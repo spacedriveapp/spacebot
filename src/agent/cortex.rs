@@ -11,6 +11,8 @@
 
 use crate::error::Result;
 use crate::llm::SpacebotModel;
+use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
+use crate::memory::types::MemoryType;
 use crate::{AgentDeps, ProcessEvent, ProcessType};
 use crate::hooks::CortexHook;
 
@@ -160,13 +162,144 @@ async fn run_bulletin_loop(deps: &AgentDeps) -> anyhow::Result<()> {
     }
 }
 
+/// Bulletin sections: each defines a search mode + config, and how to label the
+/// results when presenting them to the synthesis LLM.
+struct BulletinSection {
+    label: &'static str,
+    mode: SearchMode,
+    memory_type: Option<MemoryType>,
+    sort_by: SearchSort,
+    max_results: usize,
+}
+
+const BULLETIN_SECTIONS: &[BulletinSection] = &[
+    BulletinSection {
+        label: "Identity & Core Facts",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Identity),
+        sort_by: SearchSort::Importance,
+        max_results: 15,
+    },
+    BulletinSection {
+        label: "Recent Memories",
+        mode: SearchMode::Recent,
+        memory_type: None,
+        sort_by: SearchSort::Recent,
+        max_results: 15,
+    },
+    BulletinSection {
+        label: "Decisions",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Decision),
+        sort_by: SearchSort::Recent,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "High-Importance Context",
+        mode: SearchMode::Important,
+        memory_type: None,
+        sort_by: SearchSort::Importance,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Preferences & Patterns",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Preference),
+        sort_by: SearchSort::Importance,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Active Goals",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Goal),
+        sort_by: SearchSort::Recent,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Recent Events",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Event),
+        sort_by: SearchSort::Recent,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Observations",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Observation),
+        sort_by: SearchSort::Recent,
+        max_results: 5,
+    },
+];
+
+/// Gather raw memory data for each bulletin section by querying the store directly.
+/// Returns formatted sections ready for LLM synthesis.
+async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
+    let mut output = String::new();
+
+    for section in BULLETIN_SECTIONS {
+        let config = SearchConfig {
+            mode: section.mode,
+            memory_type: section.memory_type,
+            sort_by: section.sort_by,
+            max_results: section.max_results,
+            ..Default::default()
+        };
+
+        let results = match deps.memory_search.search("", &config).await {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(
+                    section = section.label,
+                    %error,
+                    "bulletin section query failed"
+                );
+                continue;
+            }
+        };
+
+        if results.is_empty() {
+            continue;
+        }
+
+        output.push_str(&format!("### {}\n\n", section.label));
+        for result in &results {
+            output.push_str(&format!(
+                "- [{}] (importance: {:.1}) {}\n",
+                result.memory.memory_type,
+                result.memory.importance,
+                result.memory.content.lines().next().unwrap_or(&result.memory.content),
+            ));
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
 /// Generate a memory bulletin and store it in RuntimeConfig.
+///
+/// Programmatically queries the memory store across multiple dimensions
+/// (identity, recent, decisions, importance, preferences, goals, events,
+/// observations), then asks an LLM to synthesize the raw results into a
+/// concise briefing.
 ///
 /// On failure, the previous bulletin is preserved (not blanked out).
 /// Returns `true` if the bulletin was successfully generated.
 pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
     tracing::info!("cortex generating memory bulletin");
 
+    // Phase 1: Programmatically gather raw memory sections (no LLM needed)
+    let raw_sections = gather_bulletin_sections(deps).await;
+
+    if raw_sections.is_empty() {
+        tracing::info!("no memories found, skipping bulletin synthesis");
+        deps.runtime_config
+            .memory_bulletin
+            .store(Arc::new(String::new()));
+        return true;
+    }
+
+    // Phase 2: LLM synthesis of raw sections into a cohesive bulletin
     let cortex_config = **deps.runtime_config.cortex.load();
     let bulletin_prompt = deps.runtime_config.prompts.load().cortex_bulletin.clone();
 
@@ -175,24 +308,18 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
     let model =
         SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
 
-    let tool_server = crate::tools::create_branch_tool_server(deps.memory_search.clone());
-
+    // No tools needed — the LLM just synthesizes the pre-gathered data
     let agent = AgentBuilder::new(model)
         .preamble(&bulletin_prompt)
-        .default_max_turns(cortex_config.bulletin_max_turns)
-        .tool_server_handle(tool_server)
         .build();
 
-    let user_prompt = format!(
-        "Generate a memory bulletin for the agent. Target length: {} words or fewer. \
-         Make one memory_recall call per memory type using the memory_type filter parameter: \
-         identity, fact, decision, event, preference, observation, goal, todo. That's 8 queries total, \
-         one per turn. Then synthesize into a detailed briefing.",
-        cortex_config.bulletin_max_words
+    let synthesis_prompt = format!(
+        "Synthesize the following memory data into a concise briefing of {} words or fewer.\n\n\
+         ## Raw Memory Data\n\n{raw_sections}",
+        cortex_config.bulletin_max_words,
     );
 
-    let mut history = Vec::new();
-    match agent.prompt(&user_prompt).with_history(&mut history).await {
+    match agent.prompt(&synthesis_prompt).await {
         Ok(bulletin) => {
             let word_count = bulletin.split_whitespace().count();
             tracing::info!(
@@ -205,50 +332,11 @@ pub async fn generate_bulletin(deps: &AgentDeps) -> bool {
                 .store(Arc::new(bulletin));
             true
         }
-        Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-            // Extract whatever the LLM produced so far
-            let partial = extract_last_assistant_text(&history);
-            if let Some(text) = partial {
-                let word_count = text.split_whitespace().count();
-                tracing::warn!(
-                    words = word_count,
-                    bulletin = %text,
-                    "cortex bulletin hit max turns, using partial result"
-                );
-                deps.runtime_config
-                    .memory_bulletin
-                    .store(Arc::new(text));
-                true
-            } else {
-                tracing::warn!("cortex bulletin hit max turns with no usable output");
-                false
-            }
-        }
         Err(error) => {
-            tracing::error!(%error, "cortex bulletin generation failed, keeping previous bulletin");
+            tracing::error!(%error, "cortex bulletin synthesis failed, keeping previous bulletin");
             false
         }
     }
 }
 
-/// Extract the last assistant text message from a history.
-fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
-    for message in history.iter().rev() {
-        if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|c| {
-                    if let rig::message::AssistantContent::Text(t) = c {
-                        Some(t.text.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !texts.is_empty() {
-                return Some(texts.join("\n"));
-            }
-        }
-    }
-    None
-}
+

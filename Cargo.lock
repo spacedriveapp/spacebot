@@ -6861,6 +6861,7 @@ dependencies = [
  "serde_json",
  "serenity",
  "sqlx",
+ "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tokio-stream",

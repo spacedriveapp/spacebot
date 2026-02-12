@@ -90,12 +90,30 @@ The cortex observes patterns across channels and can create memories at the syst
 
 Memory recall is always delegated to a worker. No LLM process ever queries the database directly and dumps raw results into its own context.
 
+### Search Modes
+
+The `memory_recall` tool supports four search modes, each suited to different retrieval needs:
+
+**Hybrid** (default) -- Full pipeline: vector similarity (LanceDB HNSW) + full-text search (Tantivy) + graph traversal, merged via Reciprocal Rank Fusion (RRF). Requires a query string. Best when you have a specific topic to search for and conversation context to inform the query.
+
+**Recent** -- Returns the most recent memories ordered by `created_at`. No query needed, no vector/FTS overhead. Pure SQLite. Best for temporal awareness -- "what just happened?"
+
+**Important** -- Returns highest-importance memories ordered by importance score. No query needed. Best for surfacing critical context that should always be in mind.
+
+**Typed** -- Filters by `MemoryType` (fact, preference, decision, identity, event, observation, goal, todo) with a configurable sort order. Requires `memory_type`. Best for structured retrieval -- "give me all decisions" or "show me identity memories."
+
+Non-hybrid modes bypass the vector/FTS/RRF pipeline entirely and query SQLite directly. They're fast and don't require an embedding model or FTS index.
+
+All modes support an optional `memory_type` filter. In hybrid mode, results are post-filtered after RRF fusion. In non-hybrid modes, the filter is applied at the SQL level.
+
+Sort options for non-hybrid modes: `recent` (created_at DESC), `importance` (importance DESC), `most_accessed` (access_count DESC).
+
 ### The Recall Flow
 
 ```
 Channel receives: "What do we know about the auth system?"
     → Branch created with channel's context
-        → Branch calls memory_recall tool
+        → Branch calls memory_recall tool (mode: hybrid, query: "auth system")
             Tool searches: vector similarity + full-text + graph traversal
             Tool gets 50 results
             Branch curates: filters noise, ranks by relevance
@@ -104,9 +122,9 @@ Channel receives: "What do we know about the auth system?"
     → Channel responds with clean, relevant information
 ```
 
-The branch is the recall intermediary. It has the channel's full context (so it knows what's relevant), and it has the `memory_recall` tool which performs hybrid search -- vector similarity (LanceDB HNSW) combined with full-text search (LanceDB's built-in Tantivy-based FTS), merged via Reciprocal Rank Fusion (RRF). RRF works on ranks rather than scores, which handles the different scales of vector and keyword results better than a weighted sum.
+The branch is the recall intermediary. It has the channel's full context (so it knows what's relevant), and it picks the appropriate search mode. Hybrid for topic-specific queries, recent for temporal context, typed for structured retrieval.
 
-After finding initial results, the branch can walk the memory graph in SQLite to pull in connected context. If the top result is "we decided to use JWT for auth tokens", the graph might surface "we considered session cookies but rejected them because of the mobile app" through a `ResultOf` edge.
+RRF works on ranks rather than scores, which handles the different scales of vector and keyword results better than a weighted sum. After finding initial results, the branch can walk the memory graph in SQLite to pull in connected context. If the top result is "we decided to use JWT for auth tokens", the graph might surface "we considered session cookies but rejected them because of the mobile app" through a `ResultOf` edge.
 
 The branch curates. 50 raw results become 5 relevant, contextualized memories. The channel never sees the noise -- it only gets the branch's conclusion.
 

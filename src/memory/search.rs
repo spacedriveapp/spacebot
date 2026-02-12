@@ -1,10 +1,37 @@
-//! Hybrid search: vector + FTS + RRF + graph traversal.
+//! Memory search: hybrid (vector + FTS + RRF + graph), temporal, importance, and typed queries.
 
 use crate::error::Result;
-use crate::memory::types::{Memory, MemorySearchResult, RelationType};
+use crate::memory::types::{Memory, MemorySearchResult, MemoryType, RelationType};
 use crate::memory::{EmbeddingModel, EmbeddingTable, MemoryStore};
+
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// Which search strategy to use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchMode {
+    /// Full hybrid: vector + FTS + graph + RRF. Requires a query string.
+    #[default]
+    Hybrid,
+    /// Most recent memories by creation time. No query needed.
+    Recent,
+    /// Highest importance memories. No query needed.
+    Important,
+    /// Filter by MemoryType with configurable sort. Requires `memory_type`.
+    Typed,
+}
+
+/// Sort order for non-hybrid search modes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SearchSort {
+    /// Most recent first (created_at DESC).
+    #[default]
+    Recent,
+    /// Highest importance first (importance DESC).
+    Importance,
+    /// Most accessed first (access_count DESC).
+    MostAccessed,
+}
 
 /// Bundles all memory search dependencies.
 pub struct MemorySearch {
@@ -65,6 +92,56 @@ impl MemorySearch {
         &self.embedding_model
     }
     
+    /// Unified search entry point. Dispatches to the appropriate strategy
+    /// based on `config.mode`.
+    pub async fn search(
+        &self,
+        query: &str,
+        config: &SearchConfig,
+    ) -> Result<Vec<MemorySearchResult>> {
+        match config.mode {
+            SearchMode::Hybrid => self.hybrid_search(query, config).await,
+            SearchMode::Recent => self.metadata_search(SearchSort::Recent, config).await,
+            SearchMode::Important => self.metadata_search(SearchSort::Importance, config).await,
+            SearchMode::Typed => self.metadata_search(config.sort_by, config).await,
+        }
+    }
+
+    /// Metadata-based search: queries SQLite directly, no vector/FTS/RRF.
+    /// Used by Recent, Important, and Typed modes.
+    async fn metadata_search(
+        &self,
+        sort: SearchSort,
+        config: &SearchConfig,
+    ) -> Result<Vec<MemorySearchResult>> {
+        let memories = self
+            .store
+            .get_sorted(sort, config.max_results as i64, config.memory_type)
+            .await?;
+
+        let total = memories.len();
+        let results = memories
+            .into_iter()
+            .enumerate()
+            .map(|(rank, memory)| {
+                // Normalized positional score so output type is consistent.
+                // First result gets 1.0, decays linearly.
+                let score = if total > 1 {
+                    1.0 - (rank as f32 / total as f32)
+                } else {
+                    1.0
+                };
+                MemorySearchResult {
+                    memory,
+                    score,
+                    rank: rank + 1,
+                }
+            })
+            .collect();
+
+        Ok(results)
+    }
+
     /// Perform hybrid search across all memory sources.
     pub async fn hybrid_search(
         &self,
@@ -139,9 +216,12 @@ impl MemorySearch {
             config.rrf_k,
         );
         
-        // Convert to MemorySearchResult with ranks
+        // Convert to MemorySearchResult with ranks, applying optional type filter
         let results: Vec<MemorySearchResult> = fused_results
             .into_iter()
+            .filter(|scored| {
+                config.memory_type.is_none_or(|t| scored.memory.memory_type == t)
+            })
             .enumerate()
             .map(|(rank, scored)| MemorySearchResult {
                 memory: scored.memory,
@@ -220,22 +300,34 @@ impl MemorySearch {
     }
 }
 
-/// Hybrid search configuration.
+/// Search configuration for all modes.
 #[derive(Debug, Clone)]
 pub struct SearchConfig {
-    /// Maximum number of results from each source (vector, fts, graph).
+    /// Which search strategy to use.
+    pub mode: SearchMode,
+    /// Optional memory type filter. Required for `Typed` mode, optional for others.
+    pub memory_type: Option<MemoryType>,
+    /// Sort order for non-hybrid modes.
+    pub sort_by: SearchSort,
+    /// Maximum number of results to return.
+    pub max_results: usize,
+    /// Maximum number of results from each source (vector, fts, graph) in hybrid mode.
     pub max_results_per_source: usize,
-    /// RRF k parameter (typically 60).
+    /// RRF k parameter (typically 60). Only used in hybrid mode.
     pub rrf_k: f64,
-    /// Minimum score threshold for results.
+    /// Minimum score threshold for results. Only used in hybrid mode.
     pub min_score: f32,
-    /// Maximum graph traversal depth.
+    /// Maximum graph traversal depth. Only used in hybrid mode.
     pub max_graph_depth: usize,
 }
 
 impl Default for SearchConfig {
     fn default() -> Self {
         Self {
+            mode: SearchMode::Hybrid,
+            memory_type: None,
+            sort_by: SearchSort::Recent,
+            max_results: 10,
             max_results_per_source: 50,
             rrf_k: 60.0,
             // RRF scores are 1/(k+rank), so with k=60 the max single-source
@@ -300,10 +392,215 @@ fn reciprocal_rank_fusion(
 }
 
 /// Curate search results to return only the most relevant.
-pub fn curate_results(results: &[MemorySearchResult], max_results: usize) -> Vec<&Memory> {
-    results
-        .iter()
-        .take(max_results)
-        .map(|r| &r.memory)
-        .collect()
+pub fn curate_results(results: &[MemorySearchResult], max_results: usize) -> Vec<&MemorySearchResult> {
+    results.iter().take(max_results).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::memory::types::MemoryType;
+    use chrono::{Duration, Utc};
+
+    fn make_scored(id: &str, score: f64) -> ScoredMemory {
+        let mut memory = Memory::new(format!("content for {id}"), MemoryType::Fact);
+        memory.id = id.to_string();
+        ScoredMemory { memory, score }
+    }
+
+    #[test]
+    fn test_rrf_single_list() {
+        let vector = vec![make_scored("a", 0.9), make_scored("b", 0.7)];
+        let fused = reciprocal_rank_fusion(&vector, &[], &[], 60.0);
+
+        assert_eq!(fused.len(), 2);
+        assert_eq!(fused[0].memory.id, "a");
+        assert_eq!(fused[1].memory.id, "b");
+        // First item: 1/(60+1) ≈ 0.01639
+        assert!((fused[0].score - 1.0 / 61.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_deduplication() {
+        // Same memory appears in vector and FTS — scores should sum
+        let vector = vec![make_scored("a", 0.9)];
+        let fts = vec![make_scored("a", 5.0)];
+
+        let fused = reciprocal_rank_fusion(&vector, &fts, &[], 60.0);
+        assert_eq!(fused.len(), 1);
+        // Should be 2 * 1/(60+1)
+        let expected = 2.0 / 61.0;
+        assert!((fused[0].score - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_rrf_multi_list_ranking() {
+        // "a" appears in all three lists, "b" only in vector
+        let vector = vec![make_scored("a", 0.9), make_scored("b", 0.5)];
+        let fts = vec![make_scored("a", 5.0)];
+        let graph = vec![make_scored("a", 0.8)];
+
+        let fused = reciprocal_rank_fusion(&vector, &fts, &graph, 60.0);
+        assert_eq!(fused[0].memory.id, "a");
+        assert!(fused[0].score > fused[1].score);
+    }
+
+    #[test]
+    fn test_rrf_empty_lists() {
+        let fused = reciprocal_rank_fusion(&[], &[], &[], 60.0);
+        assert!(fused.is_empty());
+    }
+
+    #[test]
+    fn test_curate_results_respects_limit() {
+        let results: Vec<MemorySearchResult> = (0..10)
+            .map(|i| MemorySearchResult {
+                memory: Memory::new(format!("mem {i}"), MemoryType::Fact),
+                score: 1.0 - (i as f32 * 0.1),
+                rank: i + 1,
+            })
+            .collect();
+
+        let curated = curate_results(&results, 3);
+        assert_eq!(curated.len(), 3);
+        assert_eq!(curated[0].rank, 1);
+    }
+
+    #[test]
+    fn test_curate_results_handles_empty() {
+        let curated = curate_results(&[], 5);
+        assert!(curated.is_empty());
+    }
+
+    // Non-hybrid modes only need SQLite, no LanceDB/embeddings.
+    // We construct a MemorySearch with dummy LanceDB/embedding fields
+    // and only exercise code paths that don't touch them.
+
+    async fn setup_search_with_memories() -> (Arc<crate::memory::MemoryStore>, Vec<Memory>) {
+        let store = crate::memory::MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+        let mut memories = Vec::new();
+
+        let types_and_importance = [
+            ("user identity info", MemoryType::Identity, 1.0, now - Duration::days(30)),
+            ("recent event", MemoryType::Event, 0.4, now - Duration::hours(1)),
+            ("important decision", MemoryType::Decision, 0.9, now - Duration::days(2)),
+            ("casual observation", MemoryType::Observation, 0.2, now - Duration::days(7)),
+            ("user preference", MemoryType::Preference, 0.7, now - Duration::days(1)),
+        ];
+
+        for (content, memory_type, importance, created_at) in types_and_importance {
+            let mut memory = Memory::new(content, memory_type).with_importance(importance);
+            memory.created_at = created_at;
+            memory.updated_at = created_at;
+            memory.last_accessed_at = created_at;
+            store.save(&memory).await.unwrap();
+            memories.push(memory);
+        }
+
+        (store, memories)
+    }
+
+    #[tokio::test]
+    async fn test_metadata_search_recent() {
+        let (store, _memories) = setup_search_with_memories().await;
+
+        // Construct MemorySearch with dummy lance/embedding (we won't use them)
+        let lance_dir = tempfile::tempdir().unwrap();
+        let lance_conn = lancedb::connect(lance_dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
+        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
+        let search = MemorySearch::new(store, embedding_table, embedding_model);
+
+        let config = SearchConfig {
+            mode: SearchMode::Recent,
+            max_results: 3,
+            ..Default::default()
+        };
+
+        let results = search.search("", &config).await.unwrap();
+        assert_eq!(results.len(), 3);
+        // Most recent should be first (the event from 1 hour ago)
+        assert_eq!(results[0].memory.content, "recent event");
+        // Scores should be descending
+        assert!(results[0].score >= results[1].score);
+        assert!(results[1].score >= results[2].score);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_search_important() {
+        let (store, _memories) = setup_search_with_memories().await;
+
+        let lance_dir = tempfile::tempdir().unwrap();
+        let lance_conn = lancedb::connect(lance_dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
+        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
+        let search = MemorySearch::new(store, embedding_table, embedding_model);
+
+        let config = SearchConfig {
+            mode: SearchMode::Important,
+            max_results: 5,
+            ..Default::default()
+        };
+
+        let results = search.search("", &config).await.unwrap();
+        // Identity (1.0) should be first, then Decision (0.9)
+        assert_eq!(results[0].memory.memory_type, MemoryType::Identity);
+        assert_eq!(results[1].memory.memory_type, MemoryType::Decision);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_search_typed() {
+        let (store, _memories) = setup_search_with_memories().await;
+
+        let lance_dir = tempfile::tempdir().unwrap();
+        let lance_conn = lancedb::connect(lance_dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
+        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
+        let search = MemorySearch::new(store, embedding_table, embedding_model);
+
+        let config = SearchConfig {
+            mode: SearchMode::Typed,
+            memory_type: Some(MemoryType::Decision),
+            max_results: 10,
+            ..Default::default()
+        };
+
+        let results = search.search("", &config).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].memory.memory_type, MemoryType::Decision);
+    }
+
+    #[tokio::test]
+    async fn test_metadata_search_typed_empty() {
+        let (store, _memories) = setup_search_with_memories().await;
+
+        let lance_dir = tempfile::tempdir().unwrap();
+        let lance_conn = lancedb::connect(lance_dir.path().to_str().unwrap())
+            .execute()
+            .await
+            .unwrap();
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn).await.unwrap();
+        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).unwrap());
+        let search = MemorySearch::new(store, embedding_table, embedding_model);
+
+        let config = SearchConfig {
+            mode: SearchMode::Typed,
+            memory_type: Some(MemoryType::Goal),
+            max_results: 10,
+            ..Default::default()
+        };
+
+        let results = search.search("", &config).await.unwrap();
+        assert!(results.is_empty());
+    }
 }

@@ -9,6 +9,6 @@ pub mod maintenance;
 
 pub use store::MemoryStore;
 pub use types::{Memory, MemoryType, Association, RelationType};
-pub use search::{MemorySearch, SearchConfig, curate_results};
+pub use search::{MemorySearch, SearchConfig, SearchMode, SearchSort, curate_results};
 pub use lance::EmbeddingTable;
 pub use embedding::EmbeddingModel;

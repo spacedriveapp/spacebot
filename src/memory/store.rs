@@ -1,10 +1,13 @@
 //! Memory graph storage (SQLite).
 
 use crate::error::{MemoryError, Result};
+use crate::memory::search::SearchSort;
 use crate::memory::types::{Association, Memory, MemoryType, RelationType};
-use std::sync::Arc;
-use sqlx::{Row, SqlitePool};
+
 use anyhow::Context as _;
+use sqlx::{Row, SqlitePool};
+
+use std::sync::Arc;
 
 /// Memory store for CRUD and graph operations.
 pub struct MemoryStore {
@@ -243,7 +246,82 @@ impl MemoryStore {
         
         Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
     }
-    
+
+    /// Get memories sorted by a flexible criterion with optional type filter.
+    ///
+    /// Used by non-hybrid search modes (Recent, Important, Typed) to retrieve
+    /// memories directly from SQLite without vector/FTS overhead.
+    pub async fn get_sorted(
+        &self,
+        sort: SearchSort,
+        limit: i64,
+        memory_type: Option<MemoryType>,
+    ) -> Result<Vec<Memory>> {
+        let order_clause = match sort {
+            SearchSort::Recent => "ORDER BY created_at DESC",
+            SearchSort::Importance => "ORDER BY importance DESC, created_at DESC",
+            SearchSort::MostAccessed => "ORDER BY access_count DESC, created_at DESC",
+        };
+
+        let (query_str, type_filter) = if let Some(ref memory_type) = memory_type {
+            (
+                format!(
+                    "SELECT id, content, memory_type, importance, created_at, updated_at, \
+                     last_accessed_at, access_count, source, channel_id, forgotten \
+                     FROM memories WHERE memory_type = ? AND forgotten = 0 {order_clause} LIMIT ?"
+                ),
+                Some(memory_type.to_string()),
+            )
+        } else {
+            (
+                format!(
+                    "SELECT id, content, memory_type, importance, created_at, updated_at, \
+                     last_accessed_at, access_count, source, channel_id, forgotten \
+                     FROM memories WHERE forgotten = 0 {order_clause} LIMIT ?"
+                ),
+                None,
+            )
+        };
+
+        let rows = if let Some(type_str) = type_filter {
+            sqlx::query(&query_str)
+                .bind(type_str)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+        } else {
+            sqlx::query(&query_str)
+                .bind(limit)
+                .fetch_all(&self.pool)
+                .await
+        }
+        .with_context(|| format!("failed to get sorted memories ({sort:?})"))?;
+
+        Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
+    }
+
+    /// Create an in-memory store for testing. Each call creates an isolated
+    /// database so tests can run in parallel without migration conflicts.
+    #[cfg(test)]
+    pub async fn connect_in_memory() -> Arc<Self> {
+        use sqlx::sqlite::SqliteConnectOptions;
+
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .create_if_missing(true);
+
+        // Single-connection pool: each pool gets its own private in-memory db.
+        let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("in-memory SQLite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        Arc::new(Self { pool })
+    }
 }
 
 /// Helper: Convert a database row to a Memory.
@@ -308,5 +386,140 @@ fn parse_relation_type(s: &str) -> RelationType {
         "result_of" => RelationType::ResultOf,
         "part_of" => RelationType::PartOf,
         _ => RelationType::RelatedTo,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    /// Insert a memory with a specific created_at timestamp.
+    async fn insert_memory_at(
+        store: &MemoryStore,
+        content: &str,
+        memory_type: MemoryType,
+        importance: f32,
+        created_at: chrono::DateTime<Utc>,
+    ) -> Memory {
+        let mut memory = Memory::new(content, memory_type).with_importance(importance);
+        memory.created_at = created_at;
+        memory.updated_at = created_at;
+        memory.last_accessed_at = created_at;
+        store.save(&memory).await.unwrap();
+        memory
+    }
+
+    #[tokio::test]
+    async fn test_save_and_load() {
+        let store = MemoryStore::connect_in_memory().await;
+        let memory = Memory::new("Rust is great", MemoryType::Fact);
+        store.save(&memory).await.unwrap();
+
+        let loaded = store.load(&memory.id).await.unwrap().unwrap();
+        assert_eq!(loaded.content, "Rust is great");
+        assert_eq!(loaded.memory_type, MemoryType::Fact);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_recent() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        let old = insert_memory_at(&store, "old", MemoryType::Fact, 0.5, now - Duration::hours(3)).await;
+        let mid = insert_memory_at(&store, "mid", MemoryType::Fact, 0.5, now - Duration::hours(1)).await;
+        let new = insert_memory_at(&store, "new", MemoryType::Fact, 0.5, now).await;
+
+        let results = store.get_sorted(SearchSort::Recent, 10, None).await.unwrap();
+        assert_eq!(results.len(), 3);
+        assert_eq!(results[0].id, new.id);
+        assert_eq!(results[1].id, mid.id);
+        assert_eq!(results[2].id, old.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_importance() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        let low = insert_memory_at(&store, "low", MemoryType::Fact, 0.2, now).await;
+        let high = insert_memory_at(&store, "high", MemoryType::Fact, 0.9, now).await;
+        let medium = insert_memory_at(&store, "medium", MemoryType::Fact, 0.5, now).await;
+
+        let results = store.get_sorted(SearchSort::Importance, 10, None).await.unwrap();
+        assert_eq!(results[0].id, high.id);
+        assert_eq!(results[1].id, medium.id);
+        assert_eq!(results[2].id, low.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_most_accessed() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        let a = insert_memory_at(&store, "rarely accessed", MemoryType::Fact, 0.5, now).await;
+        let b = insert_memory_at(&store, "often accessed", MemoryType::Fact, 0.5, now).await;
+
+        // Record 5 accesses for b, 1 for a
+        store.record_access(&a.id).await.unwrap();
+        for _ in 0..5 {
+            store.record_access(&b.id).await.unwrap();
+        }
+
+        let results = store.get_sorted(SearchSort::MostAccessed, 10, None).await.unwrap();
+        assert_eq!(results[0].id, b.id);
+        assert_eq!(results[1].id, a.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_with_type_filter() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        insert_memory_at(&store, "a fact", MemoryType::Fact, 0.5, now).await;
+        insert_memory_at(&store, "a preference", MemoryType::Preference, 0.5, now).await;
+        let decision = insert_memory_at(&store, "a decision", MemoryType::Decision, 0.5, now).await;
+        insert_memory_at(&store, "an event", MemoryType::Event, 0.5, now).await;
+
+        let results = store
+            .get_sorted(SearchSort::Recent, 10, Some(MemoryType::Decision))
+            .await
+            .unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, decision.id);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_respects_limit() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        for i in 0..10 {
+            insert_memory_at(
+                &store,
+                &format!("memory {i}"),
+                MemoryType::Fact,
+                0.5,
+                now - Duration::minutes(i),
+            )
+            .await;
+        }
+
+        let results = store.get_sorted(SearchSort::Recent, 3, None).await.unwrap();
+        assert_eq!(results.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn test_get_sorted_excludes_forgotten() {
+        let store = MemoryStore::connect_in_memory().await;
+        let now = Utc::now();
+
+        let visible = insert_memory_at(&store, "visible", MemoryType::Fact, 0.5, now).await;
+        let forgotten = insert_memory_at(&store, "forgotten", MemoryType::Fact, 0.5, now).await;
+        store.forget(&forgotten.id).await.unwrap();
+
+        let results = store.get_sorted(SearchSort::Recent, 10, None).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, visible.id);
     }
 }

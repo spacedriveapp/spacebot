@@ -10,21 +10,26 @@ This is what makes Spacebot feel like it actually *knows* you. Without the bulle
 
 ### How It Works
 
+Bulletin generation is a two-phase process: programmatic retrieval, then LLM synthesis.
+
 On a configurable interval (default: 60 minutes), the cortex:
 
-1. Creates a fresh Rig agent with `memory_recall` and `memory_save` tools
-2. Prompts it to query the memory graph across multiple dimensions:
-   - Identity and core facts (who is the user, what do they do)
-   - Active projects and decisions (what's in play right now)
-   - Recent events (what happened in the last week or two)
-   - Preferences and patterns (communication style, tool choices)
-   - High-importance context (anything critical that should always be in mind)
-3. The LLM makes one `memory_recall` query per memory type (identity, fact, decision, event, preference, observation) with `max_results: 25`, building a picture across the full memory graph
-4. It synthesizes the results into a detailed briefing (~1500 words, configurable)
-5. The bulletin is cached in `RuntimeConfig::memory_bulletin` via `ArcSwap`
-6. Every channel reads it on every turn — lock-free, zero-copy via `Arc`
+1. **Retrieves** memory data across eight predefined sections by querying the memory store directly (no LLM needed for retrieval):
+   - Identity & Core Facts — typed search for Identity memories, sorted by importance
+   - Recent Memories — temporal search for the most recent memories across all types
+   - Decisions — typed search for Decision memories, sorted by recency
+   - High-Importance Context — importance-sorted search across all types
+   - Preferences & Patterns — typed search for Preference memories
+   - Active Goals — typed search for Goal memories, sorted by recency
+   - Recent Events — typed search for Event memories, sorted by recency
+   - Observations — typed search for Observation memories
+2. **Synthesizes** the raw sections into a cohesive briefing via a single LLM call. The LLM receives the pre-gathered data and produces a concise summary (~500 words, configurable). No tool calls, no multi-turn — just one synthesis pass.
+3. The bulletin is cached in `RuntimeConfig::memory_bulletin` via `ArcSwap`
+4. Every channel reads it on every turn — lock-free, zero-copy via `Arc`
 
-The first bulletin is generated immediately on startup. Subsequent runs happen every `bulletin_interval_secs`. If a generation fails, the previous bulletin is preserved.
+This design avoids the problem of an LLM formulating search queries without conversation context. The retrieval phase uses `SearchMode::Typed`, `SearchMode::Recent`, and `SearchMode::Important` — metadata-based modes that query SQLite directly without needing vector embeddings or search terms. The LLM only gets involved for the part it's good at: turning structured data into readable prose.
+
+The first bulletin is generated immediately on startup. Subsequent runs happen every `bulletin_interval_secs`. If a generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
 
 ### What Channels See
 
@@ -41,9 +46,9 @@ The bulletin is injected into the system prompt between identity context and the
 [from USER.md]
 
 ## Memory Context                    ← this is the bulletin
-[A detailed, ~1500 word briefing synthesized from all six memory types:
-identity, facts, decisions, events, preferences, and observations.
-Organized by relevance and actionability, not by memory type.]
+[A concise briefing synthesized from eight memory dimensions:
+identity, recent, decisions, high-importance, preferences, goals,
+events, and observations. Organized by relevance and actionability.]
 
 ## [Channel prompt follows...]
 ```
@@ -139,10 +144,7 @@ tick_interval_secs = 30
 bulletin_interval_secs = 3600
 
 # Target word count for the memory bulletin.
-bulletin_max_words = 1500
-
-# Max LLM turns for bulletin generation (allows multiple memory_recall queries).
-bulletin_max_turns = 15
+bulletin_max_words = 500
 
 # Worker is considered hanging if no status update for this long.
 worker_timeout_secs = 300
