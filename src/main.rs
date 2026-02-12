@@ -93,6 +93,8 @@ async fn main() -> anyhow::Result<()> {
             .with_context(|| format!("failed to create data dir: {}", agent_config.data_dir.display()))?;
         std::fs::create_dir_all(&agent_config.archives_dir)
             .with_context(|| format!("failed to create archives dir: {}", agent_config.archives_dir.display()))?;
+        std::fs::create_dir_all(&agent_config.ingest_dir())
+            .with_context(|| format!("failed to create ingest dir: {}", agent_config.ingest_dir().display()))?;
 
         // Per-agent database connections
         let db = spacebot::db::Db::connect(&agent_config.data_dir)
@@ -114,8 +116,8 @@ async fn main() -> anyhow::Result<()> {
         // Per-agent event bus (broadcast for fan-out to multiple channels)
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
 
-        // Per-agent tool server with memory tools pre-registered
-        let tool_server = spacebot::tools::create_channel_tool_server(memory_search.clone());
+        // Per-agent channel tool server (starts empty, tools added per turn)
+        let tool_server = spacebot::tools::create_channel_tool_server();
 
         let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
 
@@ -297,6 +299,20 @@ async fn main() -> anyhow::Result<()> {
 
         heartbeat_schedulers.push(scheduler);
         tracing::info!(agent_id = %agent_id, "heartbeat scheduler started");
+    }
+
+    // Start memory ingestion loops for each agent
+    let mut _ingestion_handles = Vec::new();
+    for (agent_id, agent) in &agents {
+        let ingestion_config = **agent.deps.runtime_config.ingestion.load();
+        if ingestion_config.enabled {
+            let handle = spacebot::agent::ingestion::spawn_ingestion_loop(
+                agent.config.ingest_dir(),
+                agent.deps.clone(),
+            );
+            _ingestion_handles.push(handle);
+            tracing::info!(agent_id = %agent_id, "memory ingestion loop started");
+        }
     }
 
     let default_agent_id = config.default_agent_id().to_string();

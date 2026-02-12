@@ -5,13 +5,14 @@
 //!
 //! ## ToolServer Topology
 //!
-//! **Channel/Branch ToolServer** (one per agent, shared):
-//! - `memory_save` — registered at startup (stateless, uses `Arc<MemorySearch>`)
-//! - `memory_recall` — branch-only; dynamically added/removed via `BranchToolGuard`
-//!   (ref-counted so concurrent branches share it safely)
+//! **Channel ToolServer** (one per channel):
 //! - `reply`, `branch`, `spawn_worker`, `route`, `cancel`, `skip`, `react` — added
 //!   dynamically per conversation turn via `add_channel_tools()` /
 //!   `remove_channel_tools()` because they hold per-channel state.
+//! - No memory tools — the channel delegates memory work to branches.
+//!
+//! **Branch ToolServer** (one per branch, isolated):
+//! - `memory_save` + `memory_recall` — registered at creation
 //!
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file`, `exec` — stateless, registered at creation
@@ -34,6 +35,7 @@ pub mod shell;
 pub mod file;
 pub mod exec;
 pub mod browser;
+pub mod web_search;
 pub mod heartbeat;
 
 pub use reply::{ReplyTool, ReplyArgs, ReplyOutput, ReplyError};
@@ -50,6 +52,7 @@ pub use shell::{ShellTool, ShellArgs, ShellOutput, ShellError, ShellResult};
 pub use file::{FileTool, FileArgs, FileOutput, FileError, FileEntryOutput, FileEntry, FileType};
 pub use exec::{ExecTool, ExecArgs, ExecOutput, ExecError, ExecResult, EnvVar};
 pub use browser::{BrowserTool, BrowserArgs, BrowserOutput, BrowserError, BrowserAction, ActKind, ElementSummary, TabInfo};
+pub use web_search::{WebSearchTool, WebSearchArgs, WebSearchOutput, WebSearchError, SearchResult};
 pub use heartbeat::{HeartbeatTool, HeartbeatArgs, HeartbeatOutput, HeartbeatError};
 
 use crate::agent::channel::ChannelState;
@@ -60,18 +63,15 @@ use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{broadcast, mpsc};
 
-/// Create the shared ToolServer for channels and branches.
+/// Create the ToolServer for a channel.
 ///
-/// Registers `memory_save` at startup (stateless). Channel-specific tools (reply,
-/// branch, spawn_worker, route, cancel, skip, react) are added per conversation
-/// turn. `memory_recall` is managed by `BranchToolGuard` — added when the first
-/// branch starts, removed when the last finishes.
-pub fn create_channel_tool_server(memory_search: Arc<MemorySearch>) -> ToolServerHandle {
+/// Starts empty. Channel-specific tools (reply, branch, spawn_worker, route,
+/// cancel, skip, react) are added per conversation turn. Memory tools live on
+/// branch and cortex servers only — the channel delegates memory work.
+pub fn create_channel_tool_server() -> ToolServerHandle {
     ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search))
         .run()
 }
 
@@ -120,45 +120,16 @@ pub async fn remove_channel_tools(
     Ok(())
 }
 
-/// Tracks the number of active branches sharing the ToolServer.
+/// Create a per-branch ToolServer with memory tools.
 ///
-/// `memory_recall` is added when the first branch starts and removed when
-/// the last branch finishes. This keeps it off the channel (which shares
-/// the same ToolServer) while allowing concurrent branches to use it.
-pub struct BranchToolGuard {
-    active_count: AtomicUsize,
-    memory_search: Arc<MemorySearch>,
-}
-
-impl BranchToolGuard {
-    pub fn new(memory_search: Arc<MemorySearch>) -> Self {
-        Self {
-            active_count: AtomicUsize::new(0),
-            memory_search,
-        }
-    }
-
-    /// Register `memory_recall` if this is the first active branch.
-    pub async fn acquire(&self, handle: &ToolServerHandle) {
-        let previous = self.active_count.fetch_add(1, Ordering::SeqCst);
-        if previous == 0 {
-            if let Err(error) = handle.add_tool(
-                MemoryRecallTool::new(self.memory_search.clone())
-            ).await {
-                tracing::error!(%error, "failed to add memory_recall for branch");
-            }
-        }
-    }
-
-    /// Remove `memory_recall` if this was the last active branch.
-    pub async fn release(&self, handle: &ToolServerHandle) {
-        let previous = self.active_count.fetch_sub(1, Ordering::SeqCst);
-        if previous == 1 {
-            if let Err(error) = handle.remove_tool(MemoryRecallTool::NAME).await {
-                tracing::warn!(%error, "failed to remove memory_recall after last branch");
-            }
-        }
-    }
+/// Each branch gets its own isolated ToolServer so `memory_recall` is never
+/// visible to the channel. Both `memory_save` and `memory_recall` are
+/// registered at creation.
+pub fn create_branch_tool_server(memory_search: Arc<MemorySearch>) -> ToolServerHandle {
+    ToolServer::new()
+        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(MemoryRecallTool::new(memory_search))
+        .run()
 }
 
 /// Create a per-worker ToolServer with task-appropriate tools.
@@ -173,6 +144,7 @@ pub fn create_worker_tool_server(
     event_tx: broadcast::Sender<ProcessEvent>,
     browser_config: BrowserConfig,
     screenshot_dir: PathBuf,
+    brave_search_key: Option<String>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new())
@@ -182,6 +154,10 @@ pub fn create_worker_tool_server(
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+    }
+
+    if let Some(key) = brave_search_key {
+        server = server.tool(WebSearchTool::new(key));
     }
 
     server.run()

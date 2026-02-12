@@ -22,7 +22,7 @@ A channel does NOT: execute tasks directly, search memories itself, do heavy too
 
 The channel is always responsive — never blocked by work, never frozen by compaction. When it needs to think, it branches. When it needs work done, it spawns a worker. When context gets full, the compactor has already handled it.
 
-**Tools:** reply, branch, spawn_worker, route, cancel, skip, react, memory_save  
+**Tools:** reply, branch, spawn_worker, route, cancel, skip, react  
 **Context:** Conversation history + compaction summaries + status block  
 **History:** Persistent `Vec<Message>`, passed via `agent.prompt().with_history(&mut history)`
 
@@ -135,7 +135,7 @@ src/
 │   ├── cancel.rs       — cancel worker or branch (channel only)
 │   ├── skip.rs         — opt out of responding (channel only)
 │   ├── react.rs        — add emoji reaction (channel only)
-│   ├── memory_save.rs  — write memory to store (channel + branch)
+│   ├── memory_save.rs  — write memory to store (branch + cortex + compactor)
 │   ├── memory_recall.rs— search + curate memories (branch only)
 │   ├── set_status.rs   — update worker status (workers only)
 │   ├── shell.rs        — execute shell commands (task workers)
@@ -247,8 +247,10 @@ let branch_history = channel_history.clone();
 **PromptHook** — `SpacebotHook` sends `ProcessEvent`s for status reporting, usage tracking, cancellation. Returns `Continue`, `Terminate`, or `Skip`.
 
 **ToolServer topology:**
-- Shared `ToolServerHandle` for channels, branches, cortex (common tools)
+- Per-channel `ToolServer` (no memory tools, just channel action tools added per turn)
+- Per-branch `ToolServer` with memory tools (memory_save, memory_recall)
 - Per-worker `ToolServer` with task-specific tools (shell, file, exec)
+- Per-cortex `ToolServer` with memory_save
 
 **Max turns:** Rig defaults to 0 (single call). Always set explicitly.
 - Workers: `max_turns(50)` — many iterations

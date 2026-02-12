@@ -13,6 +13,7 @@ use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use rig::message::{ImageMediaType, MimeType, UserContent};
 use rig::one_or_many::OneOrMany;
+use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::{mpsc, RwLock};
 use tokio::sync::broadcast;
@@ -32,9 +33,6 @@ pub struct ChannelState {
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
     pub screenshot_dir: std::path::PathBuf,
-    /// Manages memory_recall tool lifecycle on the shared ToolServer.
-    /// Added when the first branch starts, removed when the last finishes.
-    pub branch_tool_guard: Arc<crate::tools::BranchToolGuard>,
 }
 
 impl std::fmt::Debug for ChannelState {
@@ -66,6 +64,10 @@ pub struct Channel {
     pub conversation_context: Option<String>,
     /// Context monitor that triggers background compaction.
     pub compactor: Compactor,
+    /// Count of user messages since last memory persistence branch.
+    message_count: usize,
+    /// Branch IDs for silent memory persistence branches (results not injected into history).
+    memory_persistence_branches: HashSet<BranchId>,
 }
 
 impl Channel {
@@ -98,8 +100,6 @@ impl Channel {
             conversation_logger.clone(),
         );
 
-        let branch_tool_guard = Arc::new(crate::tools::BranchToolGuard::new(deps.memory_search.clone()));
-
         let state = ChannelState {
             channel_id: id.clone(),
             history: history.clone(),
@@ -109,7 +109,6 @@ impl Channel {
             deps: deps.clone(),
             conversation_logger,
             screenshot_dir,
-            branch_tool_guard,
         };
 
         let self_tx = message_tx.clone();
@@ -126,6 +125,8 @@ impl Channel {
             conversation_id: None,
             conversation_context: None,
             compactor,
+            message_count: 0,
+            memory_persistence_branches: HashSet::new(),
         };
         
         (channel, message_tx)
@@ -327,12 +328,18 @@ impl Channel {
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
         }
+
+        // Increment message counter and spawn memory persistence branch if threshold reached
+        if message.source != "system" {
+            self.message_count += 1;
+            self.check_memory_persistence().await;
+        }
         
         Ok(())
     }
     
     /// Handle a process event (branch results, worker completions, status updates).
-    async fn handle_event(&self, event: ProcessEvent) -> Result<()> {
+    async fn handle_event(&mut self, event: ProcessEvent) -> Result<()> {
         // Only process events targeted at this channel
         if !event_is_for_channel(&event, &self.id) {
             return Ok(());
@@ -351,15 +358,21 @@ impl Channel {
                 // Remove from active branches
                 let mut branches = self.state.active_branches.write().await;
                 branches.remove(branch_id);
-                
-                // Inject branch conclusion into history as a user message so the
-                // channel LLM sees it on the next turn and can formulate a response.
-                let mut history = self.state.history.write().await;
-                let branch_message = format!("[Branch result]: {conclusion}");
-                history.push(rig::message::Message::from(branch_message));
-                should_retrigger = true;
-                
-                tracing::info!(branch_id = %branch_id, "branch result incorporated");
+
+                // Memory persistence branches complete silently — no history
+                // injection, no re-trigger. The work (memory saves) already
+                // happened inside the branch via tool calls.
+                if self.memory_persistence_branches.remove(branch_id) {
+                    tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
+                } else {
+                    // Regular branch: inject conclusion into history
+                    let mut history = self.state.history.write().await;
+                    let branch_message = format!("[Branch result]: {conclusion}");
+                    history.push(rig::message::Message::from(branch_message));
+                    should_retrigger = true;
+
+                    tracing::info!(branch_id = %branch_id, "branch result incorporated");
+                }
             }
             ProcessEvent::WorkerComplete { worker_id, result, notify, .. } => {
                 let mut workers = self.state.active_workers.write().await;
@@ -406,6 +419,40 @@ impl Channel {
         let status = self.state.status_block.read().await;
         status.render()
     }
+
+    /// Check if a memory persistence branch should be spawned based on message count.
+    async fn check_memory_persistence(&mut self) {
+        let config = **self.deps.runtime_config.memory_persistence.load();
+        if !config.enabled || config.message_interval == 0 {
+            return;
+        }
+
+        if self.message_count < config.message_interval {
+            return;
+        }
+
+        // Reset counter before spawning so subsequent messages don't pile up
+        self.message_count = 0;
+
+        match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+            Ok(branch_id) => {
+                self.memory_persistence_branches.insert(branch_id);
+                tracing::info!(
+                    channel_id = %self.id,
+                    branch_id = %branch_id,
+                    interval = config.message_interval,
+                    "memory persistence branch spawned"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to spawn memory persistence branch"
+                );
+            }
+        }
+    }
 }
 
 /// Spawn a branch from a ChannelState. Used by the BranchTool.
@@ -435,28 +482,25 @@ pub async fn spawn_branch_from_state(
     
     let prompt = description.clone();
     let branch_system_prompt = state.deps.runtime_config.prompts.load().branch.clone();
+    let tool_server = crate::tools::create_branch_tool_server(state.deps.memory_search.clone());
+    let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
     let branch = Branch::new(
         state.channel_id.clone(),
         &description,
         state.deps.clone(),
         &branch_system_prompt,
         history,
+        tool_server,
+        branch_max_turns,
     );
     
     let branch_id = branch.id;
-    
-    // Add memory_recall to the shared ToolServer (ref-counted across branches)
-    state.branch_tool_guard.acquire(&state.deps.tool_server).await;
 
     // Spawn the branch as a tokio task
-    let branch_tool_guard = state.branch_tool_guard.clone();
-    let tool_server = state.deps.tool_server.clone();
     let handle = tokio::spawn(async move {
         if let Err(error) = branch.run(&prompt).await {
             tracing::error!(branch_id = %branch_id, %error, "branch failed");
         }
-        // Release memory_recall when this branch finishes
-        branch_tool_guard.release(&tool_server).await;
     });
     
     {
@@ -474,6 +518,71 @@ pub async fn spawn_branch_from_state(
     Ok(branch_id)
 }
 
+/// Spawn a silent memory persistence branch.
+///
+/// Uses the same branching infrastructure as regular branches but with a
+/// dedicated prompt focused on memory recall + save. The result is not injected
+/// into channel history — the channel handles these branch IDs specially.
+async fn spawn_memory_persistence_branch(
+    state: &ChannelState,
+    deps: &AgentDeps,
+) -> std::result::Result<BranchId, AgentError> {
+    // Check branch limit
+    let max_branches = **deps.runtime_config.max_concurrent_branches.load();
+    {
+        let branches = state.active_branches.read().await;
+        if branches.len() >= max_branches {
+            return Err(AgentError::BranchLimitReached {
+                channel_id: state.channel_id.to_string(),
+                max: max_branches,
+            });
+        }
+    }
+
+    let history = {
+        let h = state.history.read().await;
+        h.clone()
+    };
+
+    let prompt = "Review the recent conversation and persist any important information as memories. \
+                  Start by recalling existing memories related to the topics discussed, then save \
+                  new or updated memories with appropriate associations.";
+
+    let system_prompt = deps.runtime_config.prompts.load().memory_persistence.clone();
+    let tool_server = crate::tools::create_branch_tool_server(deps.memory_search.clone());
+    let branch_max_turns = **deps.runtime_config.branch_max_turns.load();
+
+    let branch = Branch::new(
+        state.channel_id.clone(),
+        "memory persistence",
+        deps.clone(),
+        &system_prompt,
+        history,
+        tool_server,
+        branch_max_turns,
+    );
+
+    let branch_id = branch.id;
+
+    let handle = tokio::spawn(async move {
+        if let Err(error) = branch.run(prompt).await {
+            tracing::error!(branch_id = %branch_id, %error, "memory persistence branch failed");
+        }
+    });
+
+    {
+        let mut branches = state.active_branches.write().await;
+        branches.insert(branch_id, handle);
+    }
+
+    {
+        let mut status = state.status_block.write().await;
+        status.add_branch(branch_id, "persisting memories...");
+    }
+
+    Ok(branch_id)
+}
+
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
 pub async fn spawn_worker_from_state(
     state: &ChannelState,
@@ -487,6 +596,7 @@ pub async fn spawn_worker_from_state(
     let worker_system_prompt = rc.prompts.load().worker.clone();
     let skills = rc.skills.load();
     let browser_config = (**rc.browser_config.load()).clone();
+    let brave_search_key = (**rc.brave_search_key.load()).clone();
 
     // Build the worker system prompt, optionally prepending skill instructions
     let system_prompt = if let Some(name) = skill_name {
@@ -508,6 +618,7 @@ pub async fn spawn_worker_from_state(
             state.deps.clone(),
             browser_config.clone(),
             state.screenshot_dir.clone(),
+            brave_search_key.clone(),
         );
         // TODO: Store input_tx somewhere accessible for routing follow-ups
         worker
@@ -519,6 +630,7 @@ pub async fn spawn_worker_from_state(
             state.deps.clone(),
             browser_config,
             state.screenshot_dir.clone(),
+            brave_search_key,
         )
     };
     

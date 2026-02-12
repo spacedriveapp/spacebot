@@ -40,27 +40,17 @@ pub struct DefaultsConfig {
     pub routing: RoutingConfig,
     pub max_concurrent_branches: usize,
     pub max_turns: usize,
+    pub branch_max_turns: usize,
     pub context_window: usize,
     pub compaction: CompactionConfig,
+    pub memory_persistence: MemoryPersistenceConfig,
+    pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
-    /// Number of messages to fetch from the platform when a new channel is created.
+    /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
+    pub brave_search_key: Option<String>,
     pub history_backfill_count: usize,
-}
-
-impl Default for DefaultsConfig {
-    fn default() -> Self {
-        Self {
-            routing: RoutingConfig::default(),
-            max_concurrent_branches: 5,
-            max_turns: 5,
-            context_window: 128_000,
-            compaction: CompactionConfig::default(),
-            cortex: CortexConfig::default(),
-            browser: BrowserConfig::default(),
-            history_backfill_count: 50,
-        }
-    }
+    pub heartbeats: Vec<HeartbeatDef>,
 }
 
 /// Compaction threshold configuration.
@@ -71,12 +61,60 @@ pub struct CompactionConfig {
     pub emergency_threshold: f32,
 }
 
+/// Auto-branching memory persistence configuration.
+///
+/// Spawns a silent branch every N messages to recall existing memories and save
+/// new ones from the recent conversation. Runs without blocking the channel and
+/// the result is never injected into channel history.
+#[derive(Debug, Clone, Copy)]
+pub struct MemoryPersistenceConfig {
+    /// Whether auto memory persistence branches are enabled.
+    pub enabled: bool,
+    /// Number of user messages between automatic memory persistence branches.
+    pub message_interval: usize,
+}
+
+impl Default for MemoryPersistenceConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            message_interval: 50,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             background_threshold: 0.80,
             aggressive_threshold: 0.85,
             emergency_threshold: 0.95,
+        }
+    }
+}
+
+/// File-based memory ingestion configuration.
+///
+/// Watches a directory in the agent workspace for text files, chunks them, and
+/// processes each chunk through the memory recall + save flow. Files are deleted
+/// after successful ingestion.
+#[derive(Debug, Clone, Copy)]
+pub struct IngestionConfig {
+    /// Whether file-based memory ingestion is enabled.
+    pub enabled: bool,
+    /// How often to scan the ingest directory for new files, in seconds.
+    pub poll_interval_secs: u64,
+    /// Target chunk size in characters. Chunks may be slightly larger to avoid
+    /// splitting mid-line.
+    pub chunk_size: usize,
+}
+
+impl Default for IngestionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            poll_interval_secs: 30,
+            chunk_size: 4000,
         }
     }
 }
@@ -139,10 +177,15 @@ pub struct AgentConfig {
     pub routing: Option<RoutingConfig>,
     pub max_concurrent_branches: Option<usize>,
     pub max_turns: Option<usize>,
+    pub branch_max_turns: Option<usize>,
     pub context_window: Option<usize>,
     pub compaction: Option<CompactionConfig>,
+    pub memory_persistence: Option<MemoryPersistenceConfig>,
+    pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub browser: Option<BrowserConfig>,
+    /// Per-agent Brave Search API key override. None inherits from defaults.
+    pub brave_search_key: Option<String>,
     /// Heartbeat definitions for this agent.
     pub heartbeats: Vec<HeartbeatDef>,
 }
@@ -170,12 +213,37 @@ pub struct ResolvedAgentConfig {
     pub routing: RoutingConfig,
     pub max_concurrent_branches: usize,
     pub max_turns: usize,
+    pub branch_max_turns: usize,
     pub context_window: usize,
     pub compaction: CompactionConfig,
+    pub memory_persistence: MemoryPersistenceConfig,
+    pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub brave_search_key: Option<String>,
+    /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub heartbeats: Vec<HeartbeatDef>,
+}
+
+impl Default for DefaultsConfig {
+    fn default() -> Self {
+        Self {
+            routing: RoutingConfig::default(),
+            max_concurrent_branches: 5,
+            max_turns: 5,
+            branch_max_turns: 50,
+            context_window: 128_000,
+            compaction: CompactionConfig::default(),
+            memory_persistence: MemoryPersistenceConfig::default(),
+            ingestion: IngestionConfig::default(),
+            cortex: CortexConfig::default(),
+            browser: BrowserConfig::default(),
+            brave_search_key: None,
+            history_backfill_count: 50,
+            heartbeats: Vec::new(),
+        }
+    }
 }
 
 impl AgentConfig {
@@ -199,13 +267,22 @@ impl AgentConfig {
                 .max_concurrent_branches
                 .unwrap_or(defaults.max_concurrent_branches),
             max_turns: self.max_turns.unwrap_or(defaults.max_turns),
+            branch_max_turns: self.branch_max_turns.unwrap_or(defaults.branch_max_turns),
             context_window: self.context_window.unwrap_or(defaults.context_window),
             compaction: self.compaction.unwrap_or(defaults.compaction),
+            memory_persistence: self
+                .memory_persistence
+                .unwrap_or(defaults.memory_persistence),
+            ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
             browser: self
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            brave_search_key: self
+                .brave_search_key
+                .clone()
+                .or_else(|| defaults.brave_search_key.clone()),
             history_backfill_count: defaults.history_backfill_count,
             heartbeats: self.heartbeats.clone(),
         }
@@ -236,6 +313,11 @@ impl ResolvedAgentConfig {
     /// Path to agent workspace skills directory.
     pub fn skills_dir(&self) -> PathBuf {
         self.workspace.join("skills")
+    }
+
+    /// Path to the memory ingestion directory where users drop files.
+    pub fn ingest_dir(&self) -> PathBuf {
+        self.workspace.join("ingest")
     }
 }
 
@@ -373,10 +455,14 @@ struct TomlDefaultsConfig {
     routing: Option<TomlRoutingConfig>,
     max_concurrent_branches: Option<usize>,
     max_turns: Option<usize>,
+    branch_max_turns: Option<usize>,
     context_window: Option<usize>,
     compaction: Option<TomlCompactionConfig>,
+    memory_persistence: Option<TomlMemoryPersistenceConfig>,
+    ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    brave_search_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -391,6 +477,19 @@ struct TomlRoutingConfig {
     task_overrides: HashMap<String, String>,
     #[serde(default)]
     fallbacks: HashMap<String, Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct TomlMemoryPersistenceConfig {
+    enabled: Option<bool>,
+    message_interval: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TomlIngestionConfig {
+    enabled: Option<bool>,
+    poll_interval_secs: Option<u64>,
+    chunk_size: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -426,7 +525,9 @@ struct TomlAgentConfig {
     routing: Option<TomlRoutingConfig>,
     max_concurrent_branches: Option<usize>,
     max_turns: Option<usize>,
+    branch_max_turns: Option<usize>,
     context_window: Option<usize>,
+    brave_search_key: Option<String>,
     #[serde(default)]
     heartbeats: Vec<TomlHeartbeatDef>,
 }
@@ -588,10 +689,14 @@ impl Config {
             routing: Some(routing),
             max_concurrent_branches: None,
             max_turns: None,
+            branch_max_turns: None,
             context_window: None,
             compaction: None,
+            memory_persistence: None,
+            ingestion: None,
             cortex: None,
             browser: None,
+            brave_search_key: None,
             heartbeats: Vec::new(),
         }];
 
@@ -642,6 +747,10 @@ impl Config {
                 .max_concurrent_branches
                 .unwrap_or(base_defaults.max_concurrent_branches),
             max_turns: toml.defaults.max_turns.unwrap_or(base_defaults.max_turns),
+            branch_max_turns: toml
+                .defaults
+                .branch_max_turns
+                .unwrap_or(base_defaults.branch_max_turns),
             context_window: toml
                 .defaults
                 .context_window
@@ -661,6 +770,29 @@ impl Config {
                         .unwrap_or(base_defaults.compaction.emergency_threshold),
                 })
                 .unwrap_or(base_defaults.compaction),
+            memory_persistence: toml
+                .defaults
+                .memory_persistence
+                .map(|mp| MemoryPersistenceConfig {
+                    enabled: mp
+                        .enabled
+                        .unwrap_or(base_defaults.memory_persistence.enabled),
+                    message_interval: mp
+                        .message_interval
+                        .unwrap_or(base_defaults.memory_persistence.message_interval),
+                })
+                .unwrap_or(base_defaults.memory_persistence),
+            ingestion: toml
+                .defaults
+                .ingestion
+                .map(|ig| IngestionConfig {
+                    enabled: ig.enabled.unwrap_or(base_defaults.ingestion.enabled),
+                    poll_interval_secs: ig
+                        .poll_interval_secs
+                        .unwrap_or(base_defaults.ingestion.poll_interval_secs),
+                    chunk_size: ig.chunk_size.unwrap_or(base_defaults.ingestion.chunk_size),
+                })
+                .unwrap_or(base_defaults.ingestion),
             cortex: toml
                 .defaults
                 .cortex
@@ -696,7 +828,14 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.browser.clone()),
+            brave_search_key: toml
+                .defaults
+                .brave_search_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok()),
             history_backfill_count: base_defaults.history_backfill_count,
+            heartbeats: base_defaults.heartbeats,
         };
 
         let mut agents: Vec<AgentConfig> = toml
@@ -731,10 +870,14 @@ impl Config {
                     routing: agent_routing,
                     max_concurrent_branches: a.max_concurrent_branches,
                     max_turns: a.max_turns,
+                    branch_max_turns: a.branch_max_turns,
                     context_window: a.context_window,
                     compaction: None,
+                    memory_persistence: None,
+                    ingestion: None,
                     cortex: None,
                     browser: None,
+                    brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     heartbeats,
                 }
             })
@@ -748,10 +891,14 @@ impl Config {
                 routing: None,
                 max_concurrent_branches: None,
                 max_turns: None,
+                branch_max_turns: None,
                 context_window: None,
                 compaction: None,
+                memory_persistence: None,
+                ingestion: None,
                 cortex: None,
                 browser: None,
+                brave_search_key: None,
                 heartbeats: Vec::new(),
             });
         }
@@ -840,10 +987,14 @@ impl Config {
 pub struct RuntimeConfig {
     pub routing: ArcSwap<RoutingConfig>,
     pub compaction: ArcSwap<CompactionConfig>,
+    pub memory_persistence: ArcSwap<MemoryPersistenceConfig>,
+    pub ingestion: ArcSwap<IngestionConfig>,
     pub max_turns: ArcSwap<usize>,
+    pub branch_max_turns: ArcSwap<usize>,
     pub context_window: ArcSwap<usize>,
     pub max_concurrent_branches: ArcSwap<usize>,
     pub browser_config: ArcSwap<BrowserConfig>,
+    pub brave_search_key: ArcSwap<Option<String>>,
     pub prompts: ArcSwap<crate::identity::Prompts>,
     pub identity: ArcSwap<crate::identity::Identity>,
     pub skills: ArcSwap<crate::skills::SkillSet>,
@@ -860,10 +1011,14 @@ impl RuntimeConfig {
         Self {
             routing: ArcSwap::from_pointee(agent_config.routing.clone()),
             compaction: ArcSwap::from_pointee(agent_config.compaction),
+            memory_persistence: ArcSwap::from_pointee(agent_config.memory_persistence),
+            ingestion: ArcSwap::from_pointee(agent_config.ingestion),
             max_turns: ArcSwap::from_pointee(agent_config.max_turns),
+            branch_max_turns: ArcSwap::from_pointee(agent_config.branch_max_turns),
             context_window: ArcSwap::from_pointee(agent_config.context_window),
             max_concurrent_branches: ArcSwap::from_pointee(agent_config.max_concurrent_branches),
             browser_config: ArcSwap::from_pointee(agent_config.browser.clone()),
+            brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
             skills: ArcSwap::from_pointee(skills),
@@ -886,11 +1041,18 @@ impl RuntimeConfig {
 
         self.routing.store(Arc::new(resolved.routing));
         self.compaction.store(Arc::new(resolved.compaction));
+        self.memory_persistence
+            .store(Arc::new(resolved.memory_persistence));
+        self.ingestion.store(Arc::new(resolved.ingestion));
         self.max_turns.store(Arc::new(resolved.max_turns));
+        self.branch_max_turns
+            .store(Arc::new(resolved.branch_max_turns));
         self.context_window.store(Arc::new(resolved.context_window));
         self.max_concurrent_branches
             .store(Arc::new(resolved.max_concurrent_branches));
         self.browser_config.store(Arc::new(resolved.browser));
+        self.brave_search_key
+            .store(Arc::new(resolved.brave_search_key));
 
         tracing::info!(agent_id, "runtime config reloaded");
     }

@@ -15,9 +15,6 @@ use uuid::Uuid;
 /// How many turns per segment before we check context and potentially compact.
 const TURNS_PER_SEGMENT: usize = 25;
 
-/// Total max segments before we give up (25 * 4 = 100 turns max).
-const MAX_SEGMENTS: usize = 4;
-
 /// Worker state machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkerState {
@@ -47,6 +44,8 @@ pub struct Worker {
     pub browser_config: BrowserConfig,
     /// Directory for browser screenshots.
     pub screenshot_dir: PathBuf,
+    /// Brave Search API key for web search tool.
+    pub brave_search_key: Option<String>,
     /// Status updates.
     pub status_tx: watch::Sender<String>,
     pub status_rx: watch::Receiver<String>,
@@ -61,6 +60,7 @@ impl Worker {
         deps: AgentDeps,
         browser_config: BrowserConfig,
         screenshot_dir: PathBuf,
+        brave_search_key: Option<String>,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -78,6 +78,7 @@ impl Worker {
             input_rx: None,
             browser_config,
             screenshot_dir,
+            brave_search_key,
             status_tx,
             status_rx,
         }
@@ -91,6 +92,7 @@ impl Worker {
         deps: AgentDeps,
         browser_config: BrowserConfig,
         screenshot_dir: PathBuf,
+        brave_search_key: Option<String>,
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -109,6 +111,7 @@ impl Worker {
             input_rx: Some(input_rx),
             browser_config,
             screenshot_dir,
+            brave_search_key,
             status_tx,
             status_rx,
         };
@@ -162,6 +165,7 @@ impl Worker {
             self.deps.event_tx.clone(),
             self.browser_config.clone(),
             self.screenshot_dir.clone(),
+            self.brave_search_key.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();
@@ -195,17 +199,7 @@ impl Worker {
                     break response;
                 }
                 Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                    // Hit turn limit for this segment — still working
-                    if segments_run >= MAX_SEGMENTS {
-                        self.state = WorkerState::Done;
-                        self.hook.send_status("completed (hit turn limit)");
-                        let partial = extract_last_assistant_text(&history)
-                            .unwrap_or_else(|| "Worker exhausted its turns.".into());
-                        tracing::warn!(worker_id = %self.id, segments = segments_run, "worker hit max segments");
-                        return Ok(partial);
-                    }
-
-                    // Check context size and compact if needed
+                    // Hit turn limit for this segment — compact and continue
                     self.maybe_compact_history(&mut history).await;
 
                     // Continue with a follow-up prompt

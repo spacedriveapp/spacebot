@@ -6,6 +6,7 @@ use crate::{BranchId, ChannelId, ProcessId, ProcessType, AgentDeps, ProcessEvent
 use crate::hooks::SpacebotHook;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
+use rig::tool::server::ToolServerHandle;
 use uuid::Uuid;
 
 /// A branch is a fork of a channel's context for thinking.
@@ -19,6 +20,10 @@ pub struct Branch {
     pub system_prompt: String,
     /// Clone of the channel's history at fork time (Rig message format).
     pub history: Vec<rig::message::Message>,
+    /// Isolated ToolServer with memory_save + memory_recall.
+    pub tool_server: ToolServerHandle,
+    /// Maximum LLM turns before the branch is forced to conclude.
+    pub max_turns: usize,
 }
 
 impl Branch {
@@ -29,6 +34,8 @@ impl Branch {
         deps: AgentDeps,
         system_prompt: impl Into<String>,
         history: Vec<rig::message::Message>,
+        tool_server: ToolServerHandle,
+        max_turns: usize,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Branch(id);
@@ -42,15 +49,16 @@ impl Branch {
             hook,
             system_prompt: system_prompt.into(),
             history,
+            tool_server,
+            max_turns,
         }
     }
     
     /// Run the branch's LLM agent loop and return a conclusion.
     ///
-    /// The branch uses the channel's shared ToolServer. `memory_save` is always
-    /// available; `memory_recall` is added by `BranchToolGuard` before the branch
-    /// spawns and removed after it finishes. Runs with max_turns(10), then sends
-    /// a BranchResult event with the conclusion.
+    /// Each branch has its own isolated ToolServer with `memory_save` and
+    /// `memory_recall` registered at creation. This keeps `memory_recall` off the
+    /// channel's tool list entirely.
     pub async fn run(mut self, prompt: impl Into<String>) -> Result<String> {
         let prompt = prompt.into();
         
@@ -68,8 +76,8 @@ impl Branch {
 
         let agent = AgentBuilder::new(model)
             .preamble(&self.system_prompt)
-            .default_max_turns(50)
-            .tool_server_handle(self.deps.tool_server.clone())
+            .default_max_turns(self.max_turns)
+            .tool_server_handle(self.tool_server.clone())
             .build();
 
         let conclusion = match agent.prompt(&prompt)

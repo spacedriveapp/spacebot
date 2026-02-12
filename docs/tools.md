@@ -17,7 +17,7 @@ All 15 tools:
 | `cancel` | Stop a running worker or branch | Channel |
 | `skip` | Opt out of responding to the current message | Channel |
 | `react` | Add an emoji reaction to the user's message | Channel |
-| `memory_save` | Write a memory to the store | Channel, Branch, Cortex |
+| `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
 | `memory_recall` | Search memories via hybrid search | Branch |
 | `set_status` | Report worker progress to the channel | Worker |
 | `shell` | Execute shell commands | Worker |
@@ -30,20 +30,16 @@ All 15 tools:
 
 Rig's `ToolServer` runs as a tokio task. You register tools on it, call `.run()` to get a `ToolServerHandle`, and pass that handle to agents. The handle is `Clone` — all clones point to the same server task.
 
-Spacebot uses three ToolServer configurations:
+Spacebot uses four ToolServer configurations:
 
-### Channel/Branch ToolServer (shared)
+### Channel ToolServer (per-channel)
 
-One per agent, shared across all channels and branches for that agent.
+One per channel. Starts empty — tools are added and removed each conversation turn.
 
 ```
 ┌─────────────────────────────────────────┐
 │            Channel ToolServer            │
 ├─────────────────────────────────────────┤
-│ Registered at startup:                  │
-│   memory_save    (Arc<MemorySearch>)    │
-│   memory_recall  (Arc<MemorySearch>)    │
-│                                         │
 │ Added/removed per conversation turn:    │
 │   reply          (response_tx, conv_id) │
 │   branch         (channel_id, event_tx) │
@@ -56,9 +52,22 @@ One per agent, shared across all channels and branches for that agent.
 └─────────────────────────────────────────┘
 ```
 
-Memory tools are stateless relative to conversations — they only need `Arc<MemorySearch>` which is per-agent and known at startup. They get registered once via `create_channel_tool_server()`.
+The channel has no memory tools. It delegates memory work to branches. Channel-specific tools hold per-conversation state (the response sender, the channel ID). They're added dynamically via `add_channel_tools()` when a conversation turn starts and removed via `remove_channel_tools()` when it ends. This prevents stale senders from being invoked after a turn is done.
 
-Channel-specific tools hold per-conversation state (the response sender, the channel ID). They're added dynamically via `add_channel_tools()` when a conversation turn starts and removed via `remove_channel_tools()` when it ends. This prevents stale senders from being invoked after a turn is done.
+### Branch ToolServer (per-branch)
+
+Each branch gets its own isolated ToolServer, created at spawn time via `create_branch_tool_server()`.
+
+```
+┌──────────────────────────────────────────┐
+│        Branch ToolServer (per-branch)     │
+├──────────────────────────────────────────┤
+│   memory_save    (Arc<MemorySearch>)     │
+│   memory_recall  (Arc<MemorySearch>)     │
+└──────────────────────────────────────────┘
+```
+
+Branch isolation ensures `memory_recall` is never visible to the channel. Both tools are registered at creation and live for the lifetime of the branch.
 
 ### Worker ToolServer (per-worker)
 
@@ -99,12 +108,15 @@ The cortex writes consolidated memories. It doesn't need recall (it's the consol
 All in `src/tools.rs`:
 
 ```rust
-// Agent startup — creates the shared channel/branch ToolServer
-create_channel_tool_server(memory_search) -> ToolServerHandle
+// Agent startup — creates an empty channel ToolServer
+create_channel_tool_server() -> ToolServerHandle
 
 // Per conversation turn — add/remove channel-specific tools
 add_channel_tools(handle, channel_id, response_tx, conversation_id, event_tx)
 remove_channel_tools(handle)
+
+// Per branch spawn — creates an isolated ToolServer with memory tools
+create_branch_tool_server(memory_search) -> ToolServerHandle
 
 // Per worker spawn — creates an isolated ToolServer (browser conditionally included)
 create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
@@ -115,9 +127,9 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 
 ## Tool Lifecycle
 
-### Static tools (registered at startup)
+### Static tools (registered at creation)
 
-`memory_save`, `memory_recall` on the channel ToolServer. `shell`, `file`, `exec` on worker ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -132,9 +144,9 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 6. Response sender drops, turn is complete
 ```
 
-### Per-worker tools (created and destroyed with the worker)
+### Per-process tools (created and destroyed with the process)
 
-The entire ToolServer is created when a worker spawns and dropped when the worker finishes. The `set_status` tool on each worker ToolServer is bound to that worker's ID.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall`. Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`.
 
 ## Tool Design Patterns
 

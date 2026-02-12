@@ -5,4 +5,5 @@ pub mod branch;
 pub mod worker;
 pub mod compactor;
 pub mod cortex;
+pub mod ingestion;
 pub mod status;
