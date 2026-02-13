@@ -1,0 +1,342 @@
+# Agent Permissions and Security
+
+Per-agent permission system that controls what tools can do, enforces inter-agent boundaries, and prevents data leakage.
+
+---
+
+## Design Principles
+
+**The container is the OS-level sandbox.** On spacebot.sh, each user runs in an isolated Fly Machine. Self-hosters who need OS-level isolation can run Spacebot in Docker themselves. The permissions system does not attempt to replicate container-level security — it handles inter-agent boundaries and tool-level restrictions within a single Spacebot process.
+
+**Deny is an error, not invisible.** When a tool call is denied, the tool still appears in the LLM's tool list, but returns a structured error explaining the restriction. The LLM can reason about the denial and adapt. This is better than hiding tools (which causes the LLM to attempt workarounds) and better than silent failures (which cause confusion).
+
+**Defaults are set during onboarding.** The CLI onboarding flow asks what security posture each agent should have. No hidden defaults that surprise users later. Existing users who upgrade get a migration prompt.
+
+**Defense in depth.** Permissions are checked in three places: tool registration (which tools appear), tool execution (runtime checks), and hook scanning (output inspection). Bypassing one layer still hits the others.
+
+---
+
+## Permission Model
+
+Each agent gets a `[permissions]` block in its config. Permissions control five dimensions:
+
+### 1. Filesystem Access
+
+Controls what the file tool and shell/exec tools can read and write on disk.
+
+```toml
+[agents.personal.permissions]
+file_read = "workspace"   # can only read within its own workspace + allowed paths
+file_write = "workspace"  # can only write within its own workspace + allowed paths
+```
+
+Values:
+- `"deny"` — file read/write operations return permission denied
+- `"workspace"` — confined to the agent's workspace directory tree. All paths are resolved, canonicalized, and checked for symlink escapes before access.
+- `"allow"` — unrestricted filesystem access (subject to OS-level permissions)
+- Array of globs — explicit allowlist: `["/home/me/projects/**", "/tmp/**"]`
+
+Workspace confinement means the agent can access:
+```
+~/.spacebot/agents/{agent_id}/workspace/   # identity files, prompt overrides
+~/.spacebot/agents/{agent_id}/data/        # databases (read-only for file tool, managed by Spacebot)
+~/.spacebot/agents/{agent_id}/archives/    # compaction archives
+```
+
+But NOT:
+```
+~/.spacebot/agents/{other_agent}/          # other agents' data
+~/.spacebot/config.toml                    # instance config (contains API keys)
+/etc/, /home/, /Users/                     # system paths
+```
+
+### 2. Shell Execution
+
+Controls whether the shell tool is available and what it can do.
+
+```toml
+[agents.dev-bot.permissions]
+shell = "allow"           # unrestricted shell access
+```
+
+Values:
+- `"deny"` — shell tool returns permission denied on every call
+- `"workspace"` — shell commands can only run within the agent's workspace. The `working_dir` is forced to the workspace root. Commands that reference absolute paths outside the workspace are blocked via path scanning.
+- `"allow"` — unrestricted shell execution
+
+The shell tool's `working_dir` parameter is always resolved and checked against filesystem permissions. A `shell = "workspace"` agent cannot set `working_dir` to `/etc/`.
+
+### 3. Exec
+
+Controls the exec tool independently from shell. Exec runs a specific binary with arguments (no shell interpolation), which makes it somewhat safer than shell but still powerful.
+
+```toml
+[agents.personal.permissions]
+exec = "deny"             # no exec at all
+```
+
+Values:
+- `"deny"` — exec tool returns permission denied
+- `"allowlist"` — only binaries in the allowlist can be executed (see below)
+- `"allow"` — unrestricted
+
+Allowlist configuration:
+```toml
+[agents.research-bot.permissions]
+exec = "allowlist"
+exec_allowlist = ["python3", "node", "curl", "jq", "git"]
+```
+
+Allowlist entries are matched against the binary name (not the full path). Arguments are not filtered — the allowlist only gates which programs can run.
+
+### 4. Browser
+
+Controls headless Chrome capabilities.
+
+```toml
+[agents.personal.permissions]
+browser = false           # no browser access
+```
+
+```toml
+[agents.research-bot.permissions]
+browser = true
+browser_js_eval = false   # browser allowed, but no arbitrary JS execution
+```
+
+Fields:
+- `browser` — `true` or `false`. When false, all browser tool actions return permission denied.
+- `browser_js_eval` — `true` or `false`. Gates the `evaluate` action independently. Defaults to `false`.
+- `browser_url_allowlist` — optional array of URL patterns. When set, `navigate` only allows matching URLs. Patterns support `*` wildcards: `["https://*.github.com/*", "https://docs.rs/*"]`.
+
+### 5. Network Outbound
+
+Controls whether tools can make HTTP requests to external services.
+
+```toml
+[agents.personal.permissions]
+network_outbound = false  # no outbound HTTP
+```
+
+When `false`:
+- Shell/exec commands that attempt network access still run (we can't intercept syscalls without a container), but this is defense-in-depth — the LLM is told not to make network requests, and the browser tool's navigate action is blocked.
+- The web_search tool (if it exists) returns permission denied.
+
+When `true`:
+- Private IP ranges are blocked by default (10.x, 172.16-31.x, 192.168.x, 127.x, 169.254.x, metadata endpoints). This prevents SSRF against local services.
+- `network_allow_private` can override this: `network_allow_private = true` or `network_allow_private = ["192.168.1.100"]` for specific hosts.
+
+---
+
+## Onboarding Profiles
+
+During CLI onboarding (`spacebot setup` or first run), the user picks a profile for each agent. Profiles set all permission values at once. Users can customize after.
+
+### `trusted`
+
+Full access. For agents you control completely on your own machine.
+
+```toml
+shell = "allow"
+exec = "allow"
+file_read = "allow"
+file_write = "allow"
+browser = true
+browser_js_eval = true
+network_outbound = true
+```
+
+### `standard`
+
+Workspace-confined filesystem, shell in workspace, browser without JS eval. Good default for most agents.
+
+```toml
+shell = "workspace"
+exec = "allowlist"
+exec_allowlist = ["git", "cargo", "npm", "node", "python3", "curl", "jq"]
+file_read = "workspace"
+file_write = "workspace"
+browser = true
+browser_js_eval = false
+network_outbound = true
+```
+
+### `restricted`
+
+No shell, no exec, no browser. Can only use memory tools and communicate. For community-facing bots or untrusted contexts.
+
+```toml
+shell = "deny"
+exec = "deny"
+file_read = "deny"
+file_write = "deny"
+browser = false
+network_outbound = false
+```
+
+### Custom
+
+Skip profiles, set each permission individually.
+
+---
+
+## Enforcement Layers
+
+### Layer 1: Tool Availability
+
+When building a worker's `ToolServer`, check the agent's permissions. Denied tools are still registered (the LLM sees them), but their `call()` implementation checks permissions first and returns an error result if denied.
+
+Why register denied tools instead of hiding them:
+- The LLM knows the tool exists and understands why it can't use it
+- The error message can suggest alternatives ("file access is restricted to the workspace — use a relative path instead of an absolute one")
+- Prevents the LLM from inventing workarounds because it doesn't know the tool exists
+
+### Layer 2: Path Resolution
+
+All file paths go through a resolution pipeline before any I/O:
+
+```
+raw_path (from LLM)
+    → expand ~ and env vars
+    → resolve to absolute path (relative to working_dir or workspace root)
+    → canonicalize (resolve symlinks)
+    → check against permission rules
+        → workspace: must be under agent's workspace tree
+        → allowlist: must match at least one glob pattern
+        → deny: reject
+    → if passes, proceed with I/O
+```
+
+Symlink resolution prevents escape attacks: if `/tmp/link -> /etc/passwd` and the agent has `file_read = "workspace"`, canonicalization resolves the symlink before the check, and `/etc/passwd` is rejected.
+
+This pipeline is shared by the file tool, shell tool (for `working_dir`), and exec tool (for `working_dir`).
+
+### Layer 3: SpacebotHook Enforcement
+
+The hook becomes a security boundary:
+
+**`on_tool_call()`** — before execution:
+- Check tool name against agent permissions
+- For file/shell/exec tools, scan args for paths and validate against permissions
+- Return `ToolCallHookAction::Skip` with an error message on denial
+
+**`on_tool_result()`** — after execution:
+- Leak detection with blocking: scan output for API key patterns
+- On detection: redact the secret from the result string, replace with `[REDACTED]`
+- Log the detection with `tracing::warn`
+- Expanded patterns: OpenAI (`sk-`), Anthropic (`sk-ant-`), GitHub (`ghp_`, `gho_`, `github_pat_`), AWS (`AKIA`), Google (`AIza`), Slack (`xoxb-`, `xoxp-`), Discord bot tokens, PEM private keys, generic bearer tokens
+- Also scan for the instance's own API key values (loaded from config at startup) as literal string matches
+
+**`on_completion_response()`** — before response reaches the user:
+- Same leak detection as tool results
+- Redact any secrets that made it through
+
+### Layer 4: Inter-Agent Isolation
+
+Agents already have separate databases and workspaces. The permissions system adds enforcement:
+
+- File tools resolve paths and reject access to other agents' directories
+- Shell/exec `working_dir` cannot be set to another agent's workspace
+- The event bus remains broadcast-per-agent (agents already don't share event buses)
+- Memory tools are scoped to the calling agent's `MemoryStore` (already the case)
+
+The remaining gap is shell/exec commands accessing other agents' files via absolute paths in the command string. For `shell = "workspace"` agents, the `working_dir` is locked. For `shell = "allow"` agents, this is intentionally unrestricted — `trusted` profile means trusted.
+
+---
+
+## Config Schema
+
+Full example showing all permission fields:
+
+```toml
+[agents.main]
+
+[agents.main.permissions]
+# Filesystem
+file_read = "workspace"                    # "deny" | "workspace" | "allow" | [globs]
+file_write = "workspace"                   # "deny" | "workspace" | "allow" | [globs]
+
+# Shell
+shell = "workspace"                        # "deny" | "workspace" | "allow"
+
+# Exec
+exec = "allowlist"                         # "deny" | "allowlist" | "allow"
+exec_allowlist = ["git", "cargo", "curl"]  # only when exec = "allowlist"
+
+# Browser
+browser = true                             # true | false
+browser_js_eval = false                    # true | false
+browser_url_allowlist = []                 # optional URL patterns
+
+# Network
+network_outbound = true                    # true | false
+network_allow_private = false              # true | false | [specific IPs]
+```
+
+Default when no `[permissions]` block exists: all tools return permission denied with a message directing the user to configure permissions. This forces explicit configuration rather than defaulting to either extreme.
+
+---
+
+## What This Does NOT Do
+
+**OS-level sandboxing.** No Docker containers, no seccomp profiles, no capability dropping. The Fly Machine (spacebot.sh) or the user's own Docker setup handles this. Spacebot's permissions system is application-level.
+
+**Shell command parsing.** We don't parse shell pipelines or analyze command strings for dangerous patterns. For `shell = "workspace"`, the `working_dir` is confined but the command itself runs unrestricted within that directory. Full command analysis is fragile and has diminishing returns — if you need that level of restriction, use `shell = "deny"`.
+
+**Interactive approval workflows.** No "approve this command?" prompts. Spacebot is a daemon without a UI. Permissions are declarative in config, not interactive at runtime. If a tool is allowed, it runs. If it's denied, it fails with an error.
+
+**Per-tool-call rate limiting.** The permissions system gates access but doesn't throttle it. A `shell = "allow"` agent can run as many commands as it wants. Rate limiting is a separate concern (and less useful than just denying the tool).
+
+---
+
+## spacebot.sh Considerations
+
+On the hosted platform, the container provides the hard boundary. Permissions are about inter-agent security within the container.
+
+- Single-agent users don't need to think about permissions — everything runs in their isolated machine
+- Multi-agent users configure permissions to keep agents from stepping on each other
+- The control plane sets a default profile based on the plan tier but users can customize
+- `network_outbound = true` is safe because the container can't reach other users' containers (Fly network isolation)
+- `shell = "allow"` is safe because the worst case is the user trashing their own container (which can be reprovisioned from the volume)
+
+---
+
+## Phases
+
+### Phase 1: Path Resolution and Workspace Confinement
+
+The foundation. Without this, nothing else matters.
+
+- Implement `PermissionResolver` with path canonicalization and symlink detection
+- Add `[permissions]` config parsing with defaults
+- Enforce `file_read` and `file_write` in the file tool
+- Enforce `working_dir` confinement in shell and exec tools
+- Add inter-agent path blocking (reject paths under other agents' directories)
+
+### Phase 2: Tool-Level Permissions
+
+- Implement permission checking in `on_tool_call()` hook
+- Shell deny/workspace/allow enforcement
+- Exec deny/allowlist/allow enforcement
+- Browser enable/disable and JS eval gating
+- Error results with actionable messages
+
+### Phase 3: Leak Detection Upgrade
+
+- Expand regex patterns (Anthropic, AWS, Slack, Discord, bearer tokens)
+- Add literal API key matching from loaded config values
+- Switch from log-only to redact-and-continue in `on_tool_result()`
+- Add scanning to `on_completion_response()`
+
+### Phase 4: Onboarding Integration
+
+- Add permission profile selection to CLI onboarding
+- Migration prompt for existing users without `[permissions]` blocks
+- Validate permission consistency (e.g., `exec = "allowlist"` requires `exec_allowlist`)
+
+### Phase 5: Network Controls
+
+- Private IP blocking for browser navigation
+- SSRF protection for any HTTP-making tools
+- `network_outbound` enforcement
+- `network_allow_private` exceptions
