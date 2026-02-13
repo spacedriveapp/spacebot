@@ -1,7 +1,9 @@
 //! SpacebotModel: Custom CompletionModel implementation that routes through LlmManager.
 
 use crate::llm::manager::LlmManager;
-use crate::llm::routing::{self, RoutingConfig, MAX_FALLBACK_ATTEMPTS};
+use crate::llm::routing::{
+    self, RoutingConfig, MAX_FALLBACK_ATTEMPTS, MAX_RETRIES_PER_MODEL, RETRY_BASE_DELAY_MS,
+};
 
 use rig::completion::{
     self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
@@ -72,6 +74,68 @@ impl SpacebotModel {
             ))),
         }
     }
+
+    /// Try a model with retries and exponential backoff on transient errors.
+    ///
+    /// Returns `Ok(response)` on success, or `Err((last_error, was_rate_limit))`
+    /// after exhausting retries. `was_rate_limit` indicates the final failure was
+    /// a 429/rate-limit (as opposed to a timeout or server error), so the caller
+    /// can decide whether to record cooldown.
+    async fn attempt_with_retries(
+        &self,
+        model_name: &str,
+        request: &CompletionRequest,
+    ) -> Result<
+        completion::CompletionResponse<RawResponse>,
+        (CompletionError, bool),
+    > {
+        let model = if model_name == self.full_model_name {
+            self.clone()
+        } else {
+            SpacebotModel::make(&self.llm_manager, model_name)
+        };
+
+        let mut last_error = None;
+        for attempt in 0..MAX_RETRIES_PER_MODEL {
+            if attempt > 0 {
+                let delay_ms = RETRY_BASE_DELAY_MS * 2u64.pow((attempt - 1) as u32);
+                tracing::debug!(
+                    model = %model_name,
+                    attempt = attempt + 1,
+                    delay_ms,
+                    "retrying after backoff"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            }
+
+            match model.attempt_completion(request.clone()).await {
+                Ok(response) => return Ok(response),
+                Err(error) => {
+                    let error_str = error.to_string();
+                    if !routing::is_retriable_error(&error_str) {
+                        // Non-retriable (auth error, bad request, etc) — bail immediately
+                        return Err((error, false));
+                    }
+                    tracing::warn!(
+                        model = %model_name,
+                        attempt = attempt + 1,
+                        %error,
+                        "retriable error"
+                    );
+                    last_error = Some(error_str);
+                }
+            }
+        }
+
+        let error_str = last_error.unwrap_or_default();
+        let was_rate_limit = routing::is_rate_limit_error(&error_str);
+        Err((
+            CompletionError::ProviderError(format!(
+                "{model_name} failed after {MAX_RETRIES_PER_MODEL} attempts: {error_str}"
+            )),
+            was_rate_limit,
+        ))
+    }
 }
 
 impl CompletionModel for SpacebotModel {
@@ -108,43 +172,49 @@ impl CompletionModel for SpacebotModel {
         request: CompletionRequest,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let Some(routing) = &self.routing else {
-            // No routing config — just call the model directly, no fallback
+            // No routing config — just call the model directly, no fallback/retry
             return self.attempt_completion(request).await;
         };
 
         let cooldown = routing.rate_limit_cooldown_secs;
-
-        // Skip the primary if it's in rate limit cooldown and we have fallbacks
         let fallbacks = routing.get_fallbacks(&self.full_model_name);
+        let mut last_error: Option<CompletionError> = None;
+
+        // Try the primary model (with retries) unless it's in rate-limit cooldown
+        // and we have fallbacks to try instead.
         let primary_rate_limited = self
             .llm_manager
             .is_rate_limited(&self.full_model_name, cooldown)
             .await;
 
-        if !primary_rate_limited {
-            match self.attempt_completion(request.clone()).await {
+        let skip_primary = primary_rate_limited && !fallbacks.is_empty();
+
+        if skip_primary {
+            tracing::debug!(
+                model = %self.full_model_name,
+                "primary model in rate-limit cooldown, skipping to fallbacks"
+            );
+        } else {
+            match self.attempt_with_retries(&self.full_model_name, &request).await {
                 Ok(response) => return Ok(response),
-                Err(error) => {
-                    let error_str = error.to_string();
-                    if !routing::is_retriable_error(&error_str) {
+                Err((error, was_rate_limit)) => {
+                    if was_rate_limit {
+                        self.llm_manager.record_rate_limit(&self.full_model_name).await;
+                    }
+                    if fallbacks.is_empty() {
+                        // No fallbacks — this is the final error
                         return Err(error);
                     }
                     tracing::warn!(
                         model = %self.full_model_name,
-                        %error,
-                        "primary model failed, trying fallbacks"
+                        "primary model exhausted retries, trying fallbacks"
                     );
-                    self.llm_manager.record_rate_limit(&self.full_model_name).await;
+                    last_error = Some(error);
                 }
             }
-        } else {
-            tracing::debug!(
-                model = %self.full_model_name,
-                "primary model in cooldown, skipping to fallbacks"
-            );
         }
 
-        // Try fallback chain, skipping models in cooldown
+        // Try fallback chain, each with their own retry loop
         for (index, fallback_name) in fallbacks.iter().take(MAX_FALLBACK_ATTEMPTS).enumerate() {
             if self.llm_manager.is_rate_limited(fallback_name, cooldown).await {
                 tracing::debug!(
@@ -154,9 +224,7 @@ impl CompletionModel for SpacebotModel {
                 continue;
             }
 
-            let fallback = SpacebotModel::make(&self.llm_manager, fallback_name);
-
-            match fallback.attempt_completion(request.clone()).await {
+            match self.attempt_with_retries(fallback_name, &request).await {
                 Ok(response) => {
                     tracing::info!(
                         original = %self.full_model_name,
@@ -166,25 +234,22 @@ impl CompletionModel for SpacebotModel {
                     );
                     return Ok(response);
                 }
-                Err(error) => {
-                    let error_str = error.to_string();
-                    if routing::is_retriable_error(&error_str) {
-                        tracing::warn!(
-                            fallback = %fallback_name,
-                            %error,
-                            "fallback also failed, continuing chain"
-                        );
+                Err((error, was_rate_limit)) => {
+                    if was_rate_limit {
                         self.llm_manager.record_rate_limit(fallback_name).await;
-                        continue;
                     }
-                    return Err(error);
+                    tracing::warn!(
+                        fallback = %fallback_name,
+                        "fallback model exhausted retries, continuing chain"
+                    );
+                    last_error = Some(error);
                 }
             }
         }
 
-        Err(CompletionError::ProviderError(
-            "all models in fallback chain failed".into()
-        ))
+        Err(last_error.unwrap_or_else(|| {
+            CompletionError::ProviderError("all models in fallback chain failed".into())
+        }))
     }
 
     async fn stream(

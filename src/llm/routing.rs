@@ -118,5 +118,19 @@ pub fn is_context_overflow_error(error_message: &str) -> bool {
         || (lower.contains("maximum") && lower.contains("tokens"))
 }
 
-/// Max number of fallback attempts before giving up.
+/// Max number of fallback models to try before giving up.
 pub const MAX_FALLBACK_ATTEMPTS: usize = 3;
+
+/// Max retries per model (primary or fallback) on retriable errors.
+pub const MAX_RETRIES_PER_MODEL: usize = 3;
+
+/// Base delay for exponential backoff between retries (milliseconds).
+pub const RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// Whether an error indicates an actual rate limit (429) vs other transient failures.
+/// Only rate-limit errors should trigger cooldown — timeouts and 5xx errors are
+/// momentary and shouldn't lock out a model for the full cooldown period.
+pub fn is_rate_limit_error(error_message: &str) -> bool {
+    let lower = error_message.to_lowercase();
+    lower.contains("429") || lower.contains("rate limit")
+}
