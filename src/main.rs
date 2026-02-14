@@ -679,15 +679,19 @@ async fn run(config: spacebot::config::Config, foreground: bool) -> anyhow::Resu
                     if backfill_count > 0 {
                         match messaging_manager.fetch_history(&message, backfill_count).await {
                             Ok(history_messages) if !history_messages.is_empty() => {
-                                let mut transcript = String::from("[Previous conversation in this channel]\n\n");
+                                let mut transcript = String::new();
                                 for entry in &history_messages {
                                     let label = if entry.is_bot { "(you)" } else { &entry.author };
                                     transcript.push_str(&format!("{}: {}\n", label, entry.content));
                                 }
-                                transcript.push_str("\n[End of previous conversation]");
+
+                                let prompt_engine = agent.deps.runtime_config.prompts.load();
+                                let backfill_text = prompt_engine
+                                    .render_system_history_backfill(transcript.trim_end())
+                                    .unwrap_or(transcript);
 
                                 let mut history = channel.state.history.write().await;
-                                history.push(rig::message::Message::from(transcript));
+                                history.push(rig::message::Message::from(backfill_text));
                                 drop(history);
 
                                 tracing::info!(

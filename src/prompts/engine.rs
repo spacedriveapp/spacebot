@@ -99,6 +99,10 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/system/ingestion_chunk"),
         )?;
         env.add_template(
+            "fragments/system/history_backfill",
+            crate::prompts::text::get("fragments/system/history_backfill"),
+        )?;
+        env.add_template(
             "fragments/coalesce_hint",
             crate::prompts::text::get("fragments/coalesce_hint"),
         )?;
@@ -289,6 +293,16 @@ impl PromptEngine {
                 chunk_number => chunk_number,
                 total_chunks => total_chunks,
                 chunk => chunk,
+            },
+        )
+    }
+
+    /// Render the history backfill wrapper with instructions not to act on it.
+    pub fn render_system_history_backfill(&self, transcript: &str) -> Result<String> {
+        self.render(
+            "fragments/system/history_backfill",
+            context! {
+                transcript => transcript,
             },
         )
     }

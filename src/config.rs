@@ -882,6 +882,12 @@ struct TomlAgentConfig {
     max_turns: Option<usize>,
     branch_max_turns: Option<usize>,
     context_window: Option<usize>,
+    compaction: Option<TomlCompactionConfig>,
+    memory_persistence: Option<TomlMemoryPersistenceConfig>,
+    coalesce: Option<TomlCoalesceConfig>,
+    ingestion: Option<TomlIngestionConfig>,
+    cortex: Option<TomlCortexConfig>,
+    browser: Option<TomlBrowserConfig>,
     brave_search_key: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -1330,12 +1336,76 @@ impl Config {
                     max_turns: a.max_turns,
                     branch_max_turns: a.branch_max_turns,
                     context_window: a.context_window,
-                    compaction: None,
-                    memory_persistence: None,
-                    coalesce: None,
-                    ingestion: None,
-                    cortex: None,
-                    browser: None,
+                    compaction: a.compaction.map(|c| CompactionConfig {
+                        background_threshold: c
+                            .background_threshold
+                            .unwrap_or(defaults.compaction.background_threshold),
+                        aggressive_threshold: c
+                            .aggressive_threshold
+                            .unwrap_or(defaults.compaction.aggressive_threshold),
+                        emergency_threshold: c
+                            .emergency_threshold
+                            .unwrap_or(defaults.compaction.emergency_threshold),
+                    }),
+                    memory_persistence: a.memory_persistence.map(|mp| MemoryPersistenceConfig {
+                        enabled: mp.enabled.unwrap_or(defaults.memory_persistence.enabled),
+                        message_interval: mp
+                            .message_interval
+                            .unwrap_or(defaults.memory_persistence.message_interval),
+                    }),
+                    coalesce: a.coalesce.map(|c| CoalesceConfig {
+                        enabled: c.enabled.unwrap_or(defaults.coalesce.enabled),
+                        debounce_ms: c.debounce_ms.unwrap_or(defaults.coalesce.debounce_ms),
+                        max_wait_ms: c.max_wait_ms.unwrap_or(defaults.coalesce.max_wait_ms),
+                        min_messages: c.min_messages.unwrap_or(defaults.coalesce.min_messages),
+                        multi_user_only: c
+                            .multi_user_only
+                            .unwrap_or(defaults.coalesce.multi_user_only),
+                    }),
+                    ingestion: a.ingestion.map(|ig| IngestionConfig {
+                        enabled: ig.enabled.unwrap_or(defaults.ingestion.enabled),
+                        poll_interval_secs: ig
+                            .poll_interval_secs
+                            .unwrap_or(defaults.ingestion.poll_interval_secs),
+                        chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
+                    }),
+                    cortex: a.cortex.map(|c| CortexConfig {
+                        tick_interval_secs: c
+                            .tick_interval_secs
+                            .unwrap_or(defaults.cortex.tick_interval_secs),
+                        worker_timeout_secs: c
+                            .worker_timeout_secs
+                            .unwrap_or(defaults.cortex.worker_timeout_secs),
+                        branch_timeout_secs: c
+                            .branch_timeout_secs
+                            .unwrap_or(defaults.cortex.branch_timeout_secs),
+                        circuit_breaker_threshold: c
+                            .circuit_breaker_threshold
+                            .unwrap_or(defaults.cortex.circuit_breaker_threshold),
+                        bulletin_interval_secs: c
+                            .bulletin_interval_secs
+                            .unwrap_or(defaults.cortex.bulletin_interval_secs),
+                        bulletin_max_words: c
+                            .bulletin_max_words
+                            .unwrap_or(defaults.cortex.bulletin_max_words),
+                        bulletin_max_turns: c
+                            .bulletin_max_turns
+                            .unwrap_or(defaults.cortex.bulletin_max_turns),
+                    }),
+                    browser: a.browser.map(|b| BrowserConfig {
+                        enabled: b.enabled.unwrap_or(defaults.browser.enabled),
+                        headless: b.headless.unwrap_or(defaults.browser.headless),
+                        evaluate_enabled: b
+                            .evaluate_enabled
+                            .unwrap_or(defaults.browser.evaluate_enabled),
+                        executable_path: b
+                            .executable_path
+                            .or_else(|| defaults.browser.executable_path.clone()),
+                        screenshot_dir: b
+                            .screenshot_dir
+                            .map(PathBuf::from)
+                            .or_else(|| defaults.browser.screenshot_dir.clone()),
+                    }),
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron,
                 }
