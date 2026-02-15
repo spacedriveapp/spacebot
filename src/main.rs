@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[derive(Parser)]
-#[command(name = "spacebot")]
+#[command(name = "spacebot", version)]
 #[command(about = "A Rust agentic system with dedicated processes for every task")]
 struct Cli {
     #[command(subcommand)]
@@ -250,6 +250,10 @@ async fn run(
 
     // Start HTTP API server if enabled
     let api_state = Arc::new(spacebot::api::ApiState::new_with_provider_sender(provider_tx));
+
+    // Start background update checker
+    spacebot::update::spawn_update_checker(api_state.update_status.clone());
+
     let _http_handle = if config.api.enabled {
         let bind: std::net::SocketAddr = format!("{}:{}", config.api.bind, config.api.port)
             .parse()

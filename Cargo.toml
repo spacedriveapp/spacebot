@@ -104,6 +104,12 @@ chromiumoxide_cdp = "0.8"
 # Templating for prompts
 minijinja = "2.8"
 
+# Docker API client (for self-update via Docker socket)
+bollard = "0.18"
+
+# Semver parsing (for update version comparison)
+semver = "1"
+
 [lints.clippy]
 dbg_macro = "forbid"
 todo = "forbid"

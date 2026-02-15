@@ -41,6 +41,7 @@ struct HealthResponse {
 #[derive(Serialize)]
 struct StatusResponse {
     status: &'static str,
+    version: &'static str,
     pid: u32,
     uptime_seconds: u64,
 }
@@ -129,11 +130,9 @@ struct CronJobInfo {
 /// Instance-wide overview response for the main dashboard.
 #[derive(Serialize)]
 struct InstanceOverviewResponse {
-    /// Total uptime across all agents (from daemon status).
+    version: &'static str,
     uptime_seconds: u64,
-    /// Daemon PID.
     pid: u32,
-    /// Per-agent summaries.
     agents: Vec<AgentSummary>,
 }
 
@@ -462,7 +461,9 @@ pub async fn start_http_server(
         .route("/providers", get(get_providers).put(update_provider))
         .route("/providers/{provider}", delete(delete_provider))
         .route("/messaging/status", get(messaging_status))
-        .route("/bindings", get(list_bindings).post(create_binding).delete(delete_binding));
+        .route("/bindings", get(list_bindings).post(create_binding).delete(delete_binding))
+        .route("/update/check", get(update_check).post(update_check_now))
+        .route("/update/apply", post(update_apply));
 
     let app = Router::new()
         .nest("/api", api_routes)
@@ -498,6 +499,7 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
     Json(StatusResponse {
         status: "running",
+        version: env!("CARGO_PKG_VERSION"),
         pid: std::process::id(),
         uptime_seconds: uptime.as_secs(),
     })
@@ -764,6 +766,7 @@ async fn instance_overview(State(state): State<Arc<ApiState>>) -> Result<Json<In
     }
 
     Ok(Json(InstanceOverviewResponse {
+        version: env!("CARGO_PKG_VERSION"),
         uptime_seconds: uptime.as_secs(),
         pid: std::process::id(),
         agents,
@@ -2852,6 +2855,37 @@ async fn delete_binding(
         success: true,
         message: "Binding deleted.".to_string(),
     }))
+}
+
+// -- Update handlers --
+
+/// Return the current update status (from background check).
+async fn update_check(State(state): State<Arc<ApiState>>) -> Json<crate::update::UpdateStatus> {
+    let status = state.update_status.load();
+    Json((**status).clone())
+}
+
+/// Force an immediate update check against GitHub.
+async fn update_check_now(State(state): State<Arc<ApiState>>) -> Json<crate::update::UpdateStatus> {
+    crate::update::check_for_update(&state.update_status).await;
+    let status = state.update_status.load();
+    Json((**status).clone())
+}
+
+/// Pull the new Docker image and recreate this container.
+async fn update_apply(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    match crate::update::apply_docker_update(&state.update_status).await {
+        Ok(()) => Ok(Json(serde_json::json!({ "status": "updating" }))),
+        Err(error) => {
+            tracing::error!(%error, "update apply failed");
+            Ok(Json(serde_json::json!({
+                "status": "error",
+                "error": error.to_string(),
+            })))
+        }
+    }
 }
 
 // -- Static file serving --

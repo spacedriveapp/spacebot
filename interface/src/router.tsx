@@ -1,28 +1,29 @@
-import { useState } from "react";
+import {useState} from "react";
 import {
 	createRouter,
 	createRootRoute,
 	createRoute,
 	Outlet,
 } from "@tanstack/react-router";
-import { ConnectionBanner } from "@/components/ConnectionBanner";
-import { SetupBanner } from "@/components/SetupBanner";
-import { Sidebar } from "@/components/Sidebar";
-import { Overview } from "@/routes/Overview";
-import { AgentDetail } from "@/routes/AgentDetail";
-import { AgentChannels } from "@/routes/AgentChannels";
-import { AgentCortex } from "@/routes/AgentCortex";
-import { ChannelDetail } from "@/routes/ChannelDetail";
-import { AgentMemories } from "@/routes/AgentMemories";
-import { AgentConfig } from "@/routes/AgentConfig";
-import { AgentCron } from "@/routes/AgentCron";
-import { AgentIngest } from "@/routes/AgentIngest";
-import { Settings } from "@/routes/Settings";
-import { useLiveContext } from "@/hooks/useLiveContext";
-import { AgentTabs } from "@/components/AgentTabs";
+import {ConnectionBanner} from "@/components/ConnectionBanner";
+import {SetupBanner} from "@/components/SetupBanner";
+import {UpdateBanner} from "@/components/UpdateBanner";
+import {Sidebar} from "@/components/Sidebar";
+import {Overview} from "@/routes/Overview";
+import {AgentDetail} from "@/routes/AgentDetail";
+import {AgentChannels} from "@/routes/AgentChannels";
+import {AgentCortex} from "@/routes/AgentCortex";
+import {ChannelDetail} from "@/routes/ChannelDetail";
+import {AgentMemories} from "@/routes/AgentMemories";
+import {AgentConfig} from "@/routes/AgentConfig";
+import {AgentCron} from "@/routes/AgentCron";
+import {AgentIngest} from "@/routes/AgentIngest";
+import {Settings} from "@/routes/Settings";
+import {useLiveContext} from "@/hooks/useLiveContext";
+import {AgentTabs} from "@/components/AgentTabs";
 
 function RootLayout() {
-	const { liveStates, connectionState } = useLiveContext();
+	const {liveStates, connectionState} = useLiveContext();
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
 
 	return (
@@ -34,6 +35,7 @@ function RootLayout() {
 			/>
 			<div className="flex flex-1 flex-col overflow-hidden">
 				<ConnectionBanner state={connectionState} />
+				<UpdateBanner />
 				<SetupBanner />
 				<div className="flex-1 overflow-hidden">
 					<Outlet />
@@ -43,7 +45,7 @@ function RootLayout() {
 	);
 }
 
-function AgentHeader({ agentId }: { agentId: string }) {
+function AgentHeader({agentId}: {agentId: string}) {
 	return (
 		<>
 			<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
@@ -62,7 +64,7 @@ const indexRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/",
 	component: function IndexPage() {
-		const { liveStates } = useLiveContext();
+		const {liveStates} = useLiveContext();
 		return <Overview liveStates={liveStates} />;
 	},
 });
@@ -96,8 +98,8 @@ const agentRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId",
 	component: function AgentPage() {
-		const { agentId } = agentRoute.useParams();
-		const { liveStates } = useLiveContext();
+		const {agentId} = agentRoute.useParams();
+		const {liveStates} = useLiveContext();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -113,8 +115,8 @@ const agentChannelsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/channels",
 	component: function AgentChannelsPage() {
-		const { agentId } = agentChannelsRoute.useParams();
-		const { liveStates } = useLiveContext();
+		const {agentId} = agentChannelsRoute.useParams();
+		const {liveStates} = useLiveContext();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -130,7 +132,7 @@ const agentMemoriesRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/memories",
 	component: function AgentMemoriesPage() {
-		const { agentId } = agentMemoriesRoute.useParams();
+		const {agentId} = agentMemoriesRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -146,7 +148,7 @@ const agentIngestRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/ingest",
 	component: function AgentIngestPage() {
-		const { agentId } = agentIngestRoute.useParams();
+		const {agentId} = agentIngestRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -162,12 +164,14 @@ const agentWorkersRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/workers",
 	component: function AgentWorkersPage() {
-		const { agentId } = agentWorkersRoute.useParams();
+		const {agentId} = agentWorkersRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex flex-1 items-center justify-center">
-					<p className="text-sm text-ink-faint">Workers coming soon</p>
+					<p className="text-sm text-ink-faint">
+						Workers control interface coming soon
+					</p>
 				</div>
 			</div>
 		);
@@ -178,7 +182,7 @@ const agentCronRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/cron",
 	component: function AgentCronPage() {
-		const { agentId } = agentCronRoute.useParams();
+		const {agentId} = agentCronRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -194,7 +198,7 @@ const agentConfigRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/config",
 	component: function AgentConfigPage() {
-		const { agentId } = agentConfigRoute.useParams();
+		const {agentId} = agentConfigRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -210,7 +214,7 @@ const agentCortexRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/cortex",
 	component: function AgentCortexPage() {
-		const { agentId } = agentCortexRoute.useParams();
+		const {agentId} = agentCortexRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
@@ -226,8 +230,8 @@ const channelRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/channels/$channelId",
 	component: function ChannelPage() {
-		const { agentId, channelId } = channelRoute.useParams();
-		const { liveStates, channels, loadOlderMessages } = useLiveContext();
+		const {agentId, channelId} = channelRoute.useParams();
+		const {liveStates, channels, loadOlderMessages} = useLiveContext();
 		const channel = channels.find((c) => c.id === channelId);
 		return (
 			<div className="flex h-full flex-col">
@@ -261,7 +265,7 @@ const routeTree = rootRoute.addChildren([
 	channelRoute,
 ]);
 
-export const router = createRouter({ routeTree });
+export const router = createRouter({routeTree});
 
 declare module "@tanstack/react-router" {
 	interface Register {

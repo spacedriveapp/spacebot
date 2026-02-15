@@ -2,6 +2,7 @@ const API_BASE = "/api";
 
 export interface StatusResponse {
 	status: string;
+	version: string;
 	pid: number;
 	uptime_seconds: number;
 }
@@ -236,9 +237,29 @@ export interface AgentSummary {
 }
 
 export interface InstanceOverviewResponse {
+	version: string;
 	uptime_seconds: number;
 	pid: number;
 	agents: AgentSummary[];
+}
+
+export type Deployment = "docker" | "native";
+
+export interface UpdateStatus {
+	current_version: string;
+	latest_version: string | null;
+	update_available: boolean;
+	release_url: string | null;
+	release_notes: string | null;
+	deployment: Deployment;
+	can_apply: boolean;
+	checked_at: string | null;
+	error: string | null;
+}
+
+export interface UpdateApplyResponse {
+	status: "updating" | "error";
+	error?: string;
 }
 
 export type MemoryType =
@@ -953,6 +974,23 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<DeleteBindingResponse>;
+	},
+
+	// Update API
+	updateCheck: () => fetchJson<UpdateStatus>("/update/check"),
+	updateCheckNow: async () => {
+		const response = await fetch(`${API_BASE}/update/check`, { method: "POST" });
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<UpdateStatus>;
+	},
+	updateApply: async () => {
+		const response = await fetch(`${API_BASE}/update/apply`, { method: "POST" });
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<UpdateApplyResponse>;
 	},
 
 	eventsUrl: `${API_BASE}/events`,

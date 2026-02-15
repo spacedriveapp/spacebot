@@ -6,6 +6,7 @@ use crate::agent::status::StatusBlock;
 use crate::config::{Binding, DiscordPermissions, RuntimeConfig, SlackPermissions};
 use crate::cron::{CronStore, Scheduler};
 use crate::memory::MemorySearch;
+use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
 
 use arc_swap::ArcSwap;
@@ -64,6 +65,8 @@ pub struct ApiState {
     pub bindings: RwLock<Option<Arc<ArcSwap<Vec<Binding>>>>>,
     /// Sender to signal the main event loop that provider keys have been configured.
     pub provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
+    /// Shared update status, populated by the background update checker.
+    pub update_status: SharedUpdateStatus,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -163,6 +166,7 @@ impl ApiState {
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
             provider_setup_tx,
+            update_status: crate::update::new_shared_status(),
         }
     }
 

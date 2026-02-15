@@ -52,6 +52,7 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV SPACEBOT_DIR=/data
+ENV SPACEBOT_DEPLOYMENT=docker
 EXPOSE 19898 18789
 
 VOLUME /data

@@ -19,6 +19,7 @@ pub mod secrets;
 pub mod settings;
 pub mod skills;
 pub mod tools;
+pub mod update;
 
 pub use error::{Error, Result};
 
