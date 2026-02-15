@@ -646,6 +646,67 @@ export interface IngestDeleteResponse {
 	success: boolean;
 }
 
+// -- Messaging / Bindings Types --
+
+export interface PlatformStatus {
+	configured: boolean;
+	enabled: boolean;
+}
+
+export interface MessagingStatusResponse {
+	discord: PlatformStatus;
+	slack: PlatformStatus;
+	webhook: PlatformStatus;
+}
+
+export interface BindingInfo {
+	agent_id: string;
+	channel: string;
+	guild_id: string | null;
+	workspace_id: string | null;
+	chat_id: string | null;
+	channel_ids: string[];
+	dm_allowed_users: string[];
+}
+
+export interface BindingsListResponse {
+	bindings: BindingInfo[];
+}
+
+export interface CreateBindingRequest {
+	agent_id: string;
+	channel: string;
+	guild_id?: string;
+	workspace_id?: string;
+	chat_id?: string;
+	channel_ids?: string[];
+	dm_allowed_users?: string[];
+	platform_credentials?: {
+		discord_token?: string;
+		slack_bot_token?: string;
+		slack_app_token?: string;
+	};
+}
+
+export interface CreateBindingResponse {
+	success: boolean;
+	restart_required: boolean;
+	message: string;
+}
+
+export interface DeleteBindingRequest {
+	agent_id: string;
+	channel: string;
+	guild_id?: string;
+	workspace_id?: string;
+	chat_id?: string;
+}
+
+export interface DeleteBindingResponse {
+	success: boolean;
+	message: string;
+}
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
@@ -858,6 +919,40 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<IngestDeleteResponse>;
+	},
+
+	// Messaging / Bindings API
+	messagingStatus: () => fetchJson<MessagingStatusResponse>("/messaging/status"),
+
+	bindings: (agentId?: string) => {
+		const params = agentId
+			? `?agent_id=${encodeURIComponent(agentId)}`
+			: "";
+		return fetchJson<BindingsListResponse>(`/bindings${params}`);
+	},
+
+	createBinding: async (request: CreateBindingRequest) => {
+		const response = await fetch(`${API_BASE}/bindings`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<CreateBindingResponse>;
+	},
+
+	deleteBinding: async (request: DeleteBindingRequest) => {
+		const response = await fetch(`${API_BASE}/bindings`, {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<DeleteBindingResponse>;
 	},
 
 	eventsUrl: `${API_BASE}/events`,
