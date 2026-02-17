@@ -63,6 +63,7 @@ pub struct LlmConfig {
     pub xai_key: Option<String>,
     pub mistral_key: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub minimax_key: Option<String>,
 }
 
 impl LlmConfig {
@@ -79,6 +80,7 @@ impl LlmConfig {
             || self.xai_key.is_some()
             || self.mistral_key.is_some()
             || self.opencode_zen_key.is_some()
+            || self.minimax_key.is_some()
     }
 }
 
@@ -877,6 +879,7 @@ struct TomlLlmConfig {
     xai_key: Option<String>,
     mistral_key: Option<String>,
     opencode_zen_key: Option<String>,
+    minimax_key: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1191,6 +1194,7 @@ impl Config {
             xai_key: std::env::var("XAI_API_KEY").ok(),
             mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
@@ -1315,6 +1319,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            minimax_key: toml
+                .llm
+                .minimax_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
@@ -2275,6 +2285,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         8 => ("xAI API key", "xai_key", "xai"),
         9 => ("Mistral AI API key", "mistral_key", "mistral"),
         10 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        11 => ("MiniMax API key", "minimax_key", "minimax"),
         _ => unreachable!(),
     };
 

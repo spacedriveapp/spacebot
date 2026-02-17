@@ -77,6 +77,7 @@ impl SpacebotModel {
             "xai" => self.call_xai(request).await,
             "mistral" => self.call_mistral(request).await,
             "opencode-zen" => self.call_opencode_zen(request).await,
+            "minimax" => self.call_minimax(request).await,
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
             ))),
@@ -776,6 +777,81 @@ impl SpacebotModel {
             "OpenCode Zen",
             "https://opencode.ai/zen/v1/chat/completions",
         ).await
+    }
+
+    async fn call_minimax(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let api_key = self
+            .llm_manager
+            .get_api_key("minimax")
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+        let messages = convert_messages_to_anthropic(&request.chat_history);
+
+        let mut body = serde_json::json!({
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+        });
+
+        if let Some(preamble) = &request.preamble {
+            body["system"] = serde_json::json!(preamble);
+        }
+
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        let response = self
+            .llm_manager
+            .http_client()
+            .post("https://api.minimax.io/anthropic/v1/messages")
+            .header("x-api-key", &api_key)
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+
+        let response_body: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| CompletionError::ProviderError(format!(
+                "MiniMax response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
+            )))?;
+
+        if !status.is_success() {
+            let message = response_body["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown error");
+            return Err(CompletionError::ProviderError(format!(
+                "MiniMax API error ({status}): {message}"
+            )));
+        }
+
+        parse_anthropic_response(response_body)
     }
 }
 

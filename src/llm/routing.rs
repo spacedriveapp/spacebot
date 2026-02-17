@@ -267,6 +267,20 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 rate_limit_cooldown_secs: 60,
             }
         }
+        "minimax" => {
+            let channel: String = "minimax/MiniMax-M2.5".into();
+            let worker: String = "minimax/MiniMax-M2.5".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
         // Anthropic or unknown — use the standard defaults
         _ => RoutingConfig::default(),
     }

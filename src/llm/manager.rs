@@ -60,6 +60,8 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("mistral".into()).into()),
             "opencode-zen" => self.config.opencode_zen_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
+            "minimax" => self.config.minimax_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("minimax".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
         }
     }
