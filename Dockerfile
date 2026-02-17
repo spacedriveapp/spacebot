@@ -48,7 +48,8 @@ COPY src/ src/
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git \
     --mount=type=cache,target=/build/target \
-    SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release
+    SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
+    && cp /build/target/release/spacebot /tmp/spacebot
 
 # ---- Slim stage ----
 # Minimal runtime with just the binary. No browser.
@@ -60,7 +61,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /build/target/release/spacebot /usr/local/bin/spacebot
+COPY --from=builder /tmp/spacebot /usr/local/bin/spacebot
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
