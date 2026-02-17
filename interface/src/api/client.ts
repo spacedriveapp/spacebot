@@ -85,6 +85,14 @@ export interface BranchCompletedEvent {
 	conclusion: string;
 }
 
+export interface BranchFailedEvent {
+	type: "branch_failed";
+	agent_id: string;
+	channel_id: string;
+	branch_id: string;
+	error: string;
+}
+
 export interface ToolStartedEvent {
 	type: "tool_started";
 	agent_id: string;
@@ -112,6 +120,7 @@ export type ApiEvent =
 	| WorkerCompletedEvent
 	| BranchStartedEvent
 	| BranchCompletedEvent
+	| BranchFailedEvent
 	| ToolStartedEvent
 	| ToolCompletedEvent;
 
@@ -645,6 +654,7 @@ export interface ProviderStatus {
 	anthropic: boolean;
 	openai: boolean;
 	openrouter: boolean;
+	ollama: boolean;
 	zhipu: boolean;
 	groq: boolean;
 	together: boolean;
