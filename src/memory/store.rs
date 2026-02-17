@@ -27,12 +27,12 @@ impl MemoryStore {
     pub fn new(pool: SqlitePool) -> Arc<Self> {
         Arc::new(Self { pool })
     }
-    
+
     /// Get a reference to the SQLite pool.
     pub(crate) fn pool(&self) -> &SqlitePool {
         &self.pool
     }
-    
+
     /// Save a new memory to the store.
     pub async fn save(&self, memory: &Memory) -> Result<()> {
         sqlx::query(
@@ -40,7 +40,7 @@ impl MemoryStore {
             INSERT INTO memories (id, content, memory_type, importance, created_at, updated_at, 
                                  last_accessed_at, access_count, source, channel_id, forgotten)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            "#
+            "#,
         )
         .bind(&memory.id)
         .bind(&memory.content)
@@ -56,10 +56,10 @@ impl MemoryStore {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to save memory {}", memory.id))?;
-        
+
         Ok(())
     }
-    
+
     /// Load a memory by ID.
     pub async fn load(&self, id: &str) -> Result<Option<Memory>> {
         let row = sqlx::query(
@@ -68,16 +68,16 @@ impl MemoryStore {
                    last_accessed_at, access_count, source, channel_id, forgotten
             FROM memories
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(id)
         .fetch_optional(&self.pool)
         .await
         .with_context(|| format!("failed to load memory {}", id))?;
-        
+
         Ok(row.map(|row| row_to_memory(&row)))
     }
-    
+
     /// Update an existing memory.
     pub async fn update(&self, memory: &Memory) -> Result<()> {
         sqlx::query(
@@ -87,7 +87,7 @@ impl MemoryStore {
                 last_accessed_at = ?, access_count = ?, source = ?, channel_id = ?,
                 forgotten = ?
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(&memory.content)
         .bind(memory.memory_type.to_string())
@@ -102,10 +102,10 @@ impl MemoryStore {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to update memory {}", memory.id))?;
-        
+
         Ok(())
     }
-    
+
     /// Delete a memory by ID.
     pub async fn delete(&self, id: &str) -> Result<()> {
         sqlx::query("DELETE FROM memories WHERE id = ?")
@@ -113,35 +113,35 @@ impl MemoryStore {
             .execute(&self.pool)
             .await
             .with_context(|| format!("failed to delete memory {}", id))?;
-        
+
         Ok(())
     }
-    
+
     /// Record access to a memory, updating last_accessed_at and access_count.
     pub async fn record_access(&self, id: &str) -> Result<()> {
         let now = chrono::Utc::now();
-        
+
         sqlx::query(
             r#"
             UPDATE memories 
             SET last_accessed_at = ?, access_count = access_count + 1
             WHERE id = ?
-            "#
+            "#,
         )
         .bind(now)
         .bind(id)
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to record access for memory {}", id))?;
-        
+
         Ok(())
     }
-    
+
     /// Mark a memory as forgotten. The memory stays in the database but is
     /// excluded from search results and recall.
     pub async fn forget(&self, id: &str) -> Result<bool> {
         let result = sqlx::query(
-            "UPDATE memories SET forgotten = 1, updated_at = ? WHERE id = ? AND forgotten = 0"
+            "UPDATE memories SET forgotten = 1, updated_at = ? WHERE id = ? AND forgotten = 0",
         )
         .bind(chrono::Utc::now())
         .bind(id)
@@ -160,7 +160,7 @@ impl MemoryStore {
             VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET
                 weight = excluded.weight
-            "#
+            "#,
         )
         .bind(&association.id)
         .bind(&association.source_id)
@@ -176,10 +176,10 @@ impl MemoryStore {
                 association.source_id, association.target_id
             )
         })?;
-        
+
         Ok(())
     }
-    
+
     /// Get all associations for a memory (both incoming and outgoing).
     pub async fn get_associations(&self, memory_id: &str) -> Result<Vec<Association>> {
         let rows = sqlx::query(
@@ -187,25 +187,28 @@ impl MemoryStore {
             SELECT id, source_id, target_id, relation_type, weight, created_at
             FROM associations
             WHERE source_id = ? OR target_id = ?
-            "#
+            "#,
         )
         .bind(memory_id)
         .bind(memory_id)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("failed to get associations for memory {}", memory_id))?;
-        
+
         let associations = rows
             .into_iter()
             .map(|row| row_to_association(&row))
             .collect();
-        
+
         Ok(associations)
     }
 
     /// Get all associations where both source and target are in the provided set.
     /// Used by the graph view to fetch edges between a known set of visible nodes.
-    pub async fn get_associations_between(&self, memory_ids: &[String]) -> Result<Vec<Association>> {
+    pub async fn get_associations_between(
+        &self,
+        memory_ids: &[String],
+    ) -> Result<Vec<Association>> {
         if memory_ids.is_empty() {
             return Ok(Vec::new());
         }
@@ -233,7 +236,10 @@ impl MemoryStore {
             .await
             .context("failed to get associations between memory set")?;
 
-        Ok(rows.into_iter().map(|row| row_to_association(&row)).collect())
+        Ok(rows
+            .into_iter()
+            .map(|row| row_to_association(&row))
+            .collect())
     }
 
     /// Get neighbors of a memory: all associations plus the connected memories.
@@ -296,11 +302,11 @@ impl MemoryStore {
 
         Ok((neighbors, all_associations))
     }
-    
+
     /// Get memories by type.
     pub async fn get_by_type(&self, memory_type: MemoryType, limit: i64) -> Result<Vec<Memory>> {
         let type_str = memory_type.to_string();
-        
+
         let rows = sqlx::query(
             r#"
             SELECT id, content, memory_type, importance, created_at, updated_at,
@@ -309,17 +315,17 @@ impl MemoryStore {
             WHERE memory_type = ? AND forgotten = 0
             ORDER BY importance DESC, updated_at DESC
             LIMIT ?
-            "#
+            "#,
         )
         .bind(&type_str)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("failed to get memories by type {:?}", memory_type))?;
-        
+
         Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
     }
-    
+
     /// Get high-importance memories for injection into context.
     pub async fn get_high_importance(&self, threshold: f32, limit: i64) -> Result<Vec<Memory>> {
         let rows = sqlx::query(
@@ -330,14 +336,14 @@ impl MemoryStore {
             WHERE importance >= ? AND forgotten = 0
             ORDER BY importance DESC, updated_at DESC
             LIMIT ?
-            "#
+            "#,
         )
         .bind(threshold)
         .bind(limit)
         .fetch_all(&self.pool)
         .await
         .with_context(|| "failed to get high importance memories")?;
-        
+
         Ok(rows.into_iter().map(|row| row_to_memory(&row)).collect())
     }
 
@@ -422,17 +428,23 @@ impl MemoryStore {
 fn row_to_memory(row: &sqlx::sqlite::SqliteRow) -> Memory {
     let mem_type_str: String = row.try_get("memory_type").unwrap_or_default();
     let memory_type = parse_memory_type(&mem_type_str);
-    
+
     let channel_id: Option<String> = row.try_get("channel_id").ok();
-    
+
     Memory {
         id: row.try_get("id").unwrap_or_default(),
         content: row.try_get("content").unwrap_or_default(),
         memory_type,
         importance: row.try_get("importance").unwrap_or(0.5),
-        created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
-        updated_at: row.try_get("updated_at").unwrap_or_else(|_| chrono::Utc::now()),
-        last_accessed_at: row.try_get("last_accessed_at").unwrap_or_else(|_| chrono::Utc::now()),
+        created_at: row
+            .try_get("created_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        updated_at: row
+            .try_get("updated_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        last_accessed_at: row
+            .try_get("last_accessed_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
         access_count: row.try_get("access_count").unwrap_or(0),
         source: row.try_get("source").ok(),
         channel_id: channel_id.map(|id| Arc::from(id) as crate::ChannelId),
@@ -459,14 +471,16 @@ fn parse_memory_type(s: &str) -> MemoryType {
 fn row_to_association(row: &sqlx::sqlite::SqliteRow) -> Association {
     let relation_type_str: String = row.try_get("relation_type").unwrap_or_default();
     let relation_type = parse_relation_type(&relation_type_str);
-    
+
     Association {
         id: row.try_get("id").unwrap_or_default(),
         source_id: row.try_get("source_id").unwrap_or_default(),
         target_id: row.try_get("target_id").unwrap_or_default(),
         relation_type,
         weight: row.try_get("weight").unwrap_or(0.5),
-        created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
+        created_at: row
+            .try_get("created_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
     }
 }
 
@@ -520,11 +534,28 @@ mod tests {
         let store = MemoryStore::connect_in_memory().await;
         let now = Utc::now();
 
-        let old = insert_memory_at(&store, "old", MemoryType::Fact, 0.5, now - Duration::hours(3)).await;
-        let mid = insert_memory_at(&store, "mid", MemoryType::Fact, 0.5, now - Duration::hours(1)).await;
+        let old = insert_memory_at(
+            &store,
+            "old",
+            MemoryType::Fact,
+            0.5,
+            now - Duration::hours(3),
+        )
+        .await;
+        let mid = insert_memory_at(
+            &store,
+            "mid",
+            MemoryType::Fact,
+            0.5,
+            now - Duration::hours(1),
+        )
+        .await;
         let new = insert_memory_at(&store, "new", MemoryType::Fact, 0.5, now).await;
 
-        let results = store.get_sorted(SearchSort::Recent, 10, None).await.unwrap();
+        let results = store
+            .get_sorted(SearchSort::Recent, 10, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 3);
         assert_eq!(results[0].id, new.id);
         assert_eq!(results[1].id, mid.id);
@@ -540,7 +571,10 @@ mod tests {
         let high = insert_memory_at(&store, "high", MemoryType::Fact, 0.9, now).await;
         let medium = insert_memory_at(&store, "medium", MemoryType::Fact, 0.5, now).await;
 
-        let results = store.get_sorted(SearchSort::Importance, 10, None).await.unwrap();
+        let results = store
+            .get_sorted(SearchSort::Importance, 10, None)
+            .await
+            .unwrap();
         assert_eq!(results[0].id, high.id);
         assert_eq!(results[1].id, medium.id);
         assert_eq!(results[2].id, low.id);
@@ -560,7 +594,10 @@ mod tests {
             store.record_access(&b.id).await.unwrap();
         }
 
-        let results = store.get_sorted(SearchSort::MostAccessed, 10, None).await.unwrap();
+        let results = store
+            .get_sorted(SearchSort::MostAccessed, 10, None)
+            .await
+            .unwrap();
         assert_eq!(results[0].id, b.id);
         assert_eq!(results[1].id, a.id);
     }
@@ -612,7 +649,10 @@ mod tests {
         let forgotten = insert_memory_at(&store, "forgotten", MemoryType::Fact, 0.5, now).await;
         store.forget(&forgotten.id).await.unwrap();
 
-        let results = store.get_sorted(SearchSort::Recent, 10, None).await.unwrap();
+        let results = store
+            .get_sorted(SearchSort::Recent, 10, None)
+            .await
+            .unwrap();
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].id, visible.id);
     }

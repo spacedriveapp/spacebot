@@ -71,17 +71,17 @@ impl MemorySearch {
             embedding_model,
         }
     }
-    
+
     /// Get a reference to the memory store.
     pub fn store(&self) -> &MemoryStore {
         &self.store
     }
-    
+
     /// Get a reference to the embedding table.
     pub fn embedding_table(&self) -> &EmbeddingTable {
         &self.embedding_table
     }
-    
+
     /// Get a reference to the embedding model.
     pub fn embedding_model(&self) -> &EmbeddingModel {
         &self.embedding_model
@@ -91,7 +91,7 @@ impl MemorySearch {
     pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
         &self.embedding_model
     }
-    
+
     /// Unified search entry point. Dispatches to the appropriate strategy
     /// based on `config.mode`.
     pub async fn search(
@@ -152,16 +152,23 @@ impl MemorySearch {
         let mut vector_results = Vec::new();
         let mut fts_results = Vec::new();
         let mut graph_results = Vec::new();
-        
+
         // 1. Full-text search via LanceDB
         // FTS requires an inverted index. If the index doesn't exist yet (empty
         // table, first run) this will fail — fall back to vector + graph search.
-        match self.embedding_table.text_search(query, config.max_results_per_source).await {
+        match self
+            .embedding_table
+            .text_search(query, config.max_results_per_source)
+            .await
+        {
             Ok(fts_matches) => {
                 for (memory_id, score) in fts_matches {
                     if let Some(memory) = self.store.load(&memory_id).await? {
                         if !memory.forgotten {
-                            fts_results.push(ScoredMemory { memory, score: score as f64 });
+                            fts_results.push(ScoredMemory {
+                                memory,
+                                score: score as f64,
+                            });
                         }
                     }
                 }
@@ -170,16 +177,23 @@ impl MemorySearch {
                 tracing::debug!(%error, "FTS search unavailable, falling back to vector + graph");
             }
         }
-        
+
         // 2. Vector similarity search via LanceDB
         let query_embedding = self.embedding_model.embed_one(query).await?;
-        match self.embedding_table.vector_search(&query_embedding, config.max_results_per_source).await {
+        match self
+            .embedding_table
+            .vector_search(&query_embedding, config.max_results_per_source)
+            .await
+        {
             Ok(vector_matches) => {
                 for (memory_id, distance) in vector_matches {
                     let similarity = 1.0 - distance;
                     if let Some(memory) = self.store.load(&memory_id).await? {
                         if !memory.forgotten {
-                            vector_results.push(ScoredMemory { memory, score: similarity as f64 });
+                            vector_results.push(ScoredMemory {
+                                memory,
+                                score: similarity as f64,
+                            });
                         }
                     }
                 }
@@ -188,39 +202,40 @@ impl MemorySearch {
                 tracing::debug!(%error, "vector search unavailable, falling back to graph only");
             }
         }
-        
+
         // 3. Graph traversal from high-importance memories
         // Get identity and high-importance memories as starting points
         let seed_memories = self.store.get_high_importance(0.8, 20).await?;
-        
+
         for seed in seed_memories {
             // Check if seed is semantically related to query via simple keyword matching
-            if query.to_lowercase().split_whitespace().any(|term| {
-                seed.content.to_lowercase().contains(term)
-            }) {
-                graph_results.push(ScoredMemory { 
-                    memory: seed.clone(), 
-                    score: seed.importance as f64
+            if query
+                .to_lowercase()
+                .split_whitespace()
+                .any(|term| seed.content.to_lowercase().contains(term))
+            {
+                graph_results.push(ScoredMemory {
+                    memory: seed.clone(),
+                    score: seed.importance as f64,
                 });
-                
+
                 // Traverse graph to find related memories
-                self.traverse_graph(&seed.id, config.max_graph_depth, &mut graph_results).await?;
+                self.traverse_graph(&seed.id, config.max_graph_depth, &mut graph_results)
+                    .await?;
             }
         }
-        
+
         // 4. Merge results using Reciprocal Rank Fusion (RRF)
-        let fused_results = reciprocal_rank_fusion(
-            &vector_results,
-            &fts_results,
-            &graph_results,
-            config.rrf_k,
-        );
-        
+        let fused_results =
+            reciprocal_rank_fusion(&vector_results, &fts_results, &graph_results, config.rrf_k);
+
         // Convert to MemorySearchResult with ranks, applying optional type filter
         let results: Vec<MemorySearchResult> = fused_results
             .into_iter()
             .filter(|scored| {
-                config.memory_type.is_none_or(|t| scored.memory.memory_type == t)
+                config
+                    .memory_type
+                    .is_none_or(|t| scored.memory.memory_type == t)
             })
             .enumerate()
             .map(|(rank, scored)| MemorySearchResult {
@@ -231,10 +246,10 @@ impl MemorySearch {
             .filter(|r| r.score >= config.min_score)
             .take(config.max_results_per_source)
             .collect();
-        
+
         Ok(results)
     }
-    
+
     /// Traverse the memory graph to find related memories (iterative to avoid async recursion).
     async fn traverse_graph(
         &self,
@@ -243,21 +258,21 @@ impl MemorySearch {
         results: &mut Vec<ScoredMemory>,
     ) -> Result<()> {
         use std::collections::VecDeque;
-        
+
         // Queue of (memory_id, current_depth)
         let mut queue: VecDeque<(String, usize)> = VecDeque::new();
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
-        
+
         queue.push_back((start_id.to_string(), 0));
         visited.insert(start_id.to_string());
-        
+
         while let Some((current_id, depth)) = queue.pop_front() {
             if depth > max_depth {
                 continue;
             }
-            
+
             let associations = self.store.get_associations(&current_id).await?;
-            
+
             for assoc in associations {
                 // Get the related memory
                 let related_id = if assoc.source_id == current_id {
@@ -265,12 +280,12 @@ impl MemorySearch {
                 } else {
                     &assoc.source_id
                 };
-                
+
                 if visited.contains(related_id) {
                     continue;
                 }
                 visited.insert(related_id.clone());
-                
+
                 if let Some(memory) = self.store.load(related_id).await? {
                     if memory.forgotten {
                         continue;
@@ -283,19 +298,25 @@ impl MemorySearch {
                         RelationType::Contradicts => 0.5,
                         RelationType::PartOf => 0.8,
                     };
-                    
+
                     let score = memory.importance as f64 * assoc.weight as f64 * type_multiplier;
-                    
-                    results.push(ScoredMemory { memory: memory.clone(), score });
-                    
+
+                    results.push(ScoredMemory {
+                        memory: memory.clone(),
+                        score,
+                    });
+
                     // Add to queue for RelatedTo and PartOf relations
-                    if matches!(assoc.relation_type, RelationType::RelatedTo | RelationType::PartOf) {
+                    if matches!(
+                        assoc.relation_type,
+                        RelationType::RelatedTo | RelationType::PartOf
+                    ) {
                         queue.push_back((related_id.clone(), depth + 1));
                     }
                 }
             }
         }
-        
+
         Ok(())
     }
 }
@@ -355,44 +376,50 @@ fn reciprocal_rank_fusion(
 ) -> Vec<ScoredMemory> {
     // Build a map of memory ID to RRF score
     let mut rrf_scores: HashMap<String, (f64, Memory)> = HashMap::new();
-    
+
     // Add vector results
     for (rank, scored) in vector_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores.entry(scored.memory.id.clone())
+        let entry = rrf_scores
+            .entry(scored.memory.id.clone())
             .or_insert((0.0, scored.memory.clone()));
         entry.0 += rrf_score;
     }
-    
+
     // Add FTS results
     for (rank, scored) in fts_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores.entry(scored.memory.id.clone())
+        let entry = rrf_scores
+            .entry(scored.memory.id.clone())
             .or_insert((0.0, scored.memory.clone()));
         entry.0 += rrf_score;
     }
-    
+
     // Add graph results
     for (rank, scored) in graph_results.iter().enumerate() {
         let rrf_score = 1.0 / (k + (rank as f64 + 1.0));
-        let entry = rrf_scores.entry(scored.memory.id.clone())
+        let entry = rrf_scores
+            .entry(scored.memory.id.clone())
             .or_insert((0.0, scored.memory.clone()));
         entry.0 += rrf_score;
     }
-    
+
     // Convert to vec and sort by RRF score
     let mut fused: Vec<ScoredMemory> = rrf_scores
         .into_iter()
         .map(|(_, (score, memory))| ScoredMemory { memory, score })
         .collect();
-    
+
     fused.sort_by(|a, b| b.score.total_cmp(&a.score));
-    
+
     fused
 }
 
 /// Curate search results to return only the most relevant.
-pub fn curate_results(results: &[MemorySearchResult], max_results: usize) -> Vec<&MemorySearchResult> {
+pub fn curate_results(
+    results: &[MemorySearchResult],
+    max_results: usize,
+) -> Vec<&MemorySearchResult> {
     results.iter().take(max_results).collect()
 }
 
@@ -482,11 +509,36 @@ mod tests {
         let mut memories = Vec::new();
 
         let types_and_importance = [
-            ("user identity info", MemoryType::Identity, 1.0, now - Duration::days(30)),
-            ("recent event", MemoryType::Event, 0.4, now - Duration::hours(1)),
-            ("important decision", MemoryType::Decision, 0.9, now - Duration::days(2)),
-            ("casual observation", MemoryType::Observation, 0.2, now - Duration::days(7)),
-            ("user preference", MemoryType::Preference, 0.7, now - Duration::days(1)),
+            (
+                "user identity info",
+                MemoryType::Identity,
+                1.0,
+                now - Duration::days(30),
+            ),
+            (
+                "recent event",
+                MemoryType::Event,
+                0.4,
+                now - Duration::hours(1),
+            ),
+            (
+                "important decision",
+                MemoryType::Decision,
+                0.9,
+                now - Duration::days(2),
+            ),
+            (
+                "casual observation",
+                MemoryType::Observation,
+                0.2,
+                now - Duration::days(7),
+            ),
+            (
+                "user preference",
+                MemoryType::Preference,
+                0.7,
+                now - Duration::days(1),
+            ),
         ];
 
         for (content, memory_type, importance, created_at) in types_and_importance {
