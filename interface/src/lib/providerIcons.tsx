@@ -9,6 +9,8 @@ import Fireworks from "@lobehub/icons/es/Fireworks";
 import Together from "@lobehub/icons/es/Together";
 import XAI from "@lobehub/icons/es/XAI";
 import ZAI from "@lobehub/icons/es/ZAI";
+import Kimi from "@lobehub/icons/es/Kimi";
+import Minimax from "@lobehub/icons/es/Minimax";
 
 interface IconProps {
 	size?: number;
@@ -68,6 +70,8 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		xai: XAI,
 		zhipu: ZAI,
 		"glm-coding": ZAI,
+		"kimi-coding": Kimi,
+		"minimax-coding": Minimax,
 		"opencode-zen": OpenCodeZenIcon,
 	};
 
