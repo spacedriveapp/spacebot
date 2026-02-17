@@ -139,7 +139,9 @@ impl Tool for CronTool {
 
 impl CronTool {
     async fn create(&self, args: CronArgs) -> Result<CronOutput, CronError> {
-        let id = args.id.ok_or_else(|| CronError("'id' is required for create".into()))?;
+        let id = args
+            .id
+            .ok_or_else(|| CronError("'id' is required for create".into()))?;
         let prompt = args
             .prompt
             .ok_or_else(|| CronError("'prompt' is required for create".into()))?;
@@ -205,7 +207,9 @@ impl CronTool {
                 prompt: config.prompt,
                 interval_secs: config.interval_secs,
                 delivery_target: config.delivery_target,
-                active_hours: config.active_hours.map(|(s, e)| format!("{s:02}:00-{e:02}:00")),
+                active_hours: config
+                    .active_hours
+                    .map(|(s, e)| format!("{s:02}:00-{e:02}:00")),
             })
             .collect();
 

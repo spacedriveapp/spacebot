@@ -1,7 +1,7 @@
 //! Branch tool for forking context and thinking (channel only).
 
-use crate::agent::channel::{ChannelState, spawn_branch_from_state};
 use crate::BranchId;
+use crate::agent::channel::{ChannelState, spawn_branch_from_state};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -75,7 +75,10 @@ impl Tool for BranchTool {
         Ok(BranchOutput {
             branch_id,
             spawned: true,
-            message: format!("Branch {branch_id} spawned. It will investigate: {}", args.description),
+            message: format!(
+                "Branch {branch_id} spawned. It will investigate: {}",
+                args.description
+            ),
         })
     }
 }

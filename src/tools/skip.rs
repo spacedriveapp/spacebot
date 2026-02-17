@@ -84,9 +84,10 @@ impl Tool for SkipTool {
         self.flag.store(true, Ordering::Relaxed);
 
         // Cancel the typing indicator so it doesn't linger
-        let _ = self.response_tx.send(
-            OutboundResponse::Status(crate::StatusUpdate::StopTyping)
-        ).await;
+        let _ = self
+            .response_tx
+            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .await;
 
         let reason = args.reason.as_deref().unwrap_or("no reason given");
         tracing::info!(reason, "skip tool called, suppressing response");

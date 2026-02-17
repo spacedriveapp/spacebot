@@ -22,6 +22,7 @@ pub const SECRET_ENV_VARS: &[&str] = &[
     "ANTHROPIC_API_KEY",
     "OPENAI_API_KEY",
     "OPENROUTER_API_KEY",
+    "OLLAMA_API_KEY",
     "DISCORD_BOT_TOKEN",
     "SLACK_BOT_TOKEN",
     "SLACK_APP_TOKEN",
@@ -40,7 +41,10 @@ pub struct ShellTool {
 impl ShellTool {
     /// Create a new shell tool with the given instance directory for path blocking.
     pub fn new(instance_dir: PathBuf, workspace: PathBuf) -> Self {
-        Self { instance_dir, workspace }
+        Self {
+            instance_dir,
+            workspace,
+        }
     }
 
     /// Check if a command references sensitive instance paths or secret env vars.
@@ -58,7 +62,8 @@ impl ShellTool {
                 return Err(ShellError {
                     message: "ACCESS DENIED: Cannot access the instance directory — it contains \
                               protected configuration and data. Do not attempt to reproduce or \
-                              guess its contents. Inform the user that this path is restricted.".to_string(),
+                              guess its contents. Inform the user that this path is restricted."
+                        .to_string(),
                     exit_code: -1,
                 });
             }
@@ -101,9 +106,14 @@ impl ShellTool {
         // Block broad env dumps that would expose secrets
         if command.contains("printenv") {
             let trimmed = command.trim();
-            if trimmed == "printenv" || trimmed.ends_with("| printenv") || trimmed.contains("printenv |") || trimmed.contains("printenv >") {
+            if trimmed == "printenv"
+                || trimmed.ends_with("| printenv")
+                || trimmed.contains("printenv |")
+                || trimmed.contains("printenv >")
+            {
                 return Err(ShellError {
-                    message: "Cannot dump all environment variables — they may contain secrets.".to_string(),
+                    message: "Cannot dump all environment variables — they may contain secrets."
+                        .to_string(),
                     exit_code: -1,
                 });
             }
@@ -112,7 +122,8 @@ impl ShellTool {
             let trimmed = command.trim();
             if trimmed == "env" || trimmed.starts_with("env |") || trimmed.starts_with("env >") {
                 return Err(ShellError {
-                    message: "Cannot dump all environment variables — they may contain secrets.".to_string(),
+                    message: "Cannot dump all environment variables — they may contain secrets."
+                        .to_string(),
                     exit_code: -1,
                 });
             }
@@ -212,7 +223,10 @@ impl Tool for ShellTool {
         if let Some(ref dir) = args.working_dir {
             let path = std::path::Path::new(dir);
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            let workspace_canonical = self.workspace.canonicalize().unwrap_or_else(|_| self.workspace.clone());
+            let workspace_canonical = self
+                .workspace
+                .canonicalize()
+                .unwrap_or_else(|_| self.workspace.clone());
             if !canonical.starts_with(&workspace_canonical) {
                 return Err(ShellError {
                     message: format!(
@@ -241,8 +255,7 @@ impl Tool for ShellTool {
             cmd.current_dir(&self.workspace);
         }
 
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         // Set timeout
         let timeout = tokio::time::Duration::from_secs(args.timeout_seconds);
@@ -306,7 +319,10 @@ fn format_shell_output(exit_code: i32, stdout: &str, stderr: &str) -> String {
 
 /// System-internal shell execution that bypasses path restrictions.
 /// Used by the system itself, not LLM-facing.
-pub async fn shell(command: &str, working_dir: Option<&std::path::Path>) -> crate::error::Result<ShellResult> {
+pub async fn shell(
+    command: &str,
+    working_dir: Option<&std::path::Path>,
+) -> crate::error::Result<ShellResult> {
     let mut cmd = if cfg!(target_os = "windows") {
         let mut c = Command::new("cmd");
         c.arg("/C").arg(command);
@@ -323,13 +339,14 @@ pub async fn shell(command: &str, working_dir: Option<&std::path::Path>) -> crat
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(60),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Command timed out").into()))?
-    .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute command: {e}").into()))?;
+    let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
+        .await
+        .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Command timed out").into()))?
+        .map_err(|e| {
+            crate::error::AgentError::Other(
+                anyhow::anyhow!("Failed to execute command: {e}").into(),
+            )
+        })?;
 
     Ok(ShellResult {
         success: output.status.success(),
@@ -354,5 +371,3 @@ impl ShellResult {
         format_shell_output(self.exit_code, &self.stdout, &self.stderr)
     }
 }
-
-

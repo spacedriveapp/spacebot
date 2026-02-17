@@ -95,7 +95,11 @@ fn parse_memory_type(s: &str) -> std::result::Result<crate::memory::MemoryType, 
         "todo" => Ok(MemoryType::Todo),
         other => Err(MemoryRecallError(format!(
             "unknown memory_type \"{other}\". Valid types: {}",
-            crate::memory::MemoryType::ALL.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+            crate::memory::MemoryType::ALL
+                .iter()
+                .map(|t| t.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
         ))),
     }
 }
@@ -296,7 +300,10 @@ pub async fn memory_recall(
         sort_by: None,
     };
 
-    let output = tool.call(args).await.map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
+    let output = tool
+        .call(args)
+        .await
+        .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
 
     // Convert back to Memory type for backward compatibility
     let store = memory_search.store();
@@ -319,7 +326,10 @@ mod tests {
     fn test_parse_search_mode_valid() {
         assert_eq!(parse_search_mode("hybrid").unwrap(), SearchMode::Hybrid);
         assert_eq!(parse_search_mode("recent").unwrap(), SearchMode::Recent);
-        assert_eq!(parse_search_mode("important").unwrap(), SearchMode::Important);
+        assert_eq!(
+            parse_search_mode("important").unwrap(),
+            SearchMode::Important
+        );
         assert_eq!(parse_search_mode("typed").unwrap(), SearchMode::Typed);
     }
 
@@ -332,8 +342,14 @@ mod tests {
     #[test]
     fn test_parse_search_sort_valid() {
         assert_eq!(parse_search_sort("recent").unwrap(), SearchSort::Recent);
-        assert_eq!(parse_search_sort("importance").unwrap(), SearchSort::Importance);
-        assert_eq!(parse_search_sort("most_accessed").unwrap(), SearchSort::MostAccessed);
+        assert_eq!(
+            parse_search_sort("importance").unwrap(),
+            SearchSort::Importance
+        );
+        assert_eq!(
+            parse_search_sort("most_accessed").unwrap(),
+            SearchSort::MostAccessed
+        );
     }
 
     #[test]

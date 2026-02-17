@@ -21,45 +21,56 @@
 //! **Cortex ToolServer** (one per agent):
 //! - `memory_save` — registered at startup
 
-pub mod reply;
 pub mod branch_tool;
-pub mod spawn_worker;
-pub mod route;
-pub mod cancel;
-pub mod skip;
-pub mod react;
-pub mod memory_save;
-pub mod memory_recall;
-pub mod memory_delete;
-pub mod set_status;
-pub mod shell;
-pub mod file;
-pub mod exec;
 pub mod browser;
-pub mod web_search;
+pub mod cancel;
 pub mod channel_recall;
 pub mod cron;
+pub mod exec;
+pub mod file;
+pub mod memory_delete;
+pub mod memory_recall;
+pub mod memory_save;
+pub mod react;
+pub mod reply;
+pub mod route;
 pub mod send_file;
+pub mod set_status;
+pub mod shell;
+pub mod skip;
+pub mod spawn_worker;
+pub mod web_search;
 
-pub use reply::{ReplyTool, ReplyArgs, ReplyOutput, ReplyError};
-pub use branch_tool::{BranchTool, BranchArgs, BranchOutput, BranchError};
-pub use spawn_worker::{SpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerOutput, SpawnWorkerError};
-pub use route::{RouteTool, RouteArgs, RouteOutput, RouteError};
-pub use cancel::{CancelTool, CancelArgs, CancelOutput, CancelError};
-pub use skip::{SkipTool, SkipArgs, SkipOutput, SkipError, SkipFlag, new_skip_flag};
-pub use react::{ReactTool, ReactArgs, ReactOutput, ReactError};
-pub use memory_save::{MemorySaveTool, MemorySaveArgs, MemorySaveOutput, MemorySaveError, AssociationInput};
-pub use memory_recall::{MemoryRecallTool, MemoryRecallArgs, MemoryRecallOutput, MemoryRecallError, MemoryOutput};
-pub use memory_delete::{MemoryDeleteTool, MemoryDeleteArgs, MemoryDeleteOutput, MemoryDeleteError};
-pub use set_status::{SetStatusTool, SetStatusArgs, SetStatusOutput, SetStatusError};
-pub use shell::{ShellTool, ShellArgs, ShellOutput, ShellError, ShellResult};
-pub use file::{FileTool, FileArgs, FileOutput, FileError, FileEntryOutput, FileEntry, FileType};
-pub use exec::{ExecTool, ExecArgs, ExecOutput, ExecError, ExecResult, EnvVar};
-pub use browser::{BrowserTool, BrowserArgs, BrowserOutput, BrowserError, BrowserAction, ActKind, ElementSummary, TabInfo};
-pub use web_search::{WebSearchTool, WebSearchArgs, WebSearchOutput, WebSearchError, SearchResult};
-pub use channel_recall::{ChannelRecallTool, ChannelRecallArgs, ChannelRecallOutput, ChannelRecallError};
-pub use cron::{CronTool, CronArgs, CronOutput, CronError};
-pub use send_file::{SendFileTool, SendFileArgs, SendFileOutput, SendFileError};
+pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
+pub use browser::{
+    ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
+    TabInfo,
+};
+pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
+pub use channel_recall::{
+    ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
+};
+pub use cron::{CronArgs, CronError, CronOutput, CronTool};
+pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
+pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
+pub use memory_delete::{
+    MemoryDeleteArgs, MemoryDeleteError, MemoryDeleteOutput, MemoryDeleteTool,
+};
+pub use memory_recall::{
+    MemoryOutput, MemoryRecallArgs, MemoryRecallError, MemoryRecallOutput, MemoryRecallTool,
+};
+pub use memory_save::{
+    AssociationInput, MemorySaveArgs, MemorySaveError, MemorySaveOutput, MemorySaveTool,
+};
+pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
+pub use reply::{ReplyArgs, ReplyError, ReplyOutput, ReplyTool};
+pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
+pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
+pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool};
+pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
+pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 
 use crate::agent::channel::ChannelState;
 use crate::config::BrowserConfig;
@@ -116,18 +127,24 @@ pub async fn add_channel_tools(
     skip_flag: SkipFlag,
     cron_tool: Option<CronTool>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.add_tool(ReplyTool::new(
-        response_tx.clone(),
-        conversation_id,
-        state.conversation_logger.clone(),
-        state.channel_id.clone(),
-    )).await?;
+    handle
+        .add_tool(ReplyTool::new(
+            response_tx.clone(),
+            conversation_id,
+            state.conversation_logger.clone(),
+            state.channel_id.clone(),
+        ))
+        .await?;
     handle.add_tool(BranchTool::new(state.clone())).await?;
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
     handle.add_tool(CancelTool::new(state)).await?;
-    handle.add_tool(SkipTool::new(skip_flag, response_tx.clone())).await?;
-    handle.add_tool(SendFileTool::new(response_tx.clone())).await?;
+    handle
+        .add_tool(SkipTool::new(skip_flag, response_tx.clone()))
+        .await?;
+    handle
+        .add_tool(SendFileTool::new(response_tx.clone()))
+        .await?;
     handle.add_tool(ReactTool::new(response_tx)).await?;
     if let Some(cron) = cron_tool {
         handle.add_tool(cron).await?;
@@ -196,7 +213,9 @@ pub fn create_worker_tool_server(
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(instance_dir, workspace))
-        .tool(SetStatusTool::new(agent_id, worker_id, channel_id, event_tx));
+        .tool(SetStatusTool::new(
+            agent_id, worker_id, channel_id, event_tx,
+        ));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
