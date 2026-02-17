@@ -170,7 +170,11 @@ impl CronStore {
     }
 
     /// Load execution history for a specific cron job.
-    pub async fn load_executions(&self, cron_id: &str, limit: i64) -> Result<Vec<CronExecutionEntry>> {
+    pub async fn load_executions(
+        &self,
+        cron_id: &str,
+        limit: i64,
+    ) -> Result<Vec<CronExecutionEntry>> {
         let rows = sqlx::query(
             r#"
             SELECT id, executed_at, success, result_summary

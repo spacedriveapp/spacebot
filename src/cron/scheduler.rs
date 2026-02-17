@@ -14,7 +14,7 @@ use chrono::Timelike;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use tokio::time::{interval, Duration};
+use tokio::time::{Duration, interval};
 
 /// A cron job definition loaded from the database.
 #[derive(Debug, Clone)]
@@ -165,9 +165,7 @@ impl Scheduler {
             // Look up interval before entering the loop
             let interval_secs = {
                 let j = jobs.read().await;
-                j.get(&job_id)
-                    .map(|j| j.interval_secs)
-                    .unwrap_or(3600)
+                j.get(&job_id).map(|j| j.interval_secs).unwrap_or(3600)
             };
 
             let mut ticker = interval(Duration::from_secs(interval_secs));
@@ -323,9 +321,9 @@ impl Scheduler {
 
         if let Some(job) = job {
             if !job.enabled {
-                return Err(crate::error::Error::Other(
-                    anyhow::anyhow!("cron job is disabled"),
-                ));
+                return Err(crate::error::Error::Other(anyhow::anyhow!(
+                    "cron job is disabled"
+                )));
             }
 
             tracing::info!(cron_id = %job_id, "cron job triggered manually");
@@ -453,11 +451,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     } else {
         None
     };
-    if let Err(error) = context
-        .store
-        .log_execution(&job.id, true, summary)
-        .await
-    {
+    if let Err(error) = context.store.log_execution(&job.id, true, summary).await {
         tracing::warn!(%error, "failed to log cron execution");
     }
 

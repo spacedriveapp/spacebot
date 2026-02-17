@@ -1,7 +1,7 @@
 //! Prompt hooks for observing and controlling agent behavior.
 
-pub mod spacebot;
 pub mod cortex;
+pub mod spacebot;
 
-pub use spacebot::SpacebotHook;
 pub use cortex::CortexHook;
+pub use spacebot::SpacebotHook;

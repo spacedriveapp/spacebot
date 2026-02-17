@@ -38,27 +38,65 @@ impl LlmManager {
     /// Get the appropriate API key for a provider.
     pub fn get_api_key(&self, provider: &str) -> Result<String> {
         match provider {
-            "anthropic" => self.config.anthropic_key.clone()
+            "anthropic" => self
+                .config
+                .anthropic_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("anthropic".into()).into()),
-            "openai" => self.config.openai_key.clone()
+            "openai" => self
+                .config
+                .openai_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("openai".into()).into()),
-            "openrouter" => self.config.openrouter_key.clone()
+            "openrouter" => self
+                .config
+                .openrouter_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("openrouter".into()).into()),
-            "zhipu" => self.config.zhipu_key.clone()
+            "ollama" => self
+                .config
+                .ollama_key
+                .clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("ollama".into()).into()),
+            "zhipu" => self
+                .config
+                .zhipu_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("zhipu".into()).into()),
-            "groq" => self.config.groq_key.clone()
+            "groq" => self
+                .config
+                .groq_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("groq".into()).into()),
-            "together" => self.config.together_key.clone()
+            "together" => self
+                .config
+                .together_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("together".into()).into()),
-            "fireworks" => self.config.fireworks_key.clone()
+            "fireworks" => self
+                .config
+                .fireworks_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("fireworks".into()).into()),
-            "deepseek" => self.config.deepseek_key.clone()
+            "deepseek" => self
+                .config
+                .deepseek_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("deepseek".into()).into()),
-            "xai" => self.config.xai_key.clone()
+            "xai" => self
+                .config
+                .xai_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("xai".into()).into()),
-            "mistral" => self.config.mistral_key.clone()
+            "mistral" => self
+                .config
+                .mistral_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("mistral".into()).into()),
-            "opencode-zen" => self.config.opencode_zen_key.clone()
+            "opencode-zen" => self
+                .config
+                .opencode_zen_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
         }
@@ -81,7 +119,9 @@ impl LlmManager {
 
     /// Record that a model hit a rate limit.
     pub async fn record_rate_limit(&self, model_name: &str) {
-        self.rate_limited.write().await
+        self.rate_limited
+            .write()
+            .await
             .insert(model_name.to_string(), Instant::now());
         tracing::warn!(model = %model_name, "model rate limited, entering cooldown");
     }
@@ -98,7 +138,9 @@ impl LlmManager {
 
     /// Clean up expired rate limit entries.
     pub async fn cleanup_rate_limits(&self, cooldown_secs: u64) {
-        self.rate_limited.write().await
+        self.rate_limited
+            .write()
+            .await
             .retain(|_, limited_at| limited_at.elapsed().as_secs() < cooldown_secs);
     }
 }

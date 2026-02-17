@@ -54,8 +54,8 @@ impl OpenCodeServer {
         let base_url = format!("http://127.0.0.1:{port}");
 
         let env_config = OpenCodeEnvConfig::new(permissions);
-        let config_json = serde_json::to_string(&env_config)
-            .context("failed to serialize OpenCode config")?;
+        let config_json =
+            serde_json::to_string(&env_config).context("failed to serialize OpenCode config")?;
 
         tracing::info!(
             directory = %directory.display(),
@@ -73,10 +73,13 @@ impl OpenCodeServer {
             .env("OPENCODE_PORT", port.to_string())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!(
-                "failed to spawn OpenCode at '{}' for directory '{}'",
-                opencode_path, directory.display()
-            ))?;
+            .with_context(|| {
+                format!(
+                    "failed to spawn OpenCode at '{}' for directory '{}'",
+                    opencode_path,
+                    directory.display()
+                )
+            })?;
 
         let client = Client::builder()
             .timeout(std::time::Duration::from_secs(300))
@@ -185,7 +188,8 @@ impl OpenCodeServer {
     /// Check if the server is healthy.
     async fn health_check(&self) -> anyhow::Result<bool> {
         let url = format!("{}/global/health", self.base_url);
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5))
             .send()
@@ -197,7 +201,8 @@ impl OpenCodeServer {
 
         // Fallback
         let url = format!("{}/api/health", self.base_url);
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .timeout(std::time::Duration::from_secs(5))
             .send()
@@ -260,10 +265,12 @@ impl OpenCodeServer {
             .env("OPENCODE_PORT", port.to_string())
             .kill_on_drop(true)
             .spawn()
-            .with_context(|| format!(
-                "failed to restart OpenCode server for '{}'",
-                self.directory.display()
-            ))?;
+            .with_context(|| {
+                format!(
+                    "failed to restart OpenCode server for '{}'",
+                    self.directory.display()
+                )
+            })?;
 
         self.port = port;
         self.base_url = base_url;
@@ -311,7 +318,8 @@ impl OpenCodeServer {
         let url = format!("{}/session", self.base_url);
         let body = CreateSessionRequest { title };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .json(&body)
@@ -325,7 +333,9 @@ impl OpenCodeServer {
             bail!("create session failed ({status}): {text}");
         }
 
-        response.json::<Session>().await
+        response
+            .json::<Session>()
+            .await
             .context("failed to parse session response")
     }
 
@@ -337,7 +347,8 @@ impl OpenCodeServer {
     ) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .json(request)
@@ -351,7 +362,9 @@ impl OpenCodeServer {
             bail!("send prompt failed ({status}): {text}");
         }
 
-        response.json::<serde_json::Value>().await
+        response
+            .json::<serde_json::Value>()
+            .await
             .context("failed to parse prompt response")
     }
 
@@ -363,7 +376,8 @@ impl OpenCodeServer {
     ) -> anyhow::Result<()> {
         let url = format!("{}/session/{}/prompt_async", self.base_url, session_id);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .json(request)
@@ -384,7 +398,8 @@ impl OpenCodeServer {
     pub async fn abort_session(&self, session_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/session/{}/abort", self.base_url, session_id);
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .send()
@@ -412,7 +427,8 @@ impl OpenCodeServer {
             message: None,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .json(&body)
@@ -438,7 +454,8 @@ impl OpenCodeServer {
         let url = format!("{}/question/{}/reply", self.base_url, request_id);
         let body = QuestionReplyRequest { answers };
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .json(&body)
@@ -460,7 +477,8 @@ impl OpenCodeServer {
     pub async fn subscribe_events(&self) -> anyhow::Result<reqwest::Response> {
         let url = format!("{}/event", self.base_url);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .header("Accept", "text/event-stream")
@@ -479,13 +497,11 @@ impl OpenCodeServer {
     }
 
     /// Get messages for a session (for reading final results).
-    pub async fn get_messages(
-        &self,
-        session_id: &str,
-    ) -> anyhow::Result<Vec<serde_json::Value>> {
+    pub async fn get_messages(&self, session_id: &str) -> anyhow::Result<Vec<serde_json::Value>> {
         let url = format!("{}/session/{}/message", self.base_url, session_id);
 
-        let response = self.client
+        let response = self
+            .client
             .get(&url)
             .query(&[("directory", self.directory.to_str().unwrap_or("."))])
             .send()
@@ -498,7 +514,9 @@ impl OpenCodeServer {
             bail!("get messages failed ({status}): {text}");
         }
 
-        response.json::<Vec<serde_json::Value>>().await
+        response
+            .json::<Vec<serde_json::Value>>()
+            .await
             .context("failed to parse messages response")
     }
 }
@@ -552,7 +570,8 @@ impl OpenCodeServerPool {
         &self,
         directory: &Path,
     ) -> anyhow::Result<Arc<Mutex<OpenCodeServer>>> {
-        let canonical = directory.canonicalize()
+        let canonical = directory
+            .canonicalize()
             .with_context(|| format!("directory '{}' does not exist", directory.display()))?;
 
         let mut servers = self.servers.lock().await;
@@ -574,11 +593,10 @@ impl OpenCodeServerPool {
 
         // Not in pool yet. Try reattaching to an existing server on the
         // deterministic port (left over from a previous spacebot run).
-        if let Some(reattached) = OpenCodeServer::reattach(
-            canonical.clone(),
-            &self.opencode_path,
-            &self.permissions,
-        ).await {
+        if let Some(reattached) =
+            OpenCodeServer::reattach(canonical.clone(), &self.opencode_path, &self.permissions)
+                .await
+        {
             let server = Arc::new(Mutex::new(reattached));
             servers.insert(canonical, Arc::clone(&server));
             return Ok(server);
@@ -592,11 +610,9 @@ impl OpenCodeServerPool {
             );
         }
 
-        let server = OpenCodeServer::spawn(
-            canonical.clone(),
-            &self.opencode_path,
-            &self.permissions,
-        ).await?;
+        let server =
+            OpenCodeServer::spawn(canonical.clone(), &self.opencode_path, &self.permissions)
+                .await?;
 
         let server = Arc::new(Mutex::new(server));
         servers.insert(canonical, Arc::clone(&server));

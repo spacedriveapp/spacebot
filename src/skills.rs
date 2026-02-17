@@ -58,7 +58,9 @@ impl SkillSet {
 
         // Instance skills (lowest precedence)
         if instance_skills_dir.is_dir() {
-            if let Ok(skills) = load_skills_from_dir(instance_skills_dir, SkillSource::Instance).await {
+            if let Ok(skills) =
+                load_skills_from_dir(instance_skills_dir, SkillSource::Instance).await
+            {
                 for skill in skills {
                     set.skills.insert(skill.name.to_lowercase(), skill);
                 }
@@ -67,7 +69,9 @@ impl SkillSet {
 
         // Workspace skills (highest precedence, overrides instance)
         if workspace_skills_dir.is_dir() {
-            if let Ok(skills) = load_skills_from_dir(workspace_skills_dir, SkillSource::Workspace).await {
+            if let Ok(skills) =
+                load_skills_from_dir(workspace_skills_dir, SkillSource::Workspace).await
+            {
                 for skill in skills {
                     set.skills.insert(skill.name.to_lowercase(), skill);
                 }
@@ -194,26 +198,27 @@ async fn load_skills_from_dir(dir: &Path, source: SkillSource) -> anyhow::Result
 }
 
 /// Load a single skill from its SKILL.md file.
-async fn load_skill(file_path: &Path, base_dir: &Path, source: SkillSource) -> anyhow::Result<Skill> {
+async fn load_skill(
+    file_path: &Path,
+    base_dir: &Path,
+    source: SkillSource,
+) -> anyhow::Result<Skill> {
     let raw = tokio::fs::read_to_string(file_path)
         .await
         .with_context(|| format!("failed to read {}", file_path.display()))?;
 
     let (frontmatter, body) = parse_frontmatter(&raw)?;
 
-    let name = frontmatter.get("name")
-        .cloned()
-        .unwrap_or_else(|| {
-            // Fall back to directory name if no name in frontmatter
-            base_dir.file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-                .to_string()
-        });
+    let name = frontmatter.get("name").cloned().unwrap_or_else(|| {
+        // Fall back to directory name if no name in frontmatter
+        base_dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    });
 
-    let description = frontmatter.get("description")
-        .cloned()
-        .unwrap_or_default();
+    let description = frontmatter.get("description").cloned().unwrap_or_default();
 
     // Resolve {baseDir} template variable in the body
     let base_dir_str = base_dir.to_string_lossy();
@@ -277,8 +282,10 @@ fn parse_frontmatter(content: &str) -> anyhow::Result<(HashMap<String, String>, 
 
             // Strip surrounding quotes
             let value = value
-                .trim_start_matches('"').trim_end_matches('"')
-                .trim_start_matches('\'').trim_end_matches('\'')
+                .trim_start_matches('"')
+                .trim_end_matches('"')
+                .trim_start_matches('\'')
+                .trim_end_matches('\'')
                 .to_string();
 
             map.insert(key, value);
@@ -308,7 +315,10 @@ mod tests {
 
         let (fm, body) = parse_frontmatter(content).unwrap();
         assert_eq!(fm.get("name").unwrap(), "weather");
-        assert_eq!(fm.get("description").unwrap(), "Get current weather and forecasts (no API key required).");
+        assert_eq!(
+            fm.get("description").unwrap(),
+            "Get current weather and forecasts (no API key required)."
+        );
         assert_eq!(fm.get("homepage").unwrap(), "https://wttr.in/:help");
         assert!(body.starts_with("# Weather"));
     }
@@ -327,7 +337,10 @@ mod tests {
 
         let (fm, body) = parse_frontmatter(content).unwrap();
         assert_eq!(fm.get("name").unwrap(), "github");
-        assert_eq!(fm.get("description").unwrap(), "Interact with GitHub using the gh CLI.");
+        assert_eq!(
+            fm.get("description").unwrap(),
+            "Interact with GitHub using the gh CLI."
+        );
         // metadata line is skipped (starts with {)
         assert!(!fm.contains_key("metadata"));
         assert!(body.starts_with("# GitHub Skill"));
@@ -353,7 +366,10 @@ mod tests {
         "#};
 
         let (fm, _body) = parse_frontmatter(content).unwrap();
-        assert_eq!(fm.get("description").unwrap(), "A skill with 'quotes' inside");
+        assert_eq!(
+            fm.get("description").unwrap(),
+            "A skill with 'quotes' inside"
+        );
     }
 
     #[test]
@@ -366,14 +382,17 @@ mod tests {
     #[test]
     fn test_skill_set_channel_prompt() {
         let mut set = SkillSet::default();
-        set.skills.insert("weather".into(), Skill {
-            name: "weather".into(),
-            description: "Get weather forecasts".into(),
-            file_path: PathBuf::from("/skills/weather/SKILL.md"),
-            base_dir: PathBuf::from("/skills/weather"),
-            content: "# Weather\n\nUse curl.".into(),
-            source: SkillSource::Instance,
-        });
+        set.skills.insert(
+            "weather".into(),
+            Skill {
+                name: "weather".into(),
+                description: "Get weather forecasts".into(),
+                file_path: PathBuf::from("/skills/weather/SKILL.md"),
+                base_dir: PathBuf::from("/skills/weather"),
+                content: "# Weather\n\nUse curl.".into(),
+                source: SkillSource::Instance,
+            },
+        );
 
         let engine = crate::prompts::PromptEngine::new("en").unwrap();
         let prompt = set.render_channel_prompt(&engine);
@@ -385,14 +404,17 @@ mod tests {
     #[test]
     fn test_skill_set_worker_prompt() {
         let mut set = SkillSet::default();
-        set.skills.insert("weather".into(), Skill {
-            name: "weather".into(),
-            description: "Get weather forecasts".into(),
-            file_path: PathBuf::from("/skills/weather/SKILL.md"),
-            base_dir: PathBuf::from("/skills/weather"),
-            content: "# Weather\n\nUse curl.".into(),
-            source: SkillSource::Instance,
-        });
+        set.skills.insert(
+            "weather".into(),
+            Skill {
+                name: "weather".into(),
+                description: "Get weather forecasts".into(),
+                file_path: PathBuf::from("/skills/weather/SKILL.md"),
+                base_dir: PathBuf::from("/skills/weather"),
+                content: "# Weather\n\nUse curl.".into(),
+                source: SkillSource::Instance,
+            },
+        );
 
         let engine = crate::prompts::PromptEngine::new("en").unwrap();
         let prompt = set.render_worker_prompt("weather", &engine).unwrap();

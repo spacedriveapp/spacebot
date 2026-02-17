@@ -63,7 +63,8 @@ impl SpacebotHook {
                 // Google API keys
                 Regex::new(r"AIza[0-9A-Za-z_-]{35}").expect("hardcoded regex"),
                 // Discord bot tokens (base64 user ID . timestamp . HMAC)
-                Regex::new(r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}").expect("hardcoded regex"),
+                Regex::new(r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}")
+                    .expect("hardcoded regex"),
                 // Slack bot tokens
                 Regex::new(r"xoxb-[0-9]{10,}-[0-9A-Za-z-]+").expect("hardcoded regex"),
                 // Slack app tokens
@@ -89,11 +90,7 @@ impl<M> PromptHook<M> for SpacebotHook
 where
     M: CompletionModel,
 {
-    async fn on_completion_call(
-        &self,
-        _prompt: &Message,
-        _history: &[Message],
-    ) -> HookAction {
+    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
         // Log the completion call but don't block it
         tracing::debug!(
             process_id = %self.process_id,
@@ -178,12 +175,16 @@ where
                 leak_prefix = %&leak[..leak.len().min(8)],
                 "secret leak detected in tool output, terminating agent"
             );
-            return HookAction::Terminate { reason: "Tool output contained a secret. Agent terminated to prevent exfiltration.".into() };
+            return HookAction::Terminate {
+                reason: "Tool output contained a secret. Agent terminated to prevent exfiltration."
+                    .into(),
+            };
         }
 
         // Cap the result stored in the broadcast event to avoid blowing up
         // event subscribers with multi-MB tool results.
-        let capped_result = crate::tools::truncate_output(result, crate::tools::MAX_TOOL_OUTPUT_BYTES);
+        let capped_result =
+            crate::tools::truncate_output(result, crate::tools::MAX_TOOL_OUTPUT_BYTES);
         let event = ProcessEvent::ToolCompleted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),

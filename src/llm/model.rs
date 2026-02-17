@@ -2,12 +2,10 @@
 
 use crate::llm::manager::LlmManager;
 use crate::llm::routing::{
-    self, RoutingConfig, MAX_FALLBACK_ATTEMPTS, MAX_RETRIES_PER_MODEL, RETRY_BASE_DELAY_MS,
+    self, MAX_FALLBACK_ATTEMPTS, MAX_RETRIES_PER_MODEL, RETRY_BASE_DELAY_MS, RoutingConfig,
 };
 
-use rig::completion::{
-    self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage,
-};
+use rig::completion::{self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage};
 use rig::message::{
     AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
     ToolResult, UserContent,
@@ -50,9 +48,15 @@ pub struct SpacebotModel {
 }
 
 impl SpacebotModel {
-    pub fn provider(&self) -> &str { &self.provider }
-    pub fn model_name(&self) -> &str { &self.model_name }
-    pub fn full_model_name(&self) -> &str { &self.full_model_name }
+    pub fn provider(&self) -> &str {
+        &self.provider
+    }
+    pub fn model_name(&self) -> &str {
+        &self.model_name
+    }
+    pub fn full_model_name(&self) -> &str {
+        &self.full_model_name
+    }
 
     /// Attach routing config for fallback behavior.
     pub fn with_routing(mut self, routing: RoutingConfig) -> Self {
@@ -69,6 +73,7 @@ impl SpacebotModel {
             "anthropic" => self.call_anthropic(request).await,
             "openai" => self.call_openai(request).await,
             "openrouter" => self.call_openrouter(request).await,
+            "ollama" => self.call_ollama(request).await,
             "zhipu" => self.call_zhipu(request).await,
             "groq" => self.call_groq(request).await,
             "together" => self.call_together(request).await,
@@ -93,10 +98,7 @@ impl SpacebotModel {
         &self,
         model_name: &str,
         request: &CompletionRequest,
-    ) -> Result<
-        completion::CompletionResponse<RawResponse>,
-        (CompletionError, bool),
-    > {
+    ) -> Result<completion::CompletionResponse<RawResponse>, (CompletionError, bool)> {
         let model = if model_name == self.full_model_name {
             self.clone()
         } else {
@@ -203,11 +205,16 @@ impl CompletionModel for SpacebotModel {
                 "primary model in rate-limit cooldown, skipping to fallbacks"
             );
         } else {
-            match self.attempt_with_retries(&self.full_model_name, &request).await {
+            match self
+                .attempt_with_retries(&self.full_model_name, &request)
+                .await
+            {
                 Ok(response) => return Ok(response),
                 Err((error, was_rate_limit)) => {
                     if was_rate_limit {
-                        self.llm_manager.record_rate_limit(&self.full_model_name).await;
+                        self.llm_manager
+                            .record_rate_limit(&self.full_model_name)
+                            .await;
                     }
                     if fallbacks.is_empty() {
                         // No fallbacks — this is the final error
@@ -224,7 +231,11 @@ impl CompletionModel for SpacebotModel {
 
         // Try fallback chain, each with their own retry loop
         for (index, fallback_name) in fallbacks.iter().take(MAX_FALLBACK_ATTEMPTS).enumerate() {
-            if self.llm_manager.is_rate_limited(fallback_name, cooldown).await {
+            if self
+                .llm_manager
+                .is_rate_limited(fallback_name, cooldown)
+                .await
+            {
                 tracing::debug!(
                     fallback = %fallback_name,
                     "fallback model in cooldown, skipping"
@@ -324,15 +335,17 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
 
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
 
         if !status.is_success() {
             let message = response_body["error"]["message"]
@@ -409,15 +422,17 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
 
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "OpenAI response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "OpenAI response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
 
         if !status.is_success() {
             let message = response_body["error"]["message"]
@@ -496,15 +511,17 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
 
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "OpenRouter response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "OpenRouter response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
 
         if !status.is_success() {
             let message = response_body["error"]["message"]
@@ -582,15 +599,17 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
 
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "Z.ai response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "Z.ai response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
 
         if !status.is_success() {
             let message = response_body["error"]["message"]
@@ -602,6 +621,19 @@ impl SpacebotModel {
         }
 
         parse_openai_response(response_body, "Z.ai")
+    }
+
+    async fn call_ollama(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_openai_compatible(
+            request,
+            "ollama",
+            "Ollama",
+            "https://ollama.com/v1/chat/completions",
+        )
+        .await
     }
 
     /// Generic OpenAI-compatible API call.
@@ -672,15 +704,17 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
 
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
 
         if !status.is_success() {
             let message = response_body["error"]["message"]
@@ -703,7 +737,8 @@ impl SpacebotModel {
             "groq",
             "Groq",
             "https://api.groq.com/openai/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_together(
@@ -715,7 +750,8 @@ impl SpacebotModel {
             "together",
             "Together AI",
             "https://api.together.xyz/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_fireworks(
@@ -727,7 +763,8 @@ impl SpacebotModel {
             "fireworks",
             "Fireworks AI",
             "https://api.fireworks.ai/inference/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_deepseek(
@@ -739,7 +776,8 @@ impl SpacebotModel {
             "deepseek",
             "DeepSeek",
             "https://api.deepseek.com/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_xai(
@@ -751,7 +789,8 @@ impl SpacebotModel {
             "xai",
             "xAI",
             "https://api.x.ai/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_mistral(
@@ -763,7 +802,8 @@ impl SpacebotModel {
             "mistral",
             "Mistral AI",
             "https://api.mistral.ai/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 
     async fn call_opencode_zen(
@@ -775,7 +815,8 @@ impl SpacebotModel {
             "opencode-zen",
             "OpenCode Zen",
             "https://opencode.ai/zen/v1/chat/completions",
-        ).await
+        )
+        .await
     }
 }
 
@@ -1003,7 +1044,10 @@ fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> Too
     ToolCall {
         id,
         call_id: None,
-        function: ToolFunction { name: name.trim().to_string(), arguments },
+        function: ToolFunction {
+            name: name.trim().to_string(),
+            arguments,
+        },
         signature: None,
         additional_params: None,
     }
@@ -1028,8 +1072,9 @@ fn parse_anthropic_response(
                 let id = block["id"].as_str().unwrap_or("").to_string();
                 let name = block["name"].as_str().unwrap_or("").to_string();
                 let arguments = block["input"].clone();
-                assistant_content
-                    .push(AssistantContent::ToolCall(make_tool_call(id, name, arguments)));
+                assistant_content.push(AssistantContent::ToolCall(make_tool_call(
+                    id, name, arguments,
+                )));
             }
             _ => {}
         }
@@ -1081,13 +1126,15 @@ fn parse_openai_response(
                 .as_str()
                 .and_then(|s| serde_json::from_str(s).ok())
                 .unwrap_or(serde_json::json!({}));
-            assistant_content
-                .push(AssistantContent::ToolCall(make_tool_call(id, name, arguments)));
+            assistant_content.push(AssistantContent::ToolCall(make_tool_call(
+                id, name, arguments,
+            )));
         }
     }
 
-    let result_choice = OneOrMany::many(assistant_content)
-        .map_err(|_| CompletionError::ResponseError(format!("empty response from {provider_label}")))?;
+    let result_choice = OneOrMany::many(assistant_content).map_err(|_| {
+        CompletionError::ResponseError(format!("empty response from {provider_label}"))
+    })?;
 
     let input_tokens = body["usage"]["prompt_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["completion_tokens"].as_u64().unwrap_or(0);

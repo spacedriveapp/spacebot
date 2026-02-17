@@ -47,9 +47,18 @@ impl Identity {
 
 /// Default identity file templates for new agents.
 const DEFAULT_IDENTITY_FILES: &[(&str, &str)] = &[
-    ("SOUL.md", "<!-- Define this agent's soul: personality, values, communication style, boundaries. -->\n"),
-    ("IDENTITY.md", "<!-- Define this agent's identity: name, nature, purpose. -->\n"),
-    ("USER.md", "<!-- Describe the human this agent interacts with: name, preferences, context. -->\n"),
+    (
+        "SOUL.md",
+        "<!-- Define this agent's soul: personality, values, communication style, boundaries. -->\n",
+    ),
+    (
+        "IDENTITY.md",
+        "<!-- Define this agent's identity: name, nature, purpose. -->\n",
+    ),
+    (
+        "USER.md",
+        "<!-- Describe the human this agent interacts with: name, preferences, context. -->\n",
+    ),
 ];
 
 /// Write template identity files into an agent's workspace if they don't already exist.
@@ -59,9 +68,9 @@ pub async fn scaffold_identity_files(workspace: &Path) -> crate::error::Result<(
     for (filename, content) in DEFAULT_IDENTITY_FILES {
         let target = workspace.join(filename);
         if !target.exists() {
-            tokio::fs::write(&target, content)
-                .await
-                .with_context(|| format!("failed to write identity template: {}", target.display()))?;
+            tokio::fs::write(&target, content).await.with_context(|| {
+                format!("failed to write identity template: {}", target.display())
+            })?;
             tracing::info!(path = %target.display(), "wrote identity template");
         }
     }

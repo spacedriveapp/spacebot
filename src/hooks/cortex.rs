@@ -24,11 +24,7 @@ impl<M> PromptHook<M> for CortexHook
 where
     M: CompletionModel,
 {
-    async fn on_completion_call(
-        &self,
-        _prompt: &Message,
-        _history: &[Message],
-    ) -> HookAction {
+    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
         // Cortex observes but doesn't intervene
         tracing::trace!("cortex: completion call observed");
         HookAction::Continue

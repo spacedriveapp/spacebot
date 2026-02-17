@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 /// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
 async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::config::Config)> {
-    let config = spacebot::config::Config::load()
-        .context("failed to load ~/.spacebot/config.toml")?;
+    let config =
+        spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
 
     let llm_manager = Arc::new(
         spacebot::llm::LlmManager::new(config.llm.clone())
@@ -28,9 +28,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     );
 
     let resolved_agents = config.resolve_agents();
-    let agent_config = resolved_agents
-        .first()
-        .context("no agents configured")?;
+    let agent_config = resolved_agents.first().context("no agents configured")?;
 
     let db = spacebot::db::Db::connect(&agent_config.data_dir)
         .await
@@ -38,10 +36,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
 
     let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
 
-    let embedding_table =
-        spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
-            .await
-            .context("failed to init embedding table")?;
+    let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
+        .await
+        .context("failed to init embedding table")?;
 
     if let Err(error) = embedding_table.ensure_fts_index().await {
         eprintln!("warning: FTS index creation failed: {error}");
@@ -54,16 +51,18 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     ));
 
     let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
-    let prompts = spacebot::prompts::PromptEngine::new("en")
-        .context("failed to init prompt engine")?;
-    let skills = spacebot::skills::SkillSet::load(
-        &config.skills_dir(),
-        &agent_config.skills_dir(),
-    )
-    .await;
+    let prompts =
+        spacebot::prompts::PromptEngine::new("en").context("failed to init prompt engine")?;
+    let skills =
+        spacebot::skills::SkillSet::load(&config.skills_dir(), &agent_config.skills_dir()).await;
 
     let runtime_config = Arc::new(spacebot::config::RuntimeConfig::new(
-        &config.instance_dir, agent_config, &config.defaults, prompts, identity, skills,
+        &config.instance_dir,
+        agent_config,
+        &config.defaults,
+        prompts,
+        identity,
+        skills,
     ));
 
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
@@ -162,10 +161,13 @@ async fn dump_channel_context() {
     print_stats("System prompt", &prompt);
 
     // Build the actual channel tool server with real tools registered
-    let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let conversation_logger =
+        spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
     let channel_id: spacebot::ChannelId = Arc::from("test-channel");
-    let status_block = Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new()));
+    let status_block = Arc::new(tokio::sync::RwLock::new(
+        spacebot::agent::status::StatusBlock::new(),
+    ));
     let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
 
     let state = spacebot::agent::channel::ChannelState {
@@ -212,7 +214,10 @@ async fn dump_channel_context() {
     println!("\n--- TOTAL CHANNEL CONTEXT: ~{} tokens ---", total / 4);
 
     let routing = rc.routing.load();
-    println!("Model: {}", routing.resolve(spacebot::ProcessType::Channel, None));
+    println!(
+        "Model: {}",
+        routing.resolve(spacebot::ProcessType::Channel, None)
+    );
     println!("Max turns: {}", **rc.max_turns.load());
 
     assert!(!prompt.is_empty());
@@ -236,7 +241,8 @@ async fn dump_branch_context() {
     print_stats("System prompt", &branch_prompt);
 
     // Build the actual branch tool server
-    let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let conversation_logger =
+        spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
@@ -260,7 +266,10 @@ async fn dump_branch_context() {
     println!("\n--- TOTAL BRANCH CONTEXT: ~{} tokens ---", total / 4);
 
     let routing = rc.routing.load();
-    println!("Model: {}", routing.resolve(spacebot::ProcessType::Branch, None));
+    println!(
+        "Model: {}",
+        routing.resolve(spacebot::ProcessType::Branch, None)
+    );
     println!("Max turns: {}", **rc.branch_max_turns.load());
     println!("History: cloned from channel at fork time (full conversation context)");
 
@@ -319,7 +328,10 @@ async fn dump_worker_context() {
     println!("\n--- TOTAL WORKER CONTEXT: ~{} tokens ---", total / 4);
 
     let routing = rc.routing.load();
-    println!("Model: {}", routing.resolve(spacebot::ProcessType::Worker, None));
+    println!(
+        "Model: {}",
+        routing.resolve(spacebot::ProcessType::Worker, None)
+    );
     println!("Turns per segment: 25");
     println!("History: fresh (empty). Workers have no channel context.");
 
@@ -341,12 +353,16 @@ async fn dump_all_contexts() {
     let bulletin_success = spacebot::agent::cortex::generate_bulletin(&deps).await;
     if bulletin_success {
         let bulletin = rc.memory_bulletin.load();
-        println!("Bulletin generated: {} words", bulletin.split_whitespace().count());
+        println!(
+            "Bulletin generated: {} words",
+            bulletin.split_whitespace().count()
+        );
     } else {
         println!("Bulletin generation failed (may not have memories or LLM keys)");
     }
 
-    let conversation_logger = spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let conversation_logger =
+        spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
 
     // ── Channel ──
@@ -360,7 +376,9 @@ async fn dump_all_contexts() {
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
-        status_block: Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new())),
+        status_block: Arc::new(tokio::sync::RwLock::new(
+            spacebot::agent::status::StatusBlock::new(),
+        )),
         deps: deps.clone(),
         conversation_logger: conversation_logger.clone(),
         channel_store: channel_store.clone(),
@@ -370,14 +388,24 @@ async fn dump_all_contexts() {
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
     spacebot::tools::add_channel_tools(
-        &channel_tool_server, state, response_tx, "test", skip_flag, None,
-    ).await.expect("failed to add channel tools");
+        &channel_tool_server,
+        state,
+        response_tx,
+        "test",
+        skip_flag,
+        None,
+    )
+    .await
+    .expect("failed to add channel tools");
     let channel_tool_defs = channel_tool_server.get_tool_defs(None).await.unwrap();
     let channel_tools_text = format_tool_defs(&channel_tool_defs);
 
     print_section("CHANNEL SYSTEM PROMPT (with bulletin)", &channel_prompt);
     print_stats("System prompt", &channel_prompt);
-    print_section(&format!("CHANNEL TOOLS ({} tools)", channel_tool_defs.len()), &channel_tools_text);
+    print_section(
+        &format!("CHANNEL TOOLS ({} tools)", channel_tool_defs.len()),
+        &channel_tools_text,
+    );
     print_stats("Tool definitions", &channel_tools_text);
     let channel_total = channel_prompt.len() + channel_tools_text.len();
     println!("--- TOTAL CHANNEL: ~{} tokens ---", channel_total / 4);
@@ -396,7 +424,10 @@ async fn dump_all_contexts() {
 
     print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
     print_stats("System prompt", &branch_prompt);
-    print_section(&format!("BRANCH TOOLS ({} tools)", branch_tool_defs.len()), &branch_tools_text);
+    print_section(
+        &format!("BRANCH TOOLS ({} tools)", branch_tool_defs.len()),
+        &branch_tools_text,
+    );
     print_stats("Tool definitions", &branch_tools_text);
     let branch_total = branch_prompt.len() + branch_tools_text.len();
     println!("--- TOTAL BRANCH: ~{} tokens ---", branch_total / 4);
@@ -421,7 +452,10 @@ async fn dump_all_contexts() {
 
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
     print_stats("System prompt", &worker_prompt);
-    print_section(&format!("WORKER TOOLS ({} tools)", worker_tool_defs.len()), &worker_tools_text);
+    print_section(
+        &format!("WORKER TOOLS ({} tools)", worker_tool_defs.len()),
+        &worker_tools_text,
+    );
     print_stats("Tool definitions", &worker_tools_text);
     let worker_total = worker_prompt.len() + worker_tools_text.len();
     println!("--- TOTAL WORKER: ~{} tokens ---", worker_total / 4);
@@ -433,23 +467,53 @@ async fn dump_all_contexts() {
 
     let routing = rc.routing.load();
     println!("\nRouting:");
-    println!("  Channel: {}", routing.resolve(spacebot::ProcessType::Channel, None));
-    println!("  Branch:  {}", routing.resolve(spacebot::ProcessType::Branch, None));
-    println!("  Worker:  {}", routing.resolve(spacebot::ProcessType::Worker, None));
+    println!(
+        "  Channel: {}",
+        routing.resolve(spacebot::ProcessType::Channel, None)
+    );
+    println!(
+        "  Branch:  {}",
+        routing.resolve(spacebot::ProcessType::Branch, None)
+    );
+    println!(
+        "  Worker:  {}",
+        routing.resolve(spacebot::ProcessType::Worker, None)
+    );
 
     println!("\nContext budget (initial turn, before any history):");
-    println!("  Channel: ~{} tokens (prompt: ~{}, tools: ~{})",
-        channel_total / 4, channel_prompt.len() / 4, channel_tools_text.len() / 4);
-    println!("  Branch:  ~{} tokens (prompt: ~{}, tools: ~{}) + cloned channel history",
-        branch_total / 4, branch_prompt.len() / 4, branch_tools_text.len() / 4);
-    println!("  Worker:  ~{} tokens (prompt: ~{}, tools: ~{})",
-        worker_total / 4, worker_prompt.len() / 4, worker_tools_text.len() / 4);
+    println!(
+        "  Channel: ~{} tokens (prompt: ~{}, tools: ~{})",
+        channel_total / 4,
+        channel_prompt.len() / 4,
+        channel_tools_text.len() / 4
+    );
+    println!(
+        "  Branch:  ~{} tokens (prompt: ~{}, tools: ~{}) + cloned channel history",
+        branch_total / 4,
+        branch_prompt.len() / 4,
+        branch_tools_text.len() / 4
+    );
+    println!(
+        "  Worker:  ~{} tokens (prompt: ~{}, tools: ~{})",
+        worker_total / 4,
+        worker_prompt.len() / 4,
+        worker_tools_text.len() / 4
+    );
 
     let context_window = **rc.context_window.load();
     println!("\nContext window: {} tokens", context_window);
-    println!("  Channel headroom: ~{} tokens for history", context_window - channel_total / 4);
-    println!("  Branch headroom:  ~{} tokens for history", context_window - branch_total / 4);
-    println!("  Worker headroom:  ~{} tokens for history", context_window - worker_total / 4);
+    println!(
+        "  Channel headroom: ~{} tokens for history",
+        context_window - channel_total / 4
+    );
+    println!(
+        "  Branch headroom:  ~{} tokens for history",
+        context_window - branch_total / 4
+    );
+    println!(
+        "  Worker headroom:  ~{} tokens for history",
+        context_window - worker_total / 4
+    );
 
     println!("\nTurn limits:");
     println!("  Channel: {} max turns", **rc.max_turns.load());
@@ -458,26 +522,74 @@ async fn dump_all_contexts() {
 
     let compaction = rc.compaction.load();
     println!("\nCompaction thresholds:");
-    println!("  Background: {:.0}%", compaction.background_threshold * 100.0);
-    println!("  Aggressive: {:.0}%", compaction.aggressive_threshold * 100.0);
-    println!("  Emergency:  {:.0}%", compaction.emergency_threshold * 100.0);
+    println!(
+        "  Background: {:.0}%",
+        compaction.background_threshold * 100.0
+    );
+    println!(
+        "  Aggressive: {:.0}%",
+        compaction.aggressive_threshold * 100.0
+    );
+    println!(
+        "  Emergency:  {:.0}%",
+        compaction.emergency_threshold * 100.0
+    );
 
     println!("\nTool counts:");
-    println!("  Channel: {} tools ({})",
+    println!(
+        "  Channel: {} tools ({})",
         channel_tool_defs.len(),
-        channel_tool_defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", "));
-    println!("  Branch:  {} tools ({})",
+        channel_tool_defs
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  Branch:  {} tools ({})",
         branch_tool_defs.len(),
-        branch_tool_defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", "));
-    println!("  Worker:  {} tools ({})",
+        branch_tool_defs
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    println!(
+        "  Worker:  {} tools ({})",
         worker_tool_defs.len(),
-        worker_tool_defs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", "));
+        worker_tool_defs
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
 
     let identity = rc.identity.load();
     println!("\nIdentity files:");
-    println!("  SOUL.md:     {}", if identity.soul.is_some() { "loaded" } else { "empty" });
-    println!("  IDENTITY.md: {}", if identity.identity.is_some() { "loaded" } else { "empty" });
-    println!("  USER.md:     {}", if identity.user.is_some() { "loaded" } else { "empty" });
+    println!(
+        "  SOUL.md:     {}",
+        if identity.soul.is_some() {
+            "loaded"
+        } else {
+            "empty"
+        }
+    );
+    println!(
+        "  IDENTITY.md: {}",
+        if identity.identity.is_some() {
+            "loaded"
+        } else {
+            "empty"
+        }
+    );
+    println!(
+        "  USER.md:     {}",
+        if identity.user.is_some() {
+            "loaded"
+        } else {
+            "empty"
+        }
+    );
 
     let skills = rc.skills.load();
     if skills.is_empty() {
@@ -488,5 +600,8 @@ async fn dump_all_contexts() {
     }
 
     let bulletin = rc.memory_bulletin.load();
-    println!("\nMemory bulletin: {} words", bulletin.split_whitespace().count());
+    println!(
+        "\nMemory bulletin: {} words",
+        bulletin.split_whitespace().count()
+    );
 }
