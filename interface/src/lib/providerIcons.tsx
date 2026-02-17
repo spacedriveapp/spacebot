@@ -67,6 +67,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		together: Together,
 		xai: XAI,
 		zhipu: ZAI,
+		"glm-coding": ZAI,
 		"opencode-zen": OpenCodeZenIcon,
 	};
 

@@ -70,6 +70,9 @@ impl SpacebotModel {
             "openai" => self.call_openai(request).await,
             "openrouter" => self.call_openrouter(request).await,
             "zhipu" => self.call_zhipu(request).await,
+            "glm-coding" => self.call_glm_coding(request).await,
+            "kimi-coding" => self.call_kimi_coding(request).await,
+            "minimax-coding" => self.call_minimax_coding(request).await,
             "groq" => self.call_groq(request).await,
             "together" => self.call_together(request).await,
             "fireworks" => self.call_fireworks(request).await,
@@ -275,75 +278,13 @@ impl SpacebotModel {
         &self,
         request: CompletionRequest,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        let api_key = self
-            .llm_manager
-            .get_api_key("anthropic")
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let messages = convert_messages_to_anthropic(&request.chat_history);
-
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": messages,
-            "max_tokens": request.max_tokens.unwrap_or(4096),
-        });
-
-        if let Some(preamble) = &request.preamble {
-            body["system"] = serde_json::json!(preamble);
-        }
-
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = serde_json::json!(temperature);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "name": t.name,
-                        "description": t.description,
-                        "input_schema": t.parameters,
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::json!(tools);
-        }
-
-        let response = self
-            .llm_manager
-            .http_client()
-            .post("https://api.anthropic.com/v1/messages")
-            .header("x-api-key", &api_key)
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
-
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
-
-        if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            return Err(CompletionError::ProviderError(format!(
-                "Anthropic API error ({status}): {message}"
-            )));
-        }
-
-        parse_anthropic_response(response_body)
+        self.call_anthropic_compatible(
+            request,
+            "anthropic",
+            "Anthropic",
+            "https://api.anthropic.com/v1/messages",
+        )
+        .await
     }
 
     async fn call_openai(
@@ -604,6 +545,97 @@ impl SpacebotModel {
         parse_openai_response(response_body, "Z.ai")
     }
 
+    /// Generic Anthropic-compatible API call.
+    /// Used by providers that implement the Anthropic messages format.
+    async fn call_anthropic_compatible(
+        &self,
+        request: CompletionRequest,
+        provider_id: &str,
+        provider_display_name: &str,
+        endpoint: &str,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let api_key = self
+            .llm_manager
+            .get_api_key(provider_id)
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+        let messages = convert_messages_to_anthropic(&request.chat_history);
+
+        let mut body = serde_json::json!({
+            "model": self.model_name,
+            "messages": messages,
+            "max_tokens": request.max_tokens.unwrap_or(4096),
+        });
+
+        if let Some(preamble) = &request.preamble {
+            body["system"] = serde_json::json!(preamble);
+        }
+
+        if let Some(temperature) = request.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|t| {
+                    serde_json::json!({
+                        "name": t.name,
+                        "description": t.description,
+                        "input_schema": t.parameters,
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        let response = self
+            .llm_manager
+            .http_client()
+            .post(endpoint)
+            .header("x-api-key", &api_key)
+            .header("authorization", format!("Bearer {api_key}"))
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+
+        let status = response.status();
+        let response_text = response.text().await.map_err(|e| {
+            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+        })?;
+
+        let response_body: serde_json::Value =
+            serde_json::from_str(&response_text).map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}",
+                    truncate_body(&response_text)
+                ))
+            })?;
+
+        if !status.is_success() {
+            let message = response_body["error"]["message"]
+                .as_str()
+                .or_else(|| response_body["base_resp"]["status_msg"].as_str())
+                .or_else(|| response_body["message"].as_str())
+                .unwrap_or("unknown error");
+            return Err(CompletionError::ProviderError(format!(
+                "{provider_display_name} API error ({status}): {message}"
+            )));
+        }
+
+        match parse_anthropic_response(response_body.clone()) {
+            Ok(parsed) => Ok(parsed),
+            Err(_) if response_body.get("choices").is_some() => {
+                parse_openai_response(response_body, provider_display_name)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Generic OpenAI-compatible API call.
     /// Used by providers that implement the OpenAI chat completions format.
     async fn call_openai_compatible(
@@ -660,12 +692,19 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self
+        let mut request_builder = self
             .llm_manager
             .http_client()
             .post(endpoint)
             .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+
+        if provider_id == "kimi-coding" {
+            // Kimi Coding API checks for coding-agent traffic and rejects generic clients.
+            request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
+        }
+
+        let response = request_builder
             .json(&body)
             .send()
             .await
@@ -692,6 +731,45 @@ impl SpacebotModel {
         }
 
         parse_openai_response(response_body, provider_display_name)
+    }
+
+    async fn call_glm_coding(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_anthropic_compatible(
+            request,
+            "glm-coding",
+            "GLM Coding Plan",
+            "https://api.z.ai/api/anthropic/v1/messages",
+        )
+        .await
+    }
+
+    async fn call_kimi_coding(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_openai_compatible(
+            request,
+            "kimi-coding",
+            "Kimi Coding Plan",
+            "https://api.kimi.com/coding/v1/chat/completions",
+        )
+        .await
+    }
+
+    async fn call_minimax_coding(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        self.call_anthropic_compatible(
+            request,
+            "minimax-coding",
+            "MiniMax Coding Plan",
+            "https://api.minimax.io/anthropic/v1/messages",
+        )
+        .await
     }
 
     async fn call_groq(

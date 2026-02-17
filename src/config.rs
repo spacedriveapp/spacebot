@@ -56,6 +56,9 @@ pub struct LlmConfig {
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
     pub zhipu_key: Option<String>,
+    pub glm_coding_key: Option<String>,
+    pub moonshot_key: Option<String>,
+    pub minimax_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
     pub fireworks_key: Option<String>,
@@ -72,6 +75,9 @@ impl LlmConfig {
             || self.openai_key.is_some() 
             || self.openrouter_key.is_some() 
             || self.zhipu_key.is_some()
+            || self.glm_coding_key.is_some()
+            || self.moonshot_key.is_some()
+            || self.minimax_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
             || self.fireworks_key.is_some()
@@ -870,6 +876,9 @@ struct TomlLlmConfig {
     openai_key: Option<String>,
     openrouter_key: Option<String>,
     zhipu_key: Option<String>,
+    glm_coding_key: Option<String>,
+    moonshot_key: Option<String>,
+    minimax_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
     fireworks_key: Option<String>,
@@ -1146,6 +1155,17 @@ impl Config {
         std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("OPENROUTER_API_KEY").is_err()
+            && std::env::var("ZHIPU_API_KEY").is_err()
+            && std::env::var("GLM_CODING_API_KEY").is_err()
+            && std::env::var("KIMI_API_KEY").is_err()
+            && std::env::var("MOONSHOT_API_KEY").is_err()
+            && std::env::var("MINIMAX_API_KEY").is_err()
+            && std::env::var("GROQ_API_KEY").is_err()
+            && std::env::var("TOGETHER_API_KEY").is_err()
+            && std::env::var("FIREWORKS_API_KEY").is_err()
+            && std::env::var("DEEPSEEK_API_KEY").is_err()
+            && std::env::var("XAI_API_KEY").is_err()
+            && std::env::var("MISTRAL_API_KEY").is_err()
             && std::env::var("OPENCODE_ZEN_API_KEY").is_err()
     }
 
@@ -1184,6 +1204,13 @@ impl Config {
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
+            glm_coding_key: std::env::var("GLM_CODING_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
+            moonshot_key: std::env::var("KIMI_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("MOONSHOT_API_KEY").ok()),
+            minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
             fireworks_key: std::env::var("FIREWORKS_API_KEY").ok(),
@@ -1273,6 +1300,26 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
+            glm_coding_key: toml
+                .llm
+                .glm_coding_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GLM_CODING_API_KEY").ok())
+                .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
+            moonshot_key: toml
+                .llm
+                .moonshot_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("KIMI_API_KEY").ok())
+                .or_else(|| std::env::var("MOONSHOT_API_KEY").ok()),
+            minimax_key: toml
+                .llm
+                .minimax_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
             groq_key: toml
                 .llm
                 .groq_key
@@ -2249,6 +2296,9 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "OpenRouter",
         "OpenAI",
         "Z.ai (GLM)",
+        "GLM Coding Plan (Z.ai)",
+        "Kimi Coding Plan",
+        "MiniMax Coding Plan",
         "Groq",
         "Together AI",
         "Fireworks AI",
@@ -2268,13 +2318,24 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
         2 => ("OpenAI API key", "openai_key", "openai"),
         3 => ("Z.ai (GLM) API key", "zhipu_key", "zhipu"),
-        4 => ("Groq API key", "groq_key", "groq"),
-        5 => ("Together AI API key", "together_key", "together"),
-        6 => ("Fireworks AI API key", "fireworks_key", "fireworks"),
-        7 => ("DeepSeek API key", "deepseek_key", "deepseek"),
-        8 => ("xAI API key", "xai_key", "xai"),
-        9 => ("Mistral AI API key", "mistral_key", "mistral"),
-        10 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        4 => ("GLM Coding Plan API key", "glm_coding_key", "glm-coding"),
+        5 => (
+            "Kimi Coding Plan API key (KIMI_API_KEY)",
+            "moonshot_key",
+            "kimi-coding",
+        ),
+        6 => (
+            "MiniMax Coding Plan API key",
+            "minimax_key",
+            "minimax-coding",
+        ),
+        7 => ("Groq API key", "groq_key", "groq"),
+        8 => ("Together AI API key", "together_key", "together"),
+        9 => ("Fireworks AI API key", "fireworks_key", "fireworks"),
+        10 => ("DeepSeek API key", "deepseek_key", "deepseek"),
+        11 => ("xAI API key", "xai_key", "xai"),
+        12 => ("Mistral AI API key", "mistral_key", "mistral"),
+        13 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
         _ => unreachable!(),
     };
 

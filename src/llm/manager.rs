@@ -46,7 +46,26 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("openrouter".into()).into()),
             "zhipu" => self.config.zhipu_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("zhipu".into()).into()),
-            "groq" => self.config.groq_key.clone()
+            "glm-coding" => self
+                .config
+                .glm_coding_key
+                .clone()
+                .or_else(|| self.config.zhipu_key.clone())
+                .ok_or_else(|| LlmError::MissingProviderKey("glm-coding".into()).into()),
+            "kimi-coding" => self
+                .config
+                .moonshot_key
+                .clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("kimi-coding".into()).into()),
+            "minimax-coding" => self
+                .config
+                .minimax_key
+                .clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("minimax-coding".into()).into()),
+            "groq" => self
+                .config
+                .groq_key
+                .clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("groq".into()).into()),
             "together" => self.config.together_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("together".into()).into()),

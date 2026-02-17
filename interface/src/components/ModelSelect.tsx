@@ -15,6 +15,9 @@ const PROVIDER_LABELS: Record<string, string> = {
 	openrouter: "OpenRouter",
 	openai: "OpenAI",
 	zhipu: "Z.ai (GLM)",
+	"glm-coding": "GLM Coding Plan",
+	"kimi-coding": "Kimi Coding Plan",
+	"minimax-coding": "MiniMax Coding Plan",
 	"opencode-zen": "OpenCode Zen",
 };
 
@@ -109,7 +112,16 @@ export function ModelSelect({ label, description, value, onChange }: ModelSelect
 		}
 	};
 
-	const providerOrder = ["openrouter", "anthropic", "openai", "opencode-zen", "zhipu"];
+	const providerOrder = [
+		"openrouter",
+		"anthropic",
+		"openai",
+		"zhipu",
+		"glm-coding",
+		"kimi-coding",
+		"minimax-coding",
+		"opencode-zen",
+	];
 	const sortedProviders = Object.keys(grouped).sort(
 		(a, b) => (providerOrder.indexOf(a) ?? 99) - (providerOrder.indexOf(b) ?? 99),
 	);

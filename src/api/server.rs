@@ -2029,6 +2029,9 @@ struct ProviderStatus {
     openai: bool,
     openrouter: bool,
     zhipu: bool,
+    glm_coding: bool,
+    kimi_coding: bool,
+    minimax_coding: bool,
     groq: bool,
     together: bool,
     fireworks: bool,
@@ -2062,7 +2065,22 @@ async fn get_providers(
     let config_path = state.config_path.read().await.clone();
 
     // Check which providers have keys by reading the config
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
+    let (
+        anthropic,
+        openai,
+        openrouter,
+        zhipu,
+        glm_coding,
+        kimi_coding,
+        minimax_coding,
+        groq,
+        together,
+        fireworks,
+        deepseek,
+        xai,
+        mistral,
+        opencode_zen,
+    ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2092,6 +2110,10 @@ async fn get_providers(
             has_key("openai_key", "OPENAI_API_KEY"),
             has_key("openrouter_key", "OPENROUTER_API_KEY"),
             has_key("zhipu_key", "ZHIPU_API_KEY"),
+            has_key("glm_coding_key", "GLM_CODING_API_KEY")
+                || has_key("zhipu_key", "ZHIPU_API_KEY"),
+            has_key("moonshot_key", "KIMI_API_KEY") || has_key("moonshot_key", "MOONSHOT_API_KEY"),
+            has_key("minimax_key", "MINIMAX_API_KEY"),
             has_key("groq_key", "GROQ_API_KEY"),
             has_key("together_key", "TOGETHER_API_KEY"),
             has_key("fireworks_key", "FIREWORKS_API_KEY"),
@@ -2107,6 +2129,9 @@ async fn get_providers(
             std::env::var("OPENAI_API_KEY").is_ok(),
             std::env::var("OPENROUTER_API_KEY").is_ok(),
             std::env::var("ZHIPU_API_KEY").is_ok(),
+            std::env::var("GLM_CODING_API_KEY").is_ok() || std::env::var("ZHIPU_API_KEY").is_ok(),
+            std::env::var("KIMI_API_KEY").is_ok() || std::env::var("MOONSHOT_API_KEY").is_ok(),
+            std::env::var("MINIMAX_API_KEY").is_ok(),
             std::env::var("GROQ_API_KEY").is_ok(),
             std::env::var("TOGETHER_API_KEY").is_ok(),
             std::env::var("FIREWORKS_API_KEY").is_ok(),
@@ -2122,6 +2147,9 @@ async fn get_providers(
         openai,
         openrouter,
         zhipu,
+        glm_coding,
+        kimi_coding,
+        minimax_coding,
         groq,
         together,
         fireworks,
@@ -2134,6 +2162,9 @@ async fn get_providers(
         || providers.openai 
         || providers.openrouter 
         || providers.zhipu
+        || providers.glm_coding
+        || providers.kimi_coding
+        || providers.minimax_coding
         || providers.groq
         || providers.together
         || providers.fireworks
@@ -2154,6 +2185,9 @@ async fn update_provider(
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
         "zhipu" => "zhipu_key",
+        "glm-coding" => "glm_coding_key",
+        "kimi-coding" => "moonshot_key",
+        "minimax-coding" => "minimax_key",
         "groq" => "groq_key",
         "together" => "together_key",
         "fireworks" => "fireworks_key",
@@ -2235,6 +2269,27 @@ async fn update_provider(
                 .and_then(|l| l.get("zhipu_key"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty()),
+            "glm-coding" => {
+                doc.get("llm")
+                    .and_then(|l| l.get("glm_coding_key"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                    || doc
+                        .get("llm")
+                        .and_then(|l| l.get("zhipu_key"))
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|s| !s.is_empty())
+            }
+            "kimi-coding" => doc
+                .get("llm")
+                .and_then(|l| l.get("moonshot_key"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "minimax-coding" => doc
+                .get("llm")
+                .and_then(|l| l.get("minimax_key"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
             "opencode-zen" => doc
                 .get("llm")
                 .and_then(|l| l.get("opencode_zen_key"))
@@ -2307,6 +2362,9 @@ async fn delete_provider(
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
         "zhipu" => "zhipu_key",
+        "glm-coding" => "glm_coding_key",
+        "kimi-coding" => "moonshot_key",
+        "minimax-coding" => "minimax_key",
         "groq" => "groq_key",
         "together" => "together_key",
         "fireworks" => "fireworks_key",
@@ -2363,7 +2421,7 @@ struct ModelInfo {
     id: String,
     /// Human-readable name
     name: String,
-    /// Provider ID ("anthropic", "openrouter", "openai", "zhipu")
+    /// Provider ID (e.g. "anthropic", "openrouter", "openai", "zhipu")
     provider: String,
     /// Context window size in tokens, if known
     context_window: Option<u64>,
@@ -2556,6 +2614,65 @@ fn curated_models() -> Vec<ModelInfo> {
             name: "GLM-4 FlashX".into(),
             provider: "zhipu".into(),
             context_window: Some(128_000),
+            curated: true,
+        },
+        // GLM Coding Plan
+        ModelInfo {
+            id: "glm-coding/GLM-5".into(),
+            name: "GLM-5 (Coding Plan)".into(),
+            provider: "glm-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "glm-coding/GLM-4.7".into(),
+            name: "GLM-4.7 (Coding Plan)".into(),
+            provider: "glm-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "glm-coding/GLM-4.5-Air".into(),
+            name: "GLM-4.5-Air (Coding Plan)".into(),
+            provider: "glm-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        // Kimi Coding Plan
+        ModelInfo {
+            id: "kimi-coding/kimi-for-coding".into(),
+            name: "Kimi for Coding".into(),
+            provider: "kimi-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "kimi-coding/kimi-k2.5".into(),
+            name: "Kimi K2.5".into(),
+            provider: "kimi-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        // MiniMax Coding Plan
+        ModelInfo {
+            id: "minimax-coding/MiniMax-M2.5".into(),
+            name: "MiniMax M2.5".into(),
+            provider: "minimax-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "minimax-coding/MiniMax-M2.5-highspeed".into(),
+            name: "MiniMax M2.5 Highspeed".into(),
+            provider: "minimax-coding".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "minimax-coding/MiniMax-M2.1".into(),
+            name: "MiniMax M2.1".into(),
+            provider: "minimax-coding".into(),
+            context_window: None,
             curated: true,
         },
         // Groq
@@ -2894,6 +3011,15 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
     }
     if has_key("zhipu_key", "ZHIPU_API_KEY") {
         providers.push("zhipu");
+    }
+    if has_key("glm_coding_key", "GLM_CODING_API_KEY") || has_key("zhipu_key", "ZHIPU_API_KEY") {
+        providers.push("glm-coding");
+    }
+    if has_key("moonshot_key", "KIMI_API_KEY") || has_key("moonshot_key", "MOONSHOT_API_KEY") {
+        providers.push("kimi-coding");
+    }
+    if has_key("minimax_key", "MINIMAX_API_KEY") {
+        providers.push("minimax-coding");
     }
     if has_key("groq_key", "GROQ_API_KEY") {
         providers.push("groq");

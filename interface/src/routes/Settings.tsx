@@ -103,6 +103,27 @@ const PROVIDERS = [
 		envVar: "ZHIPU_API_KEY",
 	},
 	{
+		id: "glm-coding",
+		name: "GLM Coding Plan",
+		description: "Z.ai coding-plan endpoint (Anthropic API, default GLM-5)",
+		placeholder: "...",
+		envVar: "GLM_CODING_API_KEY",
+	},
+	{
+		id: "kimi-coding",
+		name: "Kimi Coding Plan",
+		description: "Kimi coding-plan endpoint (default kimi-for-coding)",
+		placeholder: "...",
+		envVar: "KIMI_API_KEY",
+	},
+	{
+		id: "minimax-coding",
+		name: "MiniMax Coding Plan",
+		description: "MiniMax coding-plan endpoint (default MiniMax-M2.5)",
+		placeholder: "...",
+		envVar: "MINIMAX_API_KEY",
+	},
+	{
 		id: "groq",
 		name: "Groq",
 		description: "Fast inference for Llama, Mixtral models",
@@ -238,7 +259,8 @@ export function Settings() {
 
 	const isConfigured = (providerId: string): boolean => {
 		if (!data) return false;
-		return data.providers[providerId as keyof typeof data.providers] ?? false;
+		const key = providerId.replace(/-/g, "_") as keyof typeof data.providers;
+		return data.providers[key] ?? false;
 	};
 
 	return (

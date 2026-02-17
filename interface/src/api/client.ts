@@ -646,6 +646,9 @@ export interface ProviderStatus {
 	openai: boolean;
 	openrouter: boolean;
 	zhipu: boolean;
+	glm_coding: boolean;
+	kimi_coding: boolean;
+	minimax_coding: boolean;
 	groq: boolean;
 	together: boolean;
 	fireworks: boolean;

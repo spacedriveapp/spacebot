@@ -167,6 +167,50 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 rate_limit_cooldown_secs: 60,
             }
         }
+        "glm-coding" => {
+            let channel: String = "glm-coding/GLM-5".into();
+            let worker: String = "glm-coding/GLM-5".into();
+            let fallback: String = "glm-coding/GLM-4.7".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![fallback])]),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
+        "kimi-coding" => {
+            let channel: String = "kimi-coding/kimi-for-coding".into();
+            let worker: String = "kimi-coding/kimi-for-coding".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::new(),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
+        "minimax-coding" => {
+            let channel: String = "minimax-coding/MiniMax-M2.5".into();
+            let worker: String = "minimax-coding/MiniMax-M2.5".into();
+            let fallback: String = "minimax-coding/MiniMax-M2.1".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![fallback])]),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
         "groq" => {
             let channel: String = "groq/llama-3.3-70b-versatile".into();
             let worker: String = "groq/llama-3.3-70b-specdec".into();
@@ -279,6 +323,9 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "openai" => "openai/",
         "anthropic" => "anthropic/",
         "zhipu" => "zhipu/",
+        "glm-coding" => "glm-coding/",
+        "kimi-coding" => "kimi-coding/",
+        "minimax-coding" => "minimax-coding/",
         "groq" => "groq/",
         "together" => "together/",
         "fireworks" => "fireworks/",
