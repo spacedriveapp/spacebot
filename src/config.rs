@@ -560,7 +560,12 @@ impl Binding {
                 .metadata
                 .get("telegram_chat_id")
                 .and_then(|v| v.as_str());
-            if message_chat != Some(chat_id) {
+            let matrix_room = message
+                .metadata
+                .get("matrix_room_id")
+                .and_then(|v| v.as_str());
+            let matched = message_chat == Some(chat_id) || matrix_room == Some(chat_id);
+            if !matched {
                 return false;
             }
         }
@@ -592,6 +597,7 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub matrix: Option<MatrixConfig>,
     pub webhook: Option<WebhookConfig>,
 }
 
@@ -755,6 +761,24 @@ pub struct TelegramConfig {
     pub dm_allowed_users: Vec<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct MatrixConfig {
+    pub enabled: bool,
+    pub homeserver_url: String,
+    pub user_id: String,
+    /// Password for login (mutually exclusive with access_token at config level).
+    pub password: Option<String>,
+    /// Pre-existing access token (skips password login).
+    pub access_token: Option<String>,
+    /// User IDs allowed to DM the bot. If empty, DMs are ignored.
+    pub dm_allowed_users: Vec<String>,
+    /// Directory for matrix-sdk SQLite store (sync state, crypto keys).
+    /// Empty string = derive from instance data dir at construction time.
+    pub data_dir: String,
+    /// Whether to auto-join rooms on invite.
+    pub auto_join: bool,
+}
+
 /// Hot-reloadable Telegram permission filters.
 ///
 /// Shared with the Telegram adapter via `Arc<ArcSwap<..>>` for hot-reloading.
@@ -806,6 +830,46 @@ impl TelegramPermissions {
             chat_filter,
             dm_allowed_users,
         }
+    }
+}
+
+/// Hot-reloadable Matrix permission filters.
+///
+/// Shared with the Matrix adapter via `Arc<ArcSwap<..>>` for hot-reloading.
+#[derive(Debug, Clone, Default)]
+pub struct MatrixPermissions {
+    /// Allowed room IDs (None = all rooms accepted).
+    pub room_filter: Option<Vec<String>>,
+    /// User IDs allowed in DMs (Matrix user IDs like @alice:example.com).
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl MatrixPermissions {
+    /// Build from the current config's matrix settings and bindings.
+    pub fn from_config(matrix: &MatrixConfig, bindings: &[Binding]) -> Self {
+        let matrix_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|b| b.channel == "matrix")
+            .collect();
+
+        let room_filter = {
+            let room_ids: Vec<String> = matrix_bindings
+                .iter()
+                .filter_map(|b| b.chat_id.clone())
+                .collect();
+            if room_ids.is_empty() { None } else { Some(room_ids) }
+        };
+
+        let mut dm_allowed_users = matrix.dm_allowed_users.clone();
+        for binding in &matrix_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
+
+        Self { room_filter, dm_allowed_users }
     }
 }
 
@@ -1025,6 +1089,7 @@ struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
     telegram: Option<TomlTelegramConfig>,
+    matrix: Option<TomlMatrixConfig>,
     webhook: Option<TomlWebhookConfig>,
 }
 
@@ -1056,6 +1121,22 @@ struct TomlTelegramConfig {
     token: Option<String>,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlMatrixConfig {
+    #[serde(default)]
+    enabled: bool,
+    homeserver_url: Option<String>,
+    user_id: Option<String>,
+    password: Option<String>,
+    access_token: Option<String>,
+    #[serde(default)]
+    dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    data_dir: Option<String>,
+    #[serde(default)]
+    auto_join: bool,
 }
 
 #[derive(Deserialize)]
@@ -1691,6 +1772,41 @@ impl Config {
                     dm_allowed_users: t.dm_allowed_users,
                 })
             }),
+            matrix: toml.messaging.matrix.and_then(|m| {
+                let homeserver_url = m
+                    .homeserver_url
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("MATRIX_HOMESERVER_URL").ok())?;
+                let user_id = m
+                    .user_id
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("MATRIX_USER_ID").ok())?;
+                let password = m
+                    .password
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("MATRIX_PASSWORD").ok());
+                let access_token = m
+                    .access_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("MATRIX_ACCESS_TOKEN").ok());
+                if password.is_none() && access_token.is_none() {
+                    return None;
+                }
+                Some(MatrixConfig {
+                    enabled: m.enabled,
+                    homeserver_url,
+                    user_id,
+                    password,
+                    access_token,
+                    dm_allowed_users: m.dm_allowed_users,
+                    data_dir: m.data_dir.unwrap_or_default(),
+                    auto_join: m.auto_join,
+                })
+            }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
                 enabled: w.enabled,
                 port: w.port,
@@ -1924,6 +2040,7 @@ pub fn spawn_file_watcher(
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
+    matrix_permissions: Option<Arc<arc_swap::ArcSwap<MatrixPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -2110,6 +2227,15 @@ pub fn spawn_file_watcher(
                     }
                 }
 
+                if let Some(ref perms) = matrix_permissions {
+                    if let Some(matrix_config) = &config.messaging.matrix {
+                        let new_perms =
+                            MatrixPermissions::from_config(matrix_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("matrix permissions reloaded");
+                    }
+                }
+
                 // Hot-start adapters that are newly enabled in the config
                 if let Some(ref manager) = messaging_manager {
                     let rt = tokio::runtime::Handle::current();
@@ -2118,6 +2244,7 @@ pub fn spawn_file_watcher(
                     let discord_permissions = discord_permissions.clone();
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
+                    let matrix_permissions = matrix_permissions.clone();
 
                     rt.spawn(async move {
                         // Discord: start if enabled and not already running
@@ -2177,6 +2304,37 @@ pub fn spawn_file_watcher(
                                 );
                                 if let Err(error) = manager.register_and_start(adapter).await {
                                     tracing::error!(%error, "failed to hot-start telegram adapter from config change");
+                                }
+                            }
+                        }
+
+                        // Matrix: start if enabled and not already running
+                        if let Some(matrix_config) = &config.messaging.matrix {
+                            if matrix_config.enabled && !manager.has_adapter("matrix").await {
+                                let perms = match matrix_permissions {
+                                    Some(ref existing) => existing.clone(),
+                                    None => {
+                                        let perms = MatrixPermissions::from_config(matrix_config, &config.bindings);
+                                        Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                                    }
+                                };
+                                let data_dir = if matrix_config.data_dir.is_empty() {
+                                    config.instance_dir.join("matrix_store")
+                                } else {
+                                    std::path::PathBuf::from(&matrix_config.data_dir)
+                                };
+                                let adapter = crate::messaging::matrix::MatrixAdapter::new(
+                                    matrix_config, data_dir, perms,
+                                ).await;
+                                match adapter {
+                                    Ok(adapter) => {
+                                        if let Err(error) = manager.register_and_start(adapter).await {
+                                            tracing::error!(%error, "failed to hot-start matrix adapter from config change");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "failed to create matrix adapter for hot-start");
+                                    }
                                 }
                             }
                         }

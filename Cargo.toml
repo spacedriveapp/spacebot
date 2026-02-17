@@ -88,6 +88,9 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 # Telegram
 teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
 
+# Matrix
+matrix-sdk = { version = "0.9", default-features = false, features = ["e2e-encryption", "sqlite", "rustls-tls"] }
+
 # Stream utilities
 tokio-stream = "0.1"
 

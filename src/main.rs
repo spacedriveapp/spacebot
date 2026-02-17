@@ -341,6 +341,7 @@ async fn run(
         let mut discord_permissions = None;
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
+        let mut matrix_permissions = None;
         initialize_agents(
             &config,
             &llm_manager,
@@ -357,6 +358,7 @@ async fn run(
             &mut discord_permissions,
             &mut slack_permissions,
             &mut telegram_permissions,
+            &mut matrix_permissions,
         )
         .await?;
         agents_initialized = true;
@@ -369,6 +371,7 @@ async fn run(
             discord_permissions,
             slack_permissions,
             telegram_permissions,
+            matrix_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
         );
@@ -378,6 +381,7 @@ async fn run(
             config_path.clone(),
             config.instance_dir.clone(),
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -620,6 +624,7 @@ async fn run(
                                 let mut new_discord_permissions = None;
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
+                                let mut new_matrix_permissions = None;
                                 match initialize_agents(
                                     &new_config,
                                     &new_llm_manager,
@@ -636,6 +641,7 @@ async fn run(
                                     &mut new_discord_permissions,
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
+                                    &mut new_matrix_permissions,
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -647,6 +653,7 @@ async fn run(
                                             new_discord_permissions,
                                             new_slack_permissions,
                                             new_telegram_permissions,
+                                            new_matrix_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                         );
@@ -726,6 +733,7 @@ async fn initialize_agents(
     discord_permissions: &mut Option<Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
+    matrix_permissions: &mut Option<Arc<ArcSwap<spacebot::config::MatrixPermissions>>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
@@ -922,6 +930,33 @@ async fn initialize_agents(
                 telegram_permissions.clone().expect("telegram permissions initialized when telegram is enabled"),
             );
             new_messaging_manager.register(adapter).await;
+        }
+    }
+
+    *matrix_permissions = config.messaging.matrix.as_ref().map(|matrix_config| {
+        let perms = spacebot::config::MatrixPermissions::from_config(matrix_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(matrix_config) = &config.messaging.matrix {
+        if matrix_config.enabled {
+            let data_dir = if matrix_config.data_dir.is_empty() {
+                config.instance_dir.join("matrix_store")
+            } else {
+                std::path::PathBuf::from(&matrix_config.data_dir)
+            };
+            match spacebot::messaging::matrix::MatrixAdapter::new(
+                matrix_config,
+                data_dir,
+                matrix_permissions.clone().expect("matrix permissions initialized when matrix is enabled"),
+            ).await {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to initialize matrix adapter");
+                }
+            }
         }
     }
 

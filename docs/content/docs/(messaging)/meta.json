@@ -1,4 +1,4 @@
 {
   "title": "Messaging",
-  "pages": ["messaging", "discord-setup", "slack-setup", "telegram-setup"]
+  "pages": ["messaging", "discord-setup", "slack-setup", "telegram-setup", "matrix-setup"]
 }

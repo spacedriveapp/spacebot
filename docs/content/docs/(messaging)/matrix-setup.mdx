@@ -1,0 +1,194 @@
+---
+title: Matrix Setup
+description: Step-by-step guide to connect Spacebot to Matrix.
+---
+
+# Matrix Setup Guide
+
+How to connect Spacebot to Matrix so it can receive and respond to messages in Matrix rooms and DMs. The adapter uses [matrix-sdk](https://crates.io/crates/matrix-sdk) (Apache-2.0), linked directly into the binary with no sidecar or Docker dependency. End-to-end encryption (E2EE) is supported out of the box.
+
+## Create a Bot Account
+
+### 1. Choose a Homeserver
+
+Matrix is a decentralized protocol — you can use any homeserver:
+
+- **matrix.org** — the largest public homeserver, good for testing
+- **Self-hosted Synapse or Conduit** — recommended for production (no rate limits, full control)
+
+### 2. Register a Dedicated Account
+
+Register a new account for your bot on the homeserver of your choice. Use [Element](https://app.element.io) or any Matrix client.
+
+- Pick a clear bot username like `@spacebot:matrix.org`
+- Use a strong, unique password
+- Do **not** use your personal account — the bot will have its own device and crypto keys
+
+### 3. Invite the Bot to Rooms
+
+From your personal account, create or open a room and invite the bot's user ID. If `auto_join` is enabled in the config, the bot will accept the invite automatically.
+
+## Spacebot Configuration
+
+Add the following to your `config.toml`:
+
+```toml
+[llm]
+openrouter_key = "env:OPENROUTER_API_KEY"
+
+[defaults.routing]
+channel = "openrouter/anthropic/claude-sonnet-4-20250514"
+worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
+
+[messaging.matrix]
+enabled = true
+homeserver_url = "https://matrix.org"
+user_id = "@mybot:matrix.org"
+password = "env:MATRIX_PASSWORD"
+# access_token = "env:MATRIX_ACCESS_TOKEN"  # alternative to password
+dm_allowed_users = ["@yourname:matrix.org"]
+auto_join = true
+# data_dir = ""  # optional, defaults to {instance_dir}/matrix_store
+
+[[agents]]
+id = "main"
+default = true
+
+# Route a specific room to the "main" agent
+[[bindings]]
+agent_id = "main"
+channel = "matrix"
+chat_id = "!roomid:matrix.org"
+```
+
+Set the environment variables:
+
+```bash
+export MATRIX_PASSWORD="your-bot-account-password"
+export OPENROUTER_API_KEY="your-openrouter-key-here"
+```
+
+### Configuration Fields
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `enabled` | Yes | Set to `true` to activate the adapter |
+| `homeserver_url` | Yes | Full URL of the Matrix homeserver |
+| `user_id` | Yes | Bot's Matrix user ID (`@user:server`) |
+| `password` | One of | Account password (mutually exclusive with `access_token`) |
+| `access_token` | One of | Pre-existing access token (skips login) |
+| `dm_allowed_users` | No | List of user IDs allowed to DM the bot. Empty = all DMs accepted |
+| `data_dir` | No | Directory for SDK state/crypto keys. Defaults to `{instance_dir}/matrix_store` |
+| `auto_join` | No | Auto-accept room invites. Default: `false` |
+
+### Environment Variables
+
+All fields support `env:VAR_NAME` syntax, or you can set them directly:
+
+- `MATRIX_HOMESERVER_URL`
+- `MATRIX_USER_ID`
+- `MATRIX_PASSWORD`
+- `MATRIX_ACCESS_TOKEN`
+
+### Getting Room IDs
+
+Matrix room IDs look like `!abc123:matrix.org`. To find one:
+
+- **Element**: Open room Settings → Advanced → scroll to "Internal room ID"
+- **Other clients**: Check room info/details for the internal ID
+
+Room IDs always start with `!` and contain a colon.
+
+### Getting User IDs
+
+Matrix user IDs have the format `@username:homeserver.com`. You can see your own in your client's profile/settings.
+
+### Open Access (No Room Filter)
+
+To respond in any room the bot is a member of, omit `chat_id` from the binding:
+
+```toml
+[[bindings]]
+agent_id = "main"
+channel = "matrix"
+```
+
+### DM Access Control
+
+By default, DMs from anyone are accepted. To restrict DMs to specific users:
+
+```toml
+[messaging.matrix]
+enabled = true
+homeserver_url = "https://matrix.org"
+user_id = "@mybot:matrix.org"
+password = "env:MATRIX_PASSWORD"
+dm_allowed_users = ["@alice:matrix.org", "@bob:matrix.org"]
+```
+
+When `dm_allowed_users` is empty (the default), all DMs are accepted. When populated, only listed user IDs can DM the bot.
+
+### Multiple Rooms, Multiple Agents
+
+Route different Matrix rooms to different agents:
+
+```toml
+[[agents]]
+id = "community"
+default = true
+
+[[agents]]
+id = "team"
+
+[[bindings]]
+agent_id = "community"
+channel = "matrix"
+chat_id = "!community123:matrix.org"
+
+[[bindings]]
+agent_id = "team"
+channel = "matrix"
+chat_id = "!team456:matrix.org"
+```
+
+## End-to-End Encryption
+
+E2EE works automatically. The bot can participate in encrypted rooms without any extra configuration.
+
+- **Crypto keys** are persisted in the `data_dir` (default: `{instance_dir}/matrix_store`). Back up this directory if you need to preserve encryption state.
+- **First run** creates a new Matrix device. Other users in the room may see a "new device" notification and may need to verify it (or configure their client to trust cross-signed devices).
+- **Restarting** reuses the same device and session, so keys are preserved across restarts.
+
+## Platform Notes
+
+### Message Limits
+
+Matrix messages are capped at 4096 characters. Longer messages are automatically split at newlines, then spaces, then hard-cut.
+
+### Typing Indicators
+
+The bot sends typing notifications while processing. Matrix typing indicators expire after ~4 seconds, so the bot repeats them until a response is ready.
+
+### Streaming
+
+Responses stream via message edits — a `...` placeholder is sent immediately, then edited in-place as content arrives. Edits are throttled to every 300ms to avoid flooding the homeserver.
+
+### History Backfill
+
+Matrix is the first adapter to support history backfill. When a conversation starts, the bot can fetch previous messages from the room to build context. Configure `history_backfill_count` in the agent's tuning section.
+
+### Auto-Join
+
+When `auto_join = true`, the bot automatically accepts room invites. When disabled, you must manually accept invites from the bot account.
+
+### Rate Limits
+
+matrix.org enforces rate limits on message sending (~10 messages/sec). Self-hosted homeservers can be configured without limits. If you hit rate limits, you'll see errors in the logs — the bot will retry automatically.
+
+### Reactions
+
+The bot can send reaction events. Matrix supports arbitrary Unicode reactions (unlike Telegram which has a restricted set).
+
+### File Attachments
+
+The bot can receive file attachments (images, documents, audio, video). Received files are passed as attachment metadata with `mxc://` URLs resolved to HTTP download URLs.
