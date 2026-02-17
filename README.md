@@ -311,7 +311,7 @@ Read the full vision in [docs/spacedrive.md](docs/spacedrive.md).
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, or OpenCode Zen)
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Ollama Cloud, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, or OpenCode Zen)
 
 ### Build and Run
 
