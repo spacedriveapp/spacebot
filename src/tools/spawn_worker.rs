@@ -1,7 +1,9 @@
 //! Spawn worker tool for creating new workers.
 
-use crate::agent::channel::{ChannelState, spawn_worker_from_state, spawn_opencode_worker_from_state};
 use crate::WorkerId;
+use crate::agent::channel::{
+    ChannelState, spawn_opencode_worker_from_state, spawn_worker_from_state,
+};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -144,17 +146,13 @@ impl Tool for SpawnWorkerTool {
         let is_opencode = args.worker_type.as_deref() == Some("opencode");
 
         let worker_id = if is_opencode {
-            let directory = args.directory.as_deref()
-                .ok_or_else(|| SpawnWorkerError("directory is required for opencode workers".into()))?;
+            let directory = args.directory.as_deref().ok_or_else(|| {
+                SpawnWorkerError("directory is required for opencode workers".into())
+            })?;
 
-            spawn_opencode_worker_from_state(
-                &self.state,
-                &args.task,
-                directory,
-                args.interactive,
-            )
-            .await
-            .map_err(|e| SpawnWorkerError(format!("{e}")))?
+            spawn_opencode_worker_from_state(&self.state, &args.task, directory, args.interactive)
+                .await
+                .map_err(|e| SpawnWorkerError(format!("{e}")))?
         } else {
             spawn_worker_from_state(
                 &self.state,

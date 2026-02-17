@@ -85,22 +85,33 @@ impl Tool for CancelTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         match args.process_type.as_str() {
             "branch" => {
-                let branch_id = args.process_id.parse::<BranchId>()
+                let branch_id = args
+                    .process_id
+                    .parse::<BranchId>()
                     .map_err(|e| CancelError(format!("Invalid branch ID: {e}")))?;
-                self.state.cancel_branch(branch_id).await
+                self.state
+                    .cancel_branch(branch_id)
+                    .await
                     .map_err(CancelError)?;
             }
             "worker" => {
-                let worker_id = args.process_id.parse::<WorkerId>()
+                let worker_id = args
+                    .process_id
+                    .parse::<WorkerId>()
                     .map_err(|e| CancelError(format!("Invalid worker ID: {e}")))?;
-                self.state.cancel_worker(worker_id).await
+                self.state
+                    .cancel_worker(worker_id)
+                    .await
                     .map_err(CancelError)?;
             }
             other => return Err(CancelError(format!("Unknown process type: {other}"))),
         }
 
         let message = if let Some(reason) = &args.reason {
-            format!("{} {} cancelled: {reason}", args.process_type, args.process_id)
+            format!(
+                "{} {} cancelled: {reason}",
+                args.process_type, args.process_id
+            )
         } else {
             format!("{} {} cancelled.", args.process_type, args.process_id)
         };

@@ -8,10 +8,10 @@
 //! content. If the server restarts mid-file, already-completed chunks are
 //! skipped on the next run.
 
-use crate::config::IngestionConfig;
-use crate::llm::SpacebotModel;
 use crate::AgentDeps;
 use crate::ProcessType;
+use crate::config::IngestionConfig;
+use crate::llm::SpacebotModel;
 
 use anyhow::Context as _;
 use rig::agent::AgentBuilder;
@@ -29,10 +29,7 @@ use std::time::Duration;
 /// Runs until the returned JoinHandle is dropped or aborted. Scans the ingest
 /// directory on a timer, processes any text files found, and deletes them after
 /// successful ingestion.
-pub fn spawn_ingestion_loop(
-    ingest_dir: PathBuf,
-    deps: AgentDeps,
-) -> tokio::task::JoinHandle<()> {
+pub fn spawn_ingestion_loop(ingest_dir: PathBuf, deps: AgentDeps) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(error) = run_ingestion_loop(&ingest_dir, &deps).await {
             tracing::error!(%error, "ingestion loop exited with error");
@@ -129,13 +126,22 @@ fn is_text_file(path: &Path) -> bool {
 
     matches!(
         ext.to_lowercase().as_str(),
-        "txt" | "md" | "markdown"
-            | "json" | "jsonl"
-            | "csv" | "tsv"
+        "txt"
+            | "md"
+            | "markdown"
+            | "json"
+            | "jsonl"
+            | "csv"
+            | "tsv"
             | "log"
-            | "xml" | "yaml" | "yml" | "toml"
-            | "rst" | "org"
-            | "html" | "htm"
+            | "xml"
+            | "yaml"
+            | "yml"
+            | "toml"
+            | "rst"
+            | "org"
+            | "html"
+            | "htm"
     )
 }
 
@@ -182,7 +188,14 @@ async fn process_file(
     let remaining = total_chunks - completed.len();
 
     // Record file-level tracking (idempotent — skips if already exists from a previous run)
-    upsert_ingestion_file(&deps.sqlite_pool, &hash, filename, file_size, total_chunks as i64).await?;
+    upsert_ingestion_file(
+        &deps.sqlite_pool,
+        &hash,
+        filename,
+        file_size,
+        total_chunks as i64,
+    )
+    .await?;
 
     if !completed.is_empty() {
         tracing::info!(
@@ -264,12 +277,9 @@ async fn process_file(
 // -- Progress tracking queries --------------------------------------------------
 
 /// Load the set of chunk indices already completed for a given content hash.
-async fn load_completed_chunks(
-    pool: &SqlitePool,
-    hash: &str,
-) -> anyhow::Result<HashSet<i64>> {
+async fn load_completed_chunks(pool: &SqlitePool, hash: &str) -> anyhow::Result<HashSet<i64>> {
     let rows = sqlx::query_scalar::<_, i64>(
-        "SELECT chunk_index FROM ingestion_progress WHERE content_hash = ?"
+        "SELECT chunk_index FROM ingestion_progress WHERE content_hash = ?",
     )
     .bind(hash)
     .fetch_all(pool)
@@ -417,13 +427,17 @@ async fn process_chunk(
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
-    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
-        .with_routing((**routing).clone());
+    let model =
+        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
 
-    let conversation_logger = crate::conversation::history::ConversationLogger::new(deps.sqlite_pool.clone());
+    let conversation_logger =
+        crate::conversation::history::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = crate::conversation::ChannelStore::new(deps.sqlite_pool.clone());
-    let tool_server: ToolServerHandle =
-        crate::tools::create_branch_tool_server(deps.memory_search.clone(), conversation_logger, channel_store);
+    let tool_server: ToolServerHandle = crate::tools::create_branch_tool_server(
+        deps.memory_search.clone(),
+        conversation_logger,
+        channel_store,
+    );
 
     let agent = AgentBuilder::new(model)
         .preamble(&ingestion_prompt)

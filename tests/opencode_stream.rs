@@ -57,7 +57,10 @@ async fn stream_events_from_live_server() {
         .await
         .expect("failed to subscribe to events");
 
-    assert!(event_response.status().is_success(), "event subscription failed");
+    assert!(
+        event_response.status().is_success(),
+        "event subscription failed"
+    );
 
     // 2. Create a session
     let session: Session = client
@@ -124,10 +127,7 @@ async fn stream_events_from_live_server() {
         let bytes = match chunk {
             Ok(b) => b,
             Err(e) => {
-                panic!(
-                    "bytes_stream error after {} events: {e}",
-                    events.len()
-                );
+                panic!("bytes_stream error after {} events: {e}", events.len());
             }
         };
 
@@ -159,7 +159,10 @@ async fn stream_events_from_live_server() {
             let envelope: SseEventEnvelope = match serde_json::from_str(&json_str) {
                 Ok(e) => e,
                 Err(err) => {
-                    eprintln!("parse error: {err} on: {}", &json_str[..json_str.len().min(200)]);
+                    eprintln!(
+                        "parse error: {err} on: {}",
+                        &json_str[..json_str.len().min(200)]
+                    );
                     continue;
                 }
             };
@@ -178,7 +181,11 @@ async fn stream_events_from_live_server() {
                     }
                 }
                 SseEvent::MessagePartUpdated { part, .. } => {
-                    if let Part::Text { session_id: Some(sid), .. } = part {
+                    if let Part::Text {
+                        session_id: Some(sid),
+                        ..
+                    } = part
+                    {
                         if sid == &session_id {
                             saw_text = true;
                         }

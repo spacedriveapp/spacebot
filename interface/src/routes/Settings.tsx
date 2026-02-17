@@ -96,6 +96,13 @@ const PROVIDERS = [
 		envVar: "OPENAI_API_KEY",
 	},
 	{
+		id: "ollama",
+		name: "Ollama Cloud",
+		description: "Hosted Ollama models via OpenAI-compatible API",
+		placeholder: "ollama_...",
+		envVar: "OLLAMA_API_KEY",
+	},
+	{
 		id: "zhipu",
 		name: "Z.ai (GLM)",
 		description: "GLM models (GLM-4, GLM-4-Flash)",

@@ -3,10 +3,10 @@
 use crate::agent::compactor::estimate_history_tokens;
 use crate::config::BrowserConfig;
 use crate::error::Result;
-use crate::llm::routing::is_context_overflow_error;
-use crate::llm::SpacebotModel;
-use crate::{WorkerId, ChannelId, ProcessId, ProcessType, AgentDeps};
 use crate::hooks::SpacebotHook;
+use crate::llm::SpacebotModel;
+use crate::llm::routing::is_context_overflow_error;
+use crate::{AgentDeps, ChannelId, ProcessId, ProcessType, WorkerId};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use std::fmt::Write as _;
@@ -73,9 +73,15 @@ impl Worker {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, channel_id.clone(), deps.event_tx.clone());
+        let hook = SpacebotHook::new(
+            deps.agent_id.clone(),
+            process_id,
+            ProcessType::Worker,
+            channel_id.clone(),
+            deps.event_tx.clone(),
+        );
         let (status_tx, status_rx) = watch::channel("starting".to_string());
-        
+
         Self {
             id,
             channel_id,
@@ -93,7 +99,7 @@ impl Worker {
             status_rx,
         }
     }
-    
+
     /// Create a new interactive worker.
     pub fn new_interactive(
         channel_id: Option<ChannelId>,
@@ -107,10 +113,16 @@ impl Worker {
     ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Worker, channel_id.clone(), deps.event_tx.clone());
+        let hook = SpacebotHook::new(
+            deps.agent_id.clone(),
+            process_id,
+            ProcessType::Worker,
+            channel_id.clone(),
+            deps.event_tx.clone(),
+        );
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
-        
+
         let worker = Self {
             id,
             channel_id,
@@ -127,14 +139,14 @@ impl Worker {
             status_tx,
             status_rx,
         };
-        
+
         (worker, input_tx)
     }
-    
+
     /// Check if the worker can transition to a new state.
     pub fn can_transition_to(&self, target: WorkerState) -> bool {
         use WorkerState::*;
-        
+
         matches!(
             (self.state, target),
             (Running, WaitingForInput)
@@ -144,19 +156,21 @@ impl Worker {
                 | (WaitingForInput, Failed)
         )
     }
-    
+
     /// Transition to a new state.
     pub fn transition_to(&mut self, new_state: WorkerState) -> Result<()> {
         if !self.can_transition_to(new_state) {
-            return Err(crate::error::AgentError::InvalidStateTransition(
-                format!("can't transition from {:?} to {:?}", self.state, new_state)
-            ).into());
+            return Err(crate::error::AgentError::InvalidStateTransition(format!(
+                "can't transition from {:?} to {:?}",
+                self.state, new_state
+            ))
+            .into());
         }
-        
+
         self.state = new_state;
         Ok(())
     }
-    
+
     /// Run the worker's LLM agent loop until completion.
     ///
     /// Runs in segments of 25 turns. After each segment, checks context usage
@@ -166,7 +180,7 @@ impl Worker {
     pub async fn run(mut self) -> Result<String> {
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
-        
+
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
         // Create per-worker ToolServer with task tools
@@ -204,7 +218,8 @@ impl Worker {
         let result = loop {
             segments_run += 1;
 
-            match agent.prompt(&prompt)
+            match agent
+                .prompt(&prompt)
                 .with_history(&mut history)
                 .with_hook(self.hook.clone())
                 .await
@@ -216,7 +231,8 @@ impl Worker {
                     overflow_retries = 0;
                     self.maybe_compact_history(&mut history).await;
                     prompt = "Continue where you left off. Do not repeat completed work.".into();
-                    self.hook.send_status(&format!("working (segment {segments_run})"));
+                    self.hook
+                        .send_status(&format!("working (segment {segments_run})"));
 
                     tracing::debug!(
                         worker_id = %self.id,
@@ -252,7 +268,8 @@ impl Worker {
                     self.force_compact_history(&mut history).await;
                     prompt = "Continue where you left off. Do not repeat completed work. \
                               Your previous attempt exceeded the context limit, so older history \
-                              has been compacted.".into();
+                              has been compacted."
+                        .into();
                 }
                 Err(error) => {
                     self.state = WorkerState::Failed;
@@ -280,7 +297,8 @@ impl Worker {
                 let mut follow_up_overflow_retries = 0;
 
                 let follow_up_ok = loop {
-                    match agent.prompt(&follow_up_prompt)
+                    match agent
+                        .prompt(&follow_up_prompt)
                         .with_history(&mut history)
                         .with_hook(self.hook.clone())
                         .await
@@ -328,13 +346,13 @@ impl Worker {
 
         self.state = WorkerState::Done;
         self.hook.send_status("completed");
-        
+
         // Write success log based on the worker log mode setting
         let log_mode = self.get_worker_log_mode();
         if log_mode != crate::settings::WorkerLogMode::ErrorsOnly {
             self.write_success_log(&history);
         }
-        
+
         tracing::info!(worker_id = %self.id, "worker completed");
         Ok(result)
     }
@@ -353,7 +371,8 @@ impl Worker {
             return;
         }
 
-        self.compact_history(history, 0.50, "worker history compacted").await;
+        self.compact_history(history, 0.50, "worker history compacted")
+            .await;
     }
 
     /// Aggressive compaction for context overflow recovery.
@@ -362,7 +381,12 @@ impl Worker {
     /// usage and removes 75% of messages. Used when the provider has already
     /// rejected the request for exceeding context limits.
     async fn force_compact_history(&self, history: &mut Vec<rig::message::Message>) {
-        self.compact_history(history, 0.75, "worker history force-compacted (overflow recovery)").await;
+        self.compact_history(
+            history,
+            0.75,
+            "worker history force-compacted (overflow recovery)",
+        )
+        .await;
     }
 
     /// Compact worker history by removing a fraction of the oldest messages.
@@ -381,7 +405,9 @@ impl Worker {
         let estimated = estimate_history_tokens(history);
         let usage = estimated as f32 / context_window as f32;
 
-        let remove_count = ((total as f32 * fraction) as usize).max(1).min(total.saturating_sub(2));
+        let remove_count = ((total as f32 * fraction) as usize)
+            .max(1)
+            .min(total.saturating_sub(2));
         let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
 
         let recap = build_worker_recap(&removed);
@@ -399,12 +425,12 @@ impl Worker {
             "{log_message}"
         );
     }
-    
+
     /// Check if worker is in a terminal state.
     pub fn is_done(&self) -> bool {
         matches!(self.state, WorkerState::Done | WorkerState::Failed)
     }
-    
+
     /// Check if worker is interactive.
     pub fn is_interactive(&self) -> bool {
         self.input_rx.is_some()
@@ -427,7 +453,7 @@ impl Worker {
     /// For AllSeparate mode, uses "failed" or "successful" subdirectories.
     fn get_log_directory(&self, is_success: bool) -> PathBuf {
         let mode = self.get_worker_log_mode();
-        
+
         match mode {
             crate::settings::WorkerLogMode::AllSeparate => {
                 let subdir = if is_success { "successful" } else { "failed" };
@@ -457,13 +483,13 @@ impl Worker {
         let _ = writeln!(log);
         let _ = writeln!(log, "--- Task ---");
         let _ = writeln!(log, "{}", self.task);
-        
+
         if let Some(err) = error {
             let _ = writeln!(log);
             let _ = writeln!(log, "--- Error ---");
             let _ = writeln!(log, "{err}");
         }
-        
+
         let _ = writeln!(log);
         let _ = writeln!(log, "--- History ({} messages) ---", history.len());
 
@@ -541,8 +567,8 @@ impl Worker {
         let log = self.build_log_content(history, None);
 
         // Best-effort write
-        if let Err(write_error) = std::fs::create_dir_all(&log_dir)
-            .and_then(|()| std::fs::write(&path, &log))
+        if let Err(write_error) =
+            std::fs::create_dir_all(&log_dir).and_then(|()| std::fs::write(&path, &log))
         {
             tracing::warn!(
                 worker_id = %self.id,
@@ -571,8 +597,8 @@ impl Worker {
         let log = self.build_log_content(history, Some(error));
 
         // Best-effort write
-        if let Err(write_error) = std::fs::create_dir_all(&log_dir)
-            .and_then(|()| std::fs::write(&path, &log))
+        if let Err(write_error) =
+            std::fs::create_dir_all(&log_dir).and_then(|()| std::fs::write(&path, &log))
         {
             tracing::warn!(
                 worker_id = %self.id,
@@ -596,7 +622,7 @@ impl Worker {
 /// retains full context of what it already did after compaction.
 fn build_worker_recap(messages: &[rig::message::Message]) -> String {
     let mut recap = String::new();
-    
+
     for message in messages {
         match message {
             rig::message::Message::Assistant { content, .. } => {
@@ -637,7 +663,8 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
 fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
     for message in history.iter().rev() {
         if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content.iter()
+            let texts: Vec<String> = content
+                .iter()
                 .filter_map(|c| {
                     if let rig::message::AssistantContent::Text(t) = c {
                         Some(t.text.clone())

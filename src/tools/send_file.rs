@@ -85,9 +85,9 @@ impl Tool for SendFileTool {
             return Err(SendFileError("file_path must be an absolute path".into()));
         }
 
-        let metadata = tokio::fs::metadata(&path)
-            .await
-            .map_err(|error| SendFileError(format!("can't read file '{}': {error}", path.display())))?;
+        let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
+            SendFileError(format!("can't read file '{}': {error}", path.display()))
+        })?;
 
         if !metadata.is_file() {
             return Err(SendFileError(format!("'{}' is not a file", path.display())));
@@ -101,9 +101,9 @@ impl Tool for SendFileTool {
             )));
         }
 
-        let data = tokio::fs::read(&path)
-            .await
-            .map_err(|error| SendFileError(format!("failed to read '{}': {error}", path.display())))?;
+        let data = tokio::fs::read(&path).await.map_err(|error| {
+            SendFileError(format!("failed to read '{}': {error}", path.display()))
+        })?;
 
         let filename = path
             .file_name()

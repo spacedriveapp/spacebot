@@ -2,10 +2,10 @@
 
 use crate::agent::compactor::estimate_history_tokens;
 use crate::error::Result;
-use crate::llm::routing::is_context_overflow_error;
-use crate::llm::SpacebotModel;
-use crate::{BranchId, ChannelId, ProcessId, ProcessType, AgentDeps, ProcessEvent};
 use crate::hooks::SpacebotHook;
+use crate::llm::SpacebotModel;
+use crate::llm::routing::is_context_overflow_error;
+use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, ProcessId, ProcessType};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use rig::tool::server::ToolServerHandle;
@@ -44,8 +44,14 @@ impl Branch {
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Branch(id);
-        let hook = SpacebotHook::new(deps.agent_id.clone(), process_id, ProcessType::Branch, Some(channel_id.clone()), deps.event_tx.clone());
-        
+        let hook = SpacebotHook::new(
+            deps.agent_id.clone(),
+            process_id,
+            ProcessType::Branch,
+            Some(channel_id.clone()),
+            deps.event_tx.clone(),
+        );
+
         Self {
             id,
             channel_id,
@@ -58,7 +64,7 @@ impl Branch {
             max_turns,
         }
     }
-    
+
     /// Run the branch's LLM agent loop and return a conclusion.
     ///
     /// Each branch has its own isolated ToolServer with `memory_save` and
@@ -70,7 +76,7 @@ impl Branch {
     /// be large, making them susceptible to overflow on the first LLM call.
     pub async fn run(mut self, prompt: impl Into<String>) -> Result<String> {
         let prompt = prompt.into();
-        
+
         tracing::info!(
             branch_id = %self.id,
             channel_id = %self.channel_id,
@@ -97,15 +103,17 @@ impl Branch {
         let mut overflow_retries = 0;
 
         let conclusion = loop {
-            match agent.prompt(&current_prompt)
+            match agent
+                .prompt(&current_prompt)
                 .with_history(&mut self.history)
                 .with_hook(self.hook.clone())
                 .await
             {
                 Ok(response) => break response,
                 Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                    let partial = extract_last_assistant_text(&self.history)
-                        .unwrap_or_else(|| "Branch exhausted its turns without a final conclusion.".into());
+                    let partial = extract_last_assistant_text(&self.history).unwrap_or_else(|| {
+                        "Branch exhausted its turns without a final conclusion.".into()
+                    });
                     tracing::warn!(branch_id = %self.id, "branch hit max turns, returning partial result");
                     break partial;
                 }
@@ -133,7 +141,8 @@ impl Branch {
                         "branch context overflow, compacting and retrying"
                     );
                     self.force_compact_history();
-                    current_prompt = "Continue where you left off. Older context has been compacted.".into();
+                    current_prompt =
+                        "Continue where you left off. Older context has been compacted.".into();
                 }
                 Err(error) => {
                     tracing::error!(branch_id = %self.id, %error, "branch LLM call failed");
@@ -149,9 +158,9 @@ impl Branch {
             channel_id: self.channel_id.clone(),
             conclusion: conclusion.clone(),
         });
-        
+
         tracing::info!(branch_id = %self.id, "branch completed");
-        
+
         Ok(conclusion)
     }
 
@@ -192,7 +201,9 @@ impl Branch {
             return;
         }
 
-        let remove_count = ((total as f32 * fraction) as usize).max(1).min(total.saturating_sub(2));
+        let remove_count = ((total as f32 * fraction) as usize)
+            .max(1)
+            .min(total.saturating_sub(2));
         self.history.drain(..remove_count);
 
         let marker = format!(
@@ -207,7 +218,8 @@ impl Branch {
 fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
     for message in history.iter().rev() {
         if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content.iter()
+            let texts: Vec<String> = content
+                .iter()
                 .filter_map(|c| {
                     if let rig::message::AssistantContent::Text(t) = c {
                         Some(t.text.clone())

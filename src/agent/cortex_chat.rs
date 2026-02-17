@@ -39,7 +39,10 @@ pub enum CortexChatEvent {
     /// A tool call started.
     ToolStarted { tool: String },
     /// A tool call completed.
-    ToolCompleted { tool: String, result_preview: String },
+    ToolCompleted {
+        tool: String,
+        result_preview: String,
+    },
     /// The full response is ready.
     Done { full_text: String },
     /// An error occurred.
@@ -378,8 +381,7 @@ impl CortexChatSession {
                             ..
                         } => {
                             if let Some(result) = result {
-                                transcript
-                                    .push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
+                                transcript.push_str(&format!("*[Worker: {task}]*: {result}\n\n"));
                             }
                         }
                     }

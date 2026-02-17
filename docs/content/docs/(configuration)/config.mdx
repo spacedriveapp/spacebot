@@ -24,6 +24,7 @@ spacebot --config /path/to.toml  # CLI override
 anthropic_key = "env:ANTHROPIC_API_KEY"
 openai_key = "env:OPENAI_API_KEY"
 openrouter_key = "env:OPENROUTER_API_KEY"
+ollama_key = "env:OLLAMA_API_KEY"
 
 # --- Instance Defaults ---
 # All agents inherit these. Individual agents can override any field.
@@ -168,6 +169,7 @@ Model names include the provider as a prefix:
 | Anthropic | `anthropic/<model>` | `anthropic/claude-sonnet-4-20250514` |
 | OpenAI | `openai/<model>` | `openai/gpt-4o` |
 | OpenRouter | `openrouter/<provider>/<model>` | `openrouter/anthropic/claude-sonnet-4-20250514` |
+| Ollama Cloud | `ollama/<model>` | `ollama/gpt-oss:20b` |
 
 You can mix providers across process types. See [Routing](/docs/routing) for the full routing system.
 

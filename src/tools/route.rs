@@ -1,7 +1,7 @@
 //! Route tool for sending follow-ups to active workers.
 
-use crate::agent::channel::ChannelState;
 use crate::WorkerId;
+use crate::agent::channel::ChannelState;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -74,7 +74,9 @@ impl Tool for RouteTool {
     }
 
     async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
-        let worker_id = args.worker_id.parse::<WorkerId>()
+        let worker_id = args
+            .worker_id
+            .parse::<WorkerId>()
             .map_err(|e| RouteError(format!("Invalid worker ID: {e}")))?;
 
         // Look up the input sender for this worker
@@ -87,10 +89,11 @@ impl Tool for RouteTool {
         drop(inputs);
 
         // Deliver the message
-        input_tx.send(args.message).await
-            .map_err(|_| RouteError(format!(
+        input_tx.send(args.message).await.map_err(|_| {
+            RouteError(format!(
                 "Worker {worker_id} has stopped accepting input (channel closed)"
-            )))?;
+            ))
+        })?;
 
         tracing::info!(
             worker_id = %worker_id,

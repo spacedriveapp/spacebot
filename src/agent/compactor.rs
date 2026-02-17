@@ -25,11 +25,7 @@ pub struct Compactor {
 
 impl Compactor {
     /// Create a new compactor for a channel.
-    pub fn new(
-        channel_id: ChannelId,
-        deps: AgentDeps,
-        history: Arc<RwLock<Vec<Message>>>,
-    ) -> Self {
+    pub fn new(channel_id: ChannelId, deps: AgentDeps, history: Arc<RwLock<Vec<Message>>>) -> Self {
         Self {
             channel_id,
             deps,
@@ -117,12 +113,7 @@ impl Compactor {
             .expect("failed to render compactor prompt");
 
         tokio::spawn(async move {
-            let result = run_compaction(
-                &deps,
-                &compactor_prompt,
-                &history,
-                fraction,
-            ).await;
+            let result = run_compaction(&deps, &compactor_prompt, &history, fraction).await;
 
             match result {
                 Ok(turns_compacted) => {
@@ -191,7 +182,9 @@ async fn run_compaction(
     let (removed_messages, remove_count) = {
         let mut hist = history.write().await;
         let total = hist.len();
-        let remove_count = ((total as f32 * fraction) as usize).max(1).min(total.saturating_sub(2));
+        let remove_count = ((total as f32 * fraction) as usize)
+            .max(1)
+            .min(total.saturating_sub(2));
         if remove_count == 0 {
             return Ok(0);
         }
@@ -205,12 +198,14 @@ async fn run_compaction(
     // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Worker, None).to_string();
-    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
-        .with_routing((**routing).clone());
+    let model =
+        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
 
     // Give the compaction worker memory_save so it can directly persist memories
     let tool_server: ToolServerHandle = ToolServer::new()
-        .tool(crate::tools::MemorySaveTool::new(deps.memory_search.clone()))
+        .tool(crate::tools::MemorySaveTool::new(
+            deps.memory_search.clone(),
+        ))
         .run();
 
     let agent = AgentBuilder::new(model)
@@ -220,7 +215,8 @@ async fn run_compaction(
         .build();
 
     let mut compaction_history = Vec::new();
-    let response = agent.prompt(&transcript)
+    let response = agent
+        .prompt(&transcript)
         .with_history(&mut compaction_history)
         .await;
 
@@ -294,9 +290,7 @@ fn estimate_assistant_content_chars(content: &AssistantContent) -> usize {
         AssistantContent::ToolCall(tc) => {
             tc.function.name.len() + tc.function.arguments.to_string().len()
         }
-        AssistantContent::Reasoning(r) => {
-            r.reasoning.iter().map(|s| s.len()).sum()
-        }
+        AssistantContent::Reasoning(r) => r.reasoning.iter().map(|s| s.len()).sum(),
         AssistantContent::Image(_) => 500,
     }
 }
@@ -339,8 +333,7 @@ fn render_messages_as_transcript(messages: &[Message]) -> String {
                         AssistantContent::ToolCall(tc) => {
                             output.push_str(&format!(
                                 "[Tool Call: {}({})]\n",
-                                tc.function.name,
-                                tc.function.arguments
+                                tc.function.name, tc.function.arguments
                             ));
                         }
                         _ => {}

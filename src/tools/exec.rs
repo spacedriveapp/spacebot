@@ -19,7 +19,10 @@ pub struct ExecTool {
 impl ExecTool {
     /// Create a new exec tool with the given instance directory for path blocking.
     pub fn new(instance_dir: PathBuf, workspace: PathBuf) -> Self {
-        Self { instance_dir, workspace }
+        Self {
+            instance_dir,
+            workspace,
+        }
     }
 
     /// Check if program arguments reference sensitive instance paths.
@@ -42,9 +45,13 @@ impl ExecTool {
         // Block references to sensitive files by name
         for file in super::shell::SENSITIVE_FILES {
             if all_args.contains(file) {
-                if all_args.contains(instance_str.as_ref()) || !all_args.contains(workspace_str.as_ref()) {
+                if all_args.contains(instance_str.as_ref())
+                    || !all_args.contains(workspace_str.as_ref())
+                {
                     return Err(ExecError {
-                        message: format!("Cannot access {file} — instance configuration is protected."),
+                        message: format!(
+                            "Cannot access {file} — instance configuration is protected."
+                        ),
                         exit_code: -1,
                     });
                 }
@@ -178,7 +185,10 @@ impl Tool for ExecTool {
         if let Some(ref dir) = args.working_dir {
             let path = std::path::Path::new(dir);
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            let workspace_canonical = self.workspace.canonicalize().unwrap_or_else(|_| self.workspace.clone());
+            let workspace_canonical = self
+                .workspace
+                .canonicalize()
+                .unwrap_or_else(|_| self.workspace.clone());
             if !canonical.starts_with(&workspace_canonical) {
                 return Err(ExecError {
                     message: format!(
@@ -216,8 +226,7 @@ impl Tool for ExecTool {
             cmd.env(env_var.key, env_var.value);
         }
 
-        cmd.stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
         let timeout = tokio::time::Duration::from_secs(args.timeout_seconds);
 
@@ -301,13 +310,14 @@ pub async fn exec(
 
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-    let output = tokio::time::timeout(
-        tokio::time::Duration::from_secs(60),
-        cmd.output(),
-    )
-    .await
-    .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out").into()))?
-    .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}").into()))?;
+    let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
+        .await
+        .map_err(|_| {
+            crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out").into())
+        })?
+        .map_err(|e| {
+            crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}").into())
+        })?;
 
     Ok(ExecResult {
         success: output.status.success(),

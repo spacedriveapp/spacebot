@@ -5,14 +5,14 @@ use crate::agent::cortex::{CortexEvent, CortexLogger};
 use crate::agent::cortex_chat::{CortexChatEvent, CortexChatMessage, CortexChatStore};
 use crate::conversation::channels::ChannelStore;
 use crate::conversation::history::{ProcessRunLogger, TimelineItem};
-use crate::memory::types::{Association, Memory, MemorySearchResult, MemoryType};
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
+use crate::memory::types::{Association, Memory, MemorySearchResult, MemoryType};
 
+use axum::Router;
 use axum::extract::{Query, State};
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{Html, IntoResponse, Json, Response, Sse};
 use axum::routing::{delete, get, post, put};
-use axum::Router;
 use futures::stream::Stream;
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
@@ -447,27 +447,50 @@ pub async fn start_http_server(
         .route("/agents/memories", get(list_memories))
         .route("/agents/memories/search", get(search_memories))
         .route("/agents/memories/graph", get(memory_graph))
-        .route("/agents/memories/graph/neighbors", get(memory_graph_neighbors))
+        .route(
+            "/agents/memories/graph/neighbors",
+            get(memory_graph_neighbors),
+        )
         .route("/cortex/events", get(cortex_events))
         .route("/cortex-chat/messages", get(cortex_chat_messages))
         .route("/cortex-chat/send", post(cortex_chat_send))
         .route("/agents/profile", get(get_agent_profile))
         .route("/agents/identity", get(get_identity).put(update_identity))
-        .route("/agents/config", get(get_agent_config).put(update_agent_config))
-        .route("/agents/cron", get(list_cron_jobs).post(create_or_update_cron).delete(delete_cron))
+        .route(
+            "/agents/config",
+            get(get_agent_config).put(update_agent_config),
+        )
+        .route(
+            "/agents/cron",
+            get(list_cron_jobs)
+                .post(create_or_update_cron)
+                .delete(delete_cron),
+        )
         .route("/agents/cron/executions", get(cron_executions))
         .route("/agents/cron/trigger", post(trigger_cron))
         .route("/agents/cron/toggle", put(toggle_cron))
         .route("/channels/cancel", post(cancel_process))
-        .route("/agents/ingest/files", get(list_ingest_files).delete(delete_ingest_file))
+        .route(
+            "/agents/ingest/files",
+            get(list_ingest_files).delete(delete_ingest_file),
+        )
         .route("/agents/ingest/upload", post(upload_ingest_file))
         .route("/providers", get(get_providers).put(update_provider))
         .route("/providers/{provider}", delete(delete_provider))
         .route("/models", get(get_models))
         .route("/models/refresh", post(refresh_models))
         .route("/messaging/status", get(messaging_status))
-        .route("/bindings", get(list_bindings).post(create_binding).put(update_binding).delete(delete_binding))
-        .route("/settings", get(get_global_settings).put(update_global_settings))
+        .route(
+            "/bindings",
+            get(list_bindings)
+                .post(create_binding)
+                .put(update_binding)
+                .delete(delete_binding),
+        )
+        .route(
+            "/settings",
+            get(get_global_settings).put(update_global_settings),
+        )
         .route("/config/raw", get(get_raw_config).put(update_raw_config))
         .route("/update/check", get(update_check).post(update_check_now))
         .route("/update/apply", post(update_apply));
@@ -515,7 +538,9 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
 /// List all configured agents with their config summaries.
 async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse> {
     let agents = state.agent_configs.load();
-    Json(AgentsResponse { agents: agents.as_ref().clone() })
+    Json(AgentsResponse {
+        agents: agents.as_ref().clone(),
+    })
 }
 
 /// Get overview stats for an agent: memory breakdown, channels, cron, cortex.
@@ -595,7 +620,8 @@ async fn agent_overview(
     // Latest bulletin text
     let latest_bulletin = bulletin_events.first().and_then(|e| {
         e.details.as_ref().and_then(|d| {
-            d.get("bulletin_text").and_then(|v| v.as_str().map(|s| s.to_string()))
+            d.get("bulletin_text")
+                .and_then(|v| v.as_str().map(|s| s.to_string()))
         })
     });
 
@@ -639,12 +665,24 @@ async fn agent_overview(
         for row in branch_activity {
             let date: String = row.get("date");
             let count: i64 = row.get("count");
-            map.entry(date.clone()).or_insert_with(|| ActivityDayCount { date, branches: 0, workers: 0 }).branches = count;
+            map.entry(date.clone())
+                .or_insert_with(|| ActivityDayCount {
+                    date,
+                    branches: 0,
+                    workers: 0,
+                })
+                .branches = count;
         }
         for row in worker_activity {
             let date: String = row.get("date");
             let count: i64 = row.get("count");
-            map.entry(date.clone()).or_insert_with(|| ActivityDayCount { date, branches: 0, workers: 0 }).workers = count;
+            map.entry(date.clone())
+                .or_insert_with(|| ActivityDayCount {
+                    date,
+                    branches: 0,
+                    workers: 0,
+                })
+                .workers = count;
         }
         let mut days: Vec<_> = map.into_values().collect();
         days.sort_by(|a, b| a.date.cmp(&b.date));
@@ -688,7 +726,9 @@ struct AgentOverviewQuery {
 }
 
 /// Get instance-wide overview for the main dashboard.
-async fn instance_overview(State(state): State<Arc<ApiState>>) -> Result<Json<InstanceOverviewResponse>, StatusCode> {
+async fn instance_overview(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<InstanceOverviewResponse>, StatusCode> {
     let uptime = state.started_at.elapsed();
     let pools = state.agent_pools.load();
     let configs = state.agent_configs.load();
@@ -697,7 +737,7 @@ async fn instance_overview(State(state): State<Arc<ApiState>>) -> Result<Json<In
 
     for agent_config in configs.iter() {
         let agent_id = agent_config.id.clone();
-        
+
         let Some(pool) = pools.get(&agent_id) else {
             continue;
         };
@@ -708,26 +748,24 @@ async fn instance_overview(State(state): State<Arc<ApiState>>) -> Result<Json<In
         let channel_count = channels.len();
 
         // Last activity from channels
-        let last_activity_at = channels.iter()
+        let last_activity_at = channels
+            .iter()
             .map(|c| &c.last_activity_at)
             .max()
             .map(|dt| dt.to_rfc3339());
 
         // Memory count
-        let memory_total: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM memories WHERE forgotten = 0",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+        let memory_total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM memories WHERE forgotten = 0")
+                .fetch_one(pool)
+                .await
+                .unwrap_or(0);
 
         // Cron job count
-        let cron_job_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cron_jobs",
-        )
-        .fetch_one(pool)
-        .await
-        .unwrap_or(0);
+        let cron_job_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cron_jobs")
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
 
         // 14-day activity sparkline
         let activity_window = chrono::Utc::now() - chrono::Duration::days(14);
@@ -749,7 +787,9 @@ async fn instance_overview(State(state): State<Arc<ApiState>>) -> Result<Json<In
 
         let mut activity_sparkline: Vec<i64> = Vec::with_capacity(14);
         for i in 0..14 {
-            let date = (chrono::Utc::now() - chrono::Duration::days(13 - i as i64)).format("%Y-%m-%d").to_string();
+            let date = (chrono::Utc::now() - chrono::Duration::days(13 - i as i64))
+                .format("%Y-%m-%d")
+                .to_string();
             activity_sparkline.push(*activity_map.get(&date).unwrap_or(&0));
         }
 
@@ -804,6 +844,7 @@ async fn events_sse(
                             ApiEvent::WorkerCompleted { .. } => "worker_completed",
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
+                            ApiEvent::BranchFailed { .. } => "branch_failed",
                             ApiEvent::ToolStarted { .. } => "tool_started",
                             ApiEvent::ToolCompleted { .. } => "tool_completed",
                         };
@@ -857,7 +898,9 @@ async fn list_channels(State(state): State<Arc<ApiState>>) -> Json<ChannelsRespo
         }
     }
 
-    Json(ChannelsResponse { channels: all_channels })
+    Json(ChannelsResponse {
+        channels: all_channels,
+    })
 }
 
 #[derive(Deserialize)]
@@ -885,10 +928,17 @@ async fn channel_messages(
 
     for (_agent_id, pool) in pools.iter() {
         let logger = ProcessRunLogger::new(pool.clone());
-        match logger.load_channel_timeline(&query.channel_id, fetch_limit, query.before.as_deref()).await {
+        match logger
+            .load_channel_timeline(&query.channel_id, fetch_limit, query.before.as_deref())
+            .await
+        {
             Ok(items) if !items.is_empty() => {
                 let has_more = items.len() as i64 > limit;
-                let items = if has_more { items[items.len() - limit as usize..].to_vec() } else { items };
+                let items = if has_more {
+                    items[items.len() - limit as usize..].to_vec()
+                } else {
+                    items
+                };
                 return Json(MessagesResponse { items, has_more });
             }
             Ok(_) => continue,
@@ -899,7 +949,10 @@ async fn channel_messages(
         }
     }
 
-    Json(MessagesResponse { items: vec![], has_more: false })
+    Json(MessagesResponse {
+        items: vec![],
+        has_more: false,
+    })
 }
 
 /// Get live status (active workers, branches, completed items) for all channels.
@@ -984,7 +1037,8 @@ async fn list_memories(
 
     // Fetch limit + offset so we can paginate, then slice
     let fetch_limit = limit + query.offset as i64;
-    let all = store.get_sorted(sort, fetch_limit, memory_type)
+    let all = store
+        .get_sorted(sort, fetch_limit, memory_type)
         .await
         .map_err(|error| {
             tracing::warn!(%error, agent_id = %query.agent_id, "failed to list memories");
@@ -1071,7 +1125,8 @@ async fn memory_graph(
     let memory_type = query.memory_type.as_deref().and_then(parse_memory_type);
 
     let fetch_limit = limit + query.offset as i64;
-    let all = store.get_sorted(sort, fetch_limit, memory_type)
+    let all = store
+        .get_sorted(sort, fetch_limit, memory_type)
         .await
         .map_err(|error| {
             tracing::warn!(%error, agent_id = %query.agent_id, "failed to load graph nodes");
@@ -1082,14 +1137,19 @@ async fn memory_graph(
     let nodes: Vec<Memory> = all.into_iter().skip(query.offset).collect();
     let node_ids: Vec<String> = nodes.iter().map(|m| m.id.clone()).collect();
 
-    let edges = store.get_associations_between(&node_ids)
+    let edges = store
+        .get_associations_between(&node_ids)
         .await
         .map_err(|error| {
             tracing::warn!(%error, agent_id = %query.agent_id, "failed to load graph edges");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(MemoryGraphResponse { nodes, edges, total }))
+    Ok(Json(MemoryGraphResponse {
+        nodes,
+        edges,
+        total,
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1118,7 +1178,8 @@ async fn memory_graph_neighbors(
     let store = memory_search.store();
 
     let depth = query.depth.min(3);
-    let exclude_ids: Vec<String> = query.exclude
+    let exclude_ids: Vec<String> = query
+        .exclude
         .as_deref()
         .unwrap_or("")
         .split(',')
@@ -1181,7 +1242,10 @@ async fn cortex_chat_messages(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    Ok(Json(CortexChatMessagesResponse { messages, thread_id }))
+    Ok(Json(CortexChatMessagesResponse {
+        messages,
+        thread_id,
+    }))
 }
 
 /// Send a message to cortex chat. Returns an SSE stream with activity events.
@@ -1272,7 +1336,9 @@ async fn get_identity(
     Query(query): Query<IdentityQuery>,
 ) -> Result<Json<IdentityResponse>, StatusCode> {
     let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let workspace = workspaces
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let identity = crate::identity::Identity::load(workspace).await;
 
@@ -1290,7 +1356,9 @@ async fn update_identity(
     axum::Json(request): axum::Json<IdentityUpdateRequest>,
 ) -> Result<Json<IdentityResponse>, StatusCode> {
     let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let workspace = workspaces
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     if let Some(soul) = &request.soul {
         tokio::fs::write(workspace.join("SOUL.md"), soul)
@@ -1438,7 +1506,8 @@ async fn update_agent_config(
         })?;
 
     // Parse with toml_edit to preserve formatting
-    let mut doc = config_content.parse::<toml_edit::DocumentMut>()
+    let mut doc = config_content
+        .parse::<toml_edit::DocumentMut>()
         .map_err(|error| {
             tracing::warn!(%error, "failed to parse config.toml");
             StatusCode::INTERNAL_SERVER_ERROR
@@ -1509,18 +1578,28 @@ async fn update_agent_config(
         }
     }
 
-    get_agent_config(State(state), Query(AgentConfigQuery { agent_id: request.agent_id })).await
+    get_agent_config(
+        State(state),
+        Query(AgentConfigQuery {
+            agent_id: request.agent_id,
+        }),
+    )
+    .await
 }
 
 /// Find the index of an agent table in the [[agents]] array, or create a new one.
-fn find_or_create_agent_table(doc: &mut toml_edit::DocumentMut, agent_id: &str) -> Result<usize, StatusCode> {
+fn find_or_create_agent_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_id: &str,
+) -> Result<usize, StatusCode> {
     // Create agents array if it doesn't exist
     if doc.get("agents").is_none() {
         doc["agents"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
     }
 
     // Get the agents array
-    let agents = doc.get_mut("agents")
+    let agents = doc
+        .get_mut("agents")
         .and_then(|a| a.as_array_of_tables_mut())
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1542,7 +1621,10 @@ fn find_or_create_agent_table(doc: &mut toml_edit::DocumentMut, agent_id: &str) 
 }
 
 /// Get a mutable reference to an agent's table in the [[agents]] array.
-fn get_agent_table_mut(doc: &mut toml_edit::DocumentMut, agent_idx: usize) -> Result<&mut toml_edit::Table, StatusCode> {
+fn get_agent_table_mut(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+) -> Result<&mut toml_edit::Table, StatusCode> {
     doc.get_mut("agents")
         .and_then(|a| a.as_array_of_tables_mut())
         .and_then(|arr| arr.get_mut(agent_idx))
@@ -1550,93 +1632,193 @@ fn get_agent_table_mut(doc: &mut toml_edit::DocumentMut, agent_idx: usize) -> Re
 }
 
 /// Get or create a subtable within an agent's config (e.g., [agents.routing]).
-fn get_or_create_subtable<'a>(agent: &'a mut toml_edit::Table, key: &str) -> &'a mut toml_edit::Table {
+fn get_or_create_subtable<'a>(
+    agent: &'a mut toml_edit::Table,
+    key: &str,
+) -> &'a mut toml_edit::Table {
     if !agent.contains_key(key) {
         agent[key] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     agent[key].as_table_mut().expect("just created as table")
 }
 
-fn update_routing_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, routing: &RoutingUpdate) -> Result<(), StatusCode> {
+fn update_routing_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    routing: &RoutingUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "routing");
-    if let Some(ref v) = routing.channel { table["channel"] = toml_edit::value(v.as_str()); }
-    if let Some(ref v) = routing.branch { table["branch"] = toml_edit::value(v.as_str()); }
-    if let Some(ref v) = routing.worker { table["worker"] = toml_edit::value(v.as_str()); }
-    if let Some(ref v) = routing.compactor { table["compactor"] = toml_edit::value(v.as_str()); }
-    if let Some(ref v) = routing.cortex { table["cortex"] = toml_edit::value(v.as_str()); }
-    if let Some(v) = routing.rate_limit_cooldown_secs { table["rate_limit_cooldown_secs"] = toml_edit::value(v as i64); }
+    if let Some(ref v) = routing.channel {
+        table["channel"] = toml_edit::value(v.as_str());
+    }
+    if let Some(ref v) = routing.branch {
+        table["branch"] = toml_edit::value(v.as_str());
+    }
+    if let Some(ref v) = routing.worker {
+        table["worker"] = toml_edit::value(v.as_str());
+    }
+    if let Some(ref v) = routing.compactor {
+        table["compactor"] = toml_edit::value(v.as_str());
+    }
+    if let Some(ref v) = routing.cortex {
+        table["cortex"] = toml_edit::value(v.as_str());
+    }
+    if let Some(v) = routing.rate_limit_cooldown_secs {
+        table["rate_limit_cooldown_secs"] = toml_edit::value(v as i64);
+    }
     Ok(())
 }
 
-fn update_tuning_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, tuning: &TuningUpdate) -> Result<(), StatusCode> {
+fn update_tuning_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    tuning: &TuningUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    if let Some(v) = tuning.max_concurrent_branches { agent["max_concurrent_branches"] = toml_edit::value(v as i64); }
-    if let Some(v) = tuning.max_concurrent_workers { agent["max_concurrent_workers"] = toml_edit::value(v as i64); }
-    if let Some(v) = tuning.max_turns { agent["max_turns"] = toml_edit::value(v as i64); }
-    if let Some(v) = tuning.branch_max_turns { agent["branch_max_turns"] = toml_edit::value(v as i64); }
-    if let Some(v) = tuning.context_window { agent["context_window"] = toml_edit::value(v as i64); }
-    if let Some(v) = tuning.history_backfill_count { agent["history_backfill_count"] = toml_edit::value(v as i64); }
+    if let Some(v) = tuning.max_concurrent_branches {
+        agent["max_concurrent_branches"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = tuning.max_concurrent_workers {
+        agent["max_concurrent_workers"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = tuning.max_turns {
+        agent["max_turns"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = tuning.branch_max_turns {
+        agent["branch_max_turns"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = tuning.context_window {
+        agent["context_window"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = tuning.history_backfill_count {
+        agent["history_backfill_count"] = toml_edit::value(v as i64);
+    }
     Ok(())
 }
 
-fn update_compaction_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, compaction: &CompactionUpdate) -> Result<(), StatusCode> {
+fn update_compaction_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    compaction: &CompactionUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "compaction");
-    if let Some(v) = compaction.background_threshold { table["background_threshold"] = toml_edit::value(v as f64); }
-    if let Some(v) = compaction.aggressive_threshold { table["aggressive_threshold"] = toml_edit::value(v as f64); }
-    if let Some(v) = compaction.emergency_threshold { table["emergency_threshold"] = toml_edit::value(v as f64); }
+    if let Some(v) = compaction.background_threshold {
+        table["background_threshold"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = compaction.aggressive_threshold {
+        table["aggressive_threshold"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = compaction.emergency_threshold {
+        table["emergency_threshold"] = toml_edit::value(v as f64);
+    }
     Ok(())
 }
 
-fn update_cortex_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, cortex: &CortexUpdate) -> Result<(), StatusCode> {
+fn update_cortex_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    cortex: &CortexUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "cortex");
-    if let Some(v) = cortex.tick_interval_secs { table["tick_interval_secs"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.worker_timeout_secs { table["worker_timeout_secs"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.branch_timeout_secs { table["branch_timeout_secs"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.circuit_breaker_threshold { table["circuit_breaker_threshold"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.bulletin_interval_secs { table["bulletin_interval_secs"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.bulletin_max_words { table["bulletin_max_words"] = toml_edit::value(v as i64); }
-    if let Some(v) = cortex.bulletin_max_turns { table["bulletin_max_turns"] = toml_edit::value(v as i64); }
+    if let Some(v) = cortex.tick_interval_secs {
+        table["tick_interval_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.worker_timeout_secs {
+        table["worker_timeout_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.branch_timeout_secs {
+        table["branch_timeout_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.circuit_breaker_threshold {
+        table["circuit_breaker_threshold"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.bulletin_interval_secs {
+        table["bulletin_interval_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.bulletin_max_words {
+        table["bulletin_max_words"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.bulletin_max_turns {
+        table["bulletin_max_turns"] = toml_edit::value(v as i64);
+    }
     Ok(())
 }
 
-fn update_coalesce_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, coalesce: &CoalesceUpdate) -> Result<(), StatusCode> {
+fn update_coalesce_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    coalesce: &CoalesceUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "coalesce");
-    if let Some(v) = coalesce.enabled { table["enabled"] = toml_edit::value(v); }
-    if let Some(v) = coalesce.debounce_ms { table["debounce_ms"] = toml_edit::value(v as i64); }
-    if let Some(v) = coalesce.max_wait_ms { table["max_wait_ms"] = toml_edit::value(v as i64); }
-    if let Some(v) = coalesce.min_messages { table["min_messages"] = toml_edit::value(v as i64); }
-    if let Some(v) = coalesce.multi_user_only { table["multi_user_only"] = toml_edit::value(v); }
+    if let Some(v) = coalesce.enabled {
+        table["enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = coalesce.debounce_ms {
+        table["debounce_ms"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = coalesce.max_wait_ms {
+        table["max_wait_ms"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = coalesce.min_messages {
+        table["min_messages"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = coalesce.multi_user_only {
+        table["multi_user_only"] = toml_edit::value(v);
+    }
     Ok(())
 }
 
-fn update_memory_persistence_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, memory_persistence: &MemoryPersistenceUpdate) -> Result<(), StatusCode> {
+fn update_memory_persistence_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    memory_persistence: &MemoryPersistenceUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "memory_persistence");
-    if let Some(v) = memory_persistence.enabled { table["enabled"] = toml_edit::value(v); }
-    if let Some(v) = memory_persistence.message_interval { table["message_interval"] = toml_edit::value(v as i64); }
+    if let Some(v) = memory_persistence.enabled {
+        table["enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = memory_persistence.message_interval {
+        table["message_interval"] = toml_edit::value(v as i64);
+    }
     Ok(())
 }
 
-fn update_browser_table(doc: &mut toml_edit::DocumentMut, agent_idx: usize, browser: &BrowserUpdate) -> Result<(), StatusCode> {
+fn update_browser_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    browser: &BrowserUpdate,
+) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "browser");
-    if let Some(v) = browser.enabled { table["enabled"] = toml_edit::value(v); }
-    if let Some(v) = browser.headless { table["headless"] = toml_edit::value(v); }
-    if let Some(v) = browser.evaluate_enabled { table["evaluate_enabled"] = toml_edit::value(v); }
+    if let Some(v) = browser.enabled {
+        table["enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = browser.headless {
+        table["headless"] = toml_edit::value(v);
+    }
+    if let Some(v) = browser.evaluate_enabled {
+        table["evaluate_enabled"] = toml_edit::value(v);
+    }
     Ok(())
 }
 
 /// Update instance-level Discord config at [messaging.discord].
-fn update_discord_table(doc: &mut toml_edit::DocumentMut, discord: &DiscordUpdate) -> Result<(), StatusCode> {
-    let messaging = doc.get_mut("messaging")
+fn update_discord_table(
+    doc: &mut toml_edit::DocumentMut,
+    discord: &DiscordUpdate,
+) -> Result<(), StatusCode> {
+    let messaging = doc
+        .get_mut("messaging")
         .and_then(|m| m.as_table_mut())
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    let discord_table = messaging.get_mut("discord")
+    let discord_table = messaging
+        .get_mut("discord")
         .and_then(|d| d.as_table_mut())
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -1684,13 +1866,10 @@ async fn cortex_events(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let total = logger
-        .count_events(event_type_ref)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, "failed to count cortex events");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let total = logger.count_events(event_type_ref).await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %query.agent_id, "failed to count cortex events");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(CortexEventsResponse { events, total }))
 }
@@ -1795,13 +1974,10 @@ async fn list_cron_jobs(
     let stores = state.cron_stores.load();
     let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
-    let configs = store
-        .load_all_unfiltered()
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cron jobs");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let configs = store.load_all_unfiltered().await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cron jobs");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     let mut jobs = Vec::new();
     for config in configs {
@@ -1864,7 +2040,9 @@ async fn create_or_update_cron(
     let schedulers = state.cron_schedulers.load();
 
     let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let scheduler = schedulers.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let active_hours = match (request.active_start_hour, request.active_end_hour) {
         (Some(start), Some(end)) => Some((start, end)),
@@ -1907,7 +2085,9 @@ async fn delete_cron(
     let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
     let schedulers = state.cron_schedulers.load();
-    let scheduler = schedulers.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Unregister from scheduler first
     scheduler.unregister(&query.cron_id).await;
@@ -1930,7 +2110,9 @@ async fn trigger_cron(
     Json(request): Json<TriggerCronRequest>,
 ) -> Result<Json<CronActionResponse>, StatusCode> {
     let schedulers = state.cron_schedulers.load();
-    let scheduler = schedulers.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     scheduler.trigger_now(&request.cron_id).await.map_err(|error| {
         tracing::warn!(%error, agent_id = %request.agent_id, cron_id = %request.cron_id, "failed to trigger cron job");
@@ -1952,7 +2134,9 @@ async fn toggle_cron(
     let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
 
     let schedulers = state.cron_schedulers.load();
-    let scheduler = schedulers.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     // Update in database first
     store.update_enabled(&request.cron_id, request.enabled).await.map_err(|error| {
@@ -1966,7 +2150,11 @@ async fn toggle_cron(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let status = if request.enabled { "enabled" } else { "disabled" };
+    let status = if request.enabled {
+        "enabled"
+    } else {
+        "disabled"
+    };
     Ok(Json(CronActionResponse {
         success: true,
         message: format!("Cron job '{}' {}", request.cron_id, status),
@@ -1994,13 +2182,19 @@ async fn cancel_process(
     Json(request): Json<CancelProcessRequest>,
 ) -> Result<Json<CancelProcessResponse>, StatusCode> {
     let states = state.channel_states.read().await;
-    let channel_state = states.get(&request.channel_id).ok_or(StatusCode::NOT_FOUND)?;
+    let channel_state = states
+        .get(&request.channel_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     match request.process_type.as_str() {
         "worker" => {
-            let worker_id: crate::WorkerId = request.process_id.parse()
+            let worker_id: crate::WorkerId = request
+                .process_id
+                .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            channel_state.cancel_worker(worker_id).await
+            channel_state
+                .cancel_worker(worker_id)
+                .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {
                 success: true,
@@ -2008,9 +2202,13 @@ async fn cancel_process(
             }))
         }
         "branch" => {
-            let branch_id: crate::BranchId = request.process_id.parse()
+            let branch_id: crate::BranchId = request
+                .process_id
+                .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
-            channel_state.cancel_branch(branch_id).await
+            channel_state
+                .cancel_branch(branch_id)
+                .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {
                 success: true,
@@ -2028,6 +2226,7 @@ struct ProviderStatus {
     anthropic: bool,
     openai: bool,
     openrouter: bool,
+    ollama: bool,
     zhipu: bool,
     groq: bool,
     together: bool,
@@ -2062,7 +2261,20 @@ async fn get_providers(
     let config_path = state.config_path.read().await.clone();
 
     // Check which providers have keys by reading the config
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
+    let (
+        anthropic,
+        openai,
+        openrouter,
+        ollama,
+        zhipu,
+        groq,
+        together,
+        fireworks,
+        deepseek,
+        xai,
+        mistral,
+        opencode_zen,
+    ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -2091,6 +2303,7 @@ async fn get_providers(
             has_key("anthropic_key", "ANTHROPIC_API_KEY"),
             has_key("openai_key", "OPENAI_API_KEY"),
             has_key("openrouter_key", "OPENROUTER_API_KEY"),
+            has_key("ollama_key", "OLLAMA_API_KEY"),
             has_key("zhipu_key", "ZHIPU_API_KEY"),
             has_key("groq_key", "GROQ_API_KEY"),
             has_key("together_key", "TOGETHER_API_KEY"),
@@ -2106,6 +2319,7 @@ async fn get_providers(
             std::env::var("ANTHROPIC_API_KEY").is_ok(),
             std::env::var("OPENAI_API_KEY").is_ok(),
             std::env::var("OPENROUTER_API_KEY").is_ok(),
+            std::env::var("OLLAMA_API_KEY").is_ok(),
             std::env::var("ZHIPU_API_KEY").is_ok(),
             std::env::var("GROQ_API_KEY").is_ok(),
             std::env::var("TOGETHER_API_KEY").is_ok(),
@@ -2121,6 +2335,7 @@ async fn get_providers(
         anthropic,
         openai,
         openrouter,
+        ollama,
         zhipu,
         groq,
         together,
@@ -2130,9 +2345,10 @@ async fn get_providers(
         mistral,
         opencode_zen,
     };
-    let has_any = providers.anthropic 
-        || providers.openai 
-        || providers.openrouter 
+    let has_any = providers.anthropic
+        || providers.openai
+        || providers.openrouter
+        || providers.ollama
         || providers.zhipu
         || providers.groq
         || providers.together
@@ -2153,6 +2369,7 @@ async fn update_provider(
         "anthropic" => "anthropic_key",
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
+        "ollama" => "ollama_key",
         "zhipu" => "zhipu_key",
         "groq" => "groq_key",
         "together" => "together_key",
@@ -2210,8 +2427,7 @@ async fn update_provider(
             .and_then(|v| v.as_str())
             .unwrap_or("anthropic/claude-sonnet-4-20250514");
 
-        let current_provider =
-            crate::llm::routing::provider_from_model(current_channel);
+        let current_provider = crate::llm::routing::provider_from_model(current_channel);
 
         // Check if the current routing provider has a key configured
         let has_key_for_current = match current_provider {
@@ -2228,6 +2444,11 @@ async fn update_provider(
             "openrouter" => doc
                 .get("llm")
                 .and_then(|l| l.get("openrouter_key"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty()),
+            "ollama" => doc
+                .get("llm")
+                .and_then(|l| l.get("ollama_key"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty()),
             "zhipu" => doc
@@ -2247,19 +2468,19 @@ async fn update_provider(
     };
 
     if should_set_routing {
-        let routing =
-            crate::llm::routing::defaults_for_provider(&request.provider);
+        let routing = crate::llm::routing::defaults_for_provider(&request.provider);
 
         if doc.get("defaults").is_none() {
             doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        
+
         if let Some(defaults) = doc.get_mut("defaults").and_then(|d| d.as_table_mut()) {
             if defaults.get("routing").is_none() {
                 defaults["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
-            
-            if let Some(routing_table) = defaults.get_mut("routing").and_then(|r| r.as_table_mut()) {
+
+            if let Some(routing_table) = defaults.get_mut("routing").and_then(|r| r.as_table_mut())
+            {
                 routing_table["channel"] = toml_edit::value(&routing.channel);
                 routing_table["branch"] = toml_edit::value(&routing.branch);
                 routing_table["worker"] = toml_edit::value(&routing.worker);
@@ -2306,6 +2527,7 @@ async fn delete_provider(
         "anthropic" => "anthropic_key",
         "openai" => "openai_key",
         "openrouter" => "openrouter_key",
+        "ollama" => "ollama_key",
         "zhipu" => "zhipu_key",
         "groq" => "groq_key",
         "together" => "together_key",
@@ -2363,7 +2585,7 @@ struct ModelInfo {
     id: String,
     /// Human-readable name
     name: String,
-    /// Provider ID ("anthropic", "openrouter", "openai", "zhipu")
+    /// Provider ID ("anthropic", "openrouter", "openai", "ollama", "zhipu")
     provider: String,
     /// Context window size in tokens, if known
     context_window: Option<u64>,
@@ -2534,6 +2756,35 @@ fn curated_models() -> Vec<ModelInfo> {
             name: "o4 Mini".into(),
             provider: "openai".into(),
             context_window: Some(200_000),
+            curated: true,
+        },
+        // Ollama Cloud (OpenAI-compatible)
+        ModelInfo {
+            id: "ollama/gpt-oss:120b".into(),
+            name: "gpt-oss 120B".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "ollama/gpt-oss:20b".into(),
+            name: "gpt-oss 20B".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "ollama/qwen3:30b-a3b".into(),
+            name: "Qwen3 30B A3B".into(),
+            provider: "ollama".into(),
+            context_window: None,
+            curated: true,
+        },
+        ModelInfo {
+            id: "ollama/devstral:24b".into(),
+            name: "Devstral 24B".into(),
+            provider: "ollama".into(),
+            context_window: None,
             curated: true,
         },
         // Z.ai (GLM)
@@ -2795,9 +3046,7 @@ fn curated_models() -> Vec<ModelInfo> {
 /// In-memory cache for dynamically fetched models.
 static DYNAMIC_MODELS: std::sync::LazyLock<
     tokio::sync::RwLock<(Vec<ModelInfo>, std::time::Instant)>,
-> = std::sync::LazyLock::new(|| {
-    tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now()))
-});
+> = std::sync::LazyLock::new(|| tokio::sync::RwLock::new((Vec::new(), std::time::Instant::now())));
 
 const MODEL_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
@@ -2892,6 +3141,9 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
     if has_key("openrouter_key", "OPENROUTER_API_KEY") {
         providers.push("openrouter");
     }
+    if has_key("ollama_key", "OLLAMA_API_KEY") {
+        providers.push("ollama");
+    }
     if has_key("zhipu_key", "ZHIPU_API_KEY") {
         providers.push("zhipu");
     }
@@ -2921,9 +3173,7 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
 }
 
 /// Fetch available models from OpenRouter's API.
-async fn fetch_openrouter_models(
-    config_path: &std::path::Path,
-) -> anyhow::Result<Vec<ModelInfo>> {
+async fn fetch_openrouter_models(config_path: &std::path::Path) -> anyhow::Result<Vec<ModelInfo>> {
     let content = tokio::fs::read_to_string(config_path).await?;
     let doc: toml_edit::DocumentMut = content.parse()?;
 
@@ -3046,13 +3296,17 @@ async fn upload_ingest_file(
     mut multipart: axum::extract::Multipart,
 ) -> Result<Json<IngestUploadResponse>, StatusCode> {
     let workspaces = state.agent_workspaces.load();
-    let workspace = workspaces.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let workspace = workspaces
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let ingest_dir = workspace.join("ingest");
 
-    tokio::fs::create_dir_all(&ingest_dir).await.map_err(|error| {
-        tracing::warn!(%error, "failed to create ingest directory");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    tokio::fs::create_dir_all(&ingest_dir)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to create ingest directory");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mut uploaded = Vec::new();
 
@@ -3089,7 +3343,12 @@ async fn upload_ingest_file(
                 .extension()
                 .and_then(|e| e.to_str())
                 .unwrap_or("txt");
-            let unique = format!("{}-{}.{}", stem, &uuid::Uuid::new_v4().to_string()[..8], ext);
+            let unique = format!(
+                "{}-{}.{}",
+                stem,
+                &uuid::Uuid::new_v4().to_string()[..8],
+                ext
+            );
             ingest_dir.join(unique)
         } else {
             target
@@ -3194,10 +3453,7 @@ async fn messaging_status(
                     .get("token")
                     .and_then(|v| v.as_str())
                     .is_some_and(|s| !s.is_empty());
-                let enabled = d
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let enabled = d.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                 PlatformStatus {
                     configured: has_token,
                     enabled: has_token && enabled,
@@ -3220,10 +3476,7 @@ async fn messaging_status(
                     .get("app_token")
                     .and_then(|v| v.as_str())
                     .is_some_and(|t| !t.is_empty());
-                let enabled = s
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                 PlatformStatus {
                     configured: has_bot_token && has_app_token,
                     enabled: has_bot_token && has_app_token && enabled,
@@ -3238,10 +3491,7 @@ async fn messaging_status(
             .get("messaging")
             .and_then(|m| m.get("webhook"))
             .map(|w| {
-                let enabled = w
-                    .get("enabled")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let enabled = w.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
                 PlatformStatus {
                     configured: true,
                     enabled,
@@ -3307,12 +3557,7 @@ async fn list_bindings(
 
     let filtered: Vec<BindingResponse> = bindings
         .into_iter()
-        .filter(|b| {
-            query
-                .agent_id
-                .as_ref()
-                .map_or(true, |id| &b.agent_id == id)
-        })
+        .filter(|b| query.agent_id.as_ref().map_or(true, |id| &b.agent_id == id))
         .map(|b| BindingResponse {
             agent_id: b.agent_id,
             channel: b.channel,
@@ -3381,10 +3626,12 @@ async fn create_binding(
     }
 
     let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-            tracing::warn!(%error, "failed to read config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "failed to read config.toml");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
     } else {
         String::new()
     };
@@ -3406,11 +3653,15 @@ async fn create_binding(
                 if doc.get("messaging").is_none() {
                     doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
-                let messaging = doc["messaging"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                let messaging = doc["messaging"]
+                    .as_table_mut()
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 if !messaging.contains_key("discord") {
                     messaging["discord"] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
-                let discord = messaging["discord"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                let discord = messaging["discord"]
+                    .as_table_mut()
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 discord["enabled"] = toml_edit::value(true);
                 discord["token"] = toml_edit::value(token.as_str());
                 new_discord_token = Some(token.clone());
@@ -3422,11 +3673,15 @@ async fn create_binding(
                 if doc.get("messaging").is_none() {
                     doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
-                let messaging = doc["messaging"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                let messaging = doc["messaging"]
+                    .as_table_mut()
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 if !messaging.contains_key("slack") {
                     messaging["slack"] = toml_edit::Item::Table(toml_edit::Table::new());
                 }
-                let slack = messaging["slack"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                let slack = messaging["slack"]
+                    .as_table_mut()
+                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 slack["enabled"] = toml_edit::value(true);
                 slack["bot_token"] = toml_edit::value(bot_token.as_str());
                 slack["app_token"] = toml_edit::value(app_token);
@@ -3510,8 +3765,10 @@ async fn create_binding(
 
         // Rebuild Discord permissions
         if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms =
-                crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+            let new_perms = crate::config::DiscordPermissions::from_config(
+                discord_config,
+                &new_config.bindings,
+            );
             let perms = state.discord_permissions.read().await;
             if let Some(arc_swap) = perms.as_ref() {
                 arc_swap.store(std::sync::Arc::new(new_perms));
@@ -3540,10 +3797,15 @@ async fn create_binding(
                         None => {
                             drop(perms_guard);
                             let perms = crate::config::DiscordPermissions::from_config(
-                                new_config.messaging.discord.as_ref().expect("discord config exists when token is provided"),
+                                new_config
+                                    .messaging
+                                    .discord
+                                    .as_ref()
+                                    .expect("discord config exists when token is provided"),
                                 &new_config.bindings,
                             );
-                            let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                            let arc_swap =
+                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
                             state.set_discord_permissions(arc_swap.clone()).await;
                             arc_swap
                         }
@@ -3563,16 +3825,22 @@ async fn create_binding(
                         None => {
                             drop(perms_guard);
                             let perms = crate::config::SlackPermissions::from_config(
-                                new_config.messaging.slack.as_ref().expect("slack config exists when tokens are provided"),
+                                new_config
+                                    .messaging
+                                    .slack
+                                    .as_ref()
+                                    .expect("slack config exists when tokens are provided"),
                                 &new_config.bindings,
                             );
-                            let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                            let arc_swap =
+                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
                             state.set_slack_permissions(arc_swap.clone()).await;
                             arc_swap
                         }
                     }
                 };
-                let adapter = crate::messaging::slack::SlackAdapter::new(&bot_token, &app_token, slack_perms);
+                let adapter =
+                    crate::messaging::slack::SlackAdapter::new(&bot_token, &app_token, slack_perms);
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start slack adapter");
                 }
@@ -3631,7 +3899,7 @@ struct UpdateBindingRequest {
     original_workspace_id: Option<String>,
     #[serde(default)]
     original_chat_id: Option<String>,
-    
+
     // New values
     agent_id: String,
     channel: String,
@@ -3662,10 +3930,12 @@ async fn update_binding(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-        tracing::warn!(%error, "failed to read config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
         tracing::warn!(%error, "failed to parse config.toml");
@@ -3723,16 +3993,18 @@ async fn update_binding(
     };
 
     // Update the binding in place
-    let binding = bindings_array.get_mut(idx).ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+    let binding = bindings_array
+        .get_mut(idx)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
     binding["agent_id"] = toml_edit::value(&request.agent_id);
     binding["channel"] = toml_edit::value(&request.channel);
-    
+
     // Clear and set optional fields
     binding.remove("guild_id");
     binding.remove("workspace_id");
     binding.remove("chat_id");
-    
+
     if let Some(ref guild_id) = request.guild_id {
         if !guild_id.is_empty() {
             binding["guild_id"] = toml_edit::value(guild_id);
@@ -3748,7 +4020,7 @@ async fn update_binding(
             binding["chat_id"] = toml_edit::value(chat_id);
         }
     }
-    
+
     // Update arrays
     if !request.channel_ids.is_empty() {
         let mut arr = toml_edit::Array::new();
@@ -3759,7 +4031,7 @@ async fn update_binding(
     } else {
         binding.remove("channel_ids");
     }
-    
+
     if !request.dm_allowed_users.is_empty() {
         let mut arr = toml_edit::Array::new();
         for id in &request.dm_allowed_users {
@@ -3792,8 +4064,10 @@ async fn update_binding(
         drop(bindings_guard);
 
         if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms =
-                crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+            let new_perms = crate::config::DiscordPermissions::from_config(
+                discord_config,
+                &new_config.bindings,
+            );
             let perms = state.discord_permissions.read().await;
             if let Some(arc_swap) = perms.as_ref() {
                 arc_swap.store(std::sync::Arc::new(new_perms));
@@ -3826,10 +4100,12 @@ async fn delete_binding(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    let content = tokio::fs::read_to_string(&config_path).await.map_err(|error| {
-        tracing::warn!(%error, "failed to read config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
         tracing::warn!(%error, "failed to parse config.toml");
@@ -3910,8 +4186,10 @@ async fn delete_binding(
         drop(bindings_guard);
 
         if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms =
-                crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+            let new_perms = crate::config::DiscordPermissions::from_config(
+                discord_config,
+                &new_config.bindings,
+            );
             let perms = state.discord_permissions.read().await;
             if let Some(arc_swap) = perms.as_ref() {
                 arc_swap.store(std::sync::Arc::new(new_perms));
@@ -4001,117 +4279,132 @@ async fn get_global_settings(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
-    
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) = if config_path.exists() {
-        let content = tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        let doc: toml_edit::DocumentMut = content
-            .parse()
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        
-        let brave_search = doc
-            .get("defaults")
-            .and_then(|d| d.get("brave_search_key"))
-            .and_then(|v| v.as_str())
-            .map(|s| {
-                if let Some(var) = s.strip_prefix("env:") {
-                    std::env::var(var).ok()
-                } else {
-                    Some(s.to_string())
-                }
-            })
-            .flatten();
-        
-        let api_enabled = doc
-            .get("api")
-            .and_then(|a| a.get("enabled"))
-            .and_then(|v| v.as_bool())
-            .unwrap_or(true);
-        
-        let api_port = doc
-            .get("api")
-            .and_then(|a| a.get("port"))
-            .and_then(|v| v.as_integer())
-            .and_then(|i| u16::try_from(i).ok())
-            .unwrap_or(19898);
-        
-        let api_bind = doc
-            .get("api")
-            .and_then(|a| a.get("bind"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("127.0.0.1")
-            .to_string();
-        
-        let worker_log_mode = doc
-            .get("defaults")
-            .and_then(|d| d.get("worker_log_mode"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("errors_only")
-            .to_string();
-        
-        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
-        let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
-        let opencode = OpenCodeSettingsResponse {
-            enabled: opencode_table
-                .and_then(|o| o.get("enabled"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            path: opencode_table
-                .and_then(|o| o.get("path"))
+
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) =
+        if config_path.exists() {
+            let content = tokio::fs::read_to_string(&config_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+            let doc: toml_edit::DocumentMut = content
+                .parse()
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+            let brave_search = doc
+                .get("defaults")
+                .and_then(|d| d.get("brave_search_key"))
                 .and_then(|v| v.as_str())
-                .unwrap_or("opencode")
-                .to_string(),
-            max_servers: opencode_table
-                .and_then(|o| o.get("max_servers"))
+                .map(|s| {
+                    if let Some(var) = s.strip_prefix("env:") {
+                        std::env::var(var).ok()
+                    } else {
+                        Some(s.to_string())
+                    }
+                })
+                .flatten();
+
+            let api_enabled = doc
+                .get("api")
+                .and_then(|a| a.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+
+            let api_port = doc
+                .get("api")
+                .and_then(|a| a.get("port"))
                 .and_then(|v| v.as_integer())
-                .and_then(|i| usize::try_from(i).ok())
-                .unwrap_or(5),
-            server_startup_timeout_secs: opencode_table
-                .and_then(|o| o.get("server_startup_timeout_secs"))
-                .and_then(|v| v.as_integer())
-                .and_then(|i| u64::try_from(i).ok())
-                .unwrap_or(30),
-            max_restart_retries: opencode_table
-                .and_then(|o| o.get("max_restart_retries"))
-                .and_then(|v| v.as_integer())
-                .and_then(|i| u32::try_from(i).ok())
-                .unwrap_or(5),
-            permissions: OpenCodePermissionsResponse {
-                edit: opencode_perms
-                    .and_then(|p| p.get("edit"))
+                .and_then(|i| u16::try_from(i).ok())
+                .unwrap_or(19898);
+
+            let api_bind = doc
+                .get("api")
+                .and_then(|a| a.get("bind"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("127.0.0.1")
+                .to_string();
+
+            let worker_log_mode = doc
+                .get("defaults")
+                .and_then(|d| d.get("worker_log_mode"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("errors_only")
+                .to_string();
+
+            let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+            let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
+            let opencode = OpenCodeSettingsResponse {
+                enabled: opencode_table
+                    .and_then(|o| o.get("enabled"))
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+                path: opencode_table
+                    .and_then(|o| o.get("path"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("allow")
+                    .unwrap_or("opencode")
                     .to_string(),
-                bash: opencode_perms
-                    .and_then(|p| p.get("bash"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("allow")
-                    .to_string(),
-                webfetch: opencode_perms
-                    .and_then(|p| p.get("webfetch"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("allow")
-                    .to_string(),
-            },
+                max_servers: opencode_table
+                    .and_then(|o| o.get("max_servers"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| usize::try_from(i).ok())
+                    .unwrap_or(5),
+                server_startup_timeout_secs: opencode_table
+                    .and_then(|o| o.get("server_startup_timeout_secs"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| u64::try_from(i).ok())
+                    .unwrap_or(30),
+                max_restart_retries: opencode_table
+                    .and_then(|o| o.get("max_restart_retries"))
+                    .and_then(|v| v.as_integer())
+                    .and_then(|i| u32::try_from(i).ok())
+                    .unwrap_or(5),
+                permissions: OpenCodePermissionsResponse {
+                    edit: opencode_perms
+                        .and_then(|p| p.get("edit"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("allow")
+                        .to_string(),
+                    bash: opencode_perms
+                        .and_then(|p| p.get("bash"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("allow")
+                        .to_string(),
+                    webfetch: opencode_perms
+                        .and_then(|p| p.get("webfetch"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("allow")
+                        .to_string(),
+                },
+            };
+
+            (
+                brave_search,
+                api_enabled,
+                api_port,
+                api_bind,
+                worker_log_mode,
+                opencode,
+            )
+        } else {
+            (
+                None,
+                true,
+                19898,
+                "127.0.0.1".to_string(),
+                "errors_only".to_string(),
+                OpenCodeSettingsResponse {
+                    enabled: false,
+                    path: "opencode".to_string(),
+                    max_servers: 5,
+                    server_startup_timeout_secs: 30,
+                    max_restart_retries: 5,
+                    permissions: OpenCodePermissionsResponse {
+                        edit: "allow".to_string(),
+                        bash: "allow".to_string(),
+                        webfetch: "allow".to_string(),
+                    },
+                },
+            )
         };
 
-        (brave_search, api_enabled, api_port, api_bind, worker_log_mode, opencode)
-    } else {
-        (None, true, 19898, "127.0.0.1".to_string(), "errors_only".to_string(), OpenCodeSettingsResponse {
-            enabled: false,
-            path: "opencode".to_string(),
-            max_servers: 5,
-            server_startup_timeout_secs: 30,
-            max_restart_retries: 5,
-            permissions: OpenCodePermissionsResponse {
-                edit: "allow".to_string(),
-                bash: "allow".to_string(),
-                webfetch: "allow".to_string(),
-            },
-        })
-    };
-    
     Ok(Json(GlobalSettingsResponse {
         brave_search_key: brave_search_key,
         api_enabled,
@@ -4127,7 +4420,7 @@ async fn update_global_settings(
     Json(request): Json<GlobalSettingsUpdate>,
 ) -> Result<Json<GlobalSettingsUpdateResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
-    
+
     let content = if config_path.exists() {
         tokio::fs::read_to_string(&config_path)
             .await
@@ -4135,13 +4428,13 @@ async fn update_global_settings(
     } else {
         String::new()
     };
-    
+
     let mut doc: toml_edit::DocumentMut = content
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     let mut requires_restart = false;
-    
+
     // Update brave_search_key
     if let Some(key) = request.brave_search_key {
         if doc.get("defaults").is_none() {
@@ -4155,15 +4448,15 @@ async fn update_global_settings(
             doc["defaults"]["brave_search_key"] = toml_edit::value(key);
         }
     }
-    
+
     // Update API settings (requires restart)
     if request.api_enabled.is_some() || request.api_port.is_some() || request.api_bind.is_some() {
         requires_restart = true;
-        
+
         if doc.get("api").is_none() {
             doc["api"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        
+
         if let Some(enabled) = request.api_enabled {
             doc["api"]["enabled"] = toml_edit::value(enabled);
         }
@@ -4174,7 +4467,7 @@ async fn update_global_settings(
             doc["api"]["bind"] = toml_edit::value(bind);
         }
     }
-    
+
     // Update worker_log_mode
     if let Some(mode) = request.worker_log_mode {
         // Validate the mode
@@ -4185,13 +4478,13 @@ async fn update_global_settings(
                 requires_restart: false,
             }));
         }
-        
+
         if doc.get("defaults").is_none() {
             doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
         doc["defaults"]["worker_log_mode"] = toml_edit::value(mode);
     }
-    
+
     // Update OpenCode settings
     if let Some(opencode) = request.opencode {
         if doc.get("defaults").is_none() {
@@ -4200,7 +4493,7 @@ async fn update_global_settings(
         if doc["defaults"].get("opencode").is_none() {
             doc["defaults"]["opencode"] = toml_edit::Item::Table(toml_edit::Table::new());
         }
-        
+
         if let Some(enabled) = opencode.enabled {
             doc["defaults"]["opencode"]["enabled"] = toml_edit::value(enabled);
         }
@@ -4211,14 +4504,16 @@ async fn update_global_settings(
             doc["defaults"]["opencode"]["max_servers"] = toml_edit::value(max_servers as i64);
         }
         if let Some(timeout) = opencode.server_startup_timeout_secs {
-            doc["defaults"]["opencode"]["server_startup_timeout_secs"] = toml_edit::value(timeout as i64);
+            doc["defaults"]["opencode"]["server_startup_timeout_secs"] =
+                toml_edit::value(timeout as i64);
         }
         if let Some(retries) = opencode.max_restart_retries {
             doc["defaults"]["opencode"]["max_restart_retries"] = toml_edit::value(retries as i64);
         }
         if let Some(permissions) = opencode.permissions {
             if doc["defaults"]["opencode"].get("permissions").is_none() {
-                doc["defaults"]["opencode"]["permissions"] = toml_edit::Item::Table(toml_edit::Table::new());
+                doc["defaults"]["opencode"]["permissions"] =
+                    toml_edit::Item::Table(toml_edit::Table::new());
             }
             if let Some(edit) = permissions.edit {
                 doc["defaults"]["opencode"]["permissions"]["edit"] = toml_edit::value(edit);
@@ -4235,13 +4530,13 @@ async fn update_global_settings(
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    
+
     let message = if requires_restart {
         "Settings updated. API server changes require a restart to take effect.".to_string()
     } else {
         "Settings updated successfully.".to_string()
     };
-    
+
     Ok(Json(GlobalSettingsUpdateResponse {
         success: true,
         message,
@@ -4385,12 +4680,7 @@ async fn static_handler(uri: Uri) -> Response {
 
     // SPA fallback
     if let Some(content) = InterfaceAssets::get("index.html") {
-        return Html(
-            std::str::from_utf8(&content.data)
-                .unwrap_or("")
-                .to_string(),
-        )
-        .into_response();
+        return Html(std::str::from_utf8(&content.data).unwrap_or("").to_string()).into_response();
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()

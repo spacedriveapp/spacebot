@@ -18,6 +18,7 @@ import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
 import {AgentIngest} from "@/routes/AgentIngest";
+import {AgentWorkers} from "@/routes/AgentWorkers";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
@@ -170,13 +171,12 @@ const agentWorkersRoute = createRoute({
 	path: "/agents/$agentId/workers",
 	component: function AgentWorkersPage() {
 		const {agentId} = agentWorkersRoute.useParams();
+		const {liveStates, channels} = useLiveContext();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
-				<div className="flex flex-1 items-center justify-center">
-					<p className="text-sm text-ink-faint">
-						Workers control interface coming soon
-					</p>
+				<div className="flex-1 overflow-hidden">
+					<AgentWorkers agentId={agentId} channels={channels} liveStates={liveStates} />
 				</div>
 			</div>
 		);

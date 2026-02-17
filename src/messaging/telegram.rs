@@ -6,13 +6,13 @@ use crate::{Attachment, InboundMessage, MessageContent, OutboundResponse, Status
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
+use teloxide::Bot;
 use teloxide::payloads::setters::*;
 use teloxide::requests::{Request, Requester};
 use teloxide::types::{
-    ChatAction, ChatId, InputFile, MediaKind, MessageId, MessageKind, ReactionType, ReplyParameters,
-    UpdateKind, UserId,
+    ChatAction, ChatId, InputFile, MediaKind, MessageId, MessageKind, ReactionType,
+    ReplyParameters, UpdateKind, UserId,
 };
-use teloxide::Bot;
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -48,10 +48,7 @@ const MAX_MESSAGE_LENGTH: usize = 4096;
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
 impl TelegramAdapter {
-    pub fn new(
-        token: impl Into<String>,
-        permissions: Arc<ArcSwap<TelegramPermissions>>,
-    ) -> Self {
+    pub fn new(token: impl Into<String>, permissions: Arc<ArcSwap<TelegramPermissions>>) -> Self {
         let token = token.into();
         let bot = Bot::new(&token);
         Self {
@@ -249,7 +246,10 @@ impl Messaging for TelegramAdapter {
                         .context("failed to send telegram message")?;
                 }
             }
-            OutboundResponse::ThreadReply { thread_name: _, text } => {
+            OutboundResponse::ThreadReply {
+                thread_name: _,
+                text,
+            } => {
                 self.stop_typing(&message.conversation_id).await;
 
                 // Telegram doesn't have named threads. Reply to the source message instead.
@@ -380,8 +380,10 @@ impl Messaging for TelegramAdapter {
                 // Send one immediately, then repeat every 4 seconds.
                 let handle = tokio::spawn(async move {
                     loop {
-                        if let Err(error) =
-                            bot.send_chat_action(chat_id, ChatAction::Typing).send().await
+                        if let Err(error) = bot
+                            .send_chat_action(chat_id, ChatAction::Typing)
+                            .send()
+                            .await
                         {
                             tracing::debug!(%error, "failed to send typing indicator");
                             break;
@@ -463,10 +465,7 @@ fn has_attachments(message: &teloxide::types::Message) -> bool {
 }
 
 /// Build `MessageContent` from a Telegram message.
-fn build_content(
-    message: &teloxide::types::Message,
-    text: &Option<String>,
-) -> MessageContent {
+fn build_content(message: &teloxide::types::Message, text: &Option<String>) -> MessageContent {
     let attachments = extract_attachments(message);
 
     if attachments.is_empty() {
@@ -635,10 +634,7 @@ fn build_metadata(
             metadata.insert("reply_to_text".into(), truncated.into());
         }
         if let Some(from) = &reply.from {
-            metadata.insert(
-                "reply_to_author".into(),
-                build_display_name(from).into(),
-            );
+            metadata.insert("reply_to_author".into(), build_display_name(from).into());
         }
     }
 

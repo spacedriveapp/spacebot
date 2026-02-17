@@ -2,4 +2,4 @@
 
 pub mod store;
 
-pub use store::{SettingsStore, WorkerLogMode, WORKER_LOG_MODE_KEY};
+pub use store::{SettingsStore, WORKER_LOG_MODE_KEY, WorkerLogMode};
