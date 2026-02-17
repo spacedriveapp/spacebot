@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	api,
+	type BranchFailedEvent,
 	type BranchCompletedEvent,
 	type BranchStartedEvent,
 	type InboundMessageEvent,
@@ -397,6 +398,31 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		});
 	}, [updateItem]);
 
+	const handleBranchFailed = useCallback((data: unknown) => {
+		const event = data as BranchFailedEvent;
+
+		// Remove from active branches
+		setLiveStates((prev) => {
+			const state = prev[event.channel_id];
+			if (!state?.branches[event.branch_id]) return prev;
+			const { [event.branch_id]: _, ...remainingBranches } = state.branches;
+			return {
+				...prev,
+				[event.channel_id]: { ...state, branches: remainingBranches },
+			};
+		});
+
+		// Update timeline item with failure summary
+		updateItem(event.channel_id, event.branch_id, (item) => {
+			if (item.type !== "branch_run") return item;
+			return {
+				...item,
+				conclusion: `Branch failed: ${event.error}`,
+				completed_at: new Date().toISOString(),
+			};
+		});
+	}, [updateItem]);
+
 	const handleToolStarted = useCallback((data: unknown) => {
 		const event = data as ToolStartedEvent;
 		const channelId = event.channel_id;
@@ -612,6 +638,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		worker_completed: handleWorkerCompleted,
 		branch_started: handleBranchStarted,
 		branch_completed: handleBranchCompleted,
+		branch_failed: handleBranchFailed,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,
 	};

@@ -35,11 +35,7 @@ impl ChannelStore {
     /// Extracts platform from the channel ID prefix (e.g. "discord" from
     /// "discord:123:456"). Updates display_name and platform_meta if the
     /// channel already exists. Fire-and-forget.
-    pub fn upsert(
-        &self,
-        channel_id: &str,
-        metadata: &HashMap<String, serde_json::Value>,
-    ) {
+    pub fn upsert(&self, channel_id: &str, metadata: &HashMap<String, serde_json::Value>) {
         let pool = self.pool.clone();
         let channel_id = channel_id.to_string();
         let platform = extract_platform(&channel_id);
@@ -73,12 +69,11 @@ impl ChannelStore {
         let channel_id = channel_id.to_string();
 
         tokio::spawn(async move {
-            if let Err(error) = sqlx::query(
-                "UPDATE channels SET last_activity_at = CURRENT_TIMESTAMP WHERE id = ?"
-            )
-            .bind(&channel_id)
-            .execute(&pool)
-            .await
+            if let Err(error) =
+                sqlx::query("UPDATE channels SET last_activity_at = CURRENT_TIMESTAMP WHERE id = ?")
+                    .bind(&channel_id)
+                    .execute(&pool)
+                    .await
             {
                 tracing::warn!(%error, %channel_id, "failed to touch channel");
             }
@@ -109,21 +104,27 @@ impl ChannelStore {
 
         // Exact name match
         if let Some(channel) = channels.iter().find(|c| {
-            c.display_name.as_ref().is_some_and(|n| n.to_lowercase() == name_lower)
+            c.display_name
+                .as_ref()
+                .is_some_and(|n| n.to_lowercase() == name_lower)
         }) {
             return Ok(Some(channel.clone()));
         }
 
         // Prefix match
         if let Some(channel) = channels.iter().find(|c| {
-            c.display_name.as_ref().is_some_and(|n| n.to_lowercase().starts_with(&name_lower))
+            c.display_name
+                .as_ref()
+                .is_some_and(|n| n.to_lowercase().starts_with(&name_lower))
         }) {
             return Ok(Some(channel.clone()));
         }
 
         // Contains match
         if let Some(channel) = channels.iter().find(|c| {
-            c.display_name.as_ref().is_some_and(|n| n.to_lowercase().contains(&name_lower))
+            c.display_name
+                .as_ref()
+                .is_some_and(|n| n.to_lowercase().contains(&name_lower))
         }) {
             return Ok(Some(channel.clone()));
         }
@@ -153,14 +154,17 @@ impl ChannelStore {
 
     /// Resolve a channel's display name by ID.
     pub async fn resolve_name(&self, channel_id: &str) -> Option<String> {
-        self.get(channel_id).await.ok().flatten().and_then(|c| c.display_name)
+        self.get(channel_id)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|c| c.display_name)
     }
 }
 
 fn row_to_channel_info(row: sqlx::sqlite::SqliteRow) -> ChannelInfo {
     let platform_meta_str: Option<String> = row.try_get("platform_meta").ok().flatten();
-    let platform_meta = platform_meta_str
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let platform_meta = platform_meta_str.and_then(|s| serde_json::from_str(&s).ok());
 
     ChannelInfo {
         id: row.try_get("id").unwrap_or_default(),
@@ -168,8 +172,12 @@ fn row_to_channel_info(row: sqlx::sqlite::SqliteRow) -> ChannelInfo {
         display_name: row.try_get("display_name").ok().flatten(),
         platform_meta,
         is_active: row.try_get::<i32, _>("is_active").unwrap_or(1) == 1,
-        created_at: row.try_get("created_at").unwrap_or_else(|_| chrono::Utc::now()),
-        last_activity_at: row.try_get("last_activity_at").unwrap_or_else(|_| chrono::Utc::now()),
+        created_at: row
+            .try_get("created_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
+        last_activity_at: row
+            .try_get("last_activity_at")
+            .unwrap_or_else(|_| chrono::Utc::now()),
     }
 }
 
@@ -224,11 +232,7 @@ fn extract_platform_meta(
             }
         }
         "slack" => {
-            for key in [
-                "slack_workspace_id",
-                "slack_channel_id",
-                "slack_thread_ts",
-            ] {
+            for key in ["slack_workspace_id", "slack_channel_id", "slack_thread_ts"] {
                 if let Some(value) = metadata.get(key) {
                     meta.insert(key.to_string(), value.clone());
                 }
