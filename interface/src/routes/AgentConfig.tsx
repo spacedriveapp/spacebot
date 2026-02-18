@@ -8,6 +8,12 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
 
+function supportsAdaptiveThinking(modelId: string): boolean {
+	const id = modelId.toLowerCase();
+	return id.includes("opus-4-6") || id.includes("opus-4.6")
+		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
+}
+
 type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser";
 
 const SECTIONS: {
@@ -485,39 +491,42 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 
 	const renderFields = () => {
 		switch (sectionId) {
-			case "routing":
+			case "routing": {
+				const modelSlots = [
+					{ key: "channel", label: "Channel Model", description: "Model for user-facing channels" },
+					{ key: "branch", label: "Branch Model", description: "Model for thinking branches" },
+					{ key: "worker", label: "Worker Model", description: "Model for task workers" },
+					{ key: "compactor", label: "Compactor Model", description: "Model for summarization" },
+					{ key: "cortex", label: "Cortex Model", description: "Model for system observation" },
+				];
 				return (
 					<div className="grid gap-4">
-						<ModelSelect
-							label="Channel Model"
-							description="Model for user-facing channels"
-							value={localValues.channel as string}
-							onChange={(v) => handleChange("channel", v)}
-						/>
-						<ModelSelect
-							label="Branch Model"
-							description="Model for thinking branches"
-							value={localValues.branch as string}
-							onChange={(v) => handleChange("branch", v)}
-						/>
-						<ModelSelect
-							label="Worker Model"
-							description="Model for task workers"
-							value={localValues.worker as string}
-							onChange={(v) => handleChange("worker", v)}
-						/>
-						<ModelSelect
-							label="Compactor Model"
-							description="Model for summarization"
-							value={localValues.compactor as string}
-							onChange={(v) => handleChange("compactor", v)}
-						/>
-						<ModelSelect
-							label="Cortex Model"
-							description="Model for system observation"
-							value={localValues.cortex as string}
-							onChange={(v) => handleChange("cortex", v)}
-						/>
+						{modelSlots.map(({ key, label, description }) => (
+							<div key={key} className="flex flex-col gap-2">
+								<ModelSelect
+									label={label}
+									description={description}
+									value={localValues[key] as string}
+									onChange={(v) => handleChange(key, v)}
+								/>
+								{supportsAdaptiveThinking(localValues[key] as string) && (
+									<div className="ml-4 flex flex-col gap-1">
+										<label className="text-xs font-medium text-ink-dull">Thinking Effort</label>
+										<select
+											value={(localValues[`${key}_thinking_effort`] as string) || "auto"}
+											onChange={(e) => handleChange(`${key}_thinking_effort`, e.target.value)}
+											className="w-full rounded-md border border-app-line/50 bg-app-darkBox/30 px-3 py-1.5 text-sm text-ink focus:outline-none focus:ring-1 focus:ring-accent"
+										>
+											<option value="auto">Auto</option>
+											<option value="max">Max</option>
+											<option value="high">High</option>
+											<option value="medium">Medium</option>
+											<option value="low">Low</option>
+										</select>
+									</div>
+								)}
+							</div>
+						))}
 						<NumberStepper
 							label="Rate Limit Cooldown"
 							description="Seconds to deprioritize rate-limited models"
@@ -528,6 +537,7 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 						/>
 					</div>
 				);
+			}
 			case "tuning":
 				return (
 					<div className="grid gap-4">

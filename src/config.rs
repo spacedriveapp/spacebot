@@ -1224,6 +1224,11 @@ struct TomlRoutingConfig {
     compactor: Option<String>,
     cortex: Option<String>,
     rate_limit_cooldown_secs: Option<u64>,
+    channel_thinking_effort: Option<String>,
+    branch_thinking_effort: Option<String>,
+    worker_thinking_effort: Option<String>,
+    compactor_thinking_effort: Option<String>,
+    cortex_thinking_effort: Option<String>,
     #[serde(default)]
     task_overrides: HashMap<String, String>,
     fallbacks: Option<HashMap<String, Vec<String>>>,
@@ -1493,6 +1498,21 @@ fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> Rou
         rate_limit_cooldown_secs: t
             .rate_limit_cooldown_secs
             .unwrap_or(base.rate_limit_cooldown_secs),
+        channel_thinking_effort: t
+            .channel_thinking_effort
+            .unwrap_or_else(|| base.channel_thinking_effort.clone()),
+        branch_thinking_effort: t
+            .branch_thinking_effort
+            .unwrap_or_else(|| base.branch_thinking_effort.clone()),
+        worker_thinking_effort: t
+            .worker_thinking_effort
+            .unwrap_or_else(|| base.worker_thinking_effort.clone()),
+        compactor_thinking_effort: t
+            .compactor_thinking_effort
+            .unwrap_or_else(|| base.compactor_thinking_effort.clone()),
+        cortex_thinking_effort: t
+            .cortex_thinking_effort
+            .unwrap_or_else(|| base.cortex_thinking_effort.clone()),
     }
 }
 
@@ -1515,6 +1535,7 @@ impl Config {
         if config_path.exists() {
             return false;
         }
+<<<<<<< HEAD
 
         // Check if we have any legacy env keys configured
         let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
@@ -1547,7 +1568,14 @@ impl Config {
                 || key.contains("PROVIDER") && key.contains("API_KEY")
         });
 
-        !has_provider_env_vars
+        // Also check for specific legacy env vars that can bootstrap
+        let has_legacy_bootstrap_vars = std::env::var("ANTHROPIC_API_KEY").is_ok()
+            || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
+            || std::env::var("OPENAI_API_KEY").is_ok()
+            || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+
+        !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
 
     /// Load configuration from the default config file, falling back to env vars.

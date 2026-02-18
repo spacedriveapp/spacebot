@@ -10,6 +10,7 @@
 
 use crate::config::{LlmConfig, ProviderConfig};
 use crate::error::{LlmError, Result};
+
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use std::collections::HashMap;

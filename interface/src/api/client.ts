@@ -462,6 +462,11 @@ export interface RoutingSection {
 	compactor: string;
 	cortex: string;
 	rate_limit_cooldown_secs: number;
+	channel_thinking_effort: string;
+	branch_thinking_effort: string;
+	worker_thinking_effort: string;
+	compactor_thinking_effort: string;
+	cortex_thinking_effort: string;
 }
 
 export interface TuningSection {
@@ -532,6 +537,11 @@ export interface RoutingUpdate {
 	compactor?: string;
 	cortex?: string;
 	rate_limit_cooldown_secs?: number;
+	channel_thinking_effort?: string;
+	branch_thinking_effort?: string;
+	worker_thinking_effort?: string;
+	compactor_thinking_effort?: string;
+	cortex_thinking_effort?: string;
 }
 
 export interface TuningUpdate {
