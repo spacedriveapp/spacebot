@@ -716,6 +716,7 @@ export interface MessagingStatusResponse {
 	discord: PlatformStatus;
 	slack: PlatformStatus;
 	telegram: PlatformStatus;
+	matrix: PlatformStatus;
 	webhook: PlatformStatus;
 }
 
@@ -745,6 +746,11 @@ export interface CreateBindingRequest {
 		discord_token?: string;
 		slack_bot_token?: string;
 		slack_app_token?: string;
+		telegram_token?: string;
+		matrix_homeserver_url?: string;
+		matrix_user_id?: string;
+		matrix_password?: string;
+		matrix_access_token?: string;
 	};
 }
 

@@ -394,7 +394,7 @@ export function Settings() {
 
 function ChannelsSection() {
 	const queryClient = useQueryClient();
-	const [editingPlatform, setEditingPlatform] = useState<"discord" | "slack" | "telegram" | "webhook" | null>(null);
+	const [editingPlatform, setEditingPlatform] = useState<"discord" | "slack" | "telegram" | "matrix" | "webhook" | null>(null);
 	const [platformInputs, setPlatformInputs] = useState<Record<string, string>>({});
 	const [message, setMessage] = useState<{
 		text: string;
@@ -456,6 +456,14 @@ function ChannelsSection() {
 			if (!platformInputs.telegram_token?.trim()) return;
 			request.platform_credentials = {
 				telegram_token: platformInputs.telegram_token.trim(),
+			};
+		} else if (editingPlatform === "matrix") {
+			if (!platformInputs.matrix_homeserver_url?.trim() || !platformInputs.matrix_user_id?.trim()) return;
+			request.platform_credentials = {
+				matrix_homeserver_url: platformInputs.matrix_homeserver_url.trim(),
+				matrix_user_id: platformInputs.matrix_user_id.trim(),
+				...(platformInputs.matrix_password?.trim() && {matrix_password: platformInputs.matrix_password.trim()}),
+				...(platformInputs.matrix_access_token?.trim() && {matrix_access_token: platformInputs.matrix_access_token.trim()}),
 			};
 		}
 
@@ -519,6 +527,17 @@ function ChannelsSection() {
 							}}
 						/>
 						<PlatformCard
+							platform="matrix"
+							name="Matrix"
+							description="Decentralized, E2EE chat protocol"
+							status={messagingStatus?.matrix}
+							onSetup={() => {
+								setEditingPlatform("matrix");
+								setPlatformInputs({});
+								setMessage(null);
+							}}
+						/>
+						<PlatformCard
 							platform="webhook"
 							name="Webhook"
 							description="HTTP webhook receiver"
@@ -529,7 +548,7 @@ function ChannelsSection() {
 								setMessage(null);
 							}}
 						/>
-						
+
 						{/* Coming Soon Platforms */}
 						<PlatformCard
 							platform="email"
@@ -541,12 +560,6 @@ function ChannelsSection() {
 							platform="whatsapp"
 							name="WhatsApp"
 							description="Meta Cloud API integration"
-							disabled
-						/>
-						<PlatformCard
-							platform="matrix"
-							name="Matrix"
-							description="Decentralized chat protocol"
 							disabled
 						/>
 						<PlatformCard
@@ -596,12 +609,14 @@ function ChannelsSection() {
 							{editingPlatform === "discord" && "Configure Discord"}
 							{editingPlatform === "slack" && "Configure Slack"}
 							{editingPlatform === "telegram" && "Configure Telegram"}
+							{editingPlatform === "matrix" && "Configure Matrix"}
 							{editingPlatform === "webhook" && "Configure Webhook"}
 						</DialogTitle>
 						<DialogDescription>
 							{editingPlatform === "discord" && "Enter your Discord bot token to enable Discord integration."}
 							{editingPlatform === "slack" && "Enter your Slack bot and app tokens to enable Slack integration."}
 							{editingPlatform === "telegram" && "Enter your Telegram bot token to enable Telegram integration."}
+							{editingPlatform === "matrix" && "Enter your Matrix homeserver URL, user ID, and either a password or access token."}
 							{editingPlatform === "webhook" && "Configure webhook receiver settings."}
 						</DialogDescription>
 					</DialogHeader>
@@ -681,10 +696,59 @@ function ChannelsSection() {
 						</div>
 					)}
 
+					{editingPlatform === "matrix" && (
+						<div className="flex flex-col gap-3">
+							<div>
+								<label className="mb-1.5 block text-sm font-medium text-ink">Homeserver URL</label>
+								<Input
+									value={platformInputs.matrix_homeserver_url ?? ""}
+									onChange={(e) => setPlatformInputs({...platformInputs, matrix_homeserver_url: e.target.value})}
+									placeholder="https://matrix.org"
+									autoFocus
+								/>
+							</div>
+							<div>
+								<label className="mb-1.5 block text-sm font-medium text-ink">User ID</label>
+								<Input
+									value={platformInputs.matrix_user_id ?? ""}
+									onChange={(e) => setPlatformInputs({...platformInputs, matrix_user_id: e.target.value})}
+									placeholder="@mybot:matrix.org"
+								/>
+							</div>
+							<div>
+								<label className="mb-1.5 block text-sm font-medium text-ink">Password</label>
+								<Input
+									type="password"
+									value={platformInputs.matrix_password ?? ""}
+									onChange={(e) => setPlatformInputs({...platformInputs, matrix_password: e.target.value})}
+									placeholder="Bot account password"
+								/>
+								<p className="mt-1 text-tiny text-ink-faint">
+									Leave empty if using access token instead
+								</p>
+							</div>
+							<div>
+								<label className="mb-1.5 block text-sm font-medium text-ink">Access Token (alternative)</label>
+								<Input
+									type="password"
+									value={platformInputs.matrix_access_token ?? ""}
+									onChange={(e) => setPlatformInputs({...platformInputs, matrix_access_token: e.target.value})}
+									placeholder="syt_..."
+									onKeyDown={(e) => {
+										if (e.key === "Enter") handleSavePlatform();
+									}}
+								/>
+								<p className="mt-1 text-tiny text-ink-faint">
+									Leave empty if using password instead
+								</p>
+							</div>
+						</div>
+					)}
+
 					{editingPlatform === "webhook" && (
 						<div className="flex flex-col gap-3">
 							<p className="text-sm text-ink-dull">
-								Webhook receiver is configured in <code className="rounded bg-app-box px-1 py-0.5 text-tiny">config.toml</code>. 
+								Webhook receiver is configured in <code className="rounded bg-app-box px-1 py-0.5 text-tiny">config.toml</code>.
 								No additional setup required here.
 							</p>
 						</div>
@@ -713,6 +777,7 @@ function ChannelsSection() {
 									editingPlatform === "discord" ? !platformInputs.discord_token?.trim() :
 									editingPlatform === "slack" ? (!platformInputs.slack_bot_token?.trim() || !platformInputs.slack_app_token?.trim()) :
 									editingPlatform === "telegram" ? !platformInputs.telegram_token?.trim() :
+									editingPlatform === "matrix" ? (!platformInputs.matrix_homeserver_url?.trim() || !platformInputs.matrix_user_id?.trim() || (!platformInputs.matrix_password?.trim() && !platformInputs.matrix_access_token?.trim())) :
 									false
 								}
 								loading={createPlatformMutation.isPending}
@@ -734,7 +799,7 @@ function BindingsSection() {
 	const [editingBinding, setEditingBinding] = useState<BindingInfo | null>(null);
 	const [bindingForm, setBindingForm] = useState({
 		agent_id: "main",
-		channel: "discord" as "discord" | "slack" | "telegram" | "webhook",
+		channel: "discord" as "discord" | "slack" | "telegram" | "matrix" | "webhook",
 		guild_id: "",
 		workspace_id: "",
 		chat_id: "",
@@ -838,6 +903,9 @@ function BindingsSection() {
 		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
 			request.chat_id = bindingForm.chat_id.trim();
 		}
+		if (bindingForm.channel === "matrix" && bindingForm.chat_id.trim()) {
+			request.chat_id = bindingForm.chat_id.trim();
+		}
 
 		if (bindingForm.channel_ids.length > 0) {
 			request.channel_ids = bindingForm.channel_ids;
@@ -883,6 +951,9 @@ function BindingsSection() {
 			request.workspace_id = bindingForm.workspace_id.trim();
 		}
 		if (bindingForm.channel === "telegram" && bindingForm.chat_id.trim()) {
+			request.chat_id = bindingForm.chat_id.trim();
+		}
+		if (bindingForm.channel === "matrix" && bindingForm.chat_id.trim()) {
 			request.chat_id = bindingForm.chat_id.trim();
 		}
 
@@ -1081,6 +1152,7 @@ function BindingsSection() {
 									<SelectItem value="discord">Discord</SelectItem>
 									<SelectItem value="slack">Slack</SelectItem>
 									<SelectItem value="telegram">Telegram</SelectItem>
+									<SelectItem value="matrix">Matrix</SelectItem>
 									<SelectItem value="webhook">Webhook</SelectItem>
 								</SelectContent>
 							</Select>
@@ -1124,6 +1196,20 @@ function BindingsSection() {
 								/>
 								<p className="mt-1 text-tiny text-ink-faint">
 									Leave empty to match any chat
+								</p>
+							</div>
+						)}
+
+						{bindingForm.channel === "matrix" && (
+							<div>
+								<label className="mb-1.5 block text-sm font-medium text-ink">Room ID</label>
+								<Input
+									value={bindingForm.chat_id}
+									onChange={(e) => setBindingForm({...bindingForm, chat_id: e.target.value})}
+									placeholder="!roomid:matrix.org (optional)"
+								/>
+								<p className="mt-1 text-tiny text-ink-faint">
+									Leave empty to match any room. Find in Element: Settings → Advanced → Internal room ID
 								</p>
 							</div>
 						)}

@@ -3165,6 +3165,8 @@ struct PlatformStatus {
 struct MessagingStatusResponse {
     discord: PlatformStatus,
     slack: PlatformStatus,
+    telegram: PlatformStatus,
+    matrix: PlatformStatus,
     webhook: PlatformStatus,
 }
 
@@ -3174,7 +3176,7 @@ async fn messaging_status(
 ) -> Result<Json<MessagingStatusResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (discord, slack, webhook) = if config_path.exists() {
+    let (discord, slack, telegram, matrix, webhook) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|error| {
@@ -3234,6 +3236,54 @@ async fn messaging_status(
                 enabled: false,
             });
 
+        let telegram_status = doc
+            .get("messaging")
+            .and_then(|m| m.get("telegram"))
+            .map(|t| {
+                let has_token = t
+                    .get("token")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let enabled = t
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                PlatformStatus {
+                    configured: has_token,
+                    enabled: has_token && enabled,
+                }
+            })
+            .unwrap_or(PlatformStatus {
+                configured: false,
+                enabled: false,
+            });
+
+        let matrix_status = doc
+            .get("messaging")
+            .and_then(|m| m.get("matrix"))
+            .map(|m| {
+                let has_homeserver = m
+                    .get("homeserver_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let has_user_id = m
+                    .get("user_id")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let enabled = m
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                PlatformStatus {
+                    configured: has_homeserver && has_user_id,
+                    enabled: has_homeserver && has_user_id && enabled,
+                }
+            })
+            .unwrap_or(PlatformStatus {
+                configured: false,
+                enabled: false,
+            });
+
         let webhook_status = doc
             .get("messaging")
             .and_then(|m| m.get("webhook"))
@@ -3252,18 +3302,20 @@ async fn messaging_status(
                 enabled: false,
             });
 
-        (discord_status, slack_status, webhook_status)
+        (discord_status, slack_status, telegram_status, matrix_status, webhook_status)
     } else {
         let default = PlatformStatus {
             configured: false,
             enabled: false,
         };
-        (default.clone(), default.clone(), default)
+        (default.clone(), default.clone(), default.clone(), default.clone(), default)
     };
 
     Ok(Json(MessagingStatusResponse {
         discord,
         slack,
+        telegram,
+        matrix,
         webhook,
     }))
 }
@@ -3360,6 +3412,14 @@ struct PlatformCredentials {
     /// Telegram bot token.
     #[serde(default)]
     telegram_token: Option<String>,
+    #[serde(default)]
+    matrix_homeserver_url: Option<String>,
+    #[serde(default)]
+    matrix_user_id: Option<String>,
+    #[serde(default)]
+    matrix_password: Option<String>,
+    #[serde(default)]
+    matrix_access_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -3398,6 +3458,7 @@ async fn create_binding(
     let mut new_discord_token: Option<String> = None;
     let mut new_slack_tokens: Option<(String, String)> = None;
     let mut new_telegram_token: Option<String> = None;
+    let mut new_matrix_homeserver: Option<String> = None;
 
     // Write platform credentials if provided
     if let Some(credentials) = &request.platform_credentials {
@@ -3446,6 +3507,33 @@ async fn create_binding(
                 telegram["enabled"] = toml_edit::value(true);
                 telegram["token"] = toml_edit::value(token.as_str());
                 new_telegram_token = Some(token.clone());
+            }
+        }
+        if let Some(homeserver_url) = &credentials.matrix_homeserver_url {
+            let user_id = credentials.matrix_user_id.as_deref().unwrap_or("");
+            if !homeserver_url.is_empty() && !user_id.is_empty() {
+                if doc.get("messaging").is_none() {
+                    doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                let messaging = doc["messaging"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                if !messaging.contains_key("matrix") {
+                    messaging["matrix"] = toml_edit::Item::Table(toml_edit::Table::new());
+                }
+                let matrix = messaging["matrix"].as_table_mut().ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+                matrix["enabled"] = toml_edit::value(true);
+                matrix["homeserver_url"] = toml_edit::value(homeserver_url.as_str());
+                matrix["user_id"] = toml_edit::value(user_id);
+                if let Some(password) = &credentials.matrix_password {
+                    if !password.is_empty() {
+                        matrix["password"] = toml_edit::value(password.as_str());
+                    }
+                }
+                if let Some(access_token) = &credentials.matrix_access_token {
+                    if !access_token.is_empty() {
+                        matrix["access_token"] = toml_edit::value(access_token.as_str());
+                    }
+                }
+                new_matrix_homeserver = Some(homeserver_url.clone());
             }
         }
     }
@@ -3589,6 +3677,32 @@ async fn create_binding(
                 let adapter = crate::messaging::telegram::TelegramAdapter::new(&token, telegram_perms);
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start telegram adapter");
+                }
+            }
+
+            if new_matrix_homeserver.is_some() {
+                if let Some(matrix_config) = &new_config.messaging.matrix {
+                    let matrix_perms = crate::config::MatrixPermissions::from_config(
+                        matrix_config, &new_config.bindings,
+                    );
+                    let matrix_perms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(matrix_perms));
+                    let data_dir = if matrix_config.data_dir.is_empty() {
+                        new_config.instance_dir.join("matrix_store")
+                    } else {
+                        std::path::PathBuf::from(&matrix_config.data_dir)
+                    };
+                    match crate::messaging::matrix::MatrixAdapter::new(
+                        matrix_config, data_dir, matrix_perms,
+                    ).await {
+                        Ok(adapter) => {
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to hot-start matrix adapter");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "failed to create matrix adapter for hot-start");
+                        }
+                    }
                 }
             }
         }
