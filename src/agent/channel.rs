@@ -721,10 +721,24 @@ impl Channel {
             guard.clone()
         };
 
-        let result = agent.prompt(user_text)
+        let mut result = agent.prompt(user_text)
             .with_history(&mut history)
             .with_hook(self.hook.clone())
             .await;
+
+        // If the LLM responded with text that looks like tool call syntax, it failed
+        // to use the tool calling API. Inject a correction and give it one more try.
+        if let Ok(ref response) = result {
+            if extract_reply_from_tool_syntax(response.trim()).is_some() {
+                tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
+                let prompt_engine = self.deps.runtime_config.prompts.load();
+                let correction = prompt_engine.render_system_tool_syntax_correction()?;
+                result = agent.prompt(&correction)
+                    .with_history(&mut history)
+                    .with_hook(self.hook.clone())
+                    .await;
+            }
+        }
 
         // Write history back after the agentic loop completes
         {
@@ -754,10 +768,17 @@ impl Channel {
                 } else {
                     // If the LLM returned text without using the reply tool, send it
                     // directly. Some models respond with text instead of tool calls.
+                    // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
+                    // attempt to extract the reply content and send that instead.
                     let text = response.trim();
-                    if !text.is_empty() {
-                        self.state.conversation_logger.log_bot_message(&self.state.channel_id, text);
-                        if let Err(error) = self.response_tx.send(OutboundResponse::Text(text.to_string())).await {
+                    let extracted = extract_reply_from_tool_syntax(text);
+                    let final_text = extracted.as_deref().unwrap_or(text);
+                    if !final_text.is_empty() {
+                        if extracted.is_some() {
+                            tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
+                        }
+                        self.state.conversation_logger.log_bot_message(&self.state.channel_id, final_text);
+                        if let Err(error) = self.response_tx.send(OutboundResponse::Text(final_text.to_string())).await {
                             tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                         }
                     }
@@ -1250,6 +1271,51 @@ where
             notify,
         });
     })
+}
+
+/// Some models emit tool call syntax as plain text instead of making actual tool calls.
+/// When the text starts with a tool-like prefix (e.g. `[reply]`, `(reply)`), try to
+/// extract the reply content so we can send it cleanly instead of showing raw JSON.
+/// Returns `None` if the text doesn't match or can't be parsed — the caller falls
+/// back to sending the original text as-is.
+fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
+    // Match patterns like "[reply]\n{...}" or "(reply)\n{...}" (with optional whitespace)
+    let tool_prefixes = [
+        "[reply]", "(reply)", "[react]", "(react)",
+        "[skip]", "(skip)", "[branch]", "(branch)",
+        "[spawn_worker]", "(spawn_worker)", "[route]", "(route)",
+        "[cancel]", "(cancel)",
+    ];
+
+    let lower = text.to_lowercase();
+    let matched_prefix = tool_prefixes.iter().find(|p| lower.starts_with(*p))?;
+    let is_reply = matched_prefix.contains("reply");
+    let is_skip = matched_prefix.contains("skip");
+
+    // For skip, just return empty — the user shouldn't see anything
+    if is_skip {
+        return Some(String::new());
+    }
+
+    // For non-reply tools (react, branch, etc.), suppress entirely
+    if !is_reply {
+        return Some(String::new());
+    }
+
+    // Try to extract "content" from the JSON payload after the prefix
+    let rest = text[matched_prefix.len()..].trim();
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rest) {
+        if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
+            return Some(content.to_string());
+        }
+    }
+
+    // If we can't parse JSON, the rest might just be the message itself (no JSON wrapper)
+    if !rest.is_empty() && !rest.starts_with('{') {
+        return Some(rest.to_string());
+    }
+
+    None
 }
 
 /// Format a user message with sender attribution from message metadata.

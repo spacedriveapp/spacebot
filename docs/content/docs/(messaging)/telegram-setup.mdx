@@ -1,115 +1,146 @@
 ---
 title: Telegram Setup
-description: Step-by-step guide to connect Spacebot to Telegram.
+description: Connect Spacebot to Telegram.
 ---
 
-# Telegram Setup Guide
+# Telegram Setup
 
-How to connect Spacebot to Telegram so it can receive messages and respond through the Telegram adapter.
+Connect Spacebot to Telegram. Takes about 2 minutes.
 
-## Create a Bot with BotFather
+You need a **Bot Token** from Telegram's BotFather.
 
-### 1. Start a Chat with BotFather
+## Step 1: Create a Bot
 
-Open Telegram and search for [@BotFather](https://t.me/BotFather), or click the link directly. This is Telegram's official bot for managing bots.
+Open Telegram and message [@BotFather](https://t.me/BotFather). Send `/newbot` and follow the prompts:
 
-### 2. Create a New Bot
-
-Send `/newbot` and follow the prompts:
-
-- **Name**: The display name for your bot (e.g. "My Spacebot")
+- **Name**: The display name (e.g. "My Spacebot")
 - **Username**: Must end in `bot` (e.g. `my_spacebot_bot`)
 
-BotFather will respond with your **bot token**. It looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`. Keep this secret.
+BotFather replies with your **bot token**. It looks like `123456789:ABCdefGHIjklMNOpqrsTUVwxyz`.
 
-### 3. Configure Bot Settings (Optional)
+## Step 2: Configure Privacy (Optional)
 
-Send these commands to BotFather to configure your bot:
+By default, bots in groups only see messages that mention them directly, reply to them, or start with a `/command`.
 
-- `/setdescription` — set the bot's profile description
-- `/setabouttext` — set the "about" text shown in the bot's profile
-- `/setuserpic` — set the bot's profile picture
-- `/setprivacy` — set to **Disable** if you want the bot to receive all messages in groups (not just commands and mentions)
+If you want the bot to see **all messages** in a group, send `/setprivacy` to BotFather and select **Disable**.
 
-## Spacebot Configuration
+<Callout type="warn">
+Privacy mode must be disabled **before** adding the bot to a group. If the bot is already in a group, remove it and re-add it after changing the setting.
+</Callout>
 
-Add the following to your `config.toml`:
+## Step 3: Add Token to Spacebot
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+1. Open your Spacebot dashboard
+2. Go to **Settings** → **Messaging Platforms**
+3. Click **Setup** on the Telegram card
+4. Paste your **Bot Token**
+5. Click **Save**
+
+Spacebot connects immediately — no restart needed.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
-[llm]
-openrouter_key = "env:OPENROUTER_API_KEY"
+[messaging.telegram]
+enabled = true
+token = "123456789:ABCdefGHIjklMNOpqrsTUVwxyz"
 
-[defaults.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
+[[bindings]]
+agent_id = "main"
+channel = "telegram"
+```
 
+You can also reference environment variables:
+
+```toml
 [messaging.telegram]
 enabled = true
 token = "env:TELEGRAM_BOT_TOKEN"
+```
 
-[[agents]]
-id = "main"
-default = true
+Token changes in config require a restart.
 
-# Route a specific Telegram chat to the "main" agent
+</Tab>
+</Tabs>
+
+## Step 4: Add the Bot
+
+Add the bot to a group, or start a DM with it by searching for its username in Telegram.
+
+## Verify It's Working
+
+The Telegram card on the Settings page shows a green status dot when connected. Send a message to the bot — you should see a typing indicator followed by a reply.
+
+## Filtering
+
+### Restrict to specific chats
+
+By default the bot responds in any chat it's added to. To limit it, add chat IDs to your binding.
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+Go to **Settings** → **Bindings** tab and add a chat ID to your Telegram binding.
+
+</Tab>
+<Tab value="TOML Config">
+
+```toml
 [[bindings]]
 agent_id = "main"
 channel = "telegram"
 chat_id = "-100123456789"
 ```
 
-Set the environment variables:
+Without `chat_id`, the bot responds in all chats.
 
-```bash
-export TELEGRAM_BOT_TOKEN="your-bot-token-from-botfather"
-export OPENROUTER_API_KEY="your-openrouter-key-here"
-```
+</Tab>
+</Tabs>
 
-### Getting Chat IDs
+### Finding chat IDs
 
-Telegram chat IDs are numbers. To find them:
+- **DMs**: The chat ID is the user's Telegram user ID. You can find it by messaging [@userinfobot](https://t.me/userinfobot).
+- **Groups**: Add the bot to the group, send a message, and check the Spacebot logs — the `conversation_id` will show as `telegram:<chat_id>`. Group IDs are negative numbers (e.g. `-100123456789`).
 
-- **Private chats (DMs)**: The chat ID is the user's Telegram user ID. You can find this by sending a message to your bot, then checking the logs — Spacebot logs the `conversation_id` as `telegram:<chat_id>`.
-- **Groups/Supergroups**: Add the bot to the group, send a message, and check the logs. Group IDs are negative numbers (e.g. `-100123456789`).
-- **Channels**: Similar to groups, channel IDs are negative numbers.
+### DM filtering
 
-Alternatively, use a bot like [@userinfobot](https://t.me/userinfobot) to find your user ID, or forward a message from the group to [@JsonDumpBot](https://t.me/JsonDumpBot) to get the chat ID.
+By default, DMs from anyone are accepted. To restrict to specific users:
 
-### Open Access (No Chat Filter)
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
 
-To allow messages from any chat that the bot is added to, omit `chat_id` from the binding:
+Go to **Settings** → **Messaging Platforms** → Telegram card and add user IDs to the **DM Allowed Users** list.
 
-```toml
-[[bindings]]
-agent_id = "main"
-channel = "telegram"
-```
-
-### DM Access Control
-
-By default, DMs from anyone are accepted. To restrict DMs to specific users:
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
 [messaging.telegram]
-enabled = true
-token = "env:TELEGRAM_BOT_TOKEN"
 dm_allowed_users = ["123456789", "987654321"]
 ```
 
-When `dm_allowed_users` is empty (the default), all DMs are accepted. When populated, only listed user IDs can DM the bot.
+When the list is empty (default), all DMs are accepted. Permission changes hot-reload within a couple seconds — no restart needed.
 
-### Multiple Chats, Multiple Agents
+</Tab>
+</Tabs>
 
-Route different Telegram chats to different agents:
+### Multiple chats, multiple agents
+
+Route different Telegram chats to different agents.
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+Create multiple bindings in the **Bindings** tab, each with a different chat ID and agent.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
-[[agents]]
-id = "community"
-default = true
-
-[[agents]]
-id = "team"
-
 [[bindings]]
 agent_id = "community"
 channel = "telegram"
@@ -121,37 +152,16 @@ channel = "telegram"
 chat_id = "-100222222222"
 ```
 
-## Platform Notes
+Each agent has its own memory, identity, and conversation history.
 
-### Message Limits
+</Tab>
+</Tabs>
 
-Telegram's message character limit is 4096 characters. Messages longer than this are automatically split at newlines, then spaces, then hard-cut.
+## Troubleshooting
 
-### Typing Indicators
-
-The bot sends `typing` indicators while processing. Telegram's typing indicator expires after 5 seconds, so Spacebot repeats it every 4 seconds until a response is ready.
-
-### Streaming
-
-Responses stream via `editMessageText` — a placeholder message is sent immediately, then edited as content arrives. Edits are rate-limited to ~1 per second to avoid Telegram API throttling.
-
-### Reactions
-
-Telegram reactions are limited to the emoji set configured for each chat. If the bot tries to react with an unsupported emoji, the reaction is silently skipped.
-
-### File Attachments
-
-The bot can receive and send files (documents, photos, videos, audio, voice messages). Received files are passed as attachment metadata with Telegram `file_id` URLs. Outbound files are sent via `sendDocument`.
-
-### History Backfill
-
-Telegram's Bot API does not support fetching message history. When Spacebot connects to a Telegram chat for the first time, it starts with no historical context. Previous conversations are available on reconnect from Spacebot's own database.
-
-### Group Privacy Mode
-
-By default, Telegram bots in group privacy mode only receive messages that:
-- Mention the bot directly (`@your_bot_username`)
-- Are replies to the bot's messages
-- Are commands (`/command`)
-
-To receive all messages in groups, disable privacy mode via BotFather: `/setprivacy` → **Disable**. This must be done before adding the bot to the group — existing groups may need the bot to be removed and re-added.
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| `401 Unauthorized` on startup | Invalid token | Get a fresh token from BotFather |
+| Bot doesn't respond in group | Privacy mode | Send `/setprivacy` → Disable to BotFather, then remove and re-add the bot |
+| Bot doesn't respond to DMs | DM filtering | Add user ID to `dm_allowed_users`, or clear the list to allow all |
+| Reaction fails silently | Unsupported emoji | Telegram limits reactions to each chat's configured emoji set |

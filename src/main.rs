@@ -43,6 +43,57 @@ enum Command {
     },
     /// Show status of the running daemon
     Status,
+    /// Manage skills
+    #[command(subcommand)]
+    Skill(SkillCommand),
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Install a skill from GitHub or skills.sh registry
+    Add {
+        /// Skill spec: owner/repo or owner/repo/skill-name
+        spec: String,
+        /// Agent ID to install for (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Install to instance-level skills directory (shared across all agents)
+        #[arg(short, long)]
+        instance: bool,
+    },
+    /// Install a skill from a .skill file
+    Install {
+        /// Path to .skill file
+        path: std::path::PathBuf,
+        /// Agent ID to install for (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+        /// Install to instance-level skills directory (shared across all agents)
+        #[arg(short, long)]
+        instance: bool,
+    },
+    /// List installed skills
+    List {
+        /// Agent ID (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+    /// Remove an installed skill
+    Remove {
+        /// Skill name
+        name: String,
+        /// Agent ID (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+    /// Show skill details
+    Info {
+        /// Skill name
+        name: String,
+        /// Agent ID (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
 }
 
 /// Tracks an active conversation channel and its message sender.
@@ -53,6 +104,10 @@ struct ActiveChannel {
 }
 
 fn main() -> anyhow::Result<()> {
+    rustls::crypto::ring::default_provider()
+        .install_default()
+        .expect("failed to install rustls crypto provider");
+
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
 
@@ -64,6 +119,7 @@ fn main() -> anyhow::Result<()> {
             cmd_start(cli.config, cli.debug, foreground)
         }
         Command::Status => cmd_status(),
+        Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
     }
 }
 
@@ -221,6 +277,177 @@ fn cmd_status() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_skill(
+    config_path: Option<std::path::PathBuf>,
+    skill_cmd: SkillCommand,
+) -> anyhow::Result<()> {
+    let config = load_config(&config_path)?;
+    
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+    
+    runtime.block_on(async {
+        match skill_cmd {
+            SkillCommand::Add { spec, agent, instance } => {
+                let target_dir = resolve_skills_dir(&config, agent.as_deref(), instance)?;
+                
+                println!("Installing skill from: {spec}");
+                println!("Target directory: {}", target_dir.display());
+                
+                let installed = spacebot::skills::install_from_github(&spec, &target_dir)
+                    .await
+                    .context("failed to install skill")?;
+                
+                println!("\nSuccessfully installed {} skill(s):", installed.len());
+                for name in installed {
+                    println!("  - {name}");
+                }
+                
+                Ok(())
+            }
+            SkillCommand::Install { path, agent, instance } => {
+                let target_dir = resolve_skills_dir(&config, agent.as_deref(), instance)?;
+                
+                println!("Installing skill from: {}", path.display());
+                println!("Target directory: {}", target_dir.display());
+                
+                let installed = spacebot::skills::install_from_file(&path, &target_dir)
+                    .await
+                    .context("failed to install skill")?;
+                
+                println!("\nSuccessfully installed {} skill(s):", installed.len());
+                for name in installed {
+                    println!("  - {name}");
+                }
+                
+                Ok(())
+            }
+            SkillCommand::List { agent } => {
+                let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
+                
+                let skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
+                
+                if skills.is_empty() {
+                    println!("No skills installed");
+                    return Ok(());
+                }
+                
+                println!("Installed skills ({}):\n", skills.len());
+                
+                for info in skills.list() {
+                    let source_label = match info.source {
+                        spacebot::skills::SkillSource::Instance => "instance",
+                        spacebot::skills::SkillSource::Workspace => "workspace",
+                    };
+                    
+                    println!("  {} ({})", info.name, source_label);
+                    if !info.description.is_empty() {
+                        println!("    {}", info.description);
+                    }
+                    println!();
+                }
+                
+                Ok(())
+            }
+            SkillCommand::Remove { name, agent } => {
+                let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
+                
+                let mut skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
+                
+                match skills.remove(&name).await? {
+                    Some(path) => {
+                        println!("Removed skill: {name}");
+                        println!("Path: {}", path.display());
+                    }
+                    None => {
+                        eprintln!("Skill not found: {name}");
+                        std::process::exit(1);
+                    }
+                }
+                
+                Ok(())
+            }
+            SkillCommand::Info { name, agent } => {
+                let (instance_dir, workspace_dir) = resolve_skill_dirs(&config, agent.as_deref())?;
+                
+                let skills = spacebot::skills::SkillSet::load(&instance_dir, &workspace_dir).await;
+                
+                let Some(skill) = skills.get(&name) else {
+                    eprintln!("Skill not found: {name}");
+                    std::process::exit(1);
+                };
+                
+                let source_label = match skill.source {
+                    spacebot::skills::SkillSource::Instance => "instance",
+                    spacebot::skills::SkillSource::Workspace => "workspace",
+                };
+                
+                println!("Skill: {}", skill.name);
+                println!("Description: {}", skill.description);
+                println!("Source: {source_label}");
+                println!("Path: {}", skill.file_path.display());
+                println!("Base directory: {}", skill.base_dir.display());
+                
+                // Show a preview of the content
+                let preview_len = skill.content.chars().take(500).count();
+                if preview_len < skill.content.len() {
+                    println!("\nContent preview (first 500 chars):\n");
+                    println!("{}", &skill.content[..preview_len]);
+                    println!("\n... ({} more characters)", skill.content.len() - preview_len);
+                } else {
+                    println!("\nContent:\n");
+                    println!("{}", skill.content);
+                }
+                
+                Ok(())
+            }
+        }
+    })
+}
+
+fn resolve_skills_dir(
+    config: &spacebot::config::Config,
+    agent_id: Option<&str>,
+    instance: bool,
+) -> anyhow::Result<std::path::PathBuf> {
+    if instance {
+        Ok(config.skills_dir())
+    } else {
+        let agent_config = get_agent_config(config, agent_id)?;
+        let resolved = agent_config.resolve(&config.instance_dir, &config.defaults);
+        Ok(resolved.skills_dir())
+    }
+}
+
+fn resolve_skill_dirs(
+    config: &spacebot::config::Config,
+    agent_id: Option<&str>,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    let agent_config = get_agent_config(config, agent_id)?;
+    let resolved = agent_config.resolve(&config.instance_dir, &config.defaults);
+    Ok((config.skills_dir(), resolved.skills_dir()))
+}
+
+fn get_agent_config<'a>(
+    config: &'a spacebot::config::Config,
+    agent_id: Option<&str>,
+) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
+    let agent_id = agent_id.unwrap_or_else(|| {
+        if config.agents.is_empty() {
+            panic!("no agents configured");
+        }
+        &config.agents[0].id
+    });
+    
+    config
+        .agents
+        .iter()
+        .find(|a| a.id == agent_id)
+        .with_context(|| format!("agent not found: {agent_id}"))
+}
+
 fn load_config(config_path: &Option<std::path::PathBuf>) -> anyhow::Result<spacebot::config::Config> {
     if let Some(path) = config_path {
         spacebot::config::Config::load_from_path(path)
@@ -255,7 +482,13 @@ async fn run(
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
 
     let _http_handle = if config.api.enabled {
-        let bind: std::net::SocketAddr = format!("{}:{}", config.api.bind, config.api.port)
+        // IPv6 addresses need brackets when combined with port: [::]:19898
+        let bind_str = if config.api.bind.contains(':') {
+            format!("[{}]:{}", config.api.bind, config.api.port)
+        } else {
+            format!("{}:{}", config.api.bind, config.api.port)
+        };
+        let bind: std::net::SocketAddr = bind_str
             .parse()
             .context("invalid API bind address")?;
         let http_shutdown = shutdown_rx.clone();
@@ -859,6 +1092,7 @@ async fn initialize_agents(
         api_state.set_memory_searches(memory_searches);
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
+        api_state.set_instance_dir(config.instance_dir.clone());
     }
 
     // Initialize messaging adapters

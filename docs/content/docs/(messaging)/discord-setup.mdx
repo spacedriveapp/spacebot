@@ -1,44 +1,35 @@
 ---
 title: Discord Setup
-description: Step-by-step guide to connect Spacebot to Discord.
+description: Connect Spacebot to Discord.
 ---
 
-# Discord Setup Guide
+# Discord Setup
 
-How to connect Spacebot to Discord so it can receive messages and respond through the Discord adapter.
+Connect Spacebot to your Discord server. Takes about 5 minutes.
 
-## Quick Setup (Hosted)
+You need a **Bot Token** from a Discord application.
 
-If you're running a hosted instance on spacebot.sh, the embedded UI handles most of this for you:
+## Step 1: Create an Application
 
-1. Create a bot in the [Discord Developer Portal](#1-create-an-application) and copy the token
-2. Open the **Agent Channels** tab in your instance UI
-3. Click **Connect Channel** → select **Discord**
-4. Paste your bot token and guild ID
-5. Click **Add Binding** — the bot starts immediately, no restart needed
+Go to [discord.com/developers/applications](https://discord.com/developers/applications) → **New Application**.
 
-The rest of this guide covers manual `config.toml` setup and the full details.
+Name it whatever you want — this is the internal name, not the bot's display name.
 
-## Discord Developer Portal
+## Step 2: Create a Bot
 
-### 1. Create an Application
+In your application settings, go to **Bot**:
 
-Go to https://discord.com/developers/applications and create a new application. Name it whatever you want — this is the internal name, not the bot's display name.
+- Click **Add Bot**
+- Copy the **bot token** — you'll need this in a moment
+- Under **Privileged Gateway Intents**, enable **Message Content Intent**
 
-### 2. Create a Bot
+<Callout type="warn">
+Message Content Intent is required. Without it, all message bodies arrive empty and the bot can't read what anyone says.
+</Callout>
 
-Under the "Bot" section:
+## Step 3: Invite the Bot to Your Server
 
-- Click "Add Bot"
-- Copy the **bot token** — you'll need this for the config
-- Under "Privileged Gateway Intents", enable:
-  - **Message Content Intent** (required — without this, message bodies arrive empty)
-  - **Server Members Intent** is NOT needed
-  - **Presence Intent** is NOT needed
-
-### 3. Generate an Invite URL
-
-Under "OAuth2" > "URL Generator":
+In your application settings, go to **OAuth2** → **URL Generator**:
 
 - Scopes: `bot`
 - Bot Permissions:
@@ -48,120 +39,130 @@ Under "OAuth2" > "URL Generator":
   - Read Message History
   - Embed Links
   - Attach Files
+  - Add Reactions
 
-Copy the generated URL and open it in your browser to invite the bot to your server.
+Copy the generated URL and open it in your browser to invite the bot.
 
-### 4. Get Your Guild ID
+## Step 4: Get Your Guild ID
 
-In Discord, enable Developer Mode (User Settings > Advanced > Developer Mode). Right-click your server name and "Copy Server ID". This is your `guild_id`.
+In Discord, enable Developer Mode (User Settings → Advanced → Developer Mode). Right-click your server name → **Copy Server ID**. This is your guild ID.
 
-## Spacebot Configuration
+## Step 5: Add Token to Spacebot
 
-Add the following to your `config.toml`:
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+1. Open your Spacebot dashboard
+2. Go to **Settings** → **Messaging Platforms**
+3. Click **Setup** on the Discord card
+4. Paste your **Bot Token**
+5. Click **Save**
+
+Spacebot connects immediately — no restart needed.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
-[llm]
-openrouter_key = "env:OPENROUTER_API_KEY"
-
-[defaults.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
-
 [messaging.discord]
 enabled = true
-token = "env:DISCORD_BOT_TOKEN"
+token = "your-bot-token"
 
-[[agents]]
-id = "main"
-default = true
-
-# Route this Discord server to the "main" agent
 [[bindings]]
 agent_id = "main"
 channel = "discord"
-guild_id = "YOUR_GUILD_ID_HERE"
+guild_id = "YOUR_GUILD_ID"
 ```
 
-Set the environment variables:
-
-```bash
-export DISCORD_BOT_TOKEN="your-bot-token-here"
-export OPENROUTER_API_KEY="your-openrouter-key-here"
-```
-
-### Discord Config Options
-
-The full `[messaging.discord]` section:
+You can also reference environment variables:
 
 ```toml
 [messaging.discord]
 enabled = true
 token = "env:DISCORD_BOT_TOKEN"
-allow_bot_messages = false       # process messages from other bots (default: false)
-dm_allowed_users = ["USER_ID"]   # user IDs allowed to DM the bot (instance-wide)
 ```
 
-### Binding Options
+Token changes in config require a restart.
 
-Each `[[bindings]]` entry supports:
+</Tab>
+</Tabs>
+
+## Verify It's Working
+
+The Discord card on the Settings page shows a green status dot when connected. Send a message in a channel the bot has access to — you should see a typing indicator followed by a reply.
+
+## Filtering
+
+### Restrict to specific channels
+
+By default the bot responds in every channel it has access to. To limit it, add channel IDs to your binding.
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+Go to **Settings** → **Bindings** tab and add channel IDs to your Discord binding.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
 [[bindings]]
 agent_id = "main"
 channel = "discord"
 guild_id = "123456789"
-channel_ids = ["111111", "222222"]     # restrict to specific channels (empty = all)
-dm_allowed_users = ["333333"]          # per-binding DM allowlist (merged with instance-wide)
+channel_ids = ["111111", "222222"]
 ```
 
-- `channel_ids` — When set, the bot only responds in those channels (and threads parented to them). When empty, it responds in all channels.
-- `dm_allowed_users` — User IDs allowed to DM the bot, scoped to this binding. Merged with the instance-wide `dm_allowed_users` on `[messaging.discord]`.
+If `channel_ids` is empty or omitted, the bot responds in all channels.
 
-### LLM Providers
+</Tab>
+</Tabs>
 
-Spacebot supports three providers. Use whichever you prefer:
+### DM filtering
 
-| Provider | Config key | Env var | Model prefix |
-|----------|-----------|---------|-------------|
-| OpenRouter | `openrouter_key` | `OPENROUTER_API_KEY` | `openrouter/` |
-| Anthropic | `anthropic_key` | `ANTHROPIC_API_KEY` | `anthropic/` |
-| OpenAI | `openai_key` | `OPENAI_API_KEY` | `openai/` |
+By default, all DMs are ignored. To allow specific users, add their Discord user IDs.
 
-OpenRouter is convenient because it gives you access to all models through a single API key. Model names use the format `openrouter/<provider>/<model>`:
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+Go to **Settings** → **Messaging Platforms** → Discord card and add user IDs to the **DM Allowed Users** list.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
-[defaults.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-worker = "openrouter/anthropic/claude-haiku-4.5-20250514"
-cortex = "openrouter/anthropic/claude-haiku-4.5-20250514"
+[messaging.discord]
+dm_allowed_users = ["USER_ID_1", "USER_ID_2"]
 ```
 
-For direct API access without OpenRouter:
+You can also set per-binding DM allowlists:
 
 ```toml
-[llm]
-anthropic_key = "env:ANTHROPIC_API_KEY"
-
-[defaults.routing]
-channel = "anthropic/claude-sonnet-4-20250514"
+[[bindings]]
+agent_id = "main"
+channel = "discord"
+guild_id = "123456789"
+dm_allowed_users = ["USER_ID_3"]
 ```
 
-The `token` and key fields support `env:` prefix to read from environment variables at startup — credentials are never stored in plaintext in config.
+Per-binding lists are merged with the instance-wide list. Permission changes hot-reload within a couple seconds — no restart needed.
 
-### Multiple Servers
+</Tab>
+</Tabs>
 
-Route different Discord servers to different agents:
+### Multiple servers
+
+Route different Discord servers to different agents.
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+Create multiple bindings in the **Bindings** tab, each with a different guild ID and agent.
+
+</Tab>
+<Tab value="TOML Config">
 
 ```toml
-[[agents]]
-id = "main"
-default = true
-
-[[agents]]
-id = "dev-bot"
-[agents.routing]
-channel = "openrouter/anthropic/claude-sonnet-4-20250514"
-
 [[bindings]]
 agent_id = "main"
 channel = "discord"
@@ -173,90 +174,21 @@ channel = "discord"
 guild_id = "987654321"
 ```
 
-Each agent has its own memory, identity, and conversation history. Messages from guild `123456789` go to the "main" agent, messages from `987654321` go to "dev-bot".
+Each agent has its own memory, identity, and conversation history.
 
-### Guild Filtering
+</Tab>
+</Tabs>
 
-When bindings specify guild IDs, the adapter only processes messages from those guilds. If no Discord bindings exist, the adapter accepts messages from all guilds the bot is in (routed to the default agent).
+## Threads
 
-## How Messages Flow
+Threads get their own separate conversation with isolated history. Messages in the main channel share one conversation. Threads are the natural fit for isolated conversations in a busy server.
 
-```
-User types in #general on Discord
-    |
-    v
-Serenity gateway receives Message event
-    |
-    v
-Handler.message() applies permission filters:
-    - Ignore self (prevent loops)
-    - Ignore other bots (unless allow_bot_messages)
-    - DM: check dm_allowed_users
-    - Guild: check guild_id against bindings
-    - Channel: check channel_ids (if specified)
-    |
-    v
-Builds InboundMessage:
-    - id: Discord message snowflake
-    - source: "discord"
-    - conversation_id: "discord:GUILD_ID:CHANNEL_ID"
-    - sender_id: Discord user ID
-    - metadata: { discord_channel_id, discord_guild_id, ... }
-    |
-    v
-mpsc channel -> InboundStream -> MessagingManager
-    |
-    v
-Router resolves binding -> sets agent_id
-    |
-    v
-Agent creates or reuses a Channel for this conversation_id
-    |
-    v
-Channel processes the message (branch -> think -> reply)
-    |
-    v
-ReplyTool -> OutboundResponse -> MessagingManager.respond()
-    |
-    v
-DiscordAdapter.respond() -> Discord API -> User sees reply
-```
+## Troubleshooting
 
-### Conversation Mapping
-
-Each Discord channel/thread maps to one Spacebot conversation:
-
-| Discord Context | conversation_id | Spacebot Behavior |
-|----------------|----------------|-------------------|
-| Server channel `#general` | `discord:GUILD:CHANNEL` | One conversation per channel |
-| Thread in `#general` | `discord:GUILD:THREAD` | One conversation per thread |
-| DM with bot | `discord:dm:USER` | One conversation per DM (requires `dm_allowed_users`) |
-
-Threads are the natural fit for isolated conversations. In a busy server channel, all messages in that channel share one conversation context. Threads give each interaction its own history.
-
-### Typing Indicators
-
-When the agent is thinking, Discord shows the "Spacebot is typing..." indicator. This auto-repeats until a response is sent. Typing stops when:
-- The agent sends a response
-- A non-Thinking status update arrives (tool execution, worker spawn, etc.)
-
-### Message Length
-
-Discord caps messages at 2000 characters. Long responses are automatically split at newlines (preferred), then spaces, then hard-cut at 2000 chars.
-
-### Streaming
-
-When streaming is enabled, the adapter sends an initial placeholder message on `StreamStart`, then edits it in-place as `StreamChunk` text accumulates. On `StreamEnd`, the placeholder is cleaned up. If accumulated text exceeds 2000 chars during streaming, it truncates with "..." (a future improvement would split into a new message).
-
-## Hot Reload
-
-Config changes take effect immediately — no restart required.
-
-The Discord adapter watches `config.toml` for changes and hot-reloads permissions on every edit. This includes:
-- Binding changes (guild IDs, channel IDs)
-- DM allowlist changes
-- `allow_bot_messages` toggle
-
-Permissions are stored behind `ArcSwap`, so each incoming message loads a fresh snapshot. You can add a new binding, change channel filters, or update the DM allowlist and it takes effect on the next message.
-
-Adding a binding via the embedded UI also hot-starts the Discord adapter if it wasn't already running — no restart needed.
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| Bot connects but doesn't see messages | Message Content Intent disabled | Discord Developer Portal → Bot → enable Message Content Intent |
+| Bot doesn't respond in channel | No access | Make sure the bot has permissions in that channel |
+| Bot doesn't respond to DMs | DM filtering | Add user ID to `dm_allowed_users` |
+| Bot responds in wrong channels | No channel filter | Add `channel_ids` to your binding |
+| `401 Unauthorized` on startup | Invalid token | Copy a fresh token from the Developer Portal |

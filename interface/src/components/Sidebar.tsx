@@ -2,7 +2,7 @@ import { useMemo } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
-import { api, type ChannelInfo } from "@/api/client";
+import { api, BASE_PATH, type ChannelInfo } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { Button } from "@/ui";
 import { ArrowLeft01Icon, DashboardSquare01Icon, LeftToRightListBulletIcon, Settings01Icon } from "@hugeicons/core-free-icons";
@@ -56,12 +56,12 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 			<div className="flex h-12 items-center border-b border-sidebar-line px-3">
 			{collapsed ? (
 				<Button onClick={onToggle} variant="ghost" size="icon" className="h-full w-full">
-					<img src="/ball.png" alt="" className="h-6 w-6" draggable={false} />
+					<img src={`${BASE_PATH}/ball.png`} alt="" className="h-6 w-6" draggable={false} />
 				</Button>
 			) : (
 				<div className="flex flex-1 items-center justify-between">
 					<Link to="/" className="flex items-center gap-2">
-						<img src="/ball.png" alt="" className="h-6 w-6 flex-shrink-0" draggable={false} />
+						<img src={`${BASE_PATH}/ball.png`} alt="" className="h-6 w-6 flex-shrink-0" draggable={false} />
 						<span className="whitespace-nowrap font-plex text-sm font-semibold text-sidebar-ink">
 							Spacebot
 						</span>

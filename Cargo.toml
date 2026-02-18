@@ -82,6 +82,9 @@ async-trait = "0.1"
 # Slack
 slack-morphism = { version = "2.17", features = ["hyper"] }
 
+# TLS (shared crypto backend for slack-morphism, reqwest, teloxide)
+rustls = { version = "0.23", default-features = false, features = ["ring"] }
+
 # Telegram
 teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
 
@@ -113,6 +116,10 @@ bollard = "0.18"
 # Semver parsing (for update version comparison)
 semver = "1"
 
+# Skill installation
+zip = "2"
+tempfile = "3"
+
 [lints.clippy]
 dbg_macro = "forbid"
 todo = "forbid"
@@ -120,4 +127,3 @@ unimplemented = "forbid"
 
 [dev-dependencies]
 tokio-test = "0.4"
-tempfile = "3"

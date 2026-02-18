@@ -107,6 +107,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/history_backfill") => {
             include_str!("../../prompts/en/fragments/system/history_backfill.md.j2")
         }
+        ("en", "fragments/system/tool_syntax_correction") => {
+            include_str!("../../prompts/en/fragments/system/tool_syntax_correction.md.j2")
+        }
 
         // Coalesce Hint
         ("en", "fragments/coalesce_hint") => {

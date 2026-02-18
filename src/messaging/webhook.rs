@@ -106,7 +106,11 @@ impl Messaging for WebhookAdapter {
             .route("/health", get(handle_health))
             .with_state(state);
 
-        let bind = format!("{}:{}", self.bind, self.port);
+        let bind = if self.bind.contains(':') {
+            format!("[{}]:{}", self.bind, self.port)
+        } else {
+            format!("{}:{}", self.bind, self.port)
+        };
         let listener = tokio::net::TcpListener::bind(&bind)
             .await
             .with_context(|| format!("failed to bind webhook server to {bind}"))?;

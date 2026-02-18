@@ -5,6 +5,7 @@ import {
 	createRoute,
 	Outlet,
 } from "@tanstack/react-router";
+import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
 import {SetupBanner} from "@/components/SetupBanner";
 import {UpdateBanner} from "@/components/UpdateBanner";
@@ -18,6 +19,7 @@ import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
 import {AgentIngest} from "@/routes/AgentIngest";
+import {AgentSkills} from "@/routes/AgentSkills";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
@@ -236,6 +238,22 @@ const agentCortexRoute = createRoute({
 	},
 });
 
+const agentSkillsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/skills",
+	component: function AgentSkillsPage() {
+		const {agentId} = agentSkillsRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentSkills agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
 const channelRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/channels/$channelId",
@@ -270,6 +288,7 @@ const routeTree = rootRoute.addChildren([
 	agentIngestRoute,
 	agentWorkersRoute,
 	agentCortexRoute,
+	agentSkillsRoute,
 	agentCronRoute,
 	agentConfigRoute,
 	channelRoute,
@@ -277,7 +296,7 @@ const routeTree = rootRoute.addChildren([
 
 export const router = createRouter({
 	routeTree,
-	basepath: (window as any).__SPACEBOT_BASE_PATH || "/",
+	basepath: BASE_PATH || "/",
 });
 
 declare module "@tanstack/react-router" {

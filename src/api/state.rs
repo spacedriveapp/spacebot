@@ -70,6 +70,8 @@ pub struct ApiState {
     pub provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
     /// Shared update status, populated by the background update checker.
     pub update_status: SharedUpdateStatus,
+    /// Instance directory path for accessing instance-level skills.
+    pub instance_dir: ArcSwap<PathBuf>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -146,6 +148,8 @@ pub enum ApiEvent {
         process_id: String,
         tool_name: String,
     },
+    /// Configuration was reloaded (skills, identity, etc.).
+    ConfigReloaded,
 }
 
 impl ApiState {
@@ -171,6 +175,7 @@ impl ApiState {
             messaging_manager: RwLock::new(None),
             provider_setup_tx,
             update_status: crate::update::new_shared_status(),
+            instance_dir: ArcSwap::from_pointee(PathBuf::new()),
         }
     }
 
@@ -354,6 +359,16 @@ impl ApiState {
     /// Share the messaging manager for runtime adapter addition from API handlers.
     pub async fn set_messaging_manager(&self, manager: Arc<MessagingManager>) {
         *self.messaging_manager.write().await = Some(manager);
+    }
+
+    /// Set the instance directory path.
+    pub fn set_instance_dir(&self, dir: PathBuf) {
+        self.instance_dir.store(Arc::new(dir));
+    }
+
+    /// Send an event to all SSE subscribers.
+    pub fn send_event(&self, event: ApiEvent) {
+        let _ = self.event_tx.send(event);
     }
 }
 

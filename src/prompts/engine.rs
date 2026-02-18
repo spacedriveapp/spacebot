@@ -111,6 +111,10 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/system/history_backfill"),
         )?;
         env.add_template(
+            "fragments/system/tool_syntax_correction",
+            crate::prompts::text::get("fragments/system/tool_syntax_correction"),
+        )?;
+        env.add_template(
             "fragments/coalesce_hint",
             crate::prompts::text::get("fragments/coalesce_hint"),
         )?;
@@ -238,6 +242,11 @@ impl PromptEngine {
     /// Convenience method for rendering system retrigger message.
     pub fn render_system_retrigger(&self) -> Result<String> {
         self.render_static("fragments/system/retrigger")
+    }
+
+    /// Correction message when the LLM outputs tool call syntax as plain text.
+    pub fn render_system_tool_syntax_correction(&self) -> Result<String> {
+        self.render_static("fragments/system/tool_syntax_correction")
     }
 
     /// Convenience method for rendering truncation marker.

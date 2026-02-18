@@ -163,11 +163,21 @@ coding = "zhipu/glm-4.7"
 
 ### Skills
 
-Extensible skill system for domain-specific behavior:
+Extensible skill system integrated with [skills.sh](https://skills.sh):
 
-- **SKILL.md format** — markdown files with frontmatter, loaded from instance or agent workspace
+- **skills.sh registry** — install any skill from the public ecosystem with one command
+- **CLI management** — `spacebot skill add owner/repo` to install, list, remove, and inspect skills
 - **Worker injection** — skills are injected into worker system prompts for specialized tasks
-- **OpenClaw compatible** — drop in existing OpenClaw skills
+- **Bundled resources** — scripts, references, and assets packaged with skills
+- **OpenClaw compatible** — drop in existing OpenClaw skills, or any skill from skills.sh
+
+**Install skills from the registry:**
+
+```bash
+spacebot skill add vercel-labs/agent-skills
+spacebot skill add anthropics/skills/pdf
+spacebot skill list
+```
 
 ---
 
@@ -302,7 +312,7 @@ Each agent is an independent entity with its own workspace, databases, identity 
 
 Spacebot is the AI counterpart to [Spacedrive](https://github.com/spacedriveapp/spacedrive) — an open source cross-platform file manager built on a virtual distributed filesystem. Both projects are independent and fully functional on their own, but complementary by design. Spacedrive indexes files across all your devices, clouds, and platforms with content-addressed identity, semantic search, and local AI analysis. Spacebot brings autonomous reasoning, memory, and task execution. Together, an agent that can think, remember, and act — backed by terabytes of queryable data across every device you own.
 
-Read the full vision in [docs/spacedrive.md](docs/spacedrive.md).
+Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx).
 
 ---
 
@@ -353,7 +363,7 @@ spacebot restart              # stop + start
 spacebot status               # show pid and uptime
 ```
 
-The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/quickstart.md) for more detail.
+The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/content/docs/(getting-started)/quickstart.mdx) for more detail.
 
 ---
 
@@ -382,22 +392,20 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 
 | Doc                                    | Description                                              |
 | -------------------------------------- | -------------------------------------------------------- |
-| [Quick Start](docs/quickstart.md)      | Setup, config, first run                                 |
-| [Daemon](docs/daemon.md)               | Background operation, IPC, logging                       |
-| [Config Reference](docs/config.md)     | Full `config.toml` reference                             |
-| [Agents](docs/agents.md)               | Multi-agent setup and isolation                          |
-| [Memory](docs/memory.md)               | Memory system design                                     |
-| [Tools](docs/tools.md)                 | All available LLM tools                                  |
-| [Compaction](docs/compaction.md)       | Context window management                                |
-| [Cortex](docs/cortex.md)               | Memory bulletin and system observation                   |
-| [Cron Jobs](docs/cron.md)              | Scheduled recurring tasks                                |
-| [Routing](docs/routing.md)             | Model routing and fallback chains                        |
-| [Messaging](docs/messaging.md)         | Adapter architecture (Discord, Slack, Telegram, webhook) |
-| [Discord Setup](docs/discord-setup.md) | Discord bot setup guide                                  |
-| [Browser](docs/browser.md)             | Headless Chrome for workers                              |
-| [OpenCode](docs/opencode.md)           | OpenCode as a worker backend                             |
-| [Philosophy](docs/philosophy.md)       | Why Rust                                                 |
-| [Spacedrive](docs/spacedrive.md)       | Future Spacedrive integration vision                     |
+| [Quick Start](docs/content/docs/(getting-started)/quickstart.mdx) | Setup, config, first run                                 |
+| [Config Reference](docs/content/docs/(configuration)/config.mdx) | Full `config.toml` reference                             |
+| [Agents](docs/content/docs/(core)/agents.mdx)                    | Multi-agent setup and isolation                          |
+| [Memory](docs/content/docs/(core)/memory.mdx)                    | Memory system design                                     |
+| [Tools](docs/content/docs/(features)/tools.mdx)                  | All available LLM tools                                  |
+| [Compaction](docs/content/docs/(core)/compaction.mdx)            | Context window management                                |
+| [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Memory bulletin and system observation                   |
+| [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                                |
+| [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
+| [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, webhook) |
+| [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
+| [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
+| [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                             |
+| [Philosophy](docs/content/docs/(core)/philosophy.mdx)            | Why Rust                                                 |
 
 ---
 
@@ -407,7 +415,7 @@ Spacebot isn't a chatbot — it's an orchestration layer for autonomous AI proce
 
 Rust's strict type system and compiler mean there's one correct way to express something. When multiple AI processes share mutable state and spawn tasks without human oversight, "the compiler won't let you do that" is a feature. The result is a single binary with no runtime dependencies, no garbage collector pauses, and predictable resource usage.
 
-Read the full argument in [docs/philosophy.md](docs/philosophy.md).
+Read the full argument in [docs/philosophy](docs/content/docs/(core)/philosophy.mdx).
 
 ---
 

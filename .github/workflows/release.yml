@@ -16,15 +16,7 @@ env:
 
 jobs:
   build-and-push:
-    runs-on: ${{ matrix.runner }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - arch: amd64
-            runner: ubuntu-latest
-          - arch: arm64
-            runner: ubuntu-24.04-arm
+    runs-on: ubuntu-latest
     permissions:
       contents: write
       packages: write
@@ -60,13 +52,11 @@ jobs:
           context: .
           target: slim
           push: true
-          platforms: linux/${{ matrix.arch }}
           tags: |
-
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-slim-${{ matrix.arch }}
-            ${{ env.IMAGE }}:slim-${{ matrix.arch }}
-          cache-from: type=gha,scope=release-slim
-          cache-to: type=gha,mode=max,scope=release-slim
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-slim
+            ${{ env.IMAGE }}:slim
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build and push full
         uses: docker/build-push-action@v6
@@ -74,54 +64,12 @@ jobs:
           context: .
           target: full
           push: true
-          platforms: linux/${{ matrix.arch }}
           tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-full-${{ matrix.arch }}
-            ${{ env.IMAGE }}:full-${{ matrix.arch }}
-          cache-from: type=gha,scope=release-full
-          cache-to: type=gha,mode=max,scope=release-full
-
-
-  publish-manifests:
-    runs-on: ubuntu-latest
-    needs: build-and-push
-    permissions:
-      contents: write
-      packages: write
-    steps:
-      - name: Determine version tag
-        id: version
-        run: |
-          if [ -n "${{ github.event.inputs.tag }}" ]; then
-            VERSION="${{ github.event.inputs.tag }}"
-          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/}"
-          else
-            VERSION="dev-$(echo $GITHUB_SHA | head -c 7)"
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create multi-arch manifests
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          docker buildx imagetools create \
-            --tag ${{ env.IMAGE }}:${VERSION}-slim \
-            --tag ${{ env.IMAGE }}:slim \
-            ${{ env.IMAGE }}:${VERSION}-slim-amd64 \
-            ${{ env.IMAGE }}:${VERSION}-slim-arm64
-          docker buildx imagetools create \
-            --tag ${{ env.IMAGE }}:${VERSION}-full \
-            --tag ${{ env.IMAGE }}:full \
-            --tag ${{ env.IMAGE }}:latest \
-            ${{ env.IMAGE }}:${VERSION}-full-amd64 \
-            ${{ env.IMAGE }}:${VERSION}-full-arm64
+            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-full
+            ${{ env.IMAGE }}:full
+            ${{ env.IMAGE }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Log in to Fly registry
         uses: docker/login-action@v3
@@ -132,9 +80,8 @@ jobs:
 
       - name: Push to Fly registry
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
           docker buildx imagetools create \
-            --tag registry.fly.io/spacebot-image:${VERSION} \
+            --tag registry.fly.io/spacebot-image:${{ steps.version.outputs.version }} \
             --tag registry.fly.io/spacebot-image:latest \
             ${{ env.IMAGE }}:latest
 
@@ -152,3 +99,4 @@ jobs:
         with:
           tag_name: ${{ steps.version.outputs.version }}
           generate_release_notes: true
+

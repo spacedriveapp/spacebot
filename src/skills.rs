@@ -2,7 +2,7 @@
 //!
 //! Skills are directories containing a SKILL.md file with YAML frontmatter
 //! (name, description, metadata) and a markdown body with instructions.
-//! Compatible with OpenClaw's skill format.
+//! Compatible with OpenClaw's skill format and skills.sh registry.
 //!
 //! Skills are loaded from two sources (later wins on name conflicts):
 //! 1. Instance-level: `{instance_dir}/skills/`
@@ -11,6 +11,10 @@
 //! The channel sees a summary of available skills and is instructed to
 //! delegate skill work to workers. Workers receive the full skill content
 //! in their system prompt.
+
+mod installer;
+
+pub use installer::{install_from_file, install_from_github};
 
 use anyhow::Context as _;
 use std::collections::HashMap;
@@ -148,6 +152,58 @@ impl SkillSet {
                 .expect("failed to render skills worker prompt"),
         )
     }
+
+    /// Remove a skill by name.
+    ///
+    /// Returns the base directory path if the skill was found and removed.
+    pub async fn remove(&mut self, name: &str) -> anyhow::Result<Option<PathBuf>> {
+        let skill = match self.skills.remove(&name.to_lowercase()) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+
+        // Remove the skill directory from disk
+        if skill.base_dir.exists() {
+            tokio::fs::remove_dir_all(&skill.base_dir)
+                .await
+                .with_context(|| format!("failed to remove skill directory: {}", skill.base_dir.display()))?;
+            
+            tracing::info!(
+                skill = %name,
+                path = %skill.base_dir.display(),
+                "skill removed"
+            );
+        }
+
+        Ok(Some(skill.base_dir))
+    }
+
+    /// List all loaded skills with their metadata.
+    pub fn list(&self) -> Vec<SkillInfo> {
+        let mut skills: Vec<_> = self.skills.values().collect();
+        skills.sort_by(|a, b| a.name.cmp(&b.name));
+        
+        skills
+            .into_iter()
+            .map(|s| SkillInfo {
+                name: s.name.clone(),
+                description: s.description.clone(),
+                file_path: s.file_path.clone(),
+                base_dir: s.base_dir.clone(),
+                source: s.source.clone(),
+            })
+            .collect()
+    }
+}
+
+/// Public skill information for API responses.
+#[derive(Debug, Clone)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    pub file_path: PathBuf,
+    pub base_dir: PathBuf,
+    pub source: SkillSource,
 }
 
 /// Load all skills from a directory.
