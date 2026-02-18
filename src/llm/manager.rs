@@ -12,6 +12,19 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
 
+// Default API endpoints per provider (used when no base_url is configured).
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/v1/messages";
+const DEFAULT_OPENAI_BASE_URL: &str = "https://api.openai.com/v1/chat/completions";
+const DEFAULT_OPENROUTER_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
+const DEFAULT_ZHIPU_BASE_URL: &str = "https://api.z.ai/api/paas/v4/chat/completions";
+const DEFAULT_GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1/chat/completions";
+const DEFAULT_TOGETHER_BASE_URL: &str = "https://api.together.xyz/v1/chat/completions";
+const DEFAULT_FIREWORKS_BASE_URL: &str = "https://api.fireworks.ai/inference/v1/chat/completions";
+const DEFAULT_DEEPSEEK_BASE_URL: &str = "https://api.deepseek.com/v1/chat/completions";
+const DEFAULT_XAI_BASE_URL: &str = "https://api.x.ai/v1/chat/completions";
+const DEFAULT_MISTRAL_BASE_URL: &str = "https://api.mistral.ai/v1/chat/completions";
+const DEFAULT_OPENCODE_ZEN_BASE_URL: &str = "https://opencode.ai/zen/v1/chat/completions";
+
 /// Manages LLM provider clients and tracks rate limit state.
 pub struct LlmManager {
     config: LlmConfig,
@@ -61,6 +74,38 @@ impl LlmManager {
             "opencode-zen" => self.config.opencode_zen_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
+        }
+    }
+
+    /// Get the base URL for a provider, falling back to the default.
+    ///
+    /// Panics if `provider` is not a known provider name — callers must
+    /// validate the provider string before reaching this point.
+    pub fn get_base_url(&self, provider: &str) -> &str {
+        match provider {
+            "anthropic" => self.config.anthropic_base_url.as_deref()
+                .unwrap_or(DEFAULT_ANTHROPIC_BASE_URL),
+            "openai" => self.config.openai_base_url.as_deref()
+                .unwrap_or(DEFAULT_OPENAI_BASE_URL),
+            "openrouter" => self.config.openrouter_base_url.as_deref()
+                .unwrap_or(DEFAULT_OPENROUTER_BASE_URL),
+            "zhipu" => self.config.zhipu_base_url.as_deref()
+                .unwrap_or(DEFAULT_ZHIPU_BASE_URL),
+            "groq" => self.config.groq_base_url.as_deref()
+                .unwrap_or(DEFAULT_GROQ_BASE_URL),
+            "together" => self.config.together_base_url.as_deref()
+                .unwrap_or(DEFAULT_TOGETHER_BASE_URL),
+            "fireworks" => self.config.fireworks_base_url.as_deref()
+                .unwrap_or(DEFAULT_FIREWORKS_BASE_URL),
+            "deepseek" => self.config.deepseek_base_url.as_deref()
+                .unwrap_or(DEFAULT_DEEPSEEK_BASE_URL),
+            "xai" => self.config.xai_base_url.as_deref()
+                .unwrap_or(DEFAULT_XAI_BASE_URL),
+            "mistral" => self.config.mistral_base_url.as_deref()
+                .unwrap_or(DEFAULT_MISTRAL_BASE_URL),
+            "opencode-zen" => self.config.opencode_zen_base_url.as_deref()
+                .unwrap_or(DEFAULT_OPENCODE_ZEN_BASE_URL),
+            _ => unreachable!("unknown provider: {provider}"),
         }
     }
 

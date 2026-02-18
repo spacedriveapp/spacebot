@@ -20,6 +20,6 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
     if config.opencode_zen_key.is_some() {
         tracing::info!("OpenCode Zen provider configured");
     }
-    
+
     Ok(())
 }

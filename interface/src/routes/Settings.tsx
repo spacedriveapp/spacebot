@@ -146,6 +146,14 @@ const PROVIDERS = [
 	},
 ] as const;
 
+// Endpoint presets for providers that support alternate base URLs.
+const ENDPOINT_PRESETS: Record<string, { label: string; url: string }[]> = {
+	zhipu: [
+		{ label: "Z.ai (General)", url: "" },
+		{ label: "Z.ai Coding Plan", url: "https://api.z.ai/api/coding/paas/v4/chat/completions" },
+	],
+};
+
 export function Settings() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
@@ -165,6 +173,7 @@ export function Settings() {
 	};
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
 	const [keyInput, setKeyInput] = useState("");
+	const [baseUrlInput, setBaseUrlInput] = useState("");
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -187,12 +196,13 @@ export function Settings() {
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: ({provider, apiKey}: {provider: string; apiKey: string}) =>
-			api.updateProvider(provider, apiKey),
+		mutationFn: ({provider, apiKey, baseUrl}: {provider: string; apiKey: string; baseUrl?: string}) =>
+			api.updateProvider(provider, apiKey, baseUrl),
 		onSuccess: (result) => {
 			if (result.success) {
 				setEditingProvider(null);
 				setKeyInput("");
+				setBaseUrlInput("");
 				setMessage({text: result.message, type: "success"});
 				queryClient.invalidateQueries({queryKey: ["providers"]});
 				// Agents will auto-start on the backend, refetch agent list after a short delay
@@ -228,17 +238,22 @@ export function Settings() {
 
 	const handleSave = () => {
 		if (!keyInput.trim() || !editingProvider) return;
-		updateMutation.mutate({provider: editingProvider, apiKey: keyInput.trim()});
+		const baseUrl = baseUrlInput.trim() || undefined;
+		updateMutation.mutate({provider: editingProvider, apiKey: keyInput.trim(), baseUrl});
 	};
 
 	const handleClose = () => {
 		setEditingProvider(null);
 		setKeyInput("");
+		setBaseUrlInput("");
 	};
 
 	const isConfigured = (providerId: string): boolean => {
 		if (!data) return false;
-		return data.providers[providerId as keyof typeof data.providers] ?? false;
+		// Provider IDs use hyphens (e.g. "opencode-zen") but the API response
+		// uses underscores as struct field names (e.g. "opencode_zen").
+		const key = providerId.replace(/-/g, "_") as keyof typeof data.providers;
+		return data.providers[key] ?? false;
 	};
 
 	return (
@@ -301,6 +316,7 @@ export function Settings() {
 										onEdit={() => {
 											setEditingProvider(provider.id);
 											setKeyInput("");
+											setBaseUrlInput(data?.base_urls?.[provider.id] ?? "");
 											setMessage(null);
 										}}
 										onRemove={() => removeMutation.mutate(provider.id)}
@@ -362,6 +378,13 @@ export function Settings() {
 							if (e.key === "Enter") handleSave();
 						}}
 					/>
+					{editingProvider && (
+						<EndpointSelector
+							presets={ENDPOINT_PRESETS[editingProvider] ?? []}
+							value={baseUrlInput}
+							onChange={setBaseUrlInput}
+						/>
+					)}
 					{message && (
 						<div
 							className={`rounded-md border px-3 py-2 text-sm ${
@@ -2062,6 +2085,70 @@ function ConfigFileSection() {
 					<div ref={editorRef} className="h-full" />
 				)}
 			</div>
+		</div>
+	);
+}
+
+interface EndpointSelectorProps {
+	presets: { label: string; url: string }[];
+	value: string;
+	onChange: (url: string) => void;
+}
+
+// Endpoint URL selector for providers with alternate API surfaces.
+// Convention: empty string = provider default URL, non-empty = override.
+// Presets offer known endpoints (e.g. Z.ai General vs Coding Plan);
+// "Custom URL" lets users enter any endpoint for proxies or self-hosted.
+function EndpointSelector({ presets, value, onChange }: EndpointSelectorProps) {
+	const isCustom = value !== "" && !presets.some((p) => p.url === value);
+	const selectValue = isCustom ? "__custom__" : (value || "__default__");
+	const hasPresets = presets.length > 0;
+
+	return (
+		<div>
+			<label className="mb-1.5 block text-sm font-medium text-ink">Endpoint</label>
+			<Select
+				value={selectValue}
+				onValueChange={(v) => {
+					if (v === "__custom__") {
+						onChange("https://");
+					} else if (v === "__default__") {
+						onChange("");
+					} else {
+						onChange(v);
+					}
+				}}
+			>
+				<SelectTrigger>
+					<SelectValue />
+				</SelectTrigger>
+				<SelectContent>
+					{hasPresets ? (
+						presets.map((preset) => (
+							<SelectItem key={preset.label} value={preset.url || "__default__"}>
+								{preset.label}
+							</SelectItem>
+						))
+					) : (
+						<SelectItem value="__default__">Default</SelectItem>
+					)}
+					<SelectItem value="__custom__">Custom URL</SelectItem>
+				</SelectContent>
+			</Select>
+			{isCustom && (
+				<>
+					<Input
+						type="url"
+						value={value}
+						onChange={(e) => onChange(e.target.value)}
+						placeholder="https://api.example.com/v1/chat/completions"
+						className="mt-2"
+					/>
+					<p className="mt-1 text-tiny text-ink-faint">
+						Full endpoint path required (e.g. ending in /v1/chat/completions)
+					</p>
+				</>
+			)}
 		</div>
 	);
 }

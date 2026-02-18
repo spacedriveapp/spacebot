@@ -53,24 +53,35 @@ impl Default for ApiConfig {
 #[derive(Debug, Clone)]
 pub struct LlmConfig {
     pub anthropic_key: Option<String>,
+    pub anthropic_base_url: Option<String>,
     pub openai_key: Option<String>,
+    pub openai_base_url: Option<String>,
     pub openrouter_key: Option<String>,
+    pub openrouter_base_url: Option<String>,
     pub zhipu_key: Option<String>,
+    pub zhipu_base_url: Option<String>,
     pub groq_key: Option<String>,
+    pub groq_base_url: Option<String>,
     pub together_key: Option<String>,
+    pub together_base_url: Option<String>,
     pub fireworks_key: Option<String>,
+    pub fireworks_base_url: Option<String>,
     pub deepseek_key: Option<String>,
+    pub deepseek_base_url: Option<String>,
     pub xai_key: Option<String>,
+    pub xai_base_url: Option<String>,
     pub mistral_key: Option<String>,
+    pub mistral_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub opencode_zen_base_url: Option<String>,
 }
 
 impl LlmConfig {
     /// Check if any provider key is configured.
     pub fn has_any_key(&self) -> bool {
-        self.anthropic_key.is_some() 
-            || self.openai_key.is_some() 
-            || self.openrouter_key.is_some() 
+        self.anthropic_key.is_some()
+            || self.openai_key.is_some()
+            || self.openrouter_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -867,16 +878,27 @@ fn default_api_bind() -> String {
 #[derive(Deserialize, Default)]
 struct TomlLlmConfig {
     anthropic_key: Option<String>,
+    anthropic_base_url: Option<String>,
     openai_key: Option<String>,
+    openai_base_url: Option<String>,
     openrouter_key: Option<String>,
+    openrouter_base_url: Option<String>,
     zhipu_key: Option<String>,
+    zhipu_base_url: Option<String>,
     groq_key: Option<String>,
+    groq_base_url: Option<String>,
     together_key: Option<String>,
+    together_base_url: Option<String>,
     fireworks_key: Option<String>,
+    fireworks_base_url: Option<String>,
     deepseek_key: Option<String>,
+    deepseek_base_url: Option<String>,
     xai_key: Option<String>,
+    xai_base_url: Option<String>,
     mistral_key: Option<String>,
+    mistral_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_zen_base_url: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1146,6 +1168,13 @@ impl Config {
         std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("OPENROUTER_API_KEY").is_err()
+            && std::env::var("ZHIPU_API_KEY").is_err()
+            && std::env::var("GROQ_API_KEY").is_err()
+            && std::env::var("TOGETHER_API_KEY").is_err()
+            && std::env::var("FIREWORKS_API_KEY").is_err()
+            && std::env::var("DEEPSEEK_API_KEY").is_err()
+            && std::env::var("XAI_API_KEY").is_err()
+            && std::env::var("MISTRAL_API_KEY").is_err()
             && std::env::var("OPENCODE_ZEN_API_KEY").is_err()
     }
 
@@ -1181,16 +1210,27 @@ impl Config {
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
         let llm = LlmConfig {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_base_url: std::env::var("ANTHROPIC_BASE_URL").ok(),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
+            openai_base_url: std::env::var("OPENAI_BASE_URL").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            openrouter_base_url: std::env::var("OPENROUTER_BASE_URL").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
+            zhipu_base_url: std::env::var("ZHIPU_BASE_URL").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
+            groq_base_url: std::env::var("GROQ_BASE_URL").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
+            together_base_url: std::env::var("TOGETHER_BASE_URL").ok(),
             fireworks_key: std::env::var("FIREWORKS_API_KEY").ok(),
+            fireworks_base_url: std::env::var("FIREWORKS_BASE_URL").ok(),
             deepseek_key: std::env::var("DEEPSEEK_API_KEY").ok(),
+            deepseek_base_url: std::env::var("DEEPSEEK_BASE_URL").ok(),
             xai_key: std::env::var("XAI_API_KEY").ok(),
+            xai_base_url: std::env::var("XAI_BASE_URL").ok(),
             mistral_key: std::env::var("MISTRAL_API_KEY").ok(),
+            mistral_base_url: std::env::var("MISTRAL_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            opencode_zen_base_url: std::env::var("OPENCODE_ZEN_BASE_URL").ok(),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.
@@ -1255,66 +1295,110 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+            anthropic_base_url: toml.llm.anthropic_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ANTHROPIC_BASE_URL").ok()),
             openai_key: toml
                 .llm
                 .openai_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENAI_API_KEY").ok()),
+            openai_base_url: toml.llm.openai_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OPENAI_BASE_URL").ok()),
             openrouter_key: toml
                 .llm
                 .openrouter_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+            openrouter_base_url: toml.llm.openrouter_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OPENROUTER_BASE_URL").ok()),
             zhipu_key: toml
                 .llm
                 .zhipu_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZHIPU_API_KEY").ok()),
+            zhipu_base_url: toml.llm.zhipu_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("ZHIPU_BASE_URL").ok()),
             groq_key: toml
                 .llm
                 .groq_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("GROQ_API_KEY").ok()),
+            groq_base_url: toml.llm.groq_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GROQ_BASE_URL").ok()),
             together_key: toml
                 .llm
                 .together_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("TOGETHER_API_KEY").ok()),
+            together_base_url: toml.llm.together_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("TOGETHER_BASE_URL").ok()),
             fireworks_key: toml
                 .llm
                 .fireworks_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("FIREWORKS_API_KEY").ok()),
+            fireworks_base_url: toml.llm.fireworks_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("FIREWORKS_BASE_URL").ok()),
             deepseek_key: toml
                 .llm
                 .deepseek_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("DEEPSEEK_API_KEY").ok()),
+            deepseek_base_url: toml.llm.deepseek_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok()),
             xai_key: toml
                 .llm
                 .xai_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("XAI_API_KEY").ok()),
+            xai_base_url: toml.llm.xai_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("XAI_BASE_URL").ok()),
             mistral_key: toml
                 .llm
                 .mistral_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MISTRAL_API_KEY").ok()),
+            mistral_base_url: toml.llm.mistral_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MISTRAL_BASE_URL").ok()),
             opencode_zen_key: toml
                 .llm
                 .opencode_zen_key
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            opencode_zen_base_url: toml.llm.opencode_zen_base_url
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OPENCODE_ZEN_BASE_URL").ok()),
         };
 
         // Note: We allow boot without provider keys now. System starts in setup mode.

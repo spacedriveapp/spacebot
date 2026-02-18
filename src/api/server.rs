@@ -2042,12 +2042,17 @@ struct ProviderStatus {
 struct ProvidersResponse {
     providers: ProviderStatus,
     has_any: bool,
+    /// Custom base URLs currently configured per provider (only present entries).
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    base_urls: HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
 struct ProviderUpdateRequest {
     provider: String,
     api_key: String,
+    #[serde(default)]
+    base_url: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2075,16 +2080,16 @@ async fn get_providers(
             if let Some(llm) = doc.get("llm") {
                 if let Some(val) = llm.get(key) {
                     if let Some(s) = val.as_str() {
-                        // If it's an env reference, check if the env var is set
+                        // If it's an env reference, check if the env var is set and non-empty
                         if let Some(var_name) = s.strip_prefix("env:") {
-                            return std::env::var(var_name).is_ok();
+                            return std::env::var(var_name).is_ok_and(|v| !v.is_empty());
                         }
                         return !s.is_empty();
                     }
                 }
             }
             // Fall back to checking env vars directly
-            std::env::var(env_var).is_ok()
+            std::env::var(env_var).is_ok_and(|v| !v.is_empty())
         };
 
         (
@@ -2102,18 +2107,19 @@ async fn get_providers(
         )
     } else {
         // No config file — check env vars only
+        let env_set = |var: &str| std::env::var(var).is_ok_and(|v| !v.is_empty());
         (
-            std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            std::env::var("OPENAI_API_KEY").is_ok(),
-            std::env::var("OPENROUTER_API_KEY").is_ok(),
-            std::env::var("ZHIPU_API_KEY").is_ok(),
-            std::env::var("GROQ_API_KEY").is_ok(),
-            std::env::var("TOGETHER_API_KEY").is_ok(),
-            std::env::var("FIREWORKS_API_KEY").is_ok(),
-            std::env::var("DEEPSEEK_API_KEY").is_ok(),
-            std::env::var("XAI_API_KEY").is_ok(),
-            std::env::var("MISTRAL_API_KEY").is_ok(),
-            std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
+            env_set("ANTHROPIC_API_KEY"),
+            env_set("OPENAI_API_KEY"),
+            env_set("OPENROUTER_API_KEY"),
+            env_set("ZHIPU_API_KEY"),
+            env_set("GROQ_API_KEY"),
+            env_set("TOGETHER_API_KEY"),
+            env_set("FIREWORKS_API_KEY"),
+            env_set("DEEPSEEK_API_KEY"),
+            env_set("XAI_API_KEY"),
+            env_set("MISTRAL_API_KEY"),
+            env_set("OPENCODE_ZEN_API_KEY"),
         )
     };
 
@@ -2130,9 +2136,9 @@ async fn get_providers(
         mistral,
         opencode_zen,
     };
-    let has_any = providers.anthropic 
-        || providers.openai 
-        || providers.openrouter 
+    let has_any = providers.anthropic
+        || providers.openai
+        || providers.openrouter
         || providers.zhipu
         || providers.groq
         || providers.together
@@ -2142,7 +2148,43 @@ async fn get_providers(
         || providers.mistral
         || providers.opencode_zen;
 
-    Ok(Json(ProvidersResponse { providers, has_any }))
+    // Read any custom base_url overrides from the config
+    let base_urls = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+        let mut urls = HashMap::new();
+        if let Some(llm) = doc.get("llm") {
+            for (provider, key) in [
+                ("anthropic", "anthropic_base_url"),
+                ("openai", "openai_base_url"),
+                ("openrouter", "openrouter_base_url"),
+                ("zhipu", "zhipu_base_url"),
+                ("groq", "groq_base_url"),
+                ("together", "together_base_url"),
+                ("fireworks", "fireworks_base_url"),
+                ("deepseek", "deepseek_base_url"),
+                ("xai", "xai_base_url"),
+                ("mistral", "mistral_base_url"),
+                ("opencode_zen", "opencode_zen_base_url"),
+            ] {
+                if let Some(val) = llm.get(key).and_then(|v| v.as_str()) {
+                    if !val.is_empty() {
+                        urls.insert(provider.to_string(), val.to_string());
+                    }
+                }
+            }
+        }
+        urls
+    } else {
+        HashMap::new()
+    };
+
+    Ok(Json(ProvidersResponse { providers, has_any, base_urls }))
 }
 
 async fn update_provider(
@@ -2198,6 +2240,25 @@ async fn update_provider(
 
     // Set the key
     doc["llm"][key_name] = toml_edit::value(request.api_key);
+
+    // Set or remove base_url if provided.
+    // Derive the TOML key from the API key name: "anthropic_key" → "anthropic_base_url".
+    let base_url_key = format!("{}_base_url", key_name.trim_end_matches("_key"));
+    if let Some(url) = &request.base_url {
+        if url.is_empty() {
+            // Empty string means "remove override, use default"
+            if let Some(llm) = doc.get_mut("llm").and_then(|l| l.as_table_mut()) {
+                llm.remove(&base_url_key);
+            }
+        } else if !url.starts_with("http://") && !url.starts_with("https://") {
+            return Ok(Json(ProviderUpdateResponse {
+                success: false,
+                message: "Base URL must start with http:// or https://".into(),
+            }));
+        } else {
+            doc["llm"][&base_url_key] = toml_edit::value(url.as_str());
+        }
+    }
 
     // Auto-set routing defaults if the current routing points to a provider
     // the user doesn't have a key for. This prevents the common case where
@@ -2338,10 +2399,12 @@ async fn delete_provider(
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    // Remove the key from [llm]
+    // Remove the key and any associated base_url from [llm]
     if let Some(llm) = doc.get_mut("llm") {
         if let Some(table) = llm.as_table_mut() {
             table.remove(key_name);
+            let base_url_key = format!("{}_base_url", key_name.trim_end_matches("_key"));
+            table.remove(&base_url_key);
         }
     }
 
@@ -2874,13 +2937,13 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
             if let Some(val) = llm.get(key) {
                 if let Some(s) = val.as_str() {
                     if let Some(var_name) = s.strip_prefix("env:") {
-                        return std::env::var(var_name).is_ok();
+                        return std::env::var(var_name).is_ok_and(|v| !v.is_empty());
                     }
                     return !s.is_empty();
                 }
             }
         }
-        std::env::var(env_var).is_ok()
+        std::env::var(env_var).is_ok_and(|v| !v.is_empty())
     };
 
     if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
@@ -2916,7 +2979,6 @@ async fn configured_providers(config_path: &std::path::Path) -> Vec<&'static str
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
     }
-
     providers
 }
 

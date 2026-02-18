@@ -66,17 +66,50 @@ impl SpacebotModel {
         request: CompletionRequest,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         match self.provider.as_str() {
-            "anthropic" => self.call_anthropic(request).await,
-            "openai" => self.call_openai(request).await,
-            "openrouter" => self.call_openrouter(request).await,
-            "zhipu" => self.call_zhipu(request).await,
-            "groq" => self.call_groq(request).await,
-            "together" => self.call_together(request).await,
-            "fireworks" => self.call_fireworks(request).await,
-            "deepseek" => self.call_deepseek(request).await,
-            "xai" => self.call_xai(request).await,
-            "mistral" => self.call_mistral(request).await,
-            "opencode-zen" => self.call_opencode_zen(request).await,
+            "anthropic" => {
+                let url = self.llm_manager.get_base_url("anthropic");
+                self.call_anthropic_compatible(request, "anthropic", "Anthropic", url).await
+            }
+            "openai" => {
+                let url = self.llm_manager.get_base_url("openai");
+                self.call_openai_compatible(request, "openai", "OpenAI", url).await
+            }
+            "openrouter" => {
+                let url = self.llm_manager.get_base_url("openrouter");
+                self.call_openai_compatible(request, "openrouter", "OpenRouter", url).await
+            }
+            "zhipu" => {
+                let url = self.llm_manager.get_base_url("zhipu");
+                self.call_openai_compatible(request, "zhipu", "Z.ai", url).await
+            }
+            "groq" => {
+                let url = self.llm_manager.get_base_url("groq");
+                self.call_openai_compatible(request, "groq", "Groq", url).await
+            }
+            "together" => {
+                let url = self.llm_manager.get_base_url("together");
+                self.call_openai_compatible(request, "together", "Together AI", url).await
+            }
+            "fireworks" => {
+                let url = self.llm_manager.get_base_url("fireworks");
+                self.call_openai_compatible(request, "fireworks", "Fireworks AI", url).await
+            }
+            "deepseek" => {
+                let url = self.llm_manager.get_base_url("deepseek");
+                self.call_openai_compatible(request, "deepseek", "DeepSeek", url).await
+            }
+            "xai" => {
+                let url = self.llm_manager.get_base_url("xai");
+                self.call_openai_compatible(request, "xai", "xAI", url).await
+            }
+            "mistral" => {
+                let url = self.llm_manager.get_base_url("mistral");
+                self.call_openai_compatible(request, "mistral", "Mistral AI", url).await
+            }
+            "opencode-zen" => {
+                let url = self.llm_manager.get_base_url("opencode-zen");
+                self.call_openai_compatible(request, "opencode-zen", "OpenCode Zen", url).await
+            }
             other => Err(CompletionError::ProviderError(format!(
                 "unknown provider: {other}"
             ))),
@@ -271,13 +304,18 @@ impl CompletionModel for SpacebotModel {
 }
 
 impl SpacebotModel {
-    async fn call_anthropic(
+    /// Generic Anthropic-compatible API call.
+    /// Used by providers that implement the Anthropic messages format.
+    async fn call_anthropic_compatible(
         &self,
         request: CompletionRequest,
+        provider_id: &str,
+        provider_display_name: &str,
+        endpoint: &str,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let api_key = self
             .llm_manager
-            .get_api_key("anthropic")
+            .get_api_key(provider_id)
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         let messages = convert_messages_to_anthropic(&request.chat_history);
@@ -314,7 +352,7 @@ impl SpacebotModel {
         let response = self
             .llm_manager
             .http_client()
-            .post("https://api.anthropic.com/v1/messages")
+            .post(endpoint)
             .header("x-api-key", &api_key)
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
@@ -331,7 +369,7 @@ impl SpacebotModel {
 
         let response_body: serde_json::Value = serde_json::from_str(&response_text)
             .map_err(|e| CompletionError::ProviderError(format!(
-                "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
+                "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
             )))?;
 
         if !status.is_success() {
@@ -339,269 +377,11 @@ impl SpacebotModel {
                 .as_str()
                 .unwrap_or("unknown error");
             return Err(CompletionError::ProviderError(format!(
-                "Anthropic API error ({status}): {message}"
+                "{provider_display_name} API error ({status}): {message}"
             )));
         }
 
         parse_anthropic_response(response_body)
-    }
-
-    async fn call_openai(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        let api_key = self
-            .llm_manager
-            .get_api_key("openai")
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let mut messages = Vec::new();
-
-        if let Some(preamble) = &request.preamble {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": preamble,
-            }));
-        }
-
-        messages.extend(convert_messages_to_openai(&request.chat_history));
-
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": messages,
-        });
-
-        if let Some(max_tokens) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = serde_json::json!(temperature);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::json!(tools);
-        }
-
-        let response = self
-            .llm_manager
-            .http_client()
-            .post("https://api.openai.com/v1/chat/completions")
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
-
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "OpenAI response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
-
-        if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            return Err(CompletionError::ProviderError(format!(
-                "OpenAI API error ({status}): {message}"
-            )));
-        }
-
-        parse_openai_response(response_body, "OpenAI")
-    }
-
-    async fn call_openrouter(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        let api_key = self
-            .llm_manager
-            .get_api_key("openrouter")
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        // OpenRouter uses the OpenAI chat completions format.
-        // model_name is the full OpenRouter model ID (e.g. "anthropic/claude-sonnet-4-20250514").
-        let mut messages = Vec::new();
-
-        if let Some(preamble) = &request.preamble {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": preamble,
-            }));
-        }
-
-        messages.extend(convert_messages_to_openai(&request.chat_history));
-
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": messages,
-        });
-
-        if let Some(max_tokens) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = serde_json::json!(temperature);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::json!(tools);
-        }
-
-        let response = self
-            .llm_manager
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
-
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "OpenRouter response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
-
-        if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            return Err(CompletionError::ProviderError(format!(
-                "OpenRouter API error ({status}): {message}"
-            )));
-        }
-
-        // OpenRouter returns OpenAI-format responses
-        parse_openai_response(response_body, "OpenRouter")
-    }
-
-    async fn call_zhipu(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        let api_key = self
-            .llm_manager
-            .get_api_key("zhipu")
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let mut messages = Vec::new();
-
-        if let Some(preamble) = &request.preamble {
-            messages.push(serde_json::json!({
-                "role": "system",
-                "content": preamble,
-            }));
-        }
-
-        messages.extend(convert_messages_to_openai(&request.chat_history));
-
-        let mut body = serde_json::json!({
-            "model": self.model_name,
-            "messages": messages,
-        });
-
-        if let Some(max_tokens) = request.max_tokens {
-            body["max_tokens"] = serde_json::json!(max_tokens);
-        }
-
-        if let Some(temperature) = request.temperature {
-            body["temperature"] = serde_json::json!(temperature);
-        }
-
-        if !request.tools.is_empty() {
-            let tools: Vec<serde_json::Value> = request
-                .tools
-                .iter()
-                .map(|t| {
-                    serde_json::json!({
-                        "type": "function",
-                        "function": {
-                            "name": t.name,
-                            "description": t.description,
-                            "parameters": t.parameters,
-                        }
-                    })
-                })
-                .collect();
-            body["tools"] = serde_json::json!(tools);
-        }
-
-        let response = self
-            .llm_manager
-            .http_client()
-            .post("https://api.z.ai/api/paas/v4/chat/completions")
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response
-            .text()
-            .await
-            .map_err(|e| CompletionError::ProviderError(format!("failed to read response body: {e}")))?;
-
-        let response_body: serde_json::Value = serde_json::from_str(&response_text)
-            .map_err(|e| CompletionError::ProviderError(format!(
-                "Z.ai response ({status}) is not valid JSON: {e}\nBody: {}", truncate_body(&response_text)
-            )))?;
-
-        if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
-            return Err(CompletionError::ProviderError(format!(
-                "Z.ai API error ({status}): {message}"
-            )));
-        }
-
-        parse_openai_response(response_body, "Z.ai")
     }
 
     /// Generic OpenAI-compatible API call.
@@ -692,90 +472,6 @@ impl SpacebotModel {
         }
 
         parse_openai_response(response_body, provider_display_name)
-    }
-
-    async fn call_groq(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "groq",
-            "Groq",
-            "https://api.groq.com/openai/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_together(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "together",
-            "Together AI",
-            "https://api.together.xyz/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_fireworks(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "fireworks",
-            "Fireworks AI",
-            "https://api.fireworks.ai/inference/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_deepseek(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "deepseek",
-            "DeepSeek",
-            "https://api.deepseek.com/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_xai(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "xai",
-            "xAI",
-            "https://api.x.ai/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_mistral(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "mistral",
-            "Mistral AI",
-            "https://api.mistral.ai/v1/chat/completions",
-        ).await
-    }
-
-    async fn call_opencode_zen(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
-        self.call_openai_compatible(
-            request,
-            "opencode-zen",
-            "OpenCode Zen",
-            "https://opencode.ai/zen/v1/chat/completions",
-        ).await
     }
 }
 
