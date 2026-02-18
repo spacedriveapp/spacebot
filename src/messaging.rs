@@ -1,11 +1,11 @@
 //! Messaging adapters (Discord, Slack, Telegram, Webhook).
 
-pub mod traits;
-pub mod manager;
 pub mod discord;
+pub mod manager;
 pub mod slack;
 pub mod telegram;
+pub mod traits;
 pub mod webhook;
 
-pub use traits::Messaging;
 pub use manager::MessagingManager;
+pub use traits::Messaging;

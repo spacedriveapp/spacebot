@@ -1,14 +1,13 @@
 //! Memory save tool for channels and branches.
 
 use crate::error::Result;
-use crate::memory::{Memory, MemorySearch, MemoryType};
 use crate::memory::types::{Association, CreateAssociationInput};
+use crate::memory::{Memory, MemorySearch, MemoryType};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
 
 /// Tool for saving memories to the store.
 #[derive(Debug, Clone)]
@@ -207,8 +206,8 @@ impl Tool for MemorySaveTool {
                 _ => crate::memory::types::RelationType::RelatedTo,
             };
 
-            let association =
-                Association::new(&memory.id, &assoc.target_id, relation_type).with_weight(assoc.weight);
+            let association = Association::new(&memory.id, &assoc.target_id, relation_type)
+                .with_weight(assoc.weight);
 
             if let Err(error) = store.create_association(&association).await {
                 tracing::warn!(
@@ -236,7 +235,12 @@ impl Tool for MemorySaveTool {
 
         // Ensure the FTS index exists so full_text_search queries work.
         // Safe to call repeatedly — no-ops if the index already exists.
-        if let Err(error) = self.memory_search.embedding_table().ensure_fts_index().await {
+        if let Err(error) = self
+            .memory_search
+            .embedding_table()
+            .ensure_fts_index()
+            .await
+        {
             tracing::warn!(%error, "failed to ensure FTS index after memory save");
         }
 
@@ -264,6 +268,9 @@ pub async fn save_fact(
         associations: vec![],
     };
 
-    let output = tool.call(args).await.map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
+    let output = tool
+        .call(args)
+        .await
+        .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
     Ok(output.memory_id)
 }

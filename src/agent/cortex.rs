@@ -10,11 +10,11 @@
 //! health monitoring and memory consolidation.
 
 use crate::error::Result;
+use crate::hooks::CortexHook;
 use crate::llm::SpacebotModel;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
 use crate::{AgentDeps, ProcessEvent, ProcessType};
-use crate::hooks::CortexHook;
 
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
@@ -180,9 +180,7 @@ impl CortexEventRow {
             id: self.id,
             event_type: self.event_type,
             summary: self.summary,
-            details: self
-                .details
-                .and_then(|d| serde_json::from_str(&d).ok()),
+            details: self.details.and_then(|d| serde_json::from_str(&d).ok()),
             created_at: self.created_at.and_utc().to_rfc3339(),
         }
     }
@@ -275,7 +273,11 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
             );
             logger.log(
                 "bulletin_failed",
-                &format!("Bulletin generation failed, retrying (attempt {}/{})", attempt + 1, MAX_RETRIES),
+                &format!(
+                    "Bulletin generation failed, retrying (attempt {}/{})",
+                    attempt + 1,
+                    MAX_RETRIES
+                ),
                 Some(serde_json::json!({ "attempt": attempt + 1, "max_retries": MAX_RETRIES })),
             );
             tokio::time::sleep(Duration::from_secs(RETRY_DELAY_SECS)).await;
@@ -401,7 +403,12 @@ async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
                 "- [{}] (importance: {:.1}) {}\n",
                 result.memory.memory_type,
                 result.memory.importance,
-                result.memory.content.lines().next().unwrap_or(&result.memory.content),
+                result
+                    .memory
+                    .content
+                    .lines()
+                    .next()
+                    .unwrap_or(&result.memory.content),
             ));
         }
         output.push('\n');
@@ -458,9 +465,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
 
     // No tools needed — the LLM just synthesizes the pre-gathered data
-    let agent = AgentBuilder::new(model)
-        .preamble(&bulletin_prompt)
-        .build();
+    let agent = AgentBuilder::new(model).preamble(&bulletin_prompt).build();
 
     let synthesis_prompt = prompt_engine
         .render_system_cortex_synthesis(cortex_config.bulletin_max_words, &raw_sections)
@@ -587,17 +592,24 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     // Gather context: identity + current bulletin
     let identity_context = {
         let rendered = deps.runtime_config.identity.load().render();
-        if rendered.is_empty() { None } else { Some(rendered) }
+        if rendered.is_empty() {
+            None
+        } else {
+            Some(rendered)
+        }
     };
     let memory_bulletin = {
         let bulletin = deps.runtime_config.memory_bulletin.load();
-        if bulletin.is_empty() { None } else { Some(bulletin.as_ref().clone()) }
+        if bulletin.is_empty() {
+            None
+        } else {
+            Some(bulletin.as_ref().clone())
+        }
     };
 
-    let synthesis_prompt = match prompt_engine.render_system_profile_synthesis(
-        identity_context.as_deref(),
-        memory_bulletin.as_deref(),
-    ) {
+    let synthesis_prompt = match prompt_engine
+        .render_system_profile_synthesis(identity_context.as_deref(), memory_bulletin.as_deref())
+    {
         Ok(p) => p,
         Err(error) => {
             tracing::warn!(%error, "failed to render profile synthesis prompt");
@@ -610,9 +622,7 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     let model =
         SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
 
-    let agent = AgentBuilder::new(model)
-        .preamble(&profile_prompt)
-        .build();
+    let agent = AgentBuilder::new(model).preamble(&profile_prompt).build();
 
     match agent.prompt(&synthesis_prompt).await {
         Ok(response) => {
@@ -679,7 +689,9 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
                     tracing::warn!(%error, raw = %cleaned, "failed to parse profile LLM response as JSON");
                     logger.log(
                         "profile_failed",
-                        &format!("Profile generation failed: could not parse LLM response — {error}"),
+                        &format!(
+                            "Profile generation failed: could not parse LLM response — {error}"
+                        ),
                         Some(serde_json::json!({
                             "error": error.to_string(),
                             "raw_response": cleaned,
@@ -711,7 +723,10 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
 /// Scans memories for embedding similarity and creates association edges
 /// between related memories. On first run, backfills all existing memories.
 /// Subsequent runs only process memories created since the last pass.
-pub fn spawn_association_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+pub fn spawn_association_loop(
+    deps: AgentDeps,
+    logger: CortexLogger,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(error) = run_association_loop(&deps, &logger).await {
             tracing::error!(%error, "cortex association loop exited with error");
@@ -727,7 +742,10 @@ async fn run_association_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow
 
     // Backfill: process all existing memories on first run
     let backfill_count = run_association_pass(deps, logger, None).await;
-    tracing::info!(associations_created = backfill_count, "association backfill complete");
+    tracing::info!(
+        associations_created = backfill_count,
+        "association backfill complete"
+    );
 
     let mut last_pass_at = chrono::Utc::now();
 
@@ -812,8 +830,8 @@ async fn run_association_pass(
             };
 
             // Weight: map similarity range to 0.5-1.0
-            let weight = 0.5 + (similarity - similarity_threshold)
-                / (1.0 - similarity_threshold) * 0.5;
+            let weight =
+                0.5 + (similarity - similarity_threshold) / (1.0 - similarity_threshold) * 0.5;
 
             let association = Association::new(memory_id, &target_id, relation_type)
                 .with_weight(weight.clamp(0.0, 1.0));

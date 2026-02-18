@@ -20,7 +20,10 @@ pub struct ChannelRecallTool {
 
 impl ChannelRecallTool {
     pub fn new(conversation_logger: ConversationLogger, channel_store: ChannelStore) -> Self {
-        Self { conversation_logger, channel_store }
+        Self {
+            conversation_logger,
+            channel_store,
+        }
     }
 }
 
@@ -118,7 +121,8 @@ impl Tool for ChannelRecallTool {
         let limit = args.limit.min(MAX_TRANSCRIPT_MESSAGES).max(1);
 
         // Resolve channel name to ID
-        let found = self.channel_store
+        let found = self
+            .channel_store
             .find_by_name(&channel_query)
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to search channels: {e}")))?;
@@ -133,19 +137,21 @@ impl Tool for ChannelRecallTool {
         };
 
         // Load transcript
-        let messages = self.conversation_logger
+        let messages = self
+            .conversation_logger
             .load_channel_transcript(&channel.id, limit)
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to load transcript: {e}")))?;
 
-        let transcript: Vec<TranscriptMessage> = messages.iter().map(|message| {
-            TranscriptMessage {
+        let transcript: Vec<TranscriptMessage> = messages
+            .iter()
+            .map(|message| TranscriptMessage {
                 role: message.role.clone(),
                 sender: message.sender_name.clone(),
                 content: message.content.clone(),
                 timestamp: message.created_at.to_rfc3339(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let summary = format_transcript(&channel.display_name, &channel.id, &transcript);
 
@@ -162,18 +168,20 @@ impl Tool for ChannelRecallTool {
 
 impl ChannelRecallTool {
     async fn list_channels(&self) -> std::result::Result<ChannelRecallOutput, ChannelRecallError> {
-        let channels = self.channel_store
+        let channels = self
+            .channel_store
             .list_active()
             .await
             .map_err(|e| ChannelRecallError(format!("Failed to list channels: {e}")))?;
 
-        let entries: Vec<ChannelListEntry> = channels.iter().map(|channel| {
-            ChannelListEntry {
+        let entries: Vec<ChannelListEntry> = channels
+            .iter()
+            .map(|channel| ChannelListEntry {
                 channel_id: channel.id.clone(),
                 channel_name: channel.display_name.clone(),
                 last_activity: channel.last_activity_at.to_rfc3339(),
-            }
-        }).collect();
+            })
+            .collect();
 
         let summary = format_channel_list(&entries);
 
@@ -201,14 +209,20 @@ fn format_transcript(
     }
 
     let label = channel_name.as_deref().unwrap_or(channel_id);
-    let mut output = format!("## Transcript from #{label} ({} messages)\n\n", messages.len());
+    let mut output = format!(
+        "## Transcript from #{label} ({} messages)\n\n",
+        messages.len()
+    );
 
     for message in messages {
         let sender = match &message.sender {
             Some(name) => name.as_str(),
             None => "assistant",
         };
-        output.push_str(&format!("**{}** ({}): {}\n\n", sender, message.role, message.content));
+        output.push_str(&format!(
+            "**{}** ({}): {}\n\n",
+            sender, message.role, message.content
+        ));
     }
 
     output

@@ -1,6 +1,6 @@
 use crate::error::Result;
 use anyhow::Context;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use std::collections::HashMap;
 use std::sync::Arc;
 

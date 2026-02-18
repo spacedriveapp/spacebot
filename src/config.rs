@@ -55,6 +55,7 @@ pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
+    pub ollama_key: Option<String>,
     pub zhipu_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
@@ -68,9 +69,10 @@ pub struct LlmConfig {
 impl LlmConfig {
     /// Check if any provider key is configured.
     pub fn has_any_key(&self) -> bool {
-        self.anthropic_key.is_some() 
-            || self.openai_key.is_some() 
-            || self.openrouter_key.is_some() 
+        self.anthropic_key.is_some()
+            || self.openai_key.is_some()
+            || self.openrouter_key.is_some()
+            || self.ollama_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -869,6 +871,7 @@ struct TomlLlmConfig {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    ollama_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1146,6 +1149,7 @@ impl Config {
         std::env::var("ANTHROPIC_API_KEY").is_err()
             && std::env::var("OPENAI_API_KEY").is_err()
             && std::env::var("OPENROUTER_API_KEY").is_err()
+            && std::env::var("OLLAMA_API_KEY").is_err()
             && std::env::var("OPENCODE_ZEN_API_KEY").is_err()
     }
 
@@ -1183,6 +1187,7 @@ impl Config {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
@@ -1239,8 +1244,8 @@ impl Config {
     /// Validate a raw TOML string as a valid Spacebot config.
     /// Returns Ok(()) if the config is structurally valid, or an error describing what's wrong.
     pub fn validate_toml(content: &str) -> Result<()> {
-        let toml_config: TomlConfig = toml::from_str(content)
-            .context("failed to parse config TOML")?;
+        let toml_config: TomlConfig =
+            toml::from_str(content).context("failed to parse config TOML")?;
         // Run full conversion to catch semantic errors (env resolution, defaults, etc.)
         let instance_dir = Self::default_instance_dir();
         Self::from_toml(toml_config, instance_dir)?;
@@ -1267,6 +1272,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+            ollama_key: toml
+                .llm
+                .ollama_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OLLAMA_API_KEY").ok()),
             zhipu_key: toml
                 .llm
                 .zhipu_key
@@ -1939,7 +1950,9 @@ pub fn spawn_file_watcher(
                     // Only forward data modification events, not metadata/access changes
                     use notify::EventKind;
                     match &event.kind {
-                        EventKind::Create(_) | EventKind::Modify(notify::event::ModifyKind::Data(_)) | EventKind::Remove(_) => {
+                        EventKind::Create(_)
+                        | EventKind::Modify(notify::event::ModifyKind::Data(_))
+                        | EventKind::Remove(_) => {
                             let _ = tx.send(event);
                         }
                         // Also forward Any/Other modify events (some backends don't distinguish)
@@ -2248,6 +2261,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Anthropic",
         "OpenRouter",
         "OpenAI",
+        "Ollama Cloud",
         "Z.ai (GLM)",
         "Groq",
         "Together AI",
@@ -2267,14 +2281,15 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         0 => ("Anthropic API key", "anthropic_key", "anthropic"),
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
         2 => ("OpenAI API key", "openai_key", "openai"),
-        3 => ("Z.ai (GLM) API key", "zhipu_key", "zhipu"),
-        4 => ("Groq API key", "groq_key", "groq"),
-        5 => ("Together AI API key", "together_key", "together"),
-        6 => ("Fireworks AI API key", "fireworks_key", "fireworks"),
-        7 => ("DeepSeek API key", "deepseek_key", "deepseek"),
-        8 => ("xAI API key", "xai_key", "xai"),
-        9 => ("Mistral AI API key", "mistral_key", "mistral"),
-        10 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        3 => ("Ollama Cloud API key", "ollama_key", "ollama"),
+        4 => ("Z.ai (GLM) API key", "zhipu_key", "zhipu"),
+        5 => ("Groq API key", "groq_key", "groq"),
+        6 => ("Together AI API key", "together_key", "together"),
+        7 => ("Fireworks AI API key", "fireworks_key", "fireworks"),
+        8 => ("DeepSeek API key", "deepseek_key", "deepseek"),
+        9 => ("xAI API key", "xai_key", "xai"),
+        10 => ("Mistral AI API key", "mistral_key", "mistral"),
+        11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
         _ => unreachable!(),
     };
 

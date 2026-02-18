@@ -9,9 +9,9 @@ use crate::messaging::traits::{InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse};
 
 use anyhow::Context as _;
+use axum::Router;
 use axum::extract::{Json, State};
 use axum::http::StatusCode;
-use axum::Router;
 use axum::routing::{get, post};
 use serde::{Deserialize, Serialize};
 

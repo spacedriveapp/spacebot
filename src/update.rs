@@ -103,7 +103,10 @@ pub async fn check_for_update(status: &SharedUpdateStatus) {
 
     match result {
         Ok(release) => {
-            let tag = release.tag_name.strip_prefix('v').unwrap_or(&release.tag_name);
+            let tag = release
+                .tag_name
+                .strip_prefix('v')
+                .unwrap_or(&release.tag_name);
             let is_newer = is_newer_version(tag, CURRENT_VERSION);
 
             next.latest_version = Some(tag.to_string());
@@ -417,11 +420,7 @@ fn resolve_target_image(current_image: &str, new_version: &str) -> String {
     };
 
     // Determine the variant suffix (slim, full, or default to slim)
-    let variant = if tag.contains("full") {
-        "full"
-    } else {
-        "slim"
-    };
+    let variant = if tag.contains("full") { "full" } else { "slim" };
 
     format!("{}:v{}-{}", base, new_version, variant)
 }

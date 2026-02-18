@@ -35,7 +35,10 @@ impl FileTool {
         // existing ancestor and append the remaining components.
         let canonical = best_effort_canonicalize(&resolved);
 
-        let workspace_canonical = self.workspace.canonicalize().unwrap_or_else(|_| self.workspace.clone());
+        let workspace_canonical = self
+            .workspace
+            .canonicalize()
+            .unwrap_or_else(|_| self.workspace.clone());
 
         if !canonical.starts_with(&workspace_canonical) {
             return Err(FileError(format!(
@@ -285,7 +288,10 @@ async fn do_file_list(path: &Path) -> Result<FileOutput, FileError> {
 
     if total_count > max_entries {
         entries.push(FileEntryOutput {
-            name: format!("... and {} more entries (listing capped at {max_entries})", total_count - max_entries),
+            name: format!(
+                "... and {} more entries (listing capped at {max_entries})",
+                total_count - max_entries
+            ),
             entry_type: "notice".to_string(),
             size: 0,
         });
@@ -300,8 +306,6 @@ async fn do_file_list(path: &Path) -> Result<FileOutput, FileError> {
         error: None,
     })
 }
-
-
 
 /// File entry metadata (legacy).
 #[derive(Debug, Clone)]

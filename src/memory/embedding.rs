@@ -22,12 +22,15 @@ impl EmbeddingModel {
         let model = fastembed::TextEmbedding::try_new(options)
             .map_err(|e| LlmError::EmbeddingFailed(e.to_string()))?;
 
-        Ok(Self { model: Arc::new(model) })
+        Ok(Self {
+            model: Arc::new(model),
+        })
     }
 
     /// Generate embeddings for multiple texts (blocking).
     pub fn embed(&self, texts: Vec<String>) -> Result<Vec<Vec<f32>>> {
-        self.model.embed(texts, None)
+        self.model
+            .embed(texts, None)
             .map_err(|e| LlmError::EmbeddingFailed(e.to_string()).into())
     }
 
@@ -42,8 +45,9 @@ impl EmbeddingModel {
         let text = text.to_string();
         let model = self.model.clone();
         let result = tokio::task::spawn_blocking(move || {
-            model.embed(vec![text], None)
-                .map_err(|e| crate::Error::Llm(crate::error::LlmError::EmbeddingFailed(e.to_string())))
+            model.embed(vec![text], None).map_err(|e| {
+                crate::Error::Llm(crate::error::LlmError::EmbeddingFailed(e.to_string()))
+            })
         })
         .await
         .map_err(|e| crate::Error::Other(anyhow::anyhow!("embedding task failed: {}", e)))??;
@@ -51,8 +55,6 @@ impl EmbeddingModel {
         Ok(result.into_iter().next().unwrap_or_default())
     }
 }
-
-
 
 /// Async function to embed text using a shared model.
 pub async fn embed_text(model: &Arc<EmbeddingModel>, text: &str) -> Result<Vec<f32>> {

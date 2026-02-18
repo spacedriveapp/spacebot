@@ -118,6 +118,26 @@ impl StatusBlock {
                     self.completed_items.remove(0);
                 }
             }
+            ProcessEvent::BranchFailed {
+                branch_id, error, ..
+            } => {
+                // Remove from active branches, add to completed with error summary.
+                if let Some(pos) = self.active_branches.iter().position(|b| b.id == *branch_id) {
+                    let branch = self.active_branches.remove(pos);
+                    self.completed_items.push(CompletedItem {
+                        id: branch_id.to_string(),
+                        item_type: CompletedItemType::Branch,
+                        description: branch.description,
+                        completed_at: Utc::now(),
+                        result_summary: format!("Branch failed: {error}"),
+                    });
+                }
+
+                // Keep only last 10 completed items
+                if self.completed_items.len() > 10 {
+                    self.completed_items.remove(0);
+                }
+            }
             _ => {}
         }
     }

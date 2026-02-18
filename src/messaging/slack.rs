@@ -244,8 +244,7 @@ impl Messaging for SlackAdapter {
             bot_token: self.bot_token.clone(),
         });
 
-        let callbacks = SlackSocketModeListenerCallbacks::new()
-            .with_push_events(handle_push_event);
+        let callbacks = SlackSocketModeListenerCallbacks::new().with_push_events(handle_push_event);
 
         let listener_environment = Arc::new(
             SlackClientEventsListenerEnvironment::new(client.clone())
@@ -331,12 +330,18 @@ impl Messaging for SlackAdapter {
                         .context("failed to send slack thread reply")?;
                 }
             }
-            OutboundResponse::File { filename, data, mime_type, caption } => {
+            OutboundResponse::File {
+                filename,
+                data,
+                mime_type,
+                caption,
+            } => {
                 // Slack's v2 upload flow: get upload URL, upload bytes, complete
                 let upload_url_response = session
-                    .get_upload_url_external(
-                        &SlackApiFilesGetUploadUrlExternalRequest::new(filename.clone(), data.len()),
-                    )
+                    .get_upload_url_external(&SlackApiFilesGetUploadUrlExternalRequest::new(
+                        filename.clone(),
+                        data.len(),
+                    ))
                     .await
                     .context("failed to get slack upload URL")?;
 
@@ -350,13 +355,12 @@ impl Messaging for SlackAdapter {
                     .context("failed to upload file to slack")?;
 
                 let thread_ts = extract_thread_ts(message);
-                let file_complete = SlackApiFilesComplete::new(upload_url_response.file_id)
-                    .with_title(filename);
+                let file_complete =
+                    SlackApiFilesComplete::new(upload_url_response.file_id).with_title(filename);
 
-                let mut complete_request = SlackApiFilesCompleteUploadExternalRequest::new(
-                    vec![file_complete],
-                )
-                .with_channel_id(channel_id.clone());
+                let mut complete_request =
+                    SlackApiFilesCompleteUploadExternalRequest::new(vec![file_complete])
+                        .with_channel_id(channel_id.clone());
 
                 complete_request = complete_request.opt_initial_comment(caption);
                 complete_request = complete_request.opt_thread_ts(thread_ts);
@@ -367,8 +371,8 @@ impl Messaging for SlackAdapter {
                     .context("failed to complete slack file upload")?;
             }
             OutboundResponse::Reaction(emoji) => {
-                let ts = extract_message_ts(message)
-                    .context("missing slack_message_ts for reaction")?;
+                let ts =
+                    extract_message_ts(message).context("missing slack_message_ts for reaction")?;
 
                 let reaction_name = sanitize_reaction_name(&emoji);
 
@@ -470,11 +474,7 @@ impl Messaging for SlackAdapter {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        target: &str,
-        response: OutboundResponse,
-    ) -> crate::Result<()> {
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let (client, token) = self.create_session()?;
         let session = client.open_session(&token);
         let channel_id = SlackChannelId(target.to_string());
@@ -539,11 +539,7 @@ impl Messaging for SlackAdapter {
 
                 HistoryMessage {
                     author,
-                    content: msg
-                        .content
-                        .text
-                        .clone()
-                        .unwrap_or_default(),
+                    content: msg.content.text.clone().unwrap_or_default(),
                     is_bot,
                 }
             })

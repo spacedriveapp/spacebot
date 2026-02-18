@@ -100,7 +100,8 @@ impl Tool for ReplyTool {
             "reply tool called"
         );
 
-        self.conversation_logger.log_bot_message(&self.channel_id, &args.content);
+        self.conversation_logger
+            .log_bot_message(&self.channel_id, &args.content);
 
         let response = match args.thread_name {
             Some(ref name) => {

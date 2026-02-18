@@ -9,7 +9,7 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
     ChannelId, ChannelType, Context, CreateAttachment, CreateMessage, CreateThread, EditMessage,
-    EventHandler, GatewayIntents, GetMessages, Http, Message, MessageId, Ready, ReactionType,
+    EventHandler, GatewayIntents, GetMessages, Http, Message, MessageId, ReactionType, Ready,
     ShardManager, User, UserId,
 };
 use std::collections::HashMap;
@@ -30,10 +30,7 @@ pub struct DiscordAdapter {
 }
 
 impl DiscordAdapter {
-    pub fn new(
-        token: impl Into<String>,
-        permissions: Arc<ArcSwap<DiscordPermissions>>,
-    ) -> Self {
+    pub fn new(token: impl Into<String>, permissions: Arc<ArcSwap<DiscordPermissions>>) -> Self {
         Self {
             token: token.into(),
             permissions,
@@ -138,15 +135,15 @@ impl Messaging for DiscordAdapter {
 
                 let thread_result = match message_id {
                     Some(source_message_id) => {
-                        let builder = CreateThread::new(&thread_name)
-                            .kind(ChannelType::PublicThread);
+                        let builder =
+                            CreateThread::new(&thread_name).kind(ChannelType::PublicThread);
                         channel_id
                             .create_thread_from_message(&*http, source_message_id, builder)
                             .await
                     }
                     None => {
-                        let builder = CreateThread::new(&thread_name)
-                            .kind(ChannelType::PublicThread);
+                        let builder =
+                            CreateThread::new(&thread_name).kind(ChannelType::PublicThread);
                         channel_id.create_thread(&*http, builder).await
                     }
                 };
@@ -178,7 +175,12 @@ impl Messaging for DiscordAdapter {
                     }
                 }
             }
-            OutboundResponse::File { filename, data, mime_type: _, caption } => {
+            OutboundResponse::File {
+                filename,
+                data,
+                mime_type: _,
+                caption,
+            } => {
                 self.stop_typing(&message.id).await;
 
                 let attachment = CreateAttachment::bytes(data, &filename);
@@ -200,7 +202,11 @@ impl Messaging for DiscordAdapter {
                     .context("missing discord_message_id for reaction")?;
 
                 channel_id
-                    .create_reaction(&*http, MessageId::new(message_id), ReactionType::Unicode(emoji))
+                    .create_reaction(
+                        &*http,
+                        MessageId::new(message_id),
+                        ReactionType::Unicode(emoji),
+                    )
                     .await
                     .context("failed to add reaction")?;
             }
@@ -267,11 +273,7 @@ impl Messaging for DiscordAdapter {
         Ok(())
     }
 
-    async fn broadcast(
-        &self,
-        target: &str,
-        response: OutboundResponse,
-    ) -> crate::Result<()> {
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let http = self.get_http().await?;
 
         let channel_id = ChannelId::new(
@@ -330,12 +332,18 @@ impl Messaging for DiscordAdapter {
 
                 let resolved_content = resolve_mentions(&message.content, &message.mentions);
 
-                let display_name = message.author.global_name.as_deref()
+                let display_name = message
+                    .author
+                    .global_name
+                    .as_deref()
                     .unwrap_or(&message.author.name);
 
                 // Include reply-to attribution if this message is a reply
                 let author = if let Some(referenced) = &message.referenced_message {
-                    let reply_author = referenced.author.global_name.as_deref()
+                    let reply_author = referenced
+                        .author
+                        .global_name
+                        .as_deref()
                         .unwrap_or(&referenced.author.name);
                     format!("{display_name} (replying to {reply_author})")
                 } else {
@@ -417,7 +425,9 @@ impl EventHandler for Handler {
         // DM filter: if no guild_id, it's a DM — only allow listed users
         if message.guild_id.is_none() {
             if permissions.dm_allowed_users.is_empty()
-                || !permissions.dm_allowed_users.contains(&message.author.id.get())
+                || !permissions
+                    .dm_allowed_users
+                    .contains(&message.author.id.get())
             {
                 return;
             }
@@ -444,8 +454,8 @@ impl EventHandler for Handler {
                         .and_then(|v| v.as_u64());
 
                     let direct_match = allowed_channels.contains(&message.channel_id.get());
-                    let parent_match = parent_channel_id
-                        .is_some_and(|pid| allowed_channels.contains(&pid));
+                    let parent_match =
+                        parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
 
                     if !direct_match && !parent_match {
                         return;
@@ -540,11 +550,17 @@ async fn build_metadata(ctx: &Context, message: &Message) -> HashMap<String, ser
     // Display name: member nickname > global display name > username
     let display_name = if let Some(member) = &message.member {
         member.nick.clone().unwrap_or_else(|| {
-            message.author.global_name.clone()
+            message
+                .author
+                .global_name
+                .clone()
                 .unwrap_or_else(|| message.author.name.clone())
         })
     } else {
-        message.author.global_name.clone()
+        message
+            .author
+            .global_name
+            .clone()
             .unwrap_or_else(|| message.author.name.clone())
     };
     metadata.insert("sender_display_name".into(), display_name.into());
@@ -565,7 +581,10 @@ async fn build_metadata(ctx: &Context, message: &Message) -> HashMap<String, ser
     // Try to get channel name and detect threads
     if let Ok(channel) = message.channel_id.to_channel(&ctx.http).await {
         if let Some(guild_channel) = channel.guild() {
-            metadata.insert("discord_channel_name".into(), guild_channel.name.clone().into());
+            metadata.insert(
+                "discord_channel_name".into(),
+                guild_channel.name.clone().into(),
+            );
 
             // Threads have a parent_id pointing to the text channel they were created in
             if guild_channel.thread_metadata.is_some() {
@@ -579,7 +598,10 @@ async fn build_metadata(ctx: &Context, message: &Message) -> HashMap<String, ser
 
     // Reply-to context: resolve the referenced message's author and content
     if let Some(referenced) = &message.referenced_message {
-        let reply_author = referenced.author.global_name.as_deref()
+        let reply_author = referenced
+            .author
+            .global_name
+            .as_deref()
             .unwrap_or(&referenced.author.name);
         metadata.insert("reply_to_author".into(), reply_author.into());
         metadata.insert("reply_to_is_bot".into(), referenced.author.bot.into());

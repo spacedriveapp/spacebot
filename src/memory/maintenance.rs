@@ -35,16 +35,16 @@ pub async fn run_maintenance(
     config: &MaintenanceConfig,
 ) -> Result<MaintenanceReport> {
     let mut report = MaintenanceReport::default();
-    
+
     // Apply decay to all non-identity memories
     report.decayed = apply_decay(memory_store, config.decay_rate).await?;
-    
+
     // Prune old, low-importance memories
     report.pruned = prune_memories(memory_store, config).await?;
-    
+
     // Merge near-duplicate memories
     report.merged = merge_similar_memories(memory_store, config.merge_similarity_threshold).await?;
-    
+
     Ok(report)
 }
 
@@ -56,17 +56,17 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
         .copied()
         .filter(|t| *t != MemoryType::Identity)
         .collect();
-    
+
     let mut decayed_count = 0;
-    
+
     for mem_type in all_types {
         let memories = memory_store.get_by_type(mem_type, 1000).await?;
-        
+
         for mut memory in memories {
             let now = chrono::Utc::now();
             let days_old = (now - memory.updated_at).num_days();
             let days_since_access = (now - memory.last_accessed_at).num_days();
-            
+
             // Calculate decay multiplier
             let age_decay = 1.0 - (days_old as f32 * decay_rate).min(0.5);
             let access_boost = if days_since_access < 7 {
@@ -76,9 +76,9 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
             } else {
                 1.0
             };
-            
+
             let new_importance = memory.importance * age_decay * access_boost;
-            
+
             if (new_importance - memory.importance).abs() > 0.01 {
                 memory.importance = new_importance.clamp(0.0, 1.0);
                 memory.updated_at = now;
@@ -87,19 +87,16 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
             }
         }
     }
-    
+
     Ok(decayed_count)
 }
 
 /// Prune memories that have fallen below the importance threshold.
-async fn prune_memories(
-    memory_store: &MemoryStore,
-    config: &MaintenanceConfig,
-) -> Result<usize> {
+async fn prune_memories(memory_store: &MemoryStore, config: &MaintenanceConfig) -> Result<usize> {
     let now = chrono::Utc::now();
     let min_age = chrono::Duration::days(config.min_age_days);
     let cutoff_date = now - min_age;
-    
+
     // Get all memories below threshold that are old enough
     let candidates = sqlx::query(
         r#"
@@ -107,21 +104,21 @@ async fn prune_memories(
         WHERE importance < ? 
         AND memory_type != 'identity'
         AND created_at < ?
-        "#
+        "#,
     )
     .bind(config.prune_threshold)
     .bind(cutoff_date)
     .fetch_all(memory_store.pool())
     .await?;
-    
+
     let mut pruned_count = 0;
-    
+
     for row in candidates {
         let id: String = sqlx::Row::try_get(&row, "id")?;
         memory_store.delete(&id).await?;
         pruned_count += 1;
     }
-    
+
     Ok(pruned_count)
 }
 
