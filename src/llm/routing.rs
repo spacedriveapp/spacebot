@@ -153,6 +153,20 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 rate_limit_cooldown_secs: 60,
             }
         }
+        "ollama" => {
+            let channel: String = "ollama/gpt-oss:120b".into();
+            let worker: String = "ollama/gpt-oss:20b".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+            }
+        }
         "zhipu" => {
             let channel: String = "zhipu/glm-4-plus".into();
             let worker: String = "zhipu/glm-4-flash".into();
@@ -277,6 +291,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
     match provider {
         "openrouter" => "openrouter/",
         "openai" => "openai/",
+        "ollama" => "ollama/",
         "anthropic" => "anthropic/",
         "zhipu" => "zhipu/",
         "groq" => "groq/",

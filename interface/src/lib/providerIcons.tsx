@@ -60,6 +60,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		anthropic: Anthropic,
 		openai: OpenAI,
 		openrouter: OpenRouter,
+		ollama: OpenRouter,
 		groq: Groq,
 		mistral: Mistral,
 		deepseek: DeepSeek,
