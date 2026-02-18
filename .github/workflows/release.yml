@@ -15,11 +15,20 @@ env:
   IMAGE: ghcr.io/spacedriveapp/spacebot
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            platform: linux/amd64
+          - runner: ubuntu-24.04-arm
+            platform: linux/arm64
+    runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
       packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
 
     steps:
       - uses: actions/checkout@v4
@@ -46,30 +55,66 @@ jobs:
           fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
+      - name: Platform pair
+        id: platform
+        run: echo "pair=$(echo ${{ matrix.platform }} | tr '/' '-')" >> "$GITHUB_OUTPUT"
+
       - name: Build and push slim
         uses: docker/build-push-action@v6
         with:
           context: .
           target: slim
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-slim
-            ${{ env.IMAGE }}:slim
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.IMAGE }}:slim-${{ steps.platform.outputs.pair }}
+          cache-from: type=gha,scope=slim-${{ steps.platform.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=slim-${{ steps.platform.outputs.pair }}
 
       - name: Build and push full
         uses: docker/build-push-action@v6
         with:
           context: .
           target: full
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.version.outputs.version }}-full
-            ${{ env.IMAGE }}:full
-            ${{ env.IMAGE }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.IMAGE }}:full-${{ steps.platform.outputs.pair }}
+          cache-from: type=gha,scope=full-${{ steps.platform.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=full-${{ steps.platform.outputs.pair }}
+
+  merge:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create slim multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.IMAGE }}:${{ needs.build.outputs.version }}-slim \
+            --tag ${{ env.IMAGE }}:slim \
+            ${{ env.IMAGE }}:slim-linux-amd64 \
+            ${{ env.IMAGE }}:slim-linux-arm64
+
+      - name: Create full multi-arch manifest
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.IMAGE }}:${{ needs.build.outputs.version }}-full \
+            --tag ${{ env.IMAGE }}:full \
+            --tag ${{ env.IMAGE }}:latest \
+            ${{ env.IMAGE }}:full-linux-amd64 \
+            ${{ env.IMAGE }}:full-linux-arm64
 
       - name: Log in to Fly registry
         uses: docker/login-action@v3
@@ -81,7 +126,7 @@ jobs:
       - name: Push to Fly registry
         run: |
           docker buildx imagetools create \
-            --tag registry.fly.io/spacebot-image:${{ steps.version.outputs.version }} \
+            --tag registry.fly.io/spacebot-image:${{ needs.build.outputs.version }} \
             --tag registry.fly.io/spacebot-image:latest \
             ${{ env.IMAGE }}:latest
 
@@ -91,12 +136,11 @@ jobs:
           curl -sf -X POST https://api.spacebot.sh/api/admin/rollout \
             -H "Content-Type: application/json" \
             -H "X-Internal-Key: ${{ secrets.PLATFORM_INTERNAL_KEY }}" \
-            -d '{"image_tag": "${{ steps.version.outputs.version }}"}'
+            -d '{"image_tag": "${{ needs.build.outputs.version }}"}'
 
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.version.outputs.version }}
+          tag_name: ${{ needs.build.outputs.version }}
           generate_release_notes: true
-
