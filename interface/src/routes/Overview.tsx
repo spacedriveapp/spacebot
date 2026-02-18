@@ -1,7 +1,8 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { api, type AgentSummary } from "@/api/client";
+import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { formatTimeAgo, formatUptime } from "@/lib/format";
 import { ResponsiveContainer, AreaChart, Area } from "recharts";
@@ -11,6 +12,8 @@ interface OverviewProps {
 }
 
 export function Overview({ liveStates }: OverviewProps) {
+	const [createOpen, setCreateOpen] = useState(false);
+
 	const { data: statusData } = useQuery({
 		queryKey: ["status"],
 		queryFn: api.status,
@@ -86,12 +89,27 @@ export function Overview({ liveStates }: OverviewProps) {
 				) : agents.length === 0 ? (
 					<div className="rounded-lg border border-dashed border-app-line p-8 text-center">
 						<p className="text-sm text-ink-faint">No agents configured.</p>
+						<button
+							onClick={() => setCreateOpen(true)}
+							className="mt-3 text-sm text-accent hover:text-accent/80 transition-colors"
+						>
+							Create your first agent
+						</button>
+						<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
 					</div>
 				) : (
 					<div className="flex flex-col gap-6">
 						{/* Agent Cards */}
 						<section>
-							<h2 className="mb-4 font-plex text-sm font-medium text-ink-dull">Agents</h2>
+							<div className="mb-4 flex items-center justify-between">
+								<h2 className="font-plex text-sm font-medium text-ink-dull">Agents</h2>
+								<button
+									onClick={() => setCreateOpen(true)}
+									className="text-sm text-ink-faint hover:text-ink transition-colors"
+								>
+									+ New Agent
+								</button>
+							</div>
 							<div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
 								{agents.map((agent) => (
 									<AgentCard
@@ -101,6 +119,7 @@ export function Overview({ liveStates }: OverviewProps) {
 									/>
 								))}
 							</div>
+							<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
 						</section>
 
 						{/* Recent Channels */}
@@ -328,9 +347,13 @@ function AgentCard({
 			</div>
 
 			{/* Bio — full text, no truncation */}
-			{profile?.bio && (
+			{profile?.bio ? (
 				<p className="px-5 mt-3 text-sm leading-relaxed text-ink-dull">
 					{profile.bio}
+				</p>
+			) : (
+				<p className="px-5 mt-3 text-sm leading-relaxed text-ink-faint">
+					This agent will fill out its own profile as it develops a personality through conversations.
 				</p>
 			)}
 
@@ -338,9 +361,11 @@ function AgentCard({
 			<div className="flex-1" />
 
 			{/* Sparkline */}
-			<div className="mx-5 mt-4 h-10">
-				<SparklineChart data={agent.activity_sparkline} />
-			</div>
+			{agent.activity_sparkline?.some((v) => v > 0) && (
+				<div className="mx-5 mt-4 h-10">
+					<SparklineChart data={agent.activity_sparkline} />
+				</div>
+			)}
 
 			{/* Stats footer */}
 			<div className="flex items-center gap-4 px-5 py-3.5 mt-3 border-t border-app-line/50 text-tiny">

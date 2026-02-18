@@ -487,10 +487,11 @@ async fn run(
 
     let _http_handle = if config.api.enabled {
         // IPv6 addresses need brackets when combined with port: [::]:19898
-        let bind_str = if config.api.bind.contains(':') {
-            format!("[{}]:{}", config.api.bind, config.api.port)
+        let raw_bind = config.api.bind.trim_start_matches('[').trim_end_matches(']');
+        let bind_str = if raw_bind.contains(':') {
+            format!("[{}]:{}", raw_bind, config.api.port)
         } else {
-            format!("{}:{}", config.api.bind, config.api.port)
+            format!("{}:{}", raw_bind, config.api.port)
         };
         let bind: std::net::SocketAddr = bind_str
             .parse()
@@ -561,6 +562,10 @@ async fn run(
     // Set the config path on the API state for config.toml writes
     let config_path = config.instance_dir.join("config.toml");
     api_state.set_config_path(config_path.clone()).await;
+    api_state.set_llm_manager(llm_manager.clone()).await;
+    api_state.set_embedding_model(embedding_model.clone()).await;
+    api_state.set_prompt_engine(prompt_engine.clone()).await;
+    api_state.set_defaults_config(config.defaults.clone()).await;
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;

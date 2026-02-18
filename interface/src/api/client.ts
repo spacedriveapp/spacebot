@@ -982,6 +982,18 @@ export const api = {
 		}
 		return response.json() as Promise<IdentityFiles>;
 	},
+	createAgent: async (agentId: string) => {
+		const response = await fetch(`${API_BASE}/agents`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean; agent_id: string; message: string }>;
+	},
+
 	agentConfig: (agentId: string) =>
 		fetchJson<AgentConfigResponse>(`/agents/config?agent_id=${encodeURIComponent(agentId)}`),
 	updateAgentConfig: async (request: AgentConfigUpdateRequest) => {

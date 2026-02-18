@@ -39,6 +39,13 @@ struct HealthResponse {
 }
 
 #[derive(Serialize)]
+struct IdleResponse {
+    idle: bool,
+    active_workers: usize,
+    active_branches: usize,
+}
+
+#[derive(Serialize)]
 struct StatusResponse {
     status: &'static str,
     version: &'static str,
@@ -504,10 +511,11 @@ pub async fn start_http_server(
 
     let api_routes = Router::new()
         .route("/health", get(health))
+        .route("/idle", get(idle))
         .route("/status", get(status))
         .route("/overview", get(instance_overview))
         .route("/events", get(events_sse))
-        .route("/agents", get(list_agents))
+        .route("/agents", get(list_agents).post(create_agent))
         .route("/agents/overview", get(agent_overview))
         .route("/channels", get(list_channels))
         .route("/channels/messages", get(channel_messages))
@@ -577,6 +585,26 @@ async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
+/// Reports whether the instance is idle (no active workers or branches).
+/// Used by the platform to gate rolling updates.
+async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {
+    let blocks = state.channel_status_blocks.read().await;
+    let mut total_workers = 0;
+    let mut total_branches = 0;
+
+    for status_block in blocks.values() {
+        let block = status_block.read().await;
+        total_workers += block.active_workers.len();
+        total_branches += block.active_branches.len();
+    }
+
+    Json(IdleResponse {
+        idle: total_workers == 0 && total_branches == 0,
+        active_workers: total_workers,
+        active_branches: total_branches,
+    })
+}
+
 async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
     Json(StatusResponse {
@@ -591,6 +619,347 @@ async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
 async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse> {
     let agents = state.agent_configs.load();
     Json(AgentsResponse { agents: agents.as_ref().clone() })
+}
+
+/// Create a new agent and initialize it live (directories, databases, memory, identity, cron, cortex).
+async fn create_agent(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<CreateAgentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let agent_id = request.agent_id.trim().to_string();
+    if agent_id.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "Agent ID cannot be empty"
+        })));
+    }
+
+    // Check if agent already exists
+    {
+        let existing = state.agent_configs.load();
+        if existing.iter().any(|a| a.id == agent_id) {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' already exists")
+            })));
+        }
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let instance_dir = (**state.instance_dir.load()).clone();
+
+    // Write agent entry to config.toml
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path).await.map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    } else {
+        String::new()
+    };
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if doc.get("agents").is_none() {
+        doc["agents"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let agents_array = doc["agents"]
+        .as_array_of_tables_mut()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut new_table = toml_edit::Table::new();
+    new_table["id"] = toml_edit::value(&agent_id);
+    agents_array.push(new_table);
+
+    tokio::fs::write(&config_path, doc.to_string()).await.map_err(|error| {
+        tracing::warn!(%error, "failed to write config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Resolve the agent config using instance defaults
+    let defaults = state.defaults_config.read().await;
+    let defaults = defaults.as_ref().ok_or_else(|| {
+        tracing::error!("defaults config not available");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    let raw_config = crate::config::AgentConfig {
+        id: agent_id.clone(),
+        default: false,
+        workspace: None,
+        routing: None,
+        max_concurrent_branches: None,
+        max_concurrent_workers: None,
+        max_turns: None,
+        branch_max_turns: None,
+        context_window: None,
+        compaction: None,
+        memory_persistence: None,
+        coalesce: None,
+        ingestion: None,
+        cortex: None,
+        browser: None,
+        brave_search_key: None,
+        cron: Vec::new(),
+    };
+    let agent_config = raw_config.resolve(&instance_dir, defaults);
+    drop(defaults);
+
+    // Create directories
+    for dir in [
+        &agent_config.workspace,
+        &agent_config.data_dir,
+        &agent_config.archives_dir,
+        &agent_config.ingest_dir(),
+        &agent_config.logs_dir(),
+    ] {
+        std::fs::create_dir_all(dir).map_err(|error| {
+            tracing::error!(%error, dir = %dir.display(), "failed to create agent directory");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    }
+
+    // Connect databases
+    let db = crate::db::Db::connect(&agent_config.data_dir).await.map_err(|error| {
+        tracing::error!(%error, agent_id = %agent_id, "failed to connect agent databases");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Settings store
+    let settings_path = agent_config.data_dir.join("settings.redb");
+    let settings_store = std::sync::Arc::new(
+        crate::settings::SettingsStore::new(&settings_path).map_err(|error| {
+            tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    );
+
+    // Memory system
+    let embedding_model = {
+        let guard = state.embedding_model.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("embedding model not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    let memory_store = crate::memory::MemoryStore::new(db.sqlite.clone());
+    let embedding_table = crate::memory::EmbeddingTable::open_or_create(&db.lance)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    if let Err(error) = embedding_table.ensure_fts_index().await {
+        tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
+    }
+
+    let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(
+        memory_store,
+        embedding_table,
+        embedding_model,
+    ));
+
+    // Event bus
+    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
+
+    // Identity scaffolding
+    crate::identity::scaffold_identity_files(&agent_config.workspace)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, agent_id = %agent_id, "failed to scaffold identity files");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let identity = crate::identity::Identity::load(&agent_config.workspace).await;
+
+    // Skills
+    let skills = crate::skills::SkillSet::load(
+        &instance_dir.join("skills"),
+        &agent_config.skills_dir(),
+    ).await;
+
+    // Prompt engine
+    let prompt_engine = {
+        let guard = state.prompt_engine.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("prompt engine not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // Defaults for RuntimeConfig
+    let defaults_for_runtime = {
+        let guard = state.defaults_config.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("defaults config not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // RuntimeConfig
+    let runtime_config = std::sync::Arc::new(crate::config::RuntimeConfig::new(
+        &instance_dir,
+        &agent_config,
+        &defaults_for_runtime,
+        prompt_engine,
+        identity,
+        skills,
+    ));
+    runtime_config.set_settings(settings_store.clone());
+
+    // LLM manager
+    let llm_manager = {
+        let guard = state.llm_manager.read().await;
+        guard.as_ref().ok_or_else(|| {
+            tracing::error!("LLM manager not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?.clone()
+    };
+
+    // Build deps
+    let deps = crate::AgentDeps {
+        agent_id: arc_agent_id.clone(),
+        memory_search: memory_search.clone(),
+        llm_manager,
+        cron_tool: None,
+        runtime_config: runtime_config.clone(),
+        event_tx: event_tx.clone(),
+        sqlite_pool: db.sqlite.clone(),
+    };
+
+    // Register event stream with API
+    let event_rx = event_tx.subscribe();
+    state.register_agent_events(agent_id.clone(), event_rx);
+
+    // Cron setup
+    let cron_store = std::sync::Arc::new(crate::cron::CronStore::new(db.sqlite.clone()));
+    let cron_context = crate::cron::CronContext {
+        deps: deps.clone(),
+        screenshot_dir: agent_config.screenshot_dir(),
+        logs_dir: agent_config.logs_dir(),
+        messaging_manager: {
+            let guard = state.messaging_manager.read().await;
+            guard.as_ref().cloned().unwrap_or_else(|| std::sync::Arc::new(crate::messaging::MessagingManager::new()))
+        },
+        store: cron_store.clone(),
+    };
+    let scheduler = std::sync::Arc::new(crate::cron::Scheduler::new(cron_context));
+    runtime_config.set_cron(cron_store.clone(), scheduler.clone());
+
+    let cron_tool = crate::tools::CronTool::new(cron_store.clone(), scheduler.clone());
+
+    // Cortex chat session
+    let browser_config = (**runtime_config.browser_config.load()).clone();
+    let brave_search_key = (**runtime_config.brave_search_key.load()).clone();
+    let conversation_logger = crate::conversation::history::ConversationLogger::new(db.sqlite.clone());
+    let channel_store = crate::conversation::ChannelStore::new(db.sqlite.clone());
+    let cortex_tool_server = crate::tools::create_cortex_chat_tool_server(
+        memory_search.clone(),
+        conversation_logger,
+        channel_store,
+        browser_config,
+        agent_config.screenshot_dir(),
+        brave_search_key,
+        runtime_config.workspace_dir.clone(),
+        runtime_config.instance_dir.clone(),
+    );
+    let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
+    let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
+        deps.clone(),
+        cortex_tool_server,
+        cortex_store,
+    );
+
+    // Spawn cortex loops
+    let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
+    tokio::spawn({
+        let deps = deps.clone();
+        let logger = cortex_logger.clone();
+        async move {
+            crate::agent::cortex::spawn_bulletin_loop(deps, logger).await;
+        }
+    });
+    tokio::spawn({
+        let deps = deps.clone();
+        async move {
+            crate::agent::cortex::spawn_association_loop(deps, cortex_logger).await;
+        }
+    });
+
+    // Spawn ingestion if enabled
+    let ingestion_config = **runtime_config.ingestion.load();
+    if ingestion_config.enabled {
+        crate::agent::ingestion::spawn_ingestion_loop(
+            agent_config.ingest_dir(),
+            deps.clone(),
+        );
+    }
+
+    // Update all ArcSwap-based API state maps
+    {
+        // Agent pools
+        let mut pools = (**state.agent_pools.load()).clone();
+        pools.insert(agent_id.clone(), db.sqlite.clone());
+        state.agent_pools.store(std::sync::Arc::new(pools));
+
+        // Memory searches
+        let mut searches = (**state.memory_searches.load()).clone();
+        searches.insert(agent_id.clone(), memory_search);
+        state.memory_searches.store(std::sync::Arc::new(searches));
+
+        // Agent workspaces
+        let mut workspaces = (**state.agent_workspaces.load()).clone();
+        workspaces.insert(agent_id.clone(), agent_config.workspace.clone());
+        state.agent_workspaces.store(std::sync::Arc::new(workspaces));
+
+        // Runtime configs
+        let mut configs = (**state.runtime_configs.load()).clone();
+        configs.insert(agent_id.clone(), runtime_config);
+        state.runtime_configs.store(std::sync::Arc::new(configs));
+
+        // Agent config summaries
+        let mut agent_infos = (**state.agent_configs.load()).clone();
+        agent_infos.push(AgentInfo {
+            id: agent_config.id.clone(),
+            workspace: agent_config.workspace.clone(),
+            context_window: agent_config.context_window,
+            max_turns: agent_config.max_turns,
+            max_concurrent_branches: agent_config.max_concurrent_branches,
+            max_concurrent_workers: agent_config.max_concurrent_workers,
+        });
+        state.agent_configs.store(std::sync::Arc::new(agent_infos));
+
+        // Cron stores and schedulers
+        let mut cron_stores = (**state.cron_stores.load()).clone();
+        cron_stores.insert(agent_id.clone(), cron_store);
+        state.cron_stores.store(std::sync::Arc::new(cron_stores));
+
+        let mut cron_schedulers = (**state.cron_schedulers.load()).clone();
+        cron_schedulers.insert(agent_id.clone(), scheduler);
+        state.cron_schedulers.store(std::sync::Arc::new(cron_schedulers));
+
+        // Cortex chat sessions
+        let mut sessions = (**state.cortex_chat_sessions.load()).clone();
+        sessions.insert(agent_id.clone(), std::sync::Arc::new(cortex_session));
+        state.cortex_chat_sessions.store(std::sync::Arc::new(sessions));
+    }
+
+    tracing::info!(agent_id = %agent_id, "agent created and initialized via API");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "agent_id": agent_id,
+        "message": format!("Agent '{agent_id}' created and running")
+    })))
+}
+
+#[derive(Deserialize)]
+struct CreateAgentRequest {
+    agent_id: String,
 }
 
 /// Get overview stats for an agent: memory breakdown, channels, cron, cortex.

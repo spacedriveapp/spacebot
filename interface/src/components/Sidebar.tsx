@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
@@ -7,6 +7,7 @@ import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { Button } from "@/ui";
 import { ArrowLeft01Icon, DashboardSquare01Icon, LeftToRightListBulletIcon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -15,6 +16,8 @@ interface SidebarProps {
 }
 
 export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
+	const [createOpen, setCreateOpen] = useState(false);
+
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,
@@ -116,6 +119,13 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 							</Link>
 						);
 					})}
+				<button
+					onClick={() => setCreateOpen(true)}
+					className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
+					title="New Agent"
+				>
+					+
+				</button>
 				</div>
 			) : (
 				<>
@@ -189,16 +199,18 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 								})}
 							</div>
 						)}
-						<Button
-							variant="outline"
-							size="sm"
-							className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
-						>
-							+ New Agent
-						</Button>
+					<Button
+						variant="outline"
+						size="sm"
+						onClick={() => setCreateOpen(true)}
+						className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
+					>
+						+ New Agent
+					</Button>
 					</div>
 				</>
 			)}
+			<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
 		</motion.nav>
 	);
 }
