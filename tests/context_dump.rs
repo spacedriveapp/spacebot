@@ -8,6 +8,7 @@
 //! Run with: cargo test --test context_dump -- --nocapture
 
 use anyhow::Context as _;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 /// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
@@ -171,15 +172,18 @@ async fn dump_channel_context() {
     let status_block = Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new()));
     let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
 
+    let process_run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let state = spacebot::agent::channel::ChannelState {
         channel_id,
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block,
         deps: deps.clone(),
         conversation_logger,
+        process_run_logger,
         channel_store,
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
@@ -300,6 +304,8 @@ async fn dump_worker_context() {
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
+        PathBuf::from(workspace_dir.as_ref()),
+        PathBuf::from(instance_dir.as_ref()),
     );
 
     let tool_defs = worker_tool_server
@@ -341,7 +347,8 @@ async fn dump_all_contexts() {
     let workspace_dir = rc.workspace_dir.to_string_lossy();
 
     // Generate bulletin so channel context is complete
-    let bulletin_success = spacebot::agent::cortex::generate_bulletin(&deps).await;
+    let cortex_logger = spacebot::agent::cortex::CortexLogger::new(deps.sqlite_pool.clone());
+    let bulletin_success = spacebot::agent::cortex::generate_bulletin(&deps, &cortex_logger).await;
     if bulletin_success {
         let bulletin = rc.memory_bulletin.load();
         println!("Bulletin generated: {} words", bulletin.split_whitespace().count());
@@ -362,10 +369,12 @@ async fn dump_all_contexts() {
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(spacebot::agent::status::StatusBlock::new())),
         deps: deps.clone(),
         conversation_logger: conversation_logger.clone(),
+        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         channel_store: channel_store.clone(),
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
@@ -418,6 +427,8 @@ async fn dump_all_contexts() {
         browser_config,
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
+        PathBuf::from(workspace_dir.as_ref()),
+        PathBuf::from(instance_dir.as_ref()),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

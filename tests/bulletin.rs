@@ -141,7 +141,8 @@ async fn test_bulletin_generation() {
     assert!(before.is_empty(), "bulletin should start empty");
 
     // Generate the bulletin
-    let success = spacebot::agent::cortex::generate_bulletin(&deps).await;
+    let logger = spacebot::agent::cortex::CortexLogger::new(deps.sqlite_pool.clone());
+    let success = spacebot::agent::cortex::generate_bulletin(&deps, &logger).await;
     assert!(success, "bulletin generation should succeed");
 
     // Verify the bulletin was stored
