@@ -189,7 +189,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 			type: "message",
 			id: `in-${Date.now()}-${crypto.randomUUID()}`,
 			role: "user",
-			sender_name: event.sender_id,
+			sender_name: event.sender_name ?? event.sender_id,
 			sender_id: event.sender_id,
 			content: event.text,
 			created_at: new Date().toISOString(),

@@ -17,6 +17,8 @@ struct SlackAdapterState {
     permissions: Arc<ArcSwap<SlackPermissions>>,
     bot_token: String,
     bot_user_id: String,
+    user_identity_cache: Arc<RwLock<HashMap<String, SlackUserIdentity>>>,
+    channel_name_cache: Arc<RwLock<HashMap<String, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -177,7 +179,7 @@ async fn handle_push_event(
     );
     metadata.insert(
         "slack_channel_id".into(),
-        serde_json::Value::String(channel_id),
+        serde_json::Value::String(channel_id.clone()),
     );
     metadata.insert(
         "slack_message_ts".into(),
@@ -195,36 +197,84 @@ async fn handle_push_event(
             serde_json::Value::String(uid.clone()),
         );
         metadata.insert("sender_id".into(), serde_json::Value::String(uid.clone()));
-        metadata.insert(
-            "slack_user_mention".into(),
-            serde_json::Value::String(format!("<@{uid}>")),
-        );
+    }
+
+    let token = SlackApiToken::new(SlackApiTokenValue(adapter_state.bot_token.clone()));
+    let session = client.open_session(&token);
+
+    // Prefer cached channel names for dashboard rendering.
+    if let Some(name) = adapter_state.channel_name_cache.read().await.get(&channel_id).cloned() {
+        metadata.insert("slack_channel_name".into(), serde_json::Value::String(name));
+    } else {
+        // Resolve channel name for dashboard channel list rendering.
+        match session
+            .conversations_info(&SlackApiConversationsInfoRequest::new(SlackChannelId(channel_id.clone())))
+            .await
+        {
+            Ok(channel_info) => {
+                if let Some(name) = channel_info.channel.name {
+                    adapter_state
+                        .channel_name_cache
+                        .write()
+                        .await
+                        .insert(channel_id.clone(), name.clone());
+                    metadata.insert(
+                        "slack_channel_name".into(),
+                        serde_json::Value::String(name),
+                    );
+                }
+            }
+            Err(error) if !channel_id.starts_with('D') => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %channel_id,
+                    "failed to resolve Slack channel name via conversations.info; verify scopes and bot channel access"
+                );
+            }
+            Err(_) => {}
+        }
     }
 
     // Resolve username/display name for better attribution and mention support.
     if let Some(ref uid) = msg_event.sender.user {
-        let token = SlackApiToken::new(SlackApiTokenValue(adapter_state.bot_token.clone()));
-        let session = client.open_session(&token);
-        if let Ok(user_info) = session
+        if let Some(identity) = adapter_state
+            .user_identity_cache
+            .read()
+            .await
+            .get(&uid.0)
+            .cloned()
+        {
+            insert_user_metadata(&mut metadata, uid, identity);
+        } else if let Ok(user_info) = session
             .users_info(&SlackApiUsersInfoRequest::new(uid.clone()))
             .await
         {
             let identity = resolve_slack_user_identity(&user_info.user, &uid.0);
-            let display_with_mention = format!("{} (<@{}>)", identity.display_name, uid.0);
-            metadata.insert(
-                "sender_display_name".into(),
-                serde_json::Value::String(display_with_mention.clone()),
-            );
-            if let Some(name) = identity.username {
-                metadata.insert(
-                    "sender_username".into(),
-                    serde_json::Value::String(name),
-                );
-            }
+            adapter_state
+                .user_identity_cache
+                .write()
+                .await
+                .insert(uid.0.clone(), identity.clone());
+            insert_user_metadata(&mut metadata, uid, identity);
         }
     }
 
-    // For Slack, formatted_author is the display_with_mention if user info was resolved
+    // For DMs, use a stable human-readable fallback channel name when the
+    // channel object has no explicit name.
+    if channel_id.starts_with('D') && !metadata.contains_key("slack_channel_name") {
+        if let Some(display_name) = metadata
+            .get("sender_display_name")
+            .and_then(|value| value.as_str())
+            .map(strip_mention_suffix)
+        {
+            metadata.insert(
+                "slack_channel_name".into(),
+                serde_json::Value::String(format!("dm-{display_name}")),
+            );
+        }
+    }
+
+    // For Slack, formatted_author is the resolved display name if available.
     let formatted_author = if let Some(uid) = &user_id {
         metadata
             .get("sender_display_name")
@@ -293,6 +343,8 @@ impl Messaging for SlackAdapter {
             permissions: self.permissions.clone(),
             bot_token: self.bot_token.clone(),
             bot_user_id,
+            user_identity_cache: Arc::new(RwLock::new(HashMap::new())),
+            channel_name_cache: Arc::new(RwLock::new(HashMap::new())),
         });
 
         let callbacks = SlackSocketModeListenerCallbacks::new()
@@ -586,7 +638,7 @@ impl Messaging for SlackAdapter {
                         .get(&user_id)
                         .map(|identity| identity.display_name.clone())
                         .unwrap_or_else(|| user_id.clone());
-                    format!("{display_name} (<@{user_id}>)")
+                    display_name
                 } else {
                     "unknown".to_string()
                 };
@@ -720,4 +772,33 @@ fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIden
         display_name,
         username,
     }
+}
+
+fn insert_user_metadata(
+    metadata: &mut HashMap<String, serde_json::Value>,
+    user_id: &SlackUserId,
+    identity: SlackUserIdentity,
+) {
+    metadata.insert(
+        "sender_display_name".into(),
+        serde_json::Value::String(identity.display_name),
+    );
+    metadata.insert(
+        "slack_user_mention".into(),
+        serde_json::Value::String(format!("<@{}>", user_id.0)),
+    );
+    if let Some(name) = identity.username {
+        metadata.insert(
+            "sender_username".into(),
+            serde_json::Value::String(name),
+        );
+    }
+}
+
+fn strip_mention_suffix(display_name: &str) -> String {
+    display_name
+        .split(" (<@")
+        .next()
+        .unwrap_or(display_name)
+        .to_string()
 }

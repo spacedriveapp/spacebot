@@ -28,6 +28,7 @@ export interface InboundMessageEvent {
 	type: "inbound_message";
 	agent_id: string;
 	channel_id: string;
+	sender_name?: string | null;
 	sender_id: string;
 	text: string;
 }

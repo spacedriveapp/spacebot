@@ -861,9 +861,17 @@ async fn run(
                     *active.latest_message.write().await = message.clone();
 
                     // Emit inbound message to SSE clients
+                    let sender_name = message.formatted_author.clone().or_else(|| {
+                        message
+                            .metadata
+                            .get("sender_display_name")
+                            .and_then(|value| value.as_str())
+                            .map(|value| value.to_string())
+                    });
                     api_state.event_tx.send(spacebot::api::ApiEvent::InboundMessage {
                         agent_id: agent_id.to_string(),
                         channel_id: conversation_id.clone(),
+                        sender_name,
                         sender_id: message.sender_id.clone(),
                         text: message.content.to_string(),
                     }).ok();

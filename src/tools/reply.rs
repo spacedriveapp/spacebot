@@ -99,8 +99,8 @@ async fn convert_mentions(
             // Parse metadata JSON to get clean display name (without mention syntax)
             if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str) {
                 if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str()) {
-                    // For Slack (from PR #43), sender_display_name includes mention: "Name (<@ID>)"
-                    // Extract just the name part
+                    // Backward-compat: older Slack rows may include mention syntax
+                    // in sender_display_name, e.g. "Name (<@ID>)".
                     let clean_name = display_name
                         .split(" (<@")
                         .next()

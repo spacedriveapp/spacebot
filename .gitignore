@@ -5,3 +5,5 @@
 # Interface
 interface/node_modules/
 interface/dist/
+
+agents/
