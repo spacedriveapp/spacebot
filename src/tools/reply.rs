@@ -60,6 +60,18 @@ pub struct ReplyArgs {
     /// reply is posted there. Thread names are capped at 100 characters.
     #[serde(default)]
     pub thread_name: Option<String>,
+    /// Optional: formatted cards (e.g. Discord embeds) to attach to the message.
+    /// Great for structured reports, summaries, or visually distinct content.
+    #[serde(default)]
+    pub cards: Option<Vec<crate::Card>>,
+    /// Optional: interactive elements (e.g. buttons, select menus) to attach.
+    /// Button clicks will be sent back to you as an inbound InteractionEvent
+    /// with the corresponding custom_id.
+    #[serde(default)]
+    pub interactive_elements: Option<Vec<crate::InteractiveElements>>,
+    /// Optional: a poll to attach to the message.
+    #[serde(default)]
+    pub poll: Option<crate::Poll>,
 }
 
 /// Output from reply tool.
@@ -153,23 +165,109 @@ impl Tool for ReplyTool {
     type Output = ReplyOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let parameters = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "content": {
+                    "type": "string",
+                    "description": "The content to send to the user. Can be markdown formatted."
+                },
+                "thread_name": {
+                    "type": "string",
+                    "description": "If provided, creates a new public thread with this name and posts the reply inside it. Max 100 characters."
+                },
+                "cards": {
+                    "type": "array",
+                    "description": "Optional: formatted cards (e.g. Discord embeds) to attach. Great for structured reports, summaries, or visually distinct content. Max 10 cards.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "description": { "type": "string" },
+                            "color": { "type": "integer", "description": "Decimal color code" },
+                            "url": { "type": "string" },
+                            "fields": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "name": { "type": "string" },
+                                        "value": { "type": "string" },
+                                        "inline": { "type": "boolean" }
+                                    },
+                                    "required": ["name", "value"]
+                                }
+                            },
+                            "footer": { "type": "string" }
+                        }
+                    }
+                },
+                "interactive_elements": {
+                    "type": "array",
+                    "description": "Optional: interactive components to attach. Button clicks will be sent back to you as an inbound InteractionEvent with the corresponding custom_id. Max 5 elements (rows).",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "type": { "type": "string", "enum": ["buttons", "select"] },
+                            "buttons": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "label": { "type": "string" },
+                                        "custom_id": { "type": "string", "description": "ID sent back to you when clicked" },
+                                        "style": { "type": "string", "enum": ["primary", "secondary", "success", "danger", "link"] },
+                                        "url": { "type": "string", "description": "Required if style is link" }
+                                    },
+                                    "required": ["label", "style"]
+                                }
+                            },
+                            "select": {
+                                "type": "object",
+                                "properties": {
+                                    "custom_id": { "type": "string" },
+                                    "options": {
+                                        "type": "array",
+                                        "items": {
+                                            "type": "object",
+                                            "properties": {
+                                                "label": { "type": "string" },
+                                                "value": { "type": "string" },
+                                                "description": { "type": "string" },
+                                                "emoji": { "type": "string" }
+                                            },
+                                            "required": ["label", "value"]
+                                        }
+                                    },
+                                    "placeholder": { "type": "string" }
+                                },
+                                "required": ["custom_id", "options"]
+                            }
+                        }
+                    }
+                },
+                "poll": {
+                    "type": "object",
+                    "description": "Optional: a poll to attach to the message.",
+                    "properties": {
+                        "question": { "type": "string" },
+                        "answers": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "allow_multiselect": { "type": "boolean" },
+                        "duration_hours": { "type": "integer", "description": "Defaults to 24 if omitted" }
+                    },
+                    "required": ["question", "answers"]
+                }
+            },
+            "required": ["content"]
+        });
+
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: crate::prompts::text::get("tools/reply").to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "content": {
-                        "type": "string",
-                        "description": "The content to send to the user. Can be markdown formatted."
-                    },
-                    "thread_name": {
-                        "type": "string",
-                        "description": "If provided, creates a new public thread with this name and posts the reply inside it. Max 100 characters."
-                    }
-                },
-                "required": ["content"]
-            }),
+            parameters,
         }
     }
 
@@ -197,20 +295,26 @@ impl Tool for ReplyTool {
 
         self.conversation_logger.log_bot_message(&self.channel_id, &converted_content);
 
-        let response = match args.thread_name {
-            Some(ref name) => {
-                // Cap thread names at 100 characters (Discord limit)
-                let thread_name = if name.len() > 100 {
-                    name[..name.floor_char_boundary(100)].to_string()
-                } else {
-                    name.clone()
-                };
-                OutboundResponse::ThreadReply {
-                    thread_name,
-                    text: converted_content.clone(),
-                }
+        let response = if let Some(ref name) = args.thread_name {
+            // Cap thread names at 100 characters (Discord limit)
+            let thread_name = if name.len() > 100 {
+                name[..name.floor_char_boundary(100)].to_string()
+            } else {
+                name.clone()
+            };
+            OutboundResponse::ThreadReply {
+                thread_name,
+                text: converted_content.clone(),
             }
-            None => OutboundResponse::Text(converted_content.clone()),
+        } else if args.cards.is_some() || args.interactive_elements.is_some() || args.poll.is_some() {
+            OutboundResponse::RichMessage {
+                text: converted_content.clone(),
+                cards: args.cards.unwrap_or_default(),
+                interactive_elements: args.interactive_elements.unwrap_or_default(),
+                poll: args.poll,
+            }
+        } else {
+            OutboundResponse::Text(converted_content.clone())
         };
 
         self.response_tx

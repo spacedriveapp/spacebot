@@ -365,7 +365,7 @@ pub enum OutboundResponse {
 }
 
 /// A generic rich-formatted card (maps to Embeds in Discord).
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct Card {
     pub title: Option<String>,
     pub description: Option<String>,
@@ -377,7 +377,7 @@ pub struct Card {
 }
 
 /// A field within a generic Card.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CardField {
     pub name: String,
     pub value: String,
@@ -387,7 +387,7 @@ pub struct CardField {
 
 /// Container for interactive elements (maps to ActionRows in Discord).
 /// In Discord, an action row can contain either buttons or a single select menu.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case", tag = "type")]
 pub enum InteractiveElements {
     Buttons { buttons: Vec<Button> },
@@ -395,7 +395,7 @@ pub enum InteractiveElements {
 }
 
 /// A generic interactive button.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Button {
     pub label: String,
     pub custom_id: Option<String>,
@@ -404,7 +404,7 @@ pub struct Button {
 }
 
 /// Styles for interactive buttons.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ButtonStyle {
     Primary,
@@ -415,7 +415,7 @@ pub enum ButtonStyle {
 }
 
 /// A select menu option.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SelectOption {
     pub label: String,
     pub value: String,
@@ -424,7 +424,7 @@ pub struct SelectOption {
 }
 
 /// A generic select menu component.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct SelectMenu {
     pub custom_id: String,
     pub options: Vec<SelectOption>,
@@ -432,7 +432,7 @@ pub struct SelectMenu {
 }
 
 /// A generic poll definition.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct Poll {
     pub question: String,
     pub answers: Vec<String>,
