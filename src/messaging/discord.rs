@@ -62,9 +62,21 @@ impl DiscordAdapter {
         Ok(ChannelId::new(id))
     }
 
-    async fn stop_typing(&self, message_id: &str) {
-        // Typing stops when the handle is dropped
-        self.typing_tasks.write().await.remove(message_id);
+    fn channel_key(message: &InboundMessage) -> String {
+        message
+            .metadata
+            .get("discord_channel_id")
+            .and_then(|v| v.as_u64())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| message.id.clone())
+    }
+
+    async fn stop_typing(&self, message: &InboundMessage) {
+        // Keyed by channel ID so stale message IDs can't leave handles orphaned
+        self.typing_tasks
+            .write()
+            .await
+            .remove(&Self::channel_key(message));
     }
 }
 
@@ -116,8 +128,9 @@ impl Messaging for DiscordAdapter {
 
         match response {
             OutboundResponse::Text(text) => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
+                let text = fix_malformed_mentions(&text);
                 for chunk in split_message(&text, 2000) {
                     channel_id
                         .say(&*http, &chunk)
@@ -126,7 +139,7 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::ThreadReply { thread_name, text } => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 // Try to create a public thread from the source message.
                 // Requires the "Create Public Threads" bot permission.
@@ -179,7 +192,7 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::File { filename, data, mime_type: _, caption } => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 let attachment = CreateAttachment::bytes(data, &filename);
                 let mut builder = CreateMessage::new().add_file(attachment);
@@ -205,7 +218,7 @@ impl Messaging for DiscordAdapter {
                     .context("failed to add reaction")?;
             }
             OutboundResponse::StreamStart => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 let placeholder = channel_id
                     .say(&*http, "\u{200B}")
@@ -257,10 +270,10 @@ impl Messaging for DiscordAdapter {
                 self.typing_tasks
                     .write()
                     .await
-                    .insert(message.id.clone(), typing);
+                    .insert(Self::channel_key(message), typing);
             }
             _ => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
             }
         }
 
@@ -347,13 +360,14 @@ impl Messaging for DiscordAdapter {
                 let display_name = message.author.global_name.as_deref()
                     .unwrap_or(&message.author.name);
 
-                // Include mention and reply-to attribution
+                // Include reply-to attribution but NOT raw mention syntax — models
+                // imitate it incorrectly. Mention conversion is handled at send time.
                 let author = if let Some(referenced) = &message.referenced_message {
                     let reply_author = referenced.author.global_name.as_deref()
                         .unwrap_or(&referenced.author.name);
-                    format!("{display_name} (<@{}>) (replying to {reply_author})", message.author.id)
+                    format!("{display_name} (replying to {reply_author})")
                 } else {
-                    format!("{display_name} (<@{}>)", message.author.id)
+                    display_name.to_string()
                 };
 
                 HistoryMessage {
@@ -569,8 +583,10 @@ async fn build_metadata(ctx: &Context, message: &Message) -> (HashMap<String, se
         serde_json::Value::String(format!("<@{}>", message.author.id)),
     );
     
-    // Platform-formatted author for LLM context
-    let formatted_author = format!("{} (<@{}>)", display_name, message.author.id);
+    // Platform-formatted author for LLM context.
+    // Do NOT include raw mention syntax here — models imitate it incorrectly.
+    // Mention conversion (@Name → <@ID>) is handled by convert_mentions() at send time.
+    let formatted_author = display_name.clone();
     
     if message.author.bot {
         metadata.insert("sender_is_bot".into(), true.into());
@@ -618,6 +634,16 @@ async fn build_metadata(ctx: &Context, message: &Message) -> (HashMap<String, se
     }
 
     (metadata, formatted_author)
+}
+
+/// Fix malformed Discord mention syntax produced by some LLMs.
+///
+/// Grok (and possibly others) sometimes outputs `<<@>ID>` instead of `<@ID>`
+/// when it sees the mention format in context and tries to imitate it. This
+/// normalises those occurrences before the text reaches Discord.
+fn fix_malformed_mentions(text: &str) -> String {
+    // <<@>ID> → <@ID>  (the <<@> prefix is 4 chars, replaced by <@ which is 2)
+    text.replace("<<@>", "<@")
 }
 
 /// Split a message into chunks that fit within Discord's 2000 char limit.

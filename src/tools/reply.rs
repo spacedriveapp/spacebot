@@ -126,7 +126,15 @@ async fn convert_mentions(
     names.sort_by(|a, b| b.len().cmp(&a.len()));
 
     for name in names {
+        // Skip empty names/IDs — they produce "@" → "<@>" which corrupts any
+        // text that contains an @ sign.
+        if name.is_empty() {
+            continue;
+        }
         if let Some(user_id) = name_to_id.get(&name) {
+            if user_id.is_empty() {
+                continue;
+            }
             let mention_pattern = format!("@{}", name);
             let replacement = match source {
                 "discord" | "slack" => format!("<@{}>", user_id),
@@ -174,6 +182,21 @@ impl Tool for ReplyTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        // If a reply was already sent this turn, drop duplicate calls silently.
+        // Some models (e.g. Grok) call reply multiple times per turn, causing
+        // message spam. Returning Ok keeps the LLM from getting confused by errors.
+        if self.skip_flag.load(Ordering::Relaxed) {
+            tracing::warn!(
+                conversation_id = %self.conversation_id,
+                "reply already sent this turn; dropping duplicate call"
+            );
+            return Ok(ReplyOutput {
+                success: true,
+                conversation_id: self.conversation_id.clone(),
+                content: String::new(),
+            });
+        }
+
         tracing::info!(
             conversation_id = %self.conversation_id,
             content_len = args.content.len(),
