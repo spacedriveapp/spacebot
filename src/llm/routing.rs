@@ -144,6 +144,9 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         "mistral" => RoutingConfig::for_model("mistral/mistral-large-latest".into()),
         "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
         "opencode-zen" => RoutingConfig::for_model("opencode-zen/kimi-k2.5".into()),
+        "featherless" => RoutingConfig::for_model(
+            "featherless/Qwen/Qwen3-32B".into(),
+        ),
         _ => RoutingConfig::default(),
     }
 }
@@ -163,6 +166,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "mistral" => "mistral/",
         "nvidia" => "nvidia/",
         "opencode-zen" => "opencode-zen/",
+        "featherless" => "featherless/",
         _ => "",
     }
 }

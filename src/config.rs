@@ -145,6 +145,7 @@ pub struct LlmConfig {
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
     pub nvidia_key: Option<String>,
+    pub featherless_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
 
@@ -165,6 +166,7 @@ impl LlmConfig {
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
             || self.nvidia_key.is_some()
+            || self.featherless_key.is_some()
             || !self.providers.is_empty()
     }
 }
@@ -172,6 +174,7 @@ impl LlmConfig {
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
+const FEATHERLESS_PROVIDER_BASE_URL: &str = "https://api.featherless.ai/v1";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Debug, Clone)]
@@ -1087,6 +1090,7 @@ struct TomlLlmConfigFields {
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
     nvidia_key: Option<String>,
+    featherless_key: Option<String>,
     #[serde(default)]
     providers: HashMap<String, TomlProviderConfig>,
     #[serde(default)]
@@ -1106,7 +1110,11 @@ struct TomlLlmConfig {
     deepseek_key: Option<String>,
     xai_key: Option<String>,
     mistral_key: Option<String>,
+    ollama_key: Option<String>,
+    ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    nvidia_key: Option<String>,
+    featherless_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
 }
 
@@ -1151,7 +1159,11 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             deepseek_key: fields.deepseek_key,
             xai_key: fields.xai_key,
             mistral_key: fields.mistral_key,
+            ollama_key: fields.ollama_key,
+            ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
+            nvidia_key: fields.nvidia_key,
+            featherless_key: fields.featherless_key,
             providers: fields.providers,
         })
     }
@@ -1481,8 +1493,9 @@ impl Config {
             || std::env::var("NVIDIA_API_KEY").is_ok()
             || std::env::var("OLLAMA_API_KEY").is_ok()
             || std::env::var("OLLAMA_BASE_URL").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
-            
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("FEATHERLESS_API_KEY").is_ok();
+
         // If we have any legacy keys, no onboarding needed
         if has_legacy_keys {
             return false;
@@ -1543,6 +1556,7 @@ impl Config {
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
+            featherless_key: std::env::var("FEATHERLESS_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
@@ -1576,6 +1590,17 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        if let Some(featherless_key) = llm.featherless_key.clone() {
+            llm.providers
+                .entry("featherless".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FEATHERLESS_PROVIDER_BASE_URL.to_string(),
+                    api_key: featherless_key,
                     name: None,
                 });
         }
@@ -1756,6 +1781,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("NVIDIA_API_KEY").ok()),
+            featherless_key: toml
+                .llm
+                .featherless_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("FEATHERLESS_API_KEY").ok()),
             providers: toml
                 .llm
                 .providers
@@ -1804,6 +1835,17 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        if let Some(featherless_key) = llm.featherless_key.clone() {
+            llm.providers
+                .entry("featherless".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FEATHERLESS_PROVIDER_BASE_URL.to_string(),
+                    api_key: featherless_key,
                     name: None,
                 });
         }
@@ -2838,6 +2880,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Mistral AI",
         "Ollama",
         "OpenCode Zen",
+        "Featherless AI",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -2858,6 +2901,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         9 => ("Mistral AI API key", "mistral_key", "mistral"),
         10 => ("Ollama base URL", "ollama_base_url", "ollama"),
         11 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
+        12 => ("Featherless AI API key", "featherless_key", "featherless"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";

@@ -274,6 +274,7 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("xai_key", "XAI_API_KEY") { providers.push("xai"); }
     if has_key("mistral_key", "MISTRAL_API_KEY") { providers.push("mistral"); }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") { providers.push("opencode-zen"); }
+    if has_key("featherless_key", "FEATHERLESS_API_KEY") { providers.push("featherless"); }
 
     providers
 }

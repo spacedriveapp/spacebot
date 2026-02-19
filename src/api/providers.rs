@@ -19,6 +19,7 @@ pub(super) struct ProviderStatus {
     xai: bool,
     mistral: bool,
     opencode_zen: bool,
+    featherless: bool,
 }
 
 #[derive(Serialize)]
@@ -44,7 +45,7 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen) = if config_path.exists() {
+    let (anthropic, openai, openrouter, zhipu, groq, together, fireworks, deepseek, xai, mistral, opencode_zen, featherless) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -78,6 +79,7 @@ pub(super) async fn get_providers(
             has_key("xai_key", "XAI_API_KEY"),
             has_key("mistral_key", "MISTRAL_API_KEY"),
             has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            has_key("featherless_key", "FEATHERLESS_API_KEY"),
         )
     } else {
         (
@@ -92,6 +94,7 @@ pub(super) async fn get_providers(
             std::env::var("XAI_API_KEY").is_ok(),
             std::env::var("MISTRAL_API_KEY").is_ok(),
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
+            std::env::var("FEATHERLESS_API_KEY").is_ok(),
         )
     };
 
@@ -107,6 +110,7 @@ pub(super) async fn get_providers(
         xai,
         mistral,
         opencode_zen,
+        featherless,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -118,7 +122,8 @@ pub(super) async fn get_providers(
         || providers.deepseek
         || providers.xai
         || providers.mistral
-        || providers.opencode_zen;
+        || providers.opencode_zen
+        || providers.featherless;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -139,6 +144,7 @@ pub(super) async fn update_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
+        "featherless" => "featherless_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
@@ -208,6 +214,7 @@ pub(super) async fn update_provider(
             "xai" => has_provider_key("xai_key", "XAI_API_KEY"),
             "mistral" => has_provider_key("mistral_key", "MISTRAL_API_KEY"),
             "opencode-zen" => has_provider_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            "featherless" => has_provider_key("featherless_key", "FEATHERLESS_API_KEY"),
             _ => false,
         };
 
@@ -273,6 +280,7 @@ pub(super) async fn delete_provider(
         "xai" => "xai_key",
         "mistral" => "mistral_key",
         "opencode-zen" => "opencode_zen_key",
+        "featherless" => "featherless_key",
         _ => {
             return Ok(Json(ProviderUpdateResponse {
                 success: false,
