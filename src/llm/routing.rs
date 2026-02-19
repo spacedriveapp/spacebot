@@ -142,6 +142,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
         "deepseek" => RoutingConfig::for_model("deepseek/deepseek-chat".into()),
         "xai" => RoutingConfig::for_model("xai/grok-2-latest".into()),
         "mistral" => RoutingConfig::for_model("mistral/mistral-large-latest".into()),
+        "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
         "opencode-zen" => RoutingConfig::for_model("opencode-zen/kimi-k2.5".into()),
         _ => RoutingConfig::default(),
     }
@@ -160,6 +161,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "deepseek" => "deepseek/",
         "xai" => "xai/",
         "mistral" => "mistral/",
+        "nvidia" => "nvidia/",
         "opencode-zen" => "opencode-zen/",
         _ => "",
     }

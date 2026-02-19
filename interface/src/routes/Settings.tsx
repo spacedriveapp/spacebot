@@ -17,7 +17,7 @@ const SECTIONS = [
 		id: "providers" as const,
 		label: "Providers",
 		group: "general" as const,
-		description: "LLM provider API keys",
+		description: "LLM provider credentials",
 	},
 	{
 		id: "channels" as const,
@@ -150,6 +150,21 @@ const PROVIDERS = [
 		placeholder: "...",
 		envVar: "MISTRAL_API_KEY",
 		defaultModel: "mistral-large-latest",
+	},
+	{
+		id: "nvidia",
+		name: "NVIDIA NIM",
+		description: "NVIDIA-hosted models via NIM API",
+		placeholder: "nvapi-...",
+		envVar: "NVIDIA_API_KEY",
+		defaultModel: "nvidia/meta/llama-3.1-405b-instruct",
+	},
+	{
+		id: "ollama",
+		name: "Ollama",
+		description: "Local or remote Ollama API endpoint",
+		placeholder: "http://localhost:11434",
+		envVar: "OLLAMA_BASE_URL",
 	},
 ] as const;
 
@@ -286,7 +301,7 @@ export function Settings() {
 								LLM Providers
 							</h2>
 							<p className="mt-1 text-sm text-ink-dull">
-								Configure API keys for LLM providers. At least one provider is
+								Configure credentials/endpoints for LLM providers. At least one provider is
 								required for agents to function.
 							</p>
 						</div>
@@ -329,7 +344,7 @@ export function Settings() {
 						{/* Info note */}
 						<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
 							<p className="text-sm text-ink-faint">
-								Keys are written to{" "}
+								Provider values are written to{" "}
 								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
 									config.toml
 								</code>{" "}
@@ -361,13 +376,18 @@ export function Settings() {
 			<Dialog open={!!editingProvider} onOpenChange={(open) => { if (!open) handleClose(); }}>
 				<DialogContent className="max-w-md">
 					<DialogHeader>
-						<DialogTitle>{isConfigured(editingProvider ?? "") ? "Update" : "Add"} API Key</DialogTitle>
+						<DialogTitle>
+							{isConfigured(editingProvider ?? "") ? "Update" : "Add"}{" "}
+							{editingProvider === "ollama" ? "Endpoint" : "API Key"}
+						</DialogTitle>
 						<DialogDescription>
-							Enter your {editingProviderData?.name} API key. It will be saved to your instance config.
+							{editingProvider === "ollama"
+								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
+								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
 					<Input
-						type="password"
+						type={editingProvider === "ollama" ? "text" : "password"}
 						value={keyInput}
 						onChange={(e) => setKeyInput(e.target.value)}
 						placeholder={editingProviderData?.placeholder}

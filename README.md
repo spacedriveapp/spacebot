@@ -28,7 +28,7 @@
   <a href="#architecture">Architecture</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#tech-stack">Tech Stack</a> •
-  <a href="docs.spacebot.sh">Docs</a>
+  <a href="https://docs.spacebot.sh">Docs</a>
 </p>
 
 > **One-click deploy with [spacebot.sh](https://spacebot.sh)** — connect your Discord, Slack, or Telegram, configure your agent, and go. No self-hosting required.
@@ -159,6 +159,20 @@ worker = "zhipu/glm-4.7"
 
 [defaults.routing.task_overrides]
 coding = "zhipu/glm-4.7"
+```
+
+**Ollama example** — run against a local Ollama instance:
+
+```toml
+[llm]
+ollama_base_url = "http://localhost:11434"
+
+[defaults.routing]
+channel = "ollama/gemma3"
+worker = "ollama/gemma3"
+
+[defaults.routing.task_overrides]
+coding = "ollama/qwen3"
 ```
 
 ### Skills

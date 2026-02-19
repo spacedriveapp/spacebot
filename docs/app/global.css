@@ -2,26 +2,25 @@
 @import 'fumadocs-ui/css/purple.css';
 @import 'fumadocs-ui/css/preset.css';
 
-/* Spacebot Dark Theme Overrides */
+/* Spacebot Light Theme */
 :root {
-  --color-fd-background: hsl(230, 8%, 5%);
-  --color-fd-foreground: hsl(230, 15%, 94%);
-  --color-fd-card: hsl(230, 8%, 8%);
-  --color-fd-card-foreground: hsl(230, 15%, 94%);
-  --color-fd-popover: hsl(230, 8%, 8%);
-  --color-fd-popover-foreground: hsl(230, 15%, 94%);
-  --color-fd-primary: hsl(282, 70%, 56.5%);
+  --color-fd-background: hsl(0, 0%, 100%);
+  --color-fd-foreground: hsl(230, 15%, 10%);
+  --color-fd-card: hsl(0, 0%, 98%);
+  --color-fd-card-foreground: hsl(230, 15%, 10%);
+  --color-fd-popover: hsl(0, 0%, 98%);
+  --color-fd-popover-foreground: hsl(230, 15%, 10%);
+  --color-fd-primary: hsl(282, 70%, 46%);
   --color-fd-primary-foreground: hsl(0, 0%, 100%);
-  --color-fd-secondary: hsl(230, 8%, 12%);
-  --color-fd-secondary-foreground: hsl(230, 15%, 94%);
-  --color-fd-muted: hsl(230, 8%, 12%);
-  --color-fd-muted-foreground: hsl(230, 8%, 65%);
-  /* Hover is faint dark gray, active is purple accent */
-  --color-fd-accent: hsl(230, 8%, 15%);
-  --color-fd-accent-foreground: hsl(230, 15%, 94%);
-  --color-fd-border: hsl(230, 8%, 14%);
-  --color-fd-input: hsl(230, 8%, 10%);
-  --color-fd-ring: hsl(282, 70%, 56.5%);
+  --color-fd-secondary: hsl(230, 8%, 93%);
+  --color-fd-secondary-foreground: hsl(230, 15%, 10%);
+  --color-fd-muted: hsl(230, 8%, 93%);
+  --color-fd-muted-foreground: hsl(230, 8%, 45%);
+  --color-fd-accent: hsl(230, 8%, 90%);
+  --color-fd-accent-foreground: hsl(230, 15%, 10%);
+  --color-fd-border: hsl(230, 8%, 86%);
+  --color-fd-input: hsl(230, 8%, 90%);
+  --color-fd-ring: hsl(282, 70%, 46%);
 }
 
 .dark {
@@ -56,16 +55,16 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: hsl(230, 8%, 5%);
+  background: var(--color-fd-background);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: hsl(230, 8%, 15%);
+  background: var(--color-fd-border);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(282, 70%, 56.5%);
+  background: var(--color-fd-ring);
 }
 
 /* Remove hover transitions from sidebar for snappier feel */

@@ -58,10 +58,19 @@ impl LlmManager {
                 .ok_or_else(|| LlmError::MissingProviderKey("xai".into()).into()),
             "mistral" => self.config.mistral_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("mistral".into()).into()),
+            "ollama" => self.config.ollama_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("ollama".into()).into()),
             "opencode-zen" => self.config.opencode_zen_key.clone()
                 .ok_or_else(|| LlmError::MissingProviderKey("opencode-zen".into()).into()),
+            "nvidia" => self.config.nvidia_key.clone()
+                .ok_or_else(|| LlmError::MissingProviderKey("nvidia".into()).into()),
             _ => Err(LlmError::UnknownProvider(provider.into()).into()),
         }
+    }
+
+    /// Get configured Ollama base URL, if provided.
+    pub fn ollama_base_url(&self) -> Option<String> {
+        self.config.ollama_base_url.clone()
     }
 
     /// Get the HTTP client.

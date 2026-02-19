@@ -538,24 +538,11 @@ async fn run(
         None
     };
 
-    // Start metrics server if enabled (feature-gated)
-    #[cfg(feature = "metrics")]
-    let _metrics_handle = if config.metrics.enabled {
-        let metrics_shutdown = shutdown_rx.clone();
-        Some(
-            spacebot::telemetry::start_metrics_server(&config.metrics, metrics_shutdown)
-                .await
-                .context("failed to start metrics server")?,
-        )
-    } else {
-        None
-    };
-
-    // Check if we have provider keys
+    // Check if we have provider configuration
     let has_providers = config.llm.has_any_key();
 
     if !has_providers {
-        tracing::info!("No LLM provider keys configured. Starting in setup mode.");
+        tracing::info!("No LLM providers configured. Starting in setup mode.");
         if foreground {
             eprintln!("No LLM provider keys configured.");
             eprintln!(
@@ -896,7 +883,7 @@ async fn run(
                 agents.insert(agent.id.clone(), agent);
             }
             Some(_event) = provider_rx.recv(), if !agents_initialized => {
-                tracing::info!("provider keys configured, initializing agents");
+                tracing::info!("providers configured, initializing agents");
 
                 // Reload config from disk to pick up new keys
                 let new_config = if config_path.exists() {
@@ -961,7 +948,7 @@ async fn run(
                         }
                     }
                     Ok(_) => {
-                        tracing::warn!("config reloaded but still no provider keys");
+                        tracing::warn!("config reloaded but still no providers configured");
                     }
                     Err(error) => {
                         tracing::error!(%error, "failed to reload config after provider setup");
@@ -1012,7 +999,7 @@ async fn run(
 }
 
 /// Initialize agents, messaging adapters, cron, cortex, and ingestion.
-/// Extracted so it can be called either at startup or after provider keys are configured.
+/// Extracted so it can be called either at startup or after providers are configured.
 #[allow(clippy::too_many_arguments)]
 async fn initialize_agents(
     config: &spacebot::config::Config,

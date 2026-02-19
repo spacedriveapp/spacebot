@@ -19,6 +19,12 @@ struct SlackAdapterState {
     bot_user_id: String,
 }
 
+#[derive(Debug, Clone)]
+struct SlackUserIdentity {
+    display_name: String,
+    username: Option<String>,
+}
+
 /// Slack adapter state.
 pub struct SlackAdapter {
     bot_token: String,
@@ -188,9 +194,14 @@ async fn handle_push_event(
             "slack_user_id".into(),
             serde_json::Value::String(uid.clone()),
         );
+        metadata.insert("sender_id".into(), serde_json::Value::String(uid.clone()));
+        metadata.insert(
+            "slack_user_mention".into(),
+            serde_json::Value::String(format!("<@{uid}>")),
+        );
     }
 
-    // Try to get user display name
+    // Resolve username/display name for better attribution and mention support.
     if let Some(ref uid) = msg_event.sender.user {
         let token = SlackApiToken::new(SlackApiTokenValue(adapter_state.bot_token.clone()));
         let session = client.open_session(&token);
@@ -198,9 +209,15 @@ async fn handle_push_event(
             .users_info(&SlackApiUsersInfoRequest::new(uid.clone()))
             .await
         {
-            if let Some(name) = user_info.user.name {
+            let identity = resolve_slack_user_identity(&user_info.user, &uid.0);
+            let display_with_mention = format!("{} (<@{}>)", identity.display_name, uid.0);
+            metadata.insert(
+                "sender_display_name".into(),
+                serde_json::Value::String(display_with_mention),
+            );
+            if let Some(name) = identity.username {
                 metadata.insert(
-                    "sender_display_name".into(),
+                    "sender_username".into(),
                     serde_json::Value::String(name),
                 );
             }
@@ -525,14 +542,42 @@ impl Messaging for SlackAdapter {
                 .messages
         };
 
-        // Slack returns newest-first, reverse to chronological
+        let mut user_identity_by_id = HashMap::new();
+        for user_id in messages
+            .iter()
+            .filter_map(|msg| msg.sender.user.as_ref().map(|user| user.0.clone()))
+        {
+            if user_identity_by_id.contains_key(&user_id) {
+                continue;
+            }
+            let slack_user_id = SlackUserId(user_id.clone());
+            if let Ok(user_info) = session
+                .users_info(&SlackApiUsersInfoRequest::new(slack_user_id))
+                .await
+            {
+                let identity = resolve_slack_user_identity(&user_info.user, &user_id);
+                user_identity_by_id.insert(user_id, identity);
+            }
+        }
+
+        // Slack returns newest-first, reverse to chronological.
         let result: Vec<HistoryMessage> = messages
             .into_iter()
             .rev()
             .map(|msg| {
                 let user_id = msg.sender.user.as_ref().map(|u| u.0.clone());
                 let is_bot = user_id.is_none() || msg.sender.bot_id.is_some();
-                let author = user_id.unwrap_or_else(|| "bot".into());
+                let author = if is_bot {
+                    "bot".to_string()
+                } else if let Some(user_id) = user_id {
+                    let display_name = user_identity_by_id
+                        .get(&user_id)
+                        .map(|identity| identity.display_name.clone())
+                        .unwrap_or_else(|| user_id.clone());
+                    format!("{display_name} (<@{user_id}>)")
+                } else {
+                    "unknown".to_string()
+                };
 
                 HistoryMessage {
                     author,
@@ -641,4 +686,26 @@ fn sanitize_reaction_name(emoji: &str) -> String {
         .trim_start_matches(':')
         .trim_end_matches(':')
         .to_lowercase()
+}
+
+fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIdentity {
+    let username = user.name.clone().filter(|name| !name.trim().is_empty());
+
+    let display_name = user
+        .profile
+        .as_ref()
+        .and_then(|profile| {
+            profile
+                .display_name
+                .clone()
+                .or(profile.real_name.clone())
+        })
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| username.clone())
+        .unwrap_or_else(|| user_id.to_string());
+
+    SlackUserIdentity {
+        display_name,
+        username,
+    }
 }
