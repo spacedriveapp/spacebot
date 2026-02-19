@@ -5,3 +5,5 @@
 # Interface
 interface/node_modules/
 interface/dist/
+CLAUDE.local.md
+.playwright-mcp/
