@@ -401,10 +401,10 @@ impl Messaging for SlackAdapter {
             OutboundResponse::Text(text) => {
                 let thread_ts = extract_thread_ts(message);
 
-                for chunk in split_message(&text, 4000) {
+                for chunk in split_message(&text, 12_000) {
                     let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
-                        SlackMessageContent::new().with_text(chunk),
+                        markdown_content(chunk),
                     );
                     req = req.opt_thread_ts(thread_ts.clone());
 
@@ -421,10 +421,10 @@ impl Messaging for SlackAdapter {
                 // Use existing thread_ts, or create a thread from the source message
                 let thread_ts = extract_thread_ts(message).or_else(|| extract_message_ts(message));
 
-                for chunk in split_message(&text, 4000) {
+                for chunk in split_message(&text, 12_000) {
                     let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
-                        SlackMessageContent::new().with_text(chunk),
+                        markdown_content(chunk),
                     );
                     req = req.opt_thread_ts(thread_ts.clone());
 
@@ -505,8 +505,8 @@ impl Messaging for SlackAdapter {
             OutboundResponse::StreamChunk(text) => {
                 let active = self.active_messages.read().await;
                 if let Some(ts) = active.get(&message.id) {
-                    let display_text = if text.len() > 4000 {
-                        let end = text.floor_char_boundary(3997);
+                    let display_text = if text.len() > 12_000 {
+                        let end = text.floor_char_boundary(11_997);
                         format!("{}...", &text[..end])
                     } else {
                         text
@@ -514,7 +514,7 @@ impl Messaging for SlackAdapter {
 
                     let req = SlackApiChatUpdateRequest::new(
                         channel_id.clone(),
-                        SlackMessageContent::new().with_text(display_text),
+                        markdown_content(display_text),
                         SlackTs(ts.clone()),
                     );
 
@@ -558,10 +558,10 @@ impl Messaging for SlackAdapter {
         };
 
         if let OutboundResponse::Text(text) = response {
-            for chunk in split_message(&text, 4000) {
+            for chunk in split_message(&text, 12_000) {
                 let req = SlackApiChatPostMessageRequest::new(
                     channel_id.clone(),
-                    SlackMessageContent::new().with_text(chunk),
+                    markdown_content(chunk),
                 );
 
                 session
@@ -713,6 +713,28 @@ fn extract_thread_ts(message: &InboundMessage) -> Option<SlackTs> {
         .get("slack_thread_ts")
         .and_then(|v| v.as_str())
         .map(|s| SlackTs(s.to_string()))
+}
+
+/// Build a `SlackMessageContent` using a Markdown block with plain text fallback.
+///
+/// The Markdown block supports standard markdown (bold, italic, lists, code,
+/// headings, quotes, links) natively — no mrkdwn conversion needed. The `text`
+/// field is set as fallback for notifications and accessibility.
+///
+/// Cumulative limit for all markdown blocks in a payload is 12,000 characters.
+/// For content exceeding 12,000 chars we fall back to plain text to avoid
+/// Slack rejecting the payload.
+fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
+    let text = text.into();
+    if text.len() <= 12_000 {
+        let block = SlackBlock::Markdown(SlackMarkdownBlock::new(text.clone()));
+        SlackMessageContent::new()
+            .with_text(text)
+            .with_blocks(vec![block])
+    } else {
+        // Exceeds markdown block limit — send as plain text
+        SlackMessageContent::new().with_text(text)
+    }
 }
 
 /// Split a message into chunks that fit within Slack's character limit.

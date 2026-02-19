@@ -62,9 +62,21 @@ impl DiscordAdapter {
         Ok(ChannelId::new(id))
     }
 
-    async fn stop_typing(&self, message_id: &str) {
-        // Typing stops when the handle is dropped
-        self.typing_tasks.write().await.remove(message_id);
+    fn channel_key(message: &InboundMessage) -> String {
+        message
+            .metadata
+            .get("discord_channel_id")
+            .and_then(|v| v.as_u64())
+            .map(|id| id.to_string())
+            .unwrap_or_else(|| message.id.clone())
+    }
+
+    async fn stop_typing(&self, message: &InboundMessage) {
+        // Keyed by channel ID so stale message IDs can't leave handles orphaned
+        self.typing_tasks
+            .write()
+            .await
+            .remove(&Self::channel_key(message));
     }
 }
 
@@ -116,7 +128,7 @@ impl Messaging for DiscordAdapter {
 
         match response {
             OutboundResponse::Text(text) => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 for chunk in split_message(&text, 2000) {
                     channel_id
@@ -126,7 +138,7 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::ThreadReply { thread_name, text } => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 // Try to create a public thread from the source message.
                 // Requires the "Create Public Threads" bot permission.
@@ -179,7 +191,7 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::File { filename, data, mime_type: _, caption } => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 let attachment = CreateAttachment::bytes(data, &filename);
                 let mut builder = CreateMessage::new().add_file(attachment);
@@ -205,7 +217,7 @@ impl Messaging for DiscordAdapter {
                     .context("failed to add reaction")?;
             }
             OutboundResponse::StreamStart => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
 
                 let placeholder = channel_id
                     .say(&*http, "\u{200B}")
@@ -257,10 +269,10 @@ impl Messaging for DiscordAdapter {
                 self.typing_tasks
                     .write()
                     .await
-                    .insert(message.id.clone(), typing);
+                    .insert(Self::channel_key(message), typing);
             }
             _ => {
-                self.stop_typing(&message.id).await;
+                self.stop_typing(message).await;
             }
         }
 
