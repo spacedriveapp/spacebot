@@ -1,0 +1,16 @@
+FROM arm64v8/debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential curl cmake pkg-config libssl-dev unzip ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# Protoc 25 (apt has an ancient version that doesn't support proto3 optional)
+RUN curl -fsSL -o /tmp/protoc.zip \
+    https://github.com/protocolbuffers/protobuf/releases/download/v25.3/protoc-25.3-linux-aarch_64.zip \
+    && unzip /tmp/protoc.zip -d /usr/local \
+    && chmod +x /usr/local/bin/protoc \
+    && rm /tmp/protoc.zip
+
+# Rust (stable)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable
+ENV PATH="/root/.cargo/bin:${PATH}"
