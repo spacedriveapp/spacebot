@@ -274,11 +274,25 @@ impl Messaging for DiscordAdapter {
     ) -> crate::Result<()> {
         let http = self.get_http().await?;
 
-        let channel_id = ChannelId::new(
-            target
-                .parse::<u64>()
-                .context("invalid discord channel id for broadcast target")?,
-        );
+        // Support "dm:{user_id}" targets for opening DM channels
+        let channel_id = if let Some(user_id_str) = target.strip_prefix("dm:") {
+            let user_id = UserId::new(
+                user_id_str
+                    .parse::<u64>()
+                    .context("invalid discord user id for DM broadcast target")?,
+            );
+            user_id
+                .create_dm_channel(&*http)
+                .await
+                .context("failed to open DM channel")?
+                .id
+        } else {
+            ChannelId::new(
+                target
+                    .parse::<u64>()
+                    .context("invalid discord channel id for broadcast target")?,
+            )
+        };
 
         if let OutboundResponse::Text(text) = response {
             for chunk in split_message(&text, 2000) {

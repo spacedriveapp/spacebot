@@ -1152,6 +1152,7 @@ async fn initialize_agents(
             runtime_config,
             event_tx,
             sqlite_pool: db.sqlite.clone(),
+            messaging_manager: None,
         };
 
         let agent = spacebot::Agent {
@@ -1348,6 +1349,7 @@ async fn initialize_agents(
         // Store cron tool on deps so each channel can register it on its own tool server
         let cron_tool = spacebot::tools::CronTool::new(store.clone(), scheduler.clone());
         agent.deps.cron_tool = Some(cron_tool);
+        agent.deps.messaging_manager = Some(messaging_manager.clone());
 
         cron_stores_map.insert(agent_id.to_string(), store);
         cron_schedulers_map.insert(agent_id.to_string(), scheduler.clone());

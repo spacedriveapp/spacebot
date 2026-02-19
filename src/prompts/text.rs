@@ -78,6 +78,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/skills_worker") => {
             include_str!("../../prompts/en/fragments/skills_worker.md.j2")
         }
+        ("en", "fragments/available_channels") => {
+            include_str!("../../prompts/en/fragments/available_channels.md.j2")
+        }
 
         // System Message Fragments
         ("en", "fragments/system/retrigger") => {
@@ -152,6 +155,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
             include_str!("../../prompts/en/tools/send_file_description.md.j2")
         }
         ("en", "tools/cron") => include_str!("../../prompts/en/tools/cron_description.md.j2"),
+        ("en", "tools/send_message_to_another_channel") => {
+            include_str!("../../prompts/en/tools/send_message_description.md.j2")
+        }
 
         // Fallback: unknown language or key -> try English
         (lang, key) if lang != "en" => {

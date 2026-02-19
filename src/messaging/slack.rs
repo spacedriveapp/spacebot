@@ -461,7 +461,20 @@ impl Messaging for SlackAdapter {
     ) -> crate::Result<()> {
         let (client, token) = self.create_session()?;
         let session = client.open_session(&token);
-        let channel_id = SlackChannelId(target.to_string());
+
+        // Support "dm:{user_id}" targets by opening a DM conversation first
+        let channel_id = if let Some(user_id_str) = target.strip_prefix("dm:") {
+            let user_id = SlackUserId(user_id_str.to_string());
+            let open_req = SlackApiConversationsOpenRequest::new()
+                .with_users(vec![user_id]);
+            let open_resp = session
+                .conversations_open(&open_req)
+                .await
+                .context("failed to open Slack DM conversation")?;
+            open_resp.channel.id
+        } else {
+            SlackChannelId(target.to_string())
+        };
 
         if let OutboundResponse::Text(text) = response {
             for chunk in split_message(&text, 4000) {

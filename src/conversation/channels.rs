@@ -198,6 +198,10 @@ fn extract_display_name(
             .get("slack_channel_name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        "telegram" => metadata
+            .get("display_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         _ => None,
     }
 }
@@ -228,6 +232,16 @@ fn extract_platform_meta(
                 "slack_workspace_id",
                 "slack_channel_id",
                 "slack_thread_ts",
+            ] {
+                if let Some(value) = metadata.get(key) {
+                    meta.insert(key.to_string(), value.clone());
+                }
+            }
+        }
+        "telegram" => {
+            for key in [
+                "telegram_chat_id",
+                "telegram_chat_type",
             ] {
                 if let Some(value) = metadata.get(key) {
                     meta.insert(key.to_string(), value.clone());

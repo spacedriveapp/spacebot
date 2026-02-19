@@ -78,6 +78,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         runtime_config,
         event_tx,
         sqlite_pool: db.sqlite.clone(),
+        messaging_manager: None,
     })
 }
 

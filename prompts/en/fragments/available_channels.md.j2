@@ -1,0 +1,9 @@
+{%- if channels %}
+## Available Channels
+
+You can send messages to these channels using the `send_message_to_another_channel` tool:
+
+{% for channel in channels -%}
+- **{{ channel.name }}** ({{ channel.platform }}{% if channel.id %}, id: `{{ channel.id }}`{% endif %})
+{% endfor %}
+{%- endif %}

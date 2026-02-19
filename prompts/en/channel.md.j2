@@ -101,6 +101,10 @@ When in doubt, skip. Being a lurker who speaks when it matters is better than be
 
 {{ worker_capabilities }}
 
+{%- if available_channels %}
+{{ available_channels }}
+{%- endif %}
+
 {%- if conversation_context %}
 ## Conversation Context
 

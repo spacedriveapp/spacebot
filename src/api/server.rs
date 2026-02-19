@@ -829,6 +829,10 @@ async fn create_agent(
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
+        messaging_manager: {
+            let guard = state.messaging_manager.read().await;
+            guard.as_ref().cloned()
+        },
     };
 
     // Register event stream with API

@@ -403,6 +403,30 @@ impl Messaging for TelegramAdapter {
         Ok(())
     }
 
+    async fn broadcast(
+        &self,
+        target: &str,
+        response: OutboundResponse,
+    ) -> crate::Result<()> {
+        let chat_id = ChatId(
+            target
+                .parse::<i64>()
+                .context("invalid telegram chat id for broadcast target")?,
+        );
+
+        if let OutboundResponse::Text(text) = response {
+            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+                self.bot
+                    .send_message(chat_id, &chunk)
+                    .send()
+                    .await
+                    .context("failed to broadcast telegram message")?;
+            }
+        }
+
+        Ok(())
+    }
+
     async fn health_check(&self) -> crate::Result<()> {
         self.bot
             .get_me()

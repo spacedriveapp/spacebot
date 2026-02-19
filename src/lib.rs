@@ -177,6 +177,7 @@ pub struct AgentDeps {
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
+    pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
 }
 
 impl AgentDeps {

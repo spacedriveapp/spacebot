@@ -78,6 +78,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         runtime_config,
         event_tx,
         sqlite_pool: db.sqlite.clone(),
+        messaging_manager: None,
     };
 
     Ok((deps, config))
@@ -145,6 +146,8 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             empty_to_none(skills_prompt),
             worker_capabilities,
             conversation_context,
+            None,
+            None,
             None,
         )
         .expect("failed to render channel prompt")

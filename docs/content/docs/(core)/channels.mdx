@@ -92,6 +92,14 @@ The `platform_meta` column stores a JSON blob of platform-specific fields extrac
 }
 ```
 
+**Telegram:**
+```json
+{
+  "telegram_chat_id": 551234,
+  "telegram_chat_type": "private"
+}
+```
+
 **Cron / Webhook:** No metadata stored (empty JSON or null).
 
 ## ChannelStore
@@ -113,7 +121,7 @@ All write operations are fire-and-forget — they spawn a tokio task and return 
 
 ### Display Name Resolution
 
-`find_by_name` powers the `channel_recall` tool's channel lookup. When a branch asks to recall from "general", the match priority is:
+`find_by_name` powers both the `channel_recall` tool and the `send_message_to_another_channel` tool. When looking up a channel by name, the match priority is:
 
 1. Exact match on `display_name` (case-insensitive)
 2. Prefix match (e.g. "gen" matches "general")
@@ -126,7 +134,49 @@ All write operations are fire-and-forget — they spawn a tokio task and return 
 
 **`channel_recall` tool** — Branches use `ChannelStore` to list available channels and resolve channel names when recalling transcripts from other conversations.
 
+**`send_message_to_another_channel` tool** — Channels use `ChannelStore` to resolve target channels by name and extract platform-specific routing info for cross-channel message delivery.
+
 **`create_branch_tool_server`** — Each branch gets a `ChannelStore` reference so the `channel_recall` tool can query channels.
+
+## Cross-Channel Messaging
+
+Channels are aware of each other. On every turn, the channel's system prompt is injected with a list of all active channels (excluding the current one, cron jobs, and webhooks). This gives the LLM context about where it can send messages.
+
+The `send_message_to_another_channel` tool lets a channel send a message to any known channel. The flow:
+
+```
+LLM calls send_message_to_another_channel { target: "general", message: "..." }
+  → SendMessageTool resolves "general" via ChannelStore::find_by_name()
+  → Extracts platform + raw ID from ChannelInfo.platform_meta
+  → MessagingManager::broadcast(platform, raw_id, text)
+  → Platform adapter delivers the message
+```
+
+Target resolution uses the same fuzzy matching as `channel_recall` — name, prefix, contains, or raw channel ID.
+
+### DM Support
+
+For Discord, broadcast targets prefixed with `dm:` trigger `UserId::create_dm_channel()` before sending. Discord DM channels have IDs like `discord:dm:{user_id}`, so the tool automatically detects these and routes accordingly.
+
+For Slack, targets prefixed with `dm:` trigger `conversations.open` to get a DM channel ID from a user ID.
+
+For Telegram, the chat ID is parsed directly from the channel ID (`telegram:{chat_id}`) and passed to `bot.send_message()`.
+
+### System Prompt Injection
+
+The available channels are rendered into the system prompt via the `fragments/available_channels.md.j2` Jinja template. The rendered output looks like:
+
+```markdown
+## Available Channels
+
+You can send messages to these channels using the `send_message_to_another_channel` tool:
+
+- **general** (discord, id: `discord:123456:789012`)
+- **dev** (discord, id: `discord:123456:789013`)
+- **Jamie** (telegram, id: `telegram:551234`)
+```
+
+When no other channels are active, the section is omitted entirely.
 
 ## Reserved Columns
 
@@ -139,6 +189,8 @@ Two columns exist in the schema but aren't populated yet:
 ## Implementation
 
 - `src/conversation/channels.rs` — `ChannelStore`, `ChannelInfo`, platform metadata extraction
-- `src/agent/channel.rs` — `ChannelState` holds `ChannelStore`, upsert on each message
+- `src/agent/channel.rs` — `ChannelState` holds `ChannelStore`, upsert on each message, `build_available_channels()` for system prompt injection
 - `src/tools/channel_recall.rs` — uses `ChannelStore` for channel lookups
+- `src/tools/send_message_to_another_channel.rs` — cross-channel messaging tool, uses `ChannelStore` for target resolution and `MessagingManager` for delivery
+- `prompts/en/fragments/available_channels.md.j2` — Jinja template for channel list injection
 - `migrations/20260213000001_channels.sql` — table and indexes

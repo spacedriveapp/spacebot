@@ -527,6 +527,8 @@ impl Channel {
             .render_coalesce_hint(message_count, &elapsed_str, unique_senders)
             .ok();
         
+        let available_channels = self.build_available_channels().await;
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
         
         prompt_engine
@@ -538,6 +540,7 @@ impl Channel {
                 self.conversation_context.clone(),
                 empty_to_none(status_text),
                 coalesce_hint,
+                available_channels,
             )
             .expect("failed to render channel prompt")
     }
@@ -631,6 +634,45 @@ impl Channel {
         Ok(())
     }
 
+    /// Build the rendered available channels fragment for cross-channel awareness.
+    async fn build_available_channels(&self) -> Option<String> {
+        if self.deps.messaging_manager.is_none() {
+            return None;
+        }
+
+        let channels = match self.state.channel_store.list_active().await {
+            Ok(channels) => channels,
+            Err(error) => {
+                tracing::warn!(%error, "failed to list channels for system prompt");
+                return None;
+            }
+        };
+
+        // Filter out the current channel and cron channels
+        let entries: Vec<crate::prompts::engine::ChannelEntry> = channels
+            .into_iter()
+            .filter(|channel| {
+                channel.id.as_str() != self.id.as_ref()
+                    && channel.platform != "cron"
+                    && channel.platform != "webhook"
+            })
+            .map(|channel| crate::prompts::engine::ChannelEntry {
+                name: channel
+                    .display_name
+                    .unwrap_or_else(|| channel.id.clone()),
+                platform: channel.platform,
+                id: channel.id,
+            })
+            .collect();
+
+        if entries.is_empty() {
+            return None;
+        }
+
+        let prompt_engine = self.deps.runtime_config.prompts.load();
+        prompt_engine.render_available_channels(entries).ok()
+    }
+
     /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> String {
         let rc = &self.deps.runtime_config;
@@ -653,6 +695,8 @@ impl Channel {
             status.render()
         };
 
+        let available_channels = self.build_available_channels().await;
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine
@@ -664,6 +708,7 @@ impl Channel {
                 self.conversation_context.clone(),
                 empty_to_none(status_text),
                 None, // coalesce_hint - only set for batched messages
+                available_channels,
             )
             .expect("failed to render channel prompt")
     }
