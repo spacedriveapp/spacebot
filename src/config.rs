@@ -174,7 +174,7 @@ impl LlmConfig {
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
-const FEATHERLESS_PROVIDER_BASE_URL: &str = "https://api.featherless.ai/v1";
+const FEATHERLESS_PROVIDER_BASE_URL: &str = "https://api.featherless.ai";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Debug, Clone)]
