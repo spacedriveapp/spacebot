@@ -749,6 +749,7 @@ fn extract_content(message: &Message) -> MessageContent {
                 mime_type: attachment.content_type.clone().unwrap_or_default(),
                 url: attachment.url.clone(),
                 size_bytes: Some(attachment.size as u64),
+                download_token: None, // Discord CDN URLs are public, no auth needed
             })
             .collect();
 

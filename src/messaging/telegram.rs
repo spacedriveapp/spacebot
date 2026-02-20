@@ -577,6 +577,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     mime_type: "image/jpeg".into(),
                     url: largest.file.id.to_string(),
                     size_bytes: Some(largest.file.size as u64),
+                    download_token: None,
                 });
             }
         }
@@ -595,6 +596,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "application/octet-stream".into()),
                 url: doc.document.file.id.to_string(),
                 size_bytes: Some(doc.document.file.size as u64),
+                download_token: None,
             });
         }
         MediaKind::Video(video) => {
@@ -612,6 +614,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "video/mp4".into()),
                 url: video.video.file.id.to_string(),
                 size_bytes: Some(video.video.file.size as u64),
+                download_token: None,
             });
         }
         MediaKind::Voice(voice) => {
@@ -625,6 +628,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "audio/ogg".into()),
                 url: voice.voice.file.id.to_string(),
                 size_bytes: Some(voice.voice.file.size as u64),
+                download_token: None,
             });
         }
         MediaKind::Audio(audio) => {
@@ -642,6 +646,7 @@ fn extract_attachments(message: &teloxide::types::Message) -> Vec<Attachment> {
                     .unwrap_or_else(|| "audio/mpeg".into()),
                 url: audio.audio.file.id.to_string(),
                 size_bytes: Some(audio.audio.file.size as u64),
+                download_token: None,
             });
         }
         _ => {}

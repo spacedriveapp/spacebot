@@ -285,6 +285,11 @@ pub struct Attachment {
     pub mime_type: String,
     pub url: String,
     pub size_bytes: Option<u64>,
+    /// Bearer token required to download this attachment.
+    /// Slack's `url_private` URLs require `Authorization: Bearer <bot_token>`;
+    /// without it the request returns 403. Other platforms leave this `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub download_token: Option<String>,
 }
 
 /// Outbound response to messaging platforms.

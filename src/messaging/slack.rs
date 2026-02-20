@@ -129,9 +129,15 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     states: SlackClientEventsUserState,
 ) -> UserCallbackResult<()> {
-    // Skip message edits / deletes / bot_message subtypes
-    if msg_event.subtype.is_some() {
-        return Ok(());
+    // Skip edits, deletes, and system events — but allow file_share through
+    // so the agent can see images and files uploaded by users.
+    // file_share is a subtype, so a blanket `subtype.is_some()` check would
+    // silently drop every file upload.
+    if let Some(ref subtype) = msg_event.subtype {
+        match subtype {
+            SlackMessageEventType::FileShare => {} // allow through
+            _ => return Ok(()),
+        }
     }
 
     let state_guard = states.read().await;
@@ -191,7 +197,7 @@ async fn handle_message_event(
         format!("slack:{}:{}", team_id_str, channel_id)
     };
 
-    let content = extract_message_content(&msg_event.content);
+    let content = extract_message_content(&msg_event.content, &adapter_state.bot_token);
 
     let (metadata, formatted_author) = build_metadata_and_author(
         &team_id_str,
@@ -1200,7 +1206,11 @@ fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
 }
 
 /// Extract `MessageContent` from an optional `SlackMessageContent`.
-fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageContent {
+///
+/// `bot_token` is attached to each `Attachment` as `download_token` because
+/// Slack's `url_private` URLs require `Authorization: Bearer <token>` — without
+/// it the download returns 403.
+fn extract_message_content(content: &Option<SlackMessageContent>, bot_token: &str) -> MessageContent {
     let Some(msg_content) = content else {
         return MessageContent::Text(String::new());
     };
@@ -1215,6 +1225,7 @@ fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageCont
                     mime_type: f.mimetype.as_ref().map(|m| m.0.clone()).unwrap_or_default(),
                     url: url.to_string(),
                     size_bytes: None,
+                    download_token: Some(bot_token.to_string()),
                 })
             })
             .collect();

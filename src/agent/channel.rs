@@ -1698,7 +1698,12 @@ async fn download_image_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let response = match http.get(&attachment.url).send().await {
+    let mut request = http.get(&attachment.url);
+    if let Some(ref token) = attachment.download_token {
+        request = request.bearer_auth(token);
+    }
+
+    let response = match request.send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download image");
@@ -1708,6 +1713,20 @@ async fn download_image_attachment(
             ));
         }
     };
+
+    if !response.status().is_success() {
+        tracing::warn!(
+            status = %response.status(),
+            filename = %attachment.filename,
+            url = %attachment.url,
+            "image download returned non-2xx status"
+        );
+        return UserContent::text(format!(
+            "[Failed to download image: {} (HTTP {})]",
+            attachment.filename,
+            response.status()
+        ));
+    }
 
     let bytes = match response.bytes().await {
         Ok(b) => b,
@@ -1739,7 +1758,11 @@ async fn download_audio_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let response = match http.get(&attachment.url).send().await {
+    let mut request = http.get(&attachment.url);
+    if let Some(ref token) = attachment.download_token {
+        request = request.bearer_auth(token);
+    }
+    let response = match request.send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download audio");
@@ -1786,7 +1809,11 @@ async fn download_text_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let response = match http.get(&attachment.url).send().await {
+    let mut request = http.get(&attachment.url);
+    if let Some(ref token) = attachment.download_token {
+        request = request.bearer_auth(token);
+    }
+    let response = match request.send().await {
         Ok(r) => r,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download text file");
