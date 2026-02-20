@@ -8,7 +8,7 @@ use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, ComponentInteraction, Context, CreateActionRow,
+    ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow,
     CreateAttachment, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
     CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
     CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,

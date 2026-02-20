@@ -672,7 +672,7 @@ impl Messaging for SlackAdapter {
         // The socket mode listener needs its own client instance — it manages
         // a persistent WebSocket connection internally and owns that client for
         // the lifetime of the connection. The shared `self.client` is for REST calls.
-        let listener_client = Arc::new(SlackClient::new(
+        let _listener_client = Arc::new(SlackClient::new(
             SlackClientHyperConnector::new()
                 .context("failed to create slack socket mode connector")?,
         ));

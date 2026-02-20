@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(wc:*)",
+      "Bash(cargo check:*)",
+      "Bash(source:*)"
+    ]
+  }
+}
