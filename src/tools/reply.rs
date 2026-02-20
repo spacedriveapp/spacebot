@@ -108,12 +108,11 @@ async fn convert_mentions(
         if let (Some(name), Some(id), Some(meta_str)) =
             (&msg.sender_name, &msg.sender_id, &msg.metadata)
         {
-            // Parse metadata JSON to get clean display name (without mention syntax)
+            // Parse metadata JSON to get clean display name
             if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str) {
                 if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str())
                 {
-                    // For Slack (from PR #43), sender_display_name includes mention: "Name (<@ID>)"
-                    // Extract just the name part
+                    // Older rows may include mention syntax "Name (<@ID>)"; strip it.
                     let clean_name = display_name.split(" (<@").next().unwrap_or(display_name);
                     name_to_id.insert(clean_name.to_string(), id.clone());
                 }

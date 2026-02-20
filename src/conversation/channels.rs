@@ -39,7 +39,7 @@ impl ChannelStore {
         let pool = self.pool.clone();
         let channel_id = channel_id.to_string();
         let platform = extract_platform(&channel_id);
-        let display_name = extract_display_name(&platform, metadata);
+        let display_name = extract_display_name(&platform, &channel_id, metadata);
         let platform_meta = extract_platform_meta(&platform, metadata);
 
         tokio::spawn(async move {
@@ -195,6 +195,7 @@ fn extract_platform(channel_id: &str) -> String {
 /// Pull the best display name from inbound message metadata.
 fn extract_display_name(
     platform: &str,
+    channel_id: &str,
     metadata: &HashMap<String, serde_json::Value>,
 ) -> Option<String> {
     match platform {
@@ -205,7 +206,13 @@ fn extract_display_name(
         "slack" => metadata
             .get("slack_channel_name")
             .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
+            .map(|name| {
+                if channel_id.contains(":D") || name.starts_with("dm-") {
+                    name.to_string()
+                } else {
+                    format!("#{name}")
+                }
+            }),
         "telegram" => metadata
             .get("display_name")
             .and_then(|v| v.as_str())

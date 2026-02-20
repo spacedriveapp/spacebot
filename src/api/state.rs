@@ -99,6 +99,7 @@ pub enum ApiEvent {
     InboundMessage {
         agent_id: String,
         channel_id: String,
+        sender_name: Option<String>,
         sender_id: String,
         text: String,
     },
