@@ -7,6 +7,79 @@ const BETA_INTERLEAVED_THINKING: &str = "interleaved-thinking-2025-05-14";
 const BETA_CLAUDE_CODE: &str = "claude-code-20250219";
 const BETA_OAUTH: &str = "oauth-2025-04-20";
 const CLAUDE_CODE_USER_AGENT: &str = "claude-code/2.1.49 (external, cli)";
+const OAUTH_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
+const OAUTH_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+
+/// OAuth token pair with expiry.
+#[derive(Debug, Clone)]
+pub struct OAuthTokens {
+    pub access_token: String,
+    pub refresh_token: String,
+    pub expires_at: i64, // Unix timestamp in milliseconds
+}
+
+impl OAuthTokens {
+    /// Refresh the access token using the refresh token.
+    pub async fn refresh(&self, http_client: &reqwest::Client) -> Result<Self, String> {
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": self.refresh_token,
+            "client_id": OAUTH_CLIENT_ID,
+        });
+
+        let response = http_client
+            .post(OAUTH_TOKEN_URL)
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Failed to send refresh request: {e}"))?;
+
+        let status = response.status();
+        let response_text = response
+            .text()
+            .await
+            .map_err(|e| format!("Failed to read refresh response: {e}"))?;
+
+        if !status.is_success() {
+            return Err(format!(
+                "Refresh failed with status {}: {}",
+                status, response_text
+            ));
+        }
+
+        let json: serde_json::Value = serde_json::from_str(&response_text)
+            .map_err(|e| format!("Failed to parse refresh response: {e}"))?;
+
+        let new_access_token = json["access_token"]
+            .as_str()
+            .ok_or_else(|| "Missing access_token in refresh response".to_string())?
+            .to_string();
+        let new_refresh_token = json["refresh_token"]
+            .as_str()
+            .ok_or_else(|| "Missing refresh_token in refresh response".to_string())?
+            .to_string();
+        let expires_in: i64 = json["expires_in"]
+            .as_i64()
+            .ok_or_else(|| "Missing expires_in in refresh response".to_string())?
+            * 1000; // Convert seconds to milliseconds
+
+        let expires_at = chrono::Utc::now().timestamp_millis() + expires_in;
+
+        Ok(Self {
+            access_token: new_access_token,
+            refresh_token: new_refresh_token,
+            expires_at,
+        })
+    }
+
+    /// Check if the access token is expired or about to expire (within 5 minutes).
+    pub fn is_expired(&self) -> bool {
+        let now = chrono::Utc::now().timestamp_millis();
+        let buffer = 5 * 60 * 1000; // 5 minutes in milliseconds
+        now >= self.expires_at - buffer
+    }
+}
 
 /// Which authentication path to use for an Anthropic API call.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

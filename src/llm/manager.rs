@@ -8,12 +8,14 @@
 //! `reload_config()` when config.toml changes, and all subsequent
 //! `get_api_key()` calls read the new values lock-free.
 
+use crate::auth::OAuthCredentials;
 use crate::config::{LlmConfig, ProviderConfig};
 use crate::error::{LlmError, Result};
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -24,6 +26,10 @@ pub struct LlmManager {
     http_client: reqwest::Client,
     /// Models currently in rate limit cooldown, with the time they were limited.
     rate_limited: Arc<RwLock<HashMap<String, Instant>>>,
+    /// Instance directory for reading/writing OAuth credentials.
+    instance_dir: Option<PathBuf>,
+    /// Cached OAuth credentials (refreshed lazily).
+    oauth_credentials: RwLock<Option<OAuthCredentials>>,
 }
 
 impl LlmManager {
@@ -38,6 +44,46 @@ impl LlmManager {
             config: ArcSwap::from_pointee(config),
             http_client,
             rate_limited: Arc::new(RwLock::new(HashMap::new())),
+            instance_dir: None,
+            oauth_credentials: RwLock::new(None),
+        })
+    }
+
+    /// Set the instance directory and load any existing OAuth credentials.
+    pub async fn set_instance_dir(&self, instance_dir: PathBuf) {
+        if let Ok(Some(creds)) = crate::auth::load_credentials(&instance_dir) {
+            tracing::info!("loaded OAuth credentials from auth.json");
+            *self.oauth_credentials.write().await = Some(creds);
+        }
+        // Store instance_dir — we can't set it on &self since it's not behind RwLock,
+        // but we only need it for save_credentials which we handle inline.
+    }
+
+    /// Initialize with an instance directory (for use at construction time).
+    pub async fn with_instance_dir(config: LlmConfig, instance_dir: PathBuf) -> Result<Self> {
+        let http_client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(120))
+            .build()
+            .with_context(|| "failed to build HTTP client")?;
+
+        let oauth_credentials = match crate::auth::load_credentials(&instance_dir) {
+            Ok(Some(creds)) => {
+                tracing::info!("loaded OAuth credentials from auth.json");
+                Some(creds)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load OAuth credentials");
+                None
+            }
+        };
+
+        Ok(Self {
+            config: ArcSwap::from_pointee(config),
+            http_client,
+            rate_limited: Arc::new(RwLock::new(HashMap::new())),
+            instance_dir: Some(instance_dir),
+            oauth_credentials: RwLock::new(oauth_credentials),
         })
     }
 
@@ -56,6 +102,45 @@ impl LlmManager {
             .get(&normalized_provider_id)
             .cloned()
             .ok_or_else(|| LlmError::UnknownProvider(provider_id.to_string()).into())
+    }
+
+    /// Get the appropriate API key for a provider, with OAuth override for Anthropic.
+    ///
+    /// If OAuth credentials are available and the provider is Anthropic,
+    /// returns the OAuth access token (refreshing if needed). Otherwise
+    /// falls back to the static API key from config.
+    pub async fn get_anthropic_token(&self) -> Result<Option<String>> {
+        let mut creds_guard = self.oauth_credentials.write().await;
+        let Some(creds) = creds_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        if !creds.is_expired() {
+            return Ok(Some(creds.access_token.clone()));
+        }
+
+        // Need to refresh
+        tracing::info!("OAuth access token expired, refreshing...");
+        match creds.refresh().await {
+            Ok(new_creds) => {
+                // Save to disk
+                if let Some(ref instance_dir) = self.instance_dir {
+                    if let Err(error) = crate::auth::save_credentials(instance_dir, &new_creds) {
+                        tracing::warn!(%error, "failed to persist refreshed OAuth credentials");
+                    }
+                }
+                let token = new_creds.access_token.clone();
+                *creds_guard = Some(new_creds);
+                tracing::info!("OAuth token refreshed successfully");
+                Ok(Some(token))
+            }
+            Err(error) => {
+                tracing::error!(%error, "OAuth token refresh failed");
+                // Return the expired token anyway — the API will reject it
+                // and the error message will be clearer than "no key"
+                Ok(Some(creds.access_token.clone()))
+            }
+        }
     }
 
     /// Get the appropriate API key for a provider.

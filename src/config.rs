@@ -1536,6 +1536,11 @@ impl Config {
             return false;
         }
 
+        // OAuth credentials count as configured
+        if crate::auth::credentials_path(&instance_dir).exists() {
+            return false;
+        }
+
         // Check if we have any legacy env keys configured
         let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
@@ -3074,6 +3079,41 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         .default(0)
         .interact()?;
 
+    // For Anthropic, offer OAuth login as an option
+    let anthropic_oauth = if provider_idx == 0 {
+        let auth_method = Select::new()
+            .with_prompt("How do you want to authenticate with Anthropic?")
+            .items(&[
+                "Log in with Claude Pro/Max (OAuth)",
+                "Log in via API Console (OAuth)",
+                "Enter an API key manually",
+            ])
+            .default(0)
+            .interact()?;
+
+        if auth_method <= 1 {
+            let mode = if auth_method == 0 {
+                crate::auth::AuthMode::Max
+            } else {
+                crate::auth::AuthMode::Console
+            };
+            let instance_dir = Config::default_instance_dir();
+            std::fs::create_dir_all(&instance_dir)?;
+
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .with_context(|| "failed to build tokio runtime")?;
+
+            runtime.block_on(crate::auth::login_interactive(&instance_dir, mode))?;
+            Some(true)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let (provider_input_name, toml_key, provider_id) = match provider_idx {
         0 => ("Anthropic API key", "anthropic_key", "anthropic"),
         1 => ("OpenRouter API key", "openrouter_key", "openrouter"),
@@ -3094,8 +3134,12 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
     };
     let is_secret = provider_id != "ollama";
 
-    // 2. Get provider credential/endpoint
-    let provider_value = if is_secret {
+    // 2. Get provider credential/endpoint (skip if OAuth was used)
+    let provider_value = if anthropic_oauth.is_some() {
+        // OAuth tokens are stored in anthropic_oauth.json, not in config.toml.
+        // Use a placeholder so the config still has an [llm] section.
+        String::new()
+    } else if is_secret {
         let api_key: String = Password::new()
             .with_prompt(format!("Enter your {provider_input_name}"))
             .interact()?;
@@ -3209,7 +3253,11 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
 
     let mut config_content = String::new();
     config_content.push_str("[llm]\n");
-    config_content.push_str(&format!("{toml_key} = \"{provider_value}\"\n"));
+    if anthropic_oauth.is_some() {
+        config_content.push_str("# Anthropic authentication via OAuth (see anthropic_oauth.json)\n");
+    } else {
+        config_content.push_str(&format!("{toml_key} = \"{provider_value}\"\n"));
+    }
     config_content.push('\n');
 
     // Write routing defaults for the chosen provider
@@ -3293,11 +3341,26 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 4] = [
+            const KEYS: [&str; 19] = [
                 "SPACEBOT_DIR",
                 "ANTHROPIC_API_KEY",
+                "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
+                "ZHIPU_API_KEY",
+                "GROQ_API_KEY",
+                "TOGETHER_API_KEY",
+                "FIREWORKS_API_KEY",
+                "DEEPSEEK_API_KEY",
+                "XAI_API_KEY",
+                "MISTRAL_API_KEY",
+                "NVIDIA_API_KEY",
+                "OLLAMA_API_KEY",
+                "OLLAMA_BASE_URL",
+                "OPENCODE_ZEN_API_KEY",
+                "MINIMAX_API_KEY",
+                "MOONSHOT_API_KEY",
+                "ZAI_CODING_PLAN_API_KEY",
             ];
 
             let vars = KEYS
@@ -3548,6 +3611,25 @@ name = "Custom OpenAI"
         unsafe {
             std::env::set_var("ANTHROPIC_API_KEY", "test-key");
         }
+
+        assert!(!Config::needs_onboarding());
+    }
+
+    #[test]
+    fn test_needs_onboarding_false_with_oauth_credentials() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        // Create an OAuth credentials file in the EnvGuard's temp dir
+        let instance_dir = Config::default_instance_dir();
+        let creds = crate::auth::OAuthCredentials {
+            access_token: "sk-ant-oat01-test".to_string(),
+            refresh_token: "sk-ant-ort01-test".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3600_000,
+        };
+        crate::auth::save_credentials(&instance_dir, &creds).expect("failed to save credentials");
 
         assert!(!Config::needs_onboarding());
     }
