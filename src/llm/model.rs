@@ -1239,7 +1239,7 @@ fn parse_anthropic_response(
     }
 
     let choice = OneOrMany::many(assistant_content).map_err(|_| {
-        tracing::debug!(
+        tracing::warn!(
             stop_reason = body["stop_reason"].as_str().unwrap_or("unknown"),
             content_blocks = content_blocks.len(),
             raw_content = %body["content"],
