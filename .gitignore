@@ -9,3 +9,5 @@ interface/dist/
 .idea
 list/
 agents/
+
+.claude/
