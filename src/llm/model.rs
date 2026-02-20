@@ -575,6 +575,7 @@ impl SpacebotModel {
 
     /// Generic OpenAI-compatible API call.
     /// Used by providers that implement the OpenAI chat completions format.
+    #[allow(dead_code)] // may be needed later
     async fn call_openai_compatible(
         &self,
         request: CompletionRequest,
@@ -764,6 +765,7 @@ impl SpacebotModel {
 }
 // --- Helpers ---
 
+#[allow(dead_code)] // may be needed later
 fn normalize_ollama_base_url(configured: Option<String>) -> String {
     let mut base_url = configured
         .unwrap_or_else(|| "http://localhost:11434".to_string())

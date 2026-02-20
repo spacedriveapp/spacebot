@@ -660,6 +660,7 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
 }
 
 /// Extract the last assistant text message from a history.
+#[allow(dead_code)] // may be needed later
 fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
     for message in history.iter().rev() {
         if let rig::message::Message::Assistant { content, .. } = message {

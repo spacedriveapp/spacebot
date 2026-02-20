@@ -2,8 +2,7 @@
 
 use crate::error::Result;
 use crate::memory::MemoryStore;
-use crate::memory::types::{Memory, MemoryType, RelationType};
-use std::sync::Arc;
+use crate::memory::types::MemoryType;
 
 /// Maintenance configuration.
 #[derive(Debug, Clone)]
@@ -124,7 +123,7 @@ async fn prune_memories(memory_store: &MemoryStore, config: &MaintenanceConfig) 
 
 /// Merge near-duplicate memories.
 async fn merge_similar_memories(
-    memory_store: &MemoryStore,
+    _memory_store: &MemoryStore,
     similarity_threshold: f32,
 ) -> Result<usize> {
     // For now, this is a placeholder

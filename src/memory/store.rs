@@ -1,6 +1,6 @@
 //! Memory graph storage (SQLite).
 
-use crate::error::{MemoryError, Result};
+use crate::error::Result;
 use crate::memory::search::SearchSort;
 use crate::memory::types::{Association, Memory, MemoryType, RelationType};
 

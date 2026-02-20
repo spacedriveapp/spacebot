@@ -213,7 +213,7 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    drop(defaults);
+    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -393,13 +393,13 @@ pub(super) async fn create_agent(
         let deps = deps.clone();
         let logger = cortex_logger.clone();
         async move {
-            crate::agent::cortex::spawn_bulletin_loop(deps, logger).await;
+            let _ = crate::agent::cortex::spawn_bulletin_loop(deps, logger).await;
         }
     });
     tokio::spawn({
         let deps = deps.clone();
         async move {
-            crate::agent::cortex::spawn_association_loop(deps, cortex_logger).await;
+            let _ = crate::agent::cortex::spawn_association_loop(deps, cortex_logger).await;
         }
     });
 

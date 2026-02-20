@@ -113,7 +113,7 @@ where
     async fn on_completion_response(
         &self,
         _prompt: &Message,
-        response: &CompletionResponse<M::Response>,
+        _response: &CompletionResponse<M::Response>,
     ) -> HookAction {
         // Tool nudging: check if response has tool calls
         // Note: Rig's CompletionResponse structure varies by model implementation

@@ -343,4 +343,3 @@ pub struct ExecResult {
     pub stderr: String,
 }
 
-use anyhow::Context as _;
