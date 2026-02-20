@@ -77,6 +77,16 @@ impl SpacebotModel {
             .get_provider(provider_id)
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
+        if provider_id == "zai-coding-plan" {
+            let endpoint = format!("{}/chat/completions", provider_config.base_url.trim_end_matches('/'));
+            return self.call_openai_compatible_with_optional_auth(
+                request,
+                "Z.AI Coding Plan",
+                &endpoint,
+                Some(provider_config.api_key.clone()),
+            ).await;
+        }
+
         match provider_config.api_type {
             ApiType::Anthropic => self.call_anthropic(request, &provider_config).await,
             ApiType::OpenAiCompletions => self.call_openai(request, &provider_config).await,

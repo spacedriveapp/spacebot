@@ -1533,8 +1533,6 @@ impl Config {
             || std::env::var("MINIMAX_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
-            || std::env::var("MINIMAX_API_KEY").is_ok()
-            || std::env::var("MOONSHOT_API_KEY").is_ok();
 
         // If we have any legacy keys, no onboarding needed
         if has_legacy_keys {
