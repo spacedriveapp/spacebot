@@ -183,6 +183,8 @@ impl Worker {
 
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
+        let mcp_tools = self.deps.mcp_manager.get_tools().await;
+
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
             self.deps.agent_id.clone(),
@@ -194,6 +196,7 @@ impl Worker {
             self.brave_search_key.clone(),
             self.deps.runtime_config.workspace_dir.clone(),
             self.deps.runtime_config.instance_dir.clone(),
+            mcp_tools,
         );
 
         let routing = self.deps.runtime_config.routing.load();

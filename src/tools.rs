@@ -28,6 +28,7 @@ pub mod channel_recall;
 pub mod cron;
 pub mod exec;
 pub mod file;
+pub mod mcp;
 pub mod memory_delete;
 pub mod memory_recall;
 pub mod memory_save;
@@ -54,6 +55,7 @@ pub use channel_recall::{
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
 pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
 pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
+pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
     MemoryDeleteArgs, MemoryDeleteError, MemoryDeleteOutput, MemoryDeleteTool,
 };
@@ -223,6 +225,7 @@ pub fn create_worker_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     instance_dir: PathBuf,
+    mcp_tools: Vec<McpToolAdapter>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
@@ -238,6 +241,10 @@ pub fn create_worker_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    for mcp_tool in mcp_tools {
+        server = server.tool(mcp_tool);
     }
 
     server.run()

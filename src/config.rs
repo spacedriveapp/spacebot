@@ -203,6 +203,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
     pub history_backfill_count: usize,
@@ -210,6 +211,37 @@ pub struct DefaultsConfig {
     pub opencode: OpenCodeConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
+}
+
+/// MCP server configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct McpServerConfig {
+    pub name: String,
+    pub transport: McpTransport,
+    pub enabled: bool,
+}
+
+/// MCP transport configuration.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpTransport {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        env: HashMap<String, String>,
+    },
+    Http {
+        url: String,
+        headers: HashMap<String, String>,
+    },
+}
+
+impl McpTransport {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            McpTransport::Stdio { .. } => "stdio",
+            McpTransport::Http { .. } => "http",
+        }
+    }
 }
 
 /// Compaction threshold configuration.
@@ -428,6 +460,7 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub browser: Option<BrowserConfig>,
+    pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
     /// Cron job definitions for this agent.
@@ -470,6 +503,7 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub browser: BrowserConfig,
+    pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
@@ -491,6 +525,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             browser: BrowserConfig::default(),
+            mcp: Vec::new(),
             brave_search_key: None,
             history_backfill_count: 50,
             cron: Vec::new(),
@@ -537,6 +572,7 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key
                 .clone()
@@ -1272,6 +1308,8 @@ struct TomlDefaultsConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    #[serde(default)]
+    mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
@@ -1365,6 +1403,26 @@ struct TomlOpenCodePermissions {
     webfetch: Option<String>,
 }
 
+#[derive(Deserialize, Clone)]
+struct TomlMcpServerConfig {
+    name: String,
+    transport: String,
+    #[serde(default = "default_mcp_enabled")]
+    enabled: bool,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+    #[serde(default)]
+    env: HashMap<String, String>,
+    url: Option<String>,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+}
+
+fn default_mcp_enabled() -> bool {
+    true
+}
+
 #[derive(Deserialize)]
 struct TomlAgentConfig {
     id: String,
@@ -1383,6 +1441,7 @@ struct TomlAgentConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     browser: Option<TomlBrowserConfig>,
+    mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -1541,6 +1600,53 @@ fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> 
     Ok(headers)
 }
 
+fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> {
+    if raw.name.trim().is_empty() {
+        return Err(ConfigError::Invalid("mcp server name cannot be empty".into()).into());
+    }
+
+    let transport = match raw.transport.as_str() {
+        "stdio" => {
+            let command = raw.command.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with stdio transport requires 'command'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Stdio {
+                command,
+                args: raw.args,
+                env: raw.env,
+            }
+        }
+        "http" => {
+            let url = raw.url.ok_or_else(|| {
+                ConfigError::Invalid(format!(
+                    "mcp server '{}' with http transport requires 'url'",
+                    raw.name
+                ))
+            })?;
+            McpTransport::Http {
+                url,
+                headers: raw.headers,
+            }
+        }
+        other => {
+            return Err(ConfigError::Invalid(format!(
+                "mcp server '{}' has invalid transport '{}', expected 'stdio' or 'http'",
+                raw.name, other
+            ))
+            .into());
+        }
+    };
+
+    Ok(McpServerConfig {
+        name: raw.name,
+        transport,
+        enabled: raw.enabled,
+    })
+}
+
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
 fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> RoutingConfig {
     let Some(t) = toml else { return base.clone() };
@@ -1580,6 +1686,28 @@ fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> Rou
             .cortex_thinking_effort
             .unwrap_or_else(|| base.cortex_thinking_effort.clone()),
     }
+}
+
+fn resolve_mcp_configs(
+    default_configs: &[McpServerConfig],
+    agent_configs: Option<&[McpServerConfig]>,
+) -> Vec<McpServerConfig> {
+    let mut merged = default_configs.to_vec();
+
+    if let Some(agent_configs) = agent_configs {
+        for agent_config in agent_configs {
+            if let Some(existing_index) = merged
+                .iter()
+                .position(|existing| existing.name == agent_config.name)
+            {
+                merged[existing_index] = agent_config.clone();
+            } else {
+                merged.push(agent_config.clone());
+            }
+        }
+    }
+
+    merged
 }
 
 impl Config {
@@ -1827,6 +1955,7 @@ impl Config {
             ingestion: None,
             cortex: None,
             browser: None,
+            mcp: None,
             brave_search_key: None,
             cron: Vec::new(),
         }];
@@ -2117,6 +2246,13 @@ impl Config {
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
+        let default_mcp = toml
+            .defaults
+            .mcp
+            .into_iter()
+            .map(parse_mcp_server_config)
+            .collect::<Result<Vec<_>>>()?;
+
         let base_defaults = DefaultsConfig::default();
         let defaults = DefaultsConfig {
             routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
@@ -2246,6 +2382,7 @@ impl Config {
                     }
                 })
                 .unwrap_or_else(|| base_defaults.browser.clone()),
+            mcp: default_mcp,
             brave_search_key: toml
                 .defaults
                 .brave_search_key
@@ -2296,7 +2433,7 @@ impl Config {
         let mut agents: Vec<AgentConfig> = toml
             .agents
             .into_iter()
-            .map(|a| {
+            .map(|a| -> Result<AgentConfig> {
                 // Per-agent routing resolves against instance defaults
                 let agent_routing = a
                     .routing
@@ -2320,7 +2457,7 @@ impl Config {
                     })
                     .collect();
 
-                AgentConfig {
+                Ok(AgentConfig {
                     id: a.id,
                     default: a.default,
                     workspace: a.workspace.map(PathBuf::from),
@@ -2412,11 +2549,20 @@ impl Config {
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
                     }),
+                    mcp: match a.mcp {
+                        Some(mcp_servers) => Some(
+                            mcp_servers
+                                .into_iter()
+                                .map(parse_mcp_server_config)
+                                .collect::<Result<Vec<_>>>()?,
+                        ),
+                        None => None,
+                    },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron,
-                }
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
 
         if agents.is_empty() {
             agents.push(AgentConfig {
@@ -2435,6 +2581,7 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 browser: None,
+                mcp: None,
                 brave_search_key: None,
                 cron: Vec::new(),
             });
@@ -2632,6 +2779,7 @@ pub struct RuntimeConfig {
     pub max_concurrent_branches: ArcSwap<usize>,
     pub max_concurrent_workers: ArcSwap<usize>,
     pub browser_config: ArcSwap<BrowserConfig>,
+    pub mcp: ArcSwap<Vec<McpServerConfig>>,
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
@@ -2683,6 +2831,7 @@ impl RuntimeConfig {
             max_concurrent_branches: ArcSwap::from_pointee(agent_config.max_concurrent_branches),
             max_concurrent_workers: ArcSwap::from_pointee(agent_config.max_concurrent_workers),
             browser_config: ArcSwap::from_pointee(agent_config.browser.clone()),
+            mcp: ArcSwap::from_pointee(agent_config.mcp.clone()),
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
@@ -2719,7 +2868,12 @@ impl RuntimeConfig {
     /// swaps all reloadable fields. Does not handle API keys (those are
     /// reloaded via LlmManager), DB paths, messaging adapters, or agent
     /// topology.
-    pub fn reload_config(&self, config: &Config, agent_id: &str) {
+    pub async fn reload_config(
+        &self,
+        config: &Config,
+        agent_id: &str,
+        mcp_manager: &crate::mcp::McpManager,
+    ) {
         let agent = config.agents.iter().find(|a| a.id == agent_id);
         let Some(agent) = agent else {
             tracing::warn!(agent_id, "agent not found in reloaded config, skipping");
@@ -2727,6 +2881,8 @@ impl RuntimeConfig {
         };
 
         let resolved = agent.resolve(&config.instance_dir, &config.defaults);
+        let old_mcp = (**self.mcp.load()).clone();
+        let new_mcp = resolved.mcp.clone();
 
         self.routing.store(Arc::new(resolved.routing));
         self.compaction.store(Arc::new(resolved.compaction));
@@ -2743,11 +2899,14 @@ impl RuntimeConfig {
         self.max_concurrent_workers
             .store(Arc::new(resolved.max_concurrent_workers));
         self.browser_config.store(Arc::new(resolved.browser));
+        self.mcp.store(Arc::new(new_mcp.clone()));
         self.history_backfill_count
             .store(Arc::new(resolved.history_backfill_count));
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cortex.store(Arc::new(resolved.cortex));
+
+        mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
         tracing::info!(agent_id, "runtime config reloaded");
     }
@@ -2780,7 +2939,12 @@ impl std::fmt::Debug for RuntimeConfig {
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     instance_dir: PathBuf,
-    agents: Vec<(String, PathBuf, Arc<RuntimeConfig>)>,
+    agents: Vec<(
+        String,
+        PathBuf,
+        Arc<RuntimeConfig>,
+        Arc<crate::mcp::McpManager>,
+    )>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
@@ -2836,7 +3000,7 @@ pub fn spawn_file_watcher(
         }
 
         // Watch per-agent workspace directories (skills, identity)
-        for (_, workspace, _) in &agents {
+        for (_, workspace, _, _) in &agents {
             for subdir in &["skills"] {
                 let path = workspace.join(subdir);
                 if path.is_dir() {
@@ -3091,9 +3255,10 @@ pub fn spawn_file_watcher(
             }
 
             // Apply reloads to each agent's RuntimeConfig
-            for (agent_id, workspace, runtime_config) in &agents {
+            for (agent_id, workspace, runtime_config, mcp_manager) in &agents {
                 if let Some(config) = &new_config {
-                    runtime_config.reload_config(config, agent_id);
+                    let rt = tokio::runtime::Handle::current();
+                    rt.block_on(runtime_config.reload_config(config, agent_id, mcp_manager));
                 }
 
                 if identity_changed {

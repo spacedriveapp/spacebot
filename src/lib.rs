@@ -12,6 +12,7 @@ pub mod error;
 pub mod hooks;
 pub mod identity;
 pub mod llm;
+pub mod mcp;
 pub mod memory;
 pub mod messaging;
 pub mod opencode;
@@ -176,6 +177,7 @@ pub struct AgentDeps {
     pub agent_id: AgentId,
     pub memory_search: Arc<memory::MemorySearch>,
     pub llm_manager: Arc<llm::LlmManager>,
+    pub mcp_manager: Arc<mcp::McpManager>,
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,

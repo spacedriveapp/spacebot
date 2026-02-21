@@ -134,12 +134,73 @@ pub(super) struct DeleteAgentQuery {
     agent_id: String,
 }
 
+#[derive(Deserialize)]
+pub(super) struct AgentMcpQuery {
+    agent_id: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct ReconnectMcpRequest {
+    agent_id: String,
+    server_name: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct AgentMcpResponse {
+    servers: Vec<crate::mcp::McpServerStatus>,
+}
+
 /// List all configured agents with their config summaries.
 pub(super) async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse> {
     let agents = state.agent_configs.load();
     Json(AgentsResponse {
         agents: agents.as_ref().clone(),
     })
+}
+
+/// List MCP connection status for an agent.
+pub(super) async fn list_agent_mcp(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<AgentMcpQuery>,
+) -> Result<Json<AgentMcpResponse>, StatusCode> {
+    let managers = state.mcp_managers.load();
+    let manager = managers
+        .get(&query.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let servers = manager.statuses().await;
+    Ok(Json(AgentMcpResponse { servers }))
+}
+
+/// Force reconnect for a single MCP server on an agent.
+pub(super) async fn reconnect_agent_mcp(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<ReconnectMcpRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let managers = state.mcp_managers.load();
+    let manager = managers
+        .get(&request.agent_id)
+        .cloned()
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    manager
+        .reconnect(&request.server_name)
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                %error,
+                agent_id = %request.agent_id,
+                server_name = %request.server_name,
+                "failed to reconnect mcp server"
+            );
+            StatusCode::BAD_REQUEST
+        })?;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "agent_id": request.agent_id,
+        "server_name": request.server_name
+    })))
 }
 
 /// Create a new agent and initialize it live (directories, databases, memory, identity, cron, cortex).
@@ -233,6 +294,7 @@ pub(super) async fn create_agent(
         ingestion: None,
         cortex: None,
         browser: None,
+        mcp: None,
         brave_search_key: None,
         cron: Vec::new(),
     };
@@ -354,10 +416,14 @@ pub(super) async fn create_agent(
             .clone()
     };
 
+    let mcp_manager = std::sync::Arc::new(crate::mcp::McpManager::new(agent_config.mcp.clone()));
+    mcp_manager.connect_all().await;
+
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),
         memory_search: memory_search.clone(),
         llm_manager,
+        mcp_manager: mcp_manager.clone(),
         cron_tool: None,
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
@@ -454,6 +520,10 @@ pub(super) async fn create_agent(
         let mut configs = (**state.runtime_configs.load()).clone();
         configs.insert(agent_id.clone(), runtime_config);
         state.runtime_configs.store(std::sync::Arc::new(configs));
+
+        let mut mcp_managers = (**state.mcp_managers.load()).clone();
+        mcp_managers.insert(agent_id.clone(), mcp_manager);
+        state.mcp_managers.store(std::sync::Arc::new(mcp_managers));
 
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
@@ -567,6 +637,12 @@ pub(super) async fn delete_agent(
 
     // Remove from all API state maps
     {
+        let mut mcp_managers = (**state.mcp_managers.load()).clone();
+        if let Some(mcp_manager) = mcp_managers.remove(&agent_id) {
+            mcp_manager.disconnect_all().await;
+        }
+        state.mcp_managers.store(std::sync::Arc::new(mcp_managers));
+
         let mut pools = (**state.agent_pools.load()).clone();
         pools.remove(&agent_id);
         state.agent_pools.store(std::sync::Arc::new(pools));

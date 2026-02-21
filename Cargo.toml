@@ -74,6 +74,7 @@ pin-project = "1"
 
 # Schema validation
 schemars = "0.8"
+rmcp = { version = "0.16", features = ["client", "reqwest", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest"] }
 
 # Command line (for main.rs)
 clap = { version = "4.5", features = ["derive"] }

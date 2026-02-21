@@ -68,11 +68,13 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let (event_tx, _) = tokio::sync::broadcast::channel(16);
 
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
+    let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
         llm_manager,
+        mcp_manager,
         cron_tool: None,
         runtime_config,
         event_tx,

@@ -326,8 +326,13 @@ pub(super) async fn update_agent_config(
     match crate::config::Config::load_from_path(&config_path) {
         Ok(new_config) => {
             let runtime_configs = state.runtime_configs.load();
-            if let Some(rc) = runtime_configs.get(&request.agent_id) {
-                rc.reload_config(&new_config, &request.agent_id);
+            let mcp_managers = state.mcp_managers.load();
+            if let (Some(rc), Some(mcp_manager)) = (
+                runtime_configs.get(&request.agent_id).cloned(),
+                mcp_managers.get(&request.agent_id).cloned(),
+            ) {
+                rc.reload_config(&new_config, &request.agent_id, &mcp_manager)
+                    .await;
             }
             if request.discord.is_some() {
                 if let Some(discord_config) = &new_config.messaging.discord {

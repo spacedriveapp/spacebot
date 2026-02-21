@@ -51,6 +51,8 @@ pub async fn start_http_server(
                 .post(agents::create_agent)
                 .delete(agents::delete_agent),
         )
+        .route("/agents/mcp", get(agents::list_agent_mcp))
+        .route("/agents/mcp/reconnect", post(agents::reconnect_agent_mcp))
         .route("/agents/overview", get(agents::agent_overview))
         .route("/channels", get(channels::list_channels))
         .route("/channels/messages", get(channels::channel_messages))
