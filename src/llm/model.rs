@@ -76,17 +76,16 @@ impl SpacebotModel {
             .map(|(provider, _)| provider)
             .unwrap_or("anthropic");
 
-        let mut provider_config = self
-            .llm_manager
-            .get_provider(provider_id)
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        // For Anthropic, prefer OAuth token from auth.json over static config key
-        if provider_id == "anthropic" {
-            if let Ok(Some(token)) = self.llm_manager.get_anthropic_token().await {
-                provider_config.api_key = token;
-            }
-        }
+        let mut provider_config = if provider_id == "anthropic" {
+            self.llm_manager
+                .get_anthropic_provider()
+                .await
+                .map_err(|e| CompletionError::ProviderError(e.to_string()))?
+        } else {
+            self.llm_manager
+                .get_provider(provider_id)
+                .map_err(|e| CompletionError::ProviderError(e.to_string()))?
+        };
 
         if provider_id == "zai-coding-plan" || provider_id == "zhipu" {
             let display_name = if provider_id == "zhipu" {
