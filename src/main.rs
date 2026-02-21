@@ -616,6 +616,18 @@ async fn run(
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
 
+    // Start metrics server if enabled (requires `metrics` cargo feature)
+    #[cfg(feature = "metrics")]
+    let _metrics_handle = if config.metrics.enabled {
+        Some(
+            spacebot::telemetry::start_metrics_server(&config.metrics, shutdown_rx.clone())
+                .await
+                .context("failed to start metrics server")?,
+        )
+    } else {
+        None
+    };
+
     let _http_handle = if config.api.enabled {
         // IPv6 addresses need brackets when combined with port: [::]:19898
         let raw_bind = config
@@ -1227,7 +1239,7 @@ async fn initialize_agents(
         );
 
         // Per-agent memory system
-        let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
+        let memory_store = spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
             .await
             .with_context(|| {

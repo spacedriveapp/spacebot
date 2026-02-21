@@ -3,6 +3,7 @@
 pub mod anthropic;
 pub mod manager;
 pub mod model;
+pub mod pricing;
 pub mod providers;
 pub mod routing;
 

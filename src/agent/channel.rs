@@ -822,6 +822,7 @@ impl Channel {
         let max_turns = **rc.max_turns.load();
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
+            .with_context(&*self.deps.agent_id, "channel")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -991,6 +992,12 @@ impl Channel {
                 // Remove from active branches
                 let mut branches = self.state.active_branches.write().await;
                 branches.remove(branch_id);
+
+                #[cfg(feature = "metrics")]
+                crate::telemetry::Metrics::global()
+                    .active_branches
+                    .with_label_values(&[&*self.deps.agent_id])
+                    .dec();
 
                 // Memory persistence branches complete silently — no history
                 // injection, no re-trigger. The work (memory saves) already
@@ -1243,6 +1250,12 @@ async fn spawn_branch(
         status.add_branch(branch_id, status_label);
     }
 
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .active_branches
+        .with_label_values(&[&*state.deps.agent_id])
+        .inc();
+
     state
         .deps
         .event_tx
@@ -1492,6 +1505,9 @@ where
 {
     tokio::spawn(async move {
         #[cfg(feature = "metrics")]
+        let worker_start = std::time::Instant::now();
+
+        #[cfg(feature = "metrics")]
         crate::telemetry::Metrics::global()
             .active_workers
             .with_label_values(&[&*agent_id])
@@ -1505,10 +1521,17 @@ where
             }
         };
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .active_workers
-            .with_label_values(&[&*agent_id])
-            .dec();
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .active_workers
+                .with_label_values(&[&*agent_id])
+                .dec();
+            metrics
+                .worker_duration_seconds
+                .with_label_values(&[&*agent_id, "builtin"])
+                .observe(worker_start.elapsed().as_secs_f64());
+        }
 
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,
