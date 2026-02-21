@@ -89,6 +89,9 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Per-agent MCP managers for connection status and reconnection.
+    #[cfg(feature = "mcp")]
+    pub mcp_managers: ArcSwap<HashMap<String, Arc<crate::mcp::McpManager>>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -205,6 +208,8 @@ impl ApiState {
             agent_tx,
             agent_remove_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
+            #[cfg(feature = "mcp")]
+            mcp_managers: ArcSwap::from_pointee(HashMap::new()),
         }
     }
 
@@ -464,6 +469,12 @@ impl ApiState {
     /// Set the shared webchat adapter for API handlers.
     pub fn set_webchat_adapter(&self, adapter: Arc<WebChatAdapter>) {
         self.webchat_adapter.store(Arc::new(Some(adapter)));
+    }
+
+    /// Set the MCP managers for all agents.
+    #[cfg(feature = "mcp")]
+    pub fn set_mcp_managers(&self, managers: HashMap<String, Arc<crate::mcp::McpManager>>) {
+        self.mcp_managers.store(Arc::new(managers));
     }
 
     /// Send an event to all SSE subscribers.

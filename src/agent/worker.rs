@@ -198,7 +198,20 @@ impl Worker {
 
         #[cfg(feature = "mcp")]
         if let Some(mcp_manager) = &self.deps.mcp_manager {
-            crate::tools::register_mcp_tools(&worker_tool_server, mcp_manager).await;
+            crate::tools::register_mcp_tools(
+                &worker_tool_server,
+                mcp_manager,
+                crate::mcp::McpScope::Worker,
+            )
+            .await;
+
+            // Register the connect_mcp meta-tool so workers can connect to
+            // new MCP servers mid-conversation.
+            let connect_tool = crate::tools::ConnectMcpTool::new(
+                mcp_manager.clone(),
+                worker_tool_server.clone(),
+            );
+            worker_tool_server.add_tool(connect_tool).await.ok();
         }
 
         let routing = self.deps.runtime_config.routing.load();

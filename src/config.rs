@@ -2315,6 +2315,7 @@ impl Config {
                 .mcp
                 .map(|m| crate::mcp::McpConfig {
                     servers: m.servers,
+                    scopes: m.scopes,
                 })
                 .unwrap_or_default(),
         };
@@ -2442,6 +2443,7 @@ impl Config {
                     cron,
                     mcp: a.mcp.map(|m| crate::mcp::McpConfig {
                         servers: m.servers,
+                        scopes: m.scopes,
                     }),
                 }
             })
@@ -2610,7 +2612,7 @@ impl Config {
             .into_iter()
             .map(|s| {
                 let transport = match s.transport.as_str() {
-                    "sse" => crate::mcp::McpTransport::Sse,
+                    "sse" | "streamable_http" => crate::mcp::McpTransport::StreamableHttp,
                     _ => crate::mcp::McpTransport::Stdio,
                 };
                 let env = s
@@ -2631,6 +2633,7 @@ impl Config {
                     env,
                     url: s.url,
                     headers,
+                    scopes: s.scopes,
                 }
             })
             .collect();

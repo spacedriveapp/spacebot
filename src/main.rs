@@ -1294,6 +1294,7 @@ async fn initialize_agents(
         {
             let manager = std::sync::Arc::new(spacebot::mcp::McpManager::new(
                 std::sync::Arc::new(config.mcp_servers.clone()),
+                &agent_config.mcp.scopes,
             ));
             manager.start(&agent_config.mcp).await;
             Some(manager)
@@ -1356,6 +1357,17 @@ async fn initialize_agents(
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_instance_dir(config.instance_dir.clone());
+
+        #[cfg(feature = "mcp")]
+        {
+            let mut mcp_managers = std::collections::HashMap::new();
+            for (agent_id, agent) in agents.iter() {
+                if let Some(manager) = &agent.deps.mcp_manager {
+                    mcp_managers.insert(agent_id.to_string(), manager.clone());
+                }
+            }
+            api_state.set_mcp_managers(mcp_managers);
+        }
     }
 
     // Initialize messaging adapters
@@ -1607,7 +1619,12 @@ async fn initialize_agents(
 
             #[cfg(feature = "mcp")]
             if let Some(mcp_manager) = &agent.deps.mcp_manager {
-                spacebot::tools::register_mcp_tools(&tool_server, mcp_manager).await;
+                spacebot::tools::register_mcp_tools(
+                    &tool_server,
+                    mcp_manager,
+                    spacebot::mcp::McpScope::CortexChat,
+                )
+                .await;
             }
 
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());

@@ -411,7 +411,12 @@ pub(super) async fn create_agent(
 
     #[cfg(feature = "mcp")]
     if let Some(mcp_manager) = &deps.mcp_manager {
-        crate::tools::register_mcp_tools(&cortex_tool_server, mcp_manager).await;
+        crate::tools::register_mcp_tools(
+            &cortex_tool_server,
+            mcp_manager,
+            crate::mcp::McpScope::CortexChat,
+        )
+        .await;
     }
 
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());

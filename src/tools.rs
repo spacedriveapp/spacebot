@@ -25,6 +25,8 @@ pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
+#[cfg(feature = "mcp")]
+pub mod connect_mcp;
 pub mod cron;
 pub mod exec;
 pub mod file;
@@ -48,6 +50,8 @@ pub use browser::{
     TabInfo,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
+#[cfg(feature = "mcp")]
+pub use connect_mcp::{ConnectMcpArgs, ConnectMcpError, ConnectMcpOutput, ConnectMcpTool};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
@@ -243,7 +247,8 @@ pub fn create_worker_tool_server(
     server.run()
 }
 
-/// Register MCP tools from a manager onto an existing tool server handle.
+/// Register MCP tools from a manager onto an existing tool server handle,
+/// filtered by scope.
 ///
 /// Called after creating worker or cortex chat tool servers to add any
 /// configured MCP tools alongside built-in tools.
@@ -251,8 +256,9 @@ pub fn create_worker_tool_server(
 pub async fn register_mcp_tools(
     handle: &ToolServerHandle,
     mcp_manager: &crate::mcp::McpManager,
+    scope: crate::mcp::McpScope,
 ) {
-    for (tool, sink) in mcp_manager.tools().await {
+    for (tool, sink) in mcp_manager.tools_for_scope(scope).await {
         let mcp_tool = rig::tool::rmcp::McpTool::from_mcp_server(tool, sink);
         if let Err(error) = handle.add_tool(mcp_tool).await {
             tracing::warn!(%error, "failed to register MCP tool");

@@ -139,7 +139,7 @@ open = "5.3.3"
 urlencoding = "2.1.3"
 
 # MCP (Model Context Protocol) client (optional, behind "mcp" feature)
-rmcp = { version = "0.13", optional = true, features = ["client", "transport-child-process"] }
+rmcp = { version = "0.13", optional = true, features = ["client", "transport-child-process", "transport-streamable-http-client-reqwest"] }
 
 [features]
 metrics = ["dep:prometheus"]

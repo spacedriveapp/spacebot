@@ -5,6 +5,8 @@ use rmcp::model::Tool;
 use rmcp::service::ServerSink;
 use rmcp::transport::child_process::ConfigureCommandExt;
 use rmcp::transport::TokioChildProcess;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::ServiceExt;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -80,10 +82,7 @@ impl McpClient {
 
         match self.config.transport {
             McpTransport::Stdio => self.connect_stdio().await,
-            McpTransport::Sse => Err(crate::error::McpError::ConnectionFailed {
-                server_id: self.config.id.clone(),
-                reason: "SSE transport not yet implemented (Phase 2)".into(),
-            }),
+            McpTransport::StreamableHttp => self.connect_streamable_http().await,
         }
     }
 
@@ -119,6 +118,39 @@ impl McpClient {
             }
         })?;
 
+        self.finish_connect(client).await
+    }
+
+    async fn connect_streamable_http(&self) -> Result<(), crate::error::McpError> {
+        let url = self.config.url.as_deref().ok_or_else(|| {
+            crate::error::McpError::ConnectionFailed {
+                server_id: self.config.id.clone(),
+                reason: "streamable HTTP transport requires a url".into(),
+            }
+        })?;
+
+        let mut config = StreamableHttpClientTransportConfig::with_uri(url);
+        if let Some(auth) = self.config.headers.get("Authorization") {
+            config = config.auth_header(auth.clone());
+        }
+
+        let transport = StreamableHttpClientTransport::from_config(config);
+
+        let client = ().serve(transport).await.map_err(|error| {
+            crate::error::McpError::ConnectionFailed {
+                server_id: self.config.id.clone(),
+                reason: format!("MCP handshake failed: {error}"),
+            }
+        })?;
+
+        self.finish_connect(client).await
+    }
+
+    /// Shared post-connection logic: discover tools, cache results, update state.
+    async fn finish_connect<S: rmcp::service::Service<rmcp::RoleClient>>(
+        &self,
+        client: rmcp::service::RunningService<rmcp::RoleClient, S>,
+    ) -> Result<(), crate::error::McpError> {
         let server_name = client
             .peer_info()
             .map(|info| info.server_info.name.clone())

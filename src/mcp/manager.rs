@@ -1,7 +1,7 @@
 //! Per-agent MCP client registry and tool registration.
 
 use crate::mcp::client::{ConnectionState, McpClient};
-use crate::mcp::types::{McpConfig, McpServerConfig};
+use crate::mcp::types::{McpConfig, McpScope, McpServerConfig, default_scopes};
 use rmcp::model::Tool;
 use rmcp::service::ServerSink;
 use std::collections::HashMap;
@@ -25,13 +25,24 @@ pub struct McpServerStatus {
 pub struct McpManager {
     clients: RwLock<HashMap<String, Arc<McpClient>>>,
     server_configs: Arc<Vec<McpServerConfig>>,
+    /// Resolved per-server scopes. Key is server_id.
+    server_scopes: RwLock<HashMap<String, Vec<McpScope>>>,
+    /// Agent-level default scopes (inherited by servers without explicit scopes).
+    default_scopes: Vec<McpScope>,
 }
 
 impl McpManager {
-    pub fn new(server_configs: Arc<Vec<McpServerConfig>>) -> Self {
+    pub fn new(server_configs: Arc<Vec<McpServerConfig>>, agent_scopes: &[McpScope]) -> Self {
+        let default_scopes = if agent_scopes.is_empty() {
+            default_scopes()
+        } else {
+            agent_scopes.to_vec()
+        };
         Self {
             clients: RwLock::new(HashMap::new()),
             server_configs,
+            server_scopes: RwLock::new(HashMap::new()),
+            default_scopes,
         }
     }
 
@@ -59,6 +70,17 @@ impl McpManager {
                 );
                 continue;
             };
+
+            // Resolve scopes: server-level > agent-level > defaults
+            let resolved = if config.scopes.is_empty() {
+                self.default_scopes.clone()
+            } else {
+                config.scopes.clone()
+            };
+            self.server_scopes
+                .write()
+                .await
+                .insert(server_id.clone(), resolved);
 
             let client = Arc::new(McpClient::new((*config).clone()));
 
@@ -101,6 +123,16 @@ impl McpManager {
             return;
         };
 
+        let resolved = if config.scopes.is_empty() {
+            self.default_scopes.clone()
+        } else {
+            config.scopes.clone()
+        };
+        self.server_scopes
+            .write()
+            .await
+            .insert(server_id.to_string(), resolved);
+
         let client = Arc::new(McpClient::new(config));
         self.clients
             .write()
@@ -119,6 +151,51 @@ impl McpManager {
         if let Some(client) = self.clients.write().await.remove(server_id) {
             client.disconnect().await;
         }
+        self.server_scopes.write().await.remove(server_id);
+    }
+
+    /// Add an ephemeral server at runtime (meta-tool path).
+    ///
+    /// Unlike `add_server()`, this creates a connection from an inline config
+    /// rather than looking it up in the instance-level server definitions.
+    /// The server is not persisted to config.toml and lives for the duration
+    /// of the manager's lifetime.
+    pub async fn add_runtime_server(
+        &self,
+        config: McpServerConfig,
+    ) -> Result<Vec<String>, crate::error::McpError> {
+        let server_id = config.id.clone();
+        let scopes = if config.scopes.is_empty() {
+            self.default_scopes.clone()
+        } else {
+            config.scopes.clone()
+        };
+
+        let client = Arc::new(McpClient::new(config));
+        client.connect().await?;
+
+        // Collect tool names before storing
+        let tool_names: Vec<String> = client
+            .tools()
+            .await
+            .map(|(tools, _)| {
+                tools
+                    .iter()
+                    .map(|t| format!("{}_{}", server_id, t.name))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        self.server_scopes
+            .write()
+            .await
+            .insert(server_id.clone(), scopes);
+        self.clients
+            .write()
+            .await
+            .insert(server_id, client);
+
+        Ok(tool_names)
     }
 
     /// Collect all connected MCP tools as (prefixed_tool, server_sink) pairs.
@@ -130,6 +207,35 @@ impl McpManager {
         let mut result = Vec::new();
 
         for (server_id, client) in clients.iter() {
+            if let Some((tools, sink)) = client.tools().await {
+                for mut tool in tools {
+                    tool.name = format!("{}_{}", server_id, tool.name).into();
+                    result.push((tool, sink.clone()));
+                }
+            }
+        }
+
+        result
+    }
+
+    /// Collect tools filtered by scope.
+    ///
+    /// Only returns tools from servers whose resolved scopes include the given scope.
+    pub async fn tools_for_scope(&self, scope: McpScope) -> Vec<(Tool, ServerSink)> {
+        let clients = self.clients.read().await;
+        let scopes = self.server_scopes.read().await;
+        let mut result = Vec::new();
+
+        for (server_id, client) in clients.iter() {
+            let has_scope = scopes
+                .get(server_id)
+                .map(|s| s.contains(&scope))
+                .unwrap_or(false);
+
+            if !has_scope {
+                continue;
+            }
+
             if let Some((tools, sink)) = client.tools().await {
                 for mut tool in tools {
                     tool.name = format!("{}_{}", server_id, tool.name).into();
@@ -160,6 +266,25 @@ impl McpManager {
         }
 
         statuses
+    }
+
+    /// Force-reconnect a specific server.
+    pub async fn reconnect_server(
+        &self,
+        server_id: &str,
+    ) -> Result<(), crate::error::McpError> {
+        let clients = self.clients.read().await;
+        let Some(client) = clients.get(server_id) else {
+            return Err(crate::error::McpError::ConnectionFailed {
+                server_id: server_id.to_string(),
+                reason: "server not found".into(),
+            });
+        };
+        let client = client.clone();
+        drop(clients);
+
+        client.disconnect().await;
+        client.connect().await
     }
 
     /// Disconnect all clients.

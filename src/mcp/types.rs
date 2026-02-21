@@ -1,6 +1,6 @@
 //! MCP configuration types.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 /// Transport protocol for connecting to an MCP server.
@@ -8,8 +8,23 @@ use std::collections::HashMap;
 pub enum McpTransport {
     /// Spawn a child process and communicate over stdin/stdout.
     Stdio,
-    /// Connect to a server-sent events endpoint (Phase 2).
-    Sse,
+    /// Connect via streamable HTTP (SSE-based) endpoint.
+    StreamableHttp,
+}
+
+/// Process types that can receive MCP tools.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpScope {
+    Worker,
+    Branch,
+    Channel,
+    CortexChat,
+}
+
+/// Default scopes when none are specified.
+pub fn default_scopes() -> Vec<McpScope> {
+    vec![McpScope::Worker, McpScope::CortexChat]
 }
 
 /// Instance-level MCP server definition.
@@ -28,10 +43,13 @@ pub struct McpServerConfig {
     /// Environment variables for the spawned process. Values support
     /// `env:VAR_NAME` references resolved at startup.
     pub env: HashMap<String, String>,
-    /// SSE endpoint URL (SSE transport only, Phase 2).
+    /// Streamable HTTP endpoint URL.
     pub url: Option<String>,
-    /// HTTP headers for SSE transport. Values support `env:VAR_NAME`.
+    /// HTTP headers for streamable HTTP transport. Values support `env:VAR_NAME`.
     pub headers: HashMap<String, String>,
+    /// Which process types can use this server's tools.
+    /// Empty means inherit from agent-level `McpConfig.scopes`.
+    pub scopes: Vec<McpScope>,
 }
 
 /// Per-agent MCP configuration.
@@ -42,6 +60,8 @@ pub struct McpServerConfig {
 #[derive(Debug, Clone, Default)]
 pub struct McpConfig {
     pub servers: Vec<String>,
+    /// Default scopes inherited by all servers that don't specify their own.
+    pub scopes: Vec<McpScope>,
 }
 
 /// TOML deserialization target for `[[mcp_servers]]`.
@@ -58,6 +78,8 @@ pub(crate) struct TomlMcpServerConfig {
     pub url: Option<String>,
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    #[serde(default)]
+    pub scopes: Vec<McpScope>,
 }
 
 fn default_transport() -> String {
@@ -69,4 +91,6 @@ fn default_transport() -> String {
 pub(crate) struct TomlMcpConfig {
     #[serde(default)]
     pub servers: Vec<String>,
+    #[serde(default)]
+    pub scopes: Vec<McpScope>,
 }

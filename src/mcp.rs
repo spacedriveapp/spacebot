@@ -13,4 +13,4 @@ pub mod types;
 pub use client::McpClient;
 #[cfg(feature = "mcp")]
 pub use manager::McpManager;
-pub use types::{McpConfig, McpServerConfig, McpTransport};
+pub use types::{McpConfig, McpScope, McpServerConfig, McpTransport};
