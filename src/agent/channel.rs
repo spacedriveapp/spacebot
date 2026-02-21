@@ -870,6 +870,12 @@ impl Channel {
             guard.clone()
         };
 
+        // Snapshot length so we can roll back on hard errors (CompletionError,
+        // ToolError, ToolServerError). Rig mutates `history` in-place as it runs;
+        // if it fails mid-turn the Vec may contain a dangling tool-call message
+        // with no corresponding result, which poisons every subsequent turn.
+        let history_len_before = history.len();
+
         let mut result = agent
             .prompt(user_text)
             .with_history(&mut history)
@@ -891,10 +897,29 @@ impl Channel {
             }
         }
 
-        // Write history back after the agentic loop completes
+        // Write history back after the agentic loop completes.
+        // On hard errors (CompletionError / ToolError / ToolServerError) Rig does
+        // not carry the history back in the error variant, but it has already
+        // mutated `history` in-place and may have left dangling tool-call messages.
+        // Roll back to the pre-call snapshot so the next turn starts clean.
         {
             let mut guard = self.state.history.write().await;
-            *guard = history;
+            match &result {
+                Ok(_)
+                | Err(rig::completion::PromptError::MaxTurnsError { .. })
+                | Err(rig::completion::PromptError::PromptCancelled { .. }) => {
+                    *guard = history;
+                }
+                Err(_) => {
+                    // Hard error — truncate any partial messages Rig appended.
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        rolled_back = history.len().saturating_sub(history_len_before),
+                        "rolling back history after LLM hard error"
+                    );
+                    guard.truncate(history_len_before);
+                }
+            }
         }
 
         if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
