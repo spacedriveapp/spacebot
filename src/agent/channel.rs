@@ -1841,6 +1841,32 @@ async fn transcribe_audio_attachment(
         ));
     }
 
+    // Local Whisper backend — bypass the LLM provider path entirely.
+    #[cfg(feature = "stt-whisper")]
+    if let Some(model_spec) = voice_model.strip_prefix("whisper-local://") {
+        let transcript = match crate::stt::transcribe(model_spec, &bytes).await {
+            Ok(text) if text.is_empty() => {
+                tracing::warn!(filename = %attachment.filename, "local Whisper returned empty transcript");
+                return UserContent::text(format!(
+                    "[Audio transcription returned empty text for {}]",
+                    attachment.filename
+                ));
+            }
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(%error, filename = %attachment.filename, "local Whisper transcription failed");
+                return UserContent::text(format!(
+                    "[Audio transcription failed for {}: {}]",
+                    attachment.filename, error
+                ));
+            }
+        };
+        return UserContent::text(format!(
+            "<voice_transcript name=\"{}\" mime=\"{}\">\n{}\n</voice_transcript>",
+            attachment.filename, attachment.mime_type, transcript
+        ));
+    }
+
     let (provider_id, model_name) = match deps.llm_manager.resolve_model(voice_model) {
         Ok(parts) => parts,
         Err(error) => {

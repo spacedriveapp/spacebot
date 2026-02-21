@@ -193,6 +193,30 @@ channel = "my-provider/my-model"
 
 Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
 
+### Voice Transcription
+
+Audio attachments (voice messages, audio files) are transcribed before being passed to the channel. Set `routing.voice` to choose the backend:
+
+**Provider-based** — route through any configured LLM provider that supports audio input:
+
+```toml
+[defaults.routing]
+voice = "openai/whisper-1"
+```
+
+**Local Whisper** (`stt-whisper` feature, requires `--features stt-whisper` at build time) — run inference locally via [whisper-rs](https://codeberg.org/tazz4843/whisper-rs), no API call needed:
+
+```toml
+[defaults.routing]
+voice = "whisper-local://small"
+```
+
+The model is downloaded automatically from [`ggerganov/whisper.cpp`](https://huggingface.co/ggerganov/whisper.cpp) on first use and cached in `~/.cache/huggingface/hub`. Supported size names: `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large`, `large-v1`, `large-v2`, `large-v3`. An absolute path to a GGML model file also works.
+
+GPU acceleration via Vulkan is enabled automatically when a compatible device is detected. The loaded model is cached for the process lifetime — restart to switch models.
+
+Ogg/Opus audio (Telegram voice messages) is decoded natively. All other formats are handled via symphonia.
+
 ### Skills
 
 Extensible skill system integrated with [skills.sh](https://skills.sh):
