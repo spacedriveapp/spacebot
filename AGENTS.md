@@ -341,6 +341,20 @@ Phase 6 — Hardening:
 
 **Don't abbreviate variable names.** `queue` not `q`, `message` not `msg`, `channel` not `ch`. Common abbreviations like `config` are fine.
 
+## Documentation Maintenance
+
+Documentation ships with the code. When any feature, behavior, or architectural change is implemented, the corresponding documentation must be created or updated in the same PR — not as a follow-up.
+
+Three documentation layers must stay in sync:
+
+**`docs/` — Internal design docs.** When adding a new module or system, create `docs/<feature>.md` covering configuration, architecture decisions, and integration with existing systems. When modifying behavior, update the relevant existing doc. Every config block, every new tool, every new process flow gets documented here.
+
+**`README.md` — Project-level overview.** Update the feature list, architecture section, or configuration examples when user-facing capabilities change. New config blocks, new build flags, new endpoints — all documented here with examples.
+
+**`docs/content/` — User-facing site docs (Fumadocs/MDX).** When a feature is user-configurable or user-visible, create or update the appropriate page under `docs/content/docs/`. Add new pages to the relevant `meta.json`. Include configuration examples, usage instructions, and prerequisites.
+
+A feature without documentation is incomplete. Do not consider a task done until all three layers are addressed. When modifying existing behavior, search for references across all three layers and update them. Be proactive — if you encounter stale or missing documentation during implementation, fix it in the same PR.
+
 ## Patterns to Implement
 
 These are validated patterns from research (see `docs/research/pattern-analysis.md`). Implement them when building the relevant module.

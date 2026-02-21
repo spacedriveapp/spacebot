@@ -2,7 +2,7 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, memories, messaging, models,
+    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
     providers, settings, skills, system, webchat,
 };
 
@@ -129,7 +129,19 @@ pub async fn start_http_server(
         )
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
-        .route("/webchat/history", get(webchat::webchat_history));
+        .route("/webchat/history", get(webchat::webchat_history))
+        .route(
+            "/mcp/servers",
+            get(mcp::list_mcp_servers)
+                .post(mcp::create_mcp_server)
+                .put(mcp::update_mcp_server),
+        )
+        .route("/mcp/servers/{id}", delete(mcp::delete_mcp_server))
+        .route(
+            "/mcp/servers/{id}/reconnect",
+            post(mcp::reconnect_mcp_server),
+        )
+        .route("/mcp/status", get(mcp::mcp_status));
 
     let app = Router::new()
         .nest("/api", api_routes)

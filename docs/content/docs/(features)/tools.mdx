@@ -32,6 +32,8 @@ All 16 tools:
 | `browser` | Headless Chrome automation (navigate, click, screenshot) | Worker |
 | `cron` | Manage scheduled cron jobs | Channel |
 
+When built with `--features mcp`, workers and cortex chat sessions also get tools from configured [MCP servers](/docs/mcp). MCP tools are namespaced with the server ID (e.g., `github_create_issue`) and appear alongside the built-in tools above.
+
 ## ToolServer Topology
 
 Rig's `ToolServer` runs as a tokio task. You register tools on it, call `.run()` to get a `ToolServerHandle`, and pass that handle to agents. The handle is `Clone` — all clones point to the same server task.
@@ -89,10 +91,12 @@ Each worker gets its own isolated ToolServer, created at spawn time via `create_
 │   exec                                   │
 │   set_status  (agent_id, worker_id, ...) │
 │   browser     (if browser.enabled)       │
+│   web_search  (if brave_search_key set)  │
+│   {server_id}_*  (if MCP configured)     │
 └──────────────────────────────────────────┘
 ```
 
-`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config.
+`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config. MCP tools (when built with `--features mcp`) are registered from connected servers, prefixed with the server ID.
 
 Workers don't get memory tools or channel tools. They can't talk to the user, can't recall memories, can't spawn branches. They execute their task and report status.
 

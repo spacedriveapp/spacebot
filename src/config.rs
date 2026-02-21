@@ -49,6 +49,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+    /// Instance-level MCP server definitions.
+    pub mcp_servers: Vec<crate::mcp::McpServerConfig>,
 }
 
 /// HTTP API server configuration.
@@ -210,6 +212,8 @@ pub struct DefaultsConfig {
     pub opencode: OpenCodeConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
+    /// MCP server IDs inherited by all agents.
+    pub mcp: crate::mcp::McpConfig,
 }
 
 /// Compaction threshold configuration.
@@ -432,6 +436,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
+    /// Per-agent MCP server IDs override. None inherits from defaults.
+    pub mcp: Option<crate::mcp::McpConfig>,
 }
 
 /// A cron job definition from config.
@@ -474,6 +480,8 @@ pub struct ResolvedAgentConfig {
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
+    /// Resolved MCP server IDs for this agent.
+    pub mcp: crate::mcp::McpConfig,
 }
 
 impl Default for DefaultsConfig {
@@ -496,6 +504,7 @@ impl Default for DefaultsConfig {
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
             worker_log_mode: crate::settings::WorkerLogMode::default(),
+            mcp: crate::mcp::McpConfig::default(),
         }
     }
 }
@@ -543,6 +552,10 @@ impl AgentConfig {
                 .or_else(|| defaults.brave_search_key.clone()),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
+            mcp: self
+                .mcp
+                .clone()
+                .unwrap_or_else(|| defaults.mcp.clone()),
         }
     }
 }
@@ -1075,6 +1088,8 @@ struct TomlConfig {
     metrics: TomlMetricsConfig,
     #[serde(default)]
     telemetry: TomlTelemetryConfig,
+    #[serde(default)]
+    mcp_servers: Vec<crate::mcp::types::TomlMcpServerConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1275,6 +1290,7 @@ struct TomlDefaultsConfig {
     brave_search_key: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
+    mcp: Option<crate::mcp::types::TomlMcpConfig>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1386,6 +1402,7 @@ struct TomlAgentConfig {
     brave_search_key: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
+    mcp: Option<crate::mcp::types::TomlMcpConfig>,
 }
 
 #[derive(Deserialize)]
@@ -1829,6 +1846,7 @@ impl Config {
             browser: None,
             brave_search_key: None,
             cron: Vec::new(),
+            mcp: None,
         }];
 
         let mut api = ApiConfig::default();
@@ -1850,6 +1868,7 @@ impl Config {
                     .unwrap_or_else(|_| "spacebot".into()),
                 sample_rate: 1.0,
             },
+            mcp_servers: Vec::new(),
         })
     }
 
@@ -2291,6 +2310,14 @@ impl Config {
                 .as_deref()
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(base_defaults.worker_log_mode),
+            mcp: toml
+                .defaults
+                .mcp
+                .map(|m| crate::mcp::McpConfig {
+                    servers: m.servers,
+                    scopes: m.scopes,
+                })
+                .unwrap_or_default(),
         };
 
         let mut agents: Vec<AgentConfig> = toml
@@ -2414,6 +2441,10 @@ impl Config {
                     }),
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron,
+                    mcp: a.mcp.map(|m| crate::mcp::McpConfig {
+                        servers: m.servers,
+                        scopes: m.scopes,
+                    }),
                 }
             })
             .collect();
@@ -2437,6 +2468,7 @@ impl Config {
                 browser: None,
                 brave_search_key: None,
                 cron: Vec::new(),
+                mcp: None,
             });
         }
 
@@ -2575,6 +2607,37 @@ impl Config {
             }
         };
 
+        let mcp_servers = toml
+            .mcp_servers
+            .into_iter()
+            .map(|s| {
+                let transport = match s.transport.as_str() {
+                    "sse" | "streamable_http" => crate::mcp::McpTransport::StreamableHttp,
+                    _ => crate::mcp::McpTransport::Stdio,
+                };
+                let env = s
+                    .env
+                    .into_iter()
+                    .filter_map(|(k, v)| resolve_env_value(&v).map(|resolved| (k, resolved)))
+                    .collect();
+                let headers = s
+                    .headers
+                    .into_iter()
+                    .filter_map(|(k, v)| resolve_env_value(&v).map(|resolved| (k, resolved)))
+                    .collect();
+                crate::mcp::McpServerConfig {
+                    id: s.id,
+                    transport,
+                    command: s.command,
+                    args: s.args,
+                    env,
+                    url: s.url,
+                    headers,
+                    scopes: s.scopes,
+                }
+            })
+            .collect();
+
         Ok(Config {
             instance_dir,
             llm,
@@ -2585,6 +2648,7 @@ impl Config {
             api,
             metrics,
             telemetry,
+            mcp_servers,
         })
     }
 
@@ -2650,6 +2714,8 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// MCP server IDs for this agent (reloadable).
+    pub mcp_config: ArcSwap<crate::mcp::McpConfig>,
 }
 
 impl RuntimeConfig {
@@ -2695,6 +2761,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            mcp_config: ArcSwap::from_pointee(agent_config.mcp.clone()),
         }
     }
 
@@ -2748,6 +2815,7 @@ impl RuntimeConfig {
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cortex.store(Arc::new(resolved.cortex));
+        self.mcp_config.store(Arc::new(resolved.mcp));
 
         tracing::info!(agent_id, "runtime config reloaded");
     }

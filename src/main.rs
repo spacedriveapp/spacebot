@@ -1288,6 +1288,20 @@ async fn initialize_agents(
             runtime_config.clone(),
         ));
 
+        #[cfg(feature = "mcp")]
+        let mcp_manager = if !config.mcp_servers.is_empty()
+            && !agent_config.mcp.servers.is_empty()
+        {
+            let manager = std::sync::Arc::new(spacebot::mcp::McpManager::new(
+                std::sync::Arc::new(config.mcp_servers.clone()),
+                &agent_config.mcp.scopes,
+            ));
+            manager.start(&agent_config.mcp).await;
+            Some(manager)
+        } else {
+            None
+        };
+
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
@@ -1297,6 +1311,8 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            #[cfg(feature = "mcp")]
+            mcp_manager,
         };
 
         let agent = spacebot::Agent {
@@ -1341,6 +1357,17 @@ async fn initialize_agents(
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_instance_dir(config.instance_dir.clone());
+
+        #[cfg(feature = "mcp")]
+        {
+            let mut mcp_managers = std::collections::HashMap::new();
+            for (agent_id, agent) in agents.iter() {
+                if let Some(manager) = &agent.deps.mcp_manager {
+                    mcp_managers.insert(agent_id.to_string(), manager.clone());
+                }
+            }
+            api_state.set_mcp_managers(mcp_managers);
+        }
     }
 
     // Initialize messaging adapters
@@ -1589,6 +1616,17 @@ async fn initialize_agents(
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.runtime_config.instance_dir.clone(),
             );
+
+            #[cfg(feature = "mcp")]
+            if let Some(mcp_manager) = &agent.deps.mcp_manager {
+                spacebot::tools::register_mcp_tools(
+                    &tool_server,
+                    mcp_manager,
+                    spacebot::mcp::McpScope::CortexChat,
+                )
+                .await;
+            }
+
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
             let session = spacebot::agent::cortex_chat::CortexChatSession::new(
                 agent.deps.clone(),

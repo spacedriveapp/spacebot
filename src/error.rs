@@ -29,6 +29,10 @@ pub enum Error {
     #[error(transparent)]
     Settings(#[from] SettingsError),
 
+    #[cfg(feature = "mcp")]
+    #[error(transparent)]
+    Mcp(#[from] McpError),
+
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
 
@@ -181,6 +185,24 @@ pub enum SecretsError {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+/// MCP server connection and tool execution errors.
+#[cfg(feature = "mcp")]
+#[derive(Debug, thiserror::Error)]
+pub enum McpError {
+    #[error("MCP connection failed for server '{server_id}': {reason}")]
+    ConnectionFailed { server_id: String, reason: String },
+
+    #[error("MCP tool call failed on server '{server_id}', tool '{tool_name}': {reason}")]
+    ToolCallFailed {
+        server_id: String,
+        tool_name: String,
+        reason: String,
+    },
+
+    #[error("MCP tool discovery failed for server '{server_id}': {reason}")]
+    DiscoveryFailed { server_id: String, reason: String },
 }
 
 /// Settings storage errors.
