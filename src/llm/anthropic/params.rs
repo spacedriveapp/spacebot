@@ -165,10 +165,10 @@ fn build_tools(
             });
 
             // Attach cache_control to the last tool definition
-            if index == request.tools.len() - 1 {
-                if let Some(cc) = cache_control {
-                    tool["cache_control"] = cc.clone();
-                }
+            if index == request.tools.len() - 1
+                && let Some(cc) = cache_control
+            {
+                tool["cache_control"] = cc.clone();
             }
 
             tool

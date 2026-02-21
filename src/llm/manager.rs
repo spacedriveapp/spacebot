@@ -124,10 +124,10 @@ impl LlmManager {
         match creds.refresh().await {
             Ok(new_creds) => {
                 // Save to disk
-                if let Some(ref instance_dir) = self.instance_dir {
-                    if let Err(error) = crate::auth::save_credentials(instance_dir, &new_creds) {
-                        tracing::warn!(%error, "failed to persist refreshed OAuth credentials");
-                    }
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) = crate::auth::save_credentials(instance_dir, &new_creds)
+                {
+                    tracing::warn!(%error, "failed to persist refreshed OAuth credentials");
                 }
                 let token = new_creds.access_token.clone();
                 *creds_guard = Some(new_creds);

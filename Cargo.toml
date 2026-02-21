@@ -142,9 +142,9 @@ urlencoding = "2.1.3"
 metrics = ["dep:prometheus"]
 
 [lints.clippy]
-dbg_macro = "forbid"
-todo = "forbid"
-unimplemented = "forbid"
+dbg_macro = "deny"
+todo = "deny"
+unimplemented = "deny"
 
 [dev-dependencies]
 tokio-test = "0.4"

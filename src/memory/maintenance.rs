@@ -2,8 +2,7 @@
 
 use crate::error::Result;
 use crate::memory::MemoryStore;
-use crate::memory::types::{Memory, MemoryType, RelationType};
-use std::sync::Arc;
+use crate::memory::types::MemoryType;
 
 /// Maintenance configuration.
 #[derive(Debug, Clone)]
@@ -37,13 +36,14 @@ pub async fn run_maintenance(
     let mut report = MaintenanceReport::default();
 
     // Apply decay to all non-identity memories
-    report.decayed = apply_decay(memory_store, config.decay_rate).await?;
-
-    // Prune old, low-importance memories
-    report.pruned = prune_memories(memory_store, config).await?;
-
-    // Merge near-duplicate memories
-    report.merged = merge_similar_memories(memory_store, config.merge_similarity_threshold).await?;
+    // Fields are assigned sequentially because the values are async — can't use struct literal.
+    #[allow(clippy::field_reassign_with_default)]
+    {
+        report.decayed = apply_decay(memory_store, config.decay_rate).await?;
+        report.pruned = prune_memories(memory_store, config).await?;
+        report.merged =
+            merge_similar_memories(memory_store, config.merge_similarity_threshold).await?;
+    }
 
     Ok(report)
 }
@@ -124,7 +124,7 @@ async fn prune_memories(memory_store: &MemoryStore, config: &MaintenanceConfig) 
 
 /// Merge near-duplicate memories.
 async fn merge_similar_memories(
-    memory_store: &MemoryStore,
+    _memory_store: &MemoryStore,
     similarity_threshold: f32,
 ) -> Result<usize> {
     // For now, this is a placeholder

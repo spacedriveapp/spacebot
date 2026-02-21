@@ -168,25 +168,26 @@ async fn handle_message_event(
         if perms.dm_allowed_users.is_empty() {
             return Ok(());
         }
-        if let Some(ref uid) = user_id {
-            if !perms.dm_allowed_users.contains(uid) {
-                return Ok(());
-            }
+        if let Some(ref uid) = user_id
+            && !perms.dm_allowed_users.contains(uid)
+        {
+            return Ok(());
         }
     }
 
     // Workspace filter
-    if let Some(ref filter) = perms.workspace_filter {
-        if !filter.contains(&team_id_str) {
-            return Ok(());
-        }
+    if let Some(ref filter) = perms.workspace_filter
+        && !filter.contains(&team_id_str)
+    {
+        return Ok(());
     }
 
     // Channel filter
-    if let Some(allowed) = perms.channel_filter.get(&team_id_str) {
-        if !allowed.is_empty() && !allowed.contains(&channel_id) {
-            return Ok(());
-        }
+    if let Some(allowed) = perms.channel_filter.get(&team_id_str)
+        && !allowed.is_empty()
+        && !allowed.contains(&channel_id)
+    {
+        return Ok(());
     }
 
     let conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
@@ -254,17 +255,18 @@ async fn handle_app_mention_event(
     let perms = adapter_state.permissions.load();
 
     // Workspace filter applies to mentions too
-    if let Some(ref filter) = perms.workspace_filter {
-        if !filter.contains(&team_id_str) {
-            return Ok(());
-        }
+    if let Some(ref filter) = perms.workspace_filter
+        && !filter.contains(&team_id_str)
+    {
+        return Ok(());
     }
 
     // Channel filter — same logic as handle_message_event
-    if let Some(allowed) = perms.channel_filter.get(&team_id_str) {
-        if !allowed.is_empty() && !allowed.contains(&channel_id) {
-            return Ok(());
-        }
+    if let Some(allowed) = perms.channel_filter.get(&team_id_str)
+        && !allowed.is_empty()
+        && !allowed.contains(&channel_id)
+    {
+        return Ok(());
     }
 
     let conversation_id = if let Some(ref thread_ts) = mention.origin.thread_ts {
@@ -352,32 +354,33 @@ async fn handle_command_event(
     {
         let perms = adapter_state.permissions.load();
 
-        if let Some(ref filter) = perms.workspace_filter {
-            if !filter.contains(&team_id) {
-                tracing::debug!(
-                    team_id = %team_id,
-                    command = %command_str,
-                    "slash command from unauthorized workspace — dropping"
-                );
-                return Ok(SlackCommandEventResponse {
-                    content: SlackMessageContent::new(),
-                    response_type: Some(SlackMessageResponseType::Ephemeral),
-                });
-            }
+        if let Some(ref filter) = perms.workspace_filter
+            && !filter.contains(&team_id)
+        {
+            tracing::debug!(
+                team_id = %team_id,
+                command = %command_str,
+                "slash command from unauthorized workspace — dropping"
+            );
+            return Ok(SlackCommandEventResponse {
+                content: SlackMessageContent::new(),
+                response_type: Some(SlackMessageResponseType::Ephemeral),
+            });
         }
 
-        if let Some(allowed) = perms.channel_filter.get(&team_id) {
-            if !allowed.is_empty() && !allowed.contains(&channel_id) {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    command = %command_str,
-                    "slash command from unauthorized channel — dropping"
-                );
-                return Ok(SlackCommandEventResponse {
-                    content: SlackMessageContent::new(),
-                    response_type: Some(SlackMessageResponseType::Ephemeral),
-                });
-            }
+        if let Some(allowed) = perms.channel_filter.get(&team_id)
+            && !allowed.is_empty()
+            && !allowed.contains(&channel_id)
+        {
+            tracing::debug!(
+                channel_id = %channel_id,
+                command = %command_str,
+                "slash command from unauthorized channel — dropping"
+            );
+            return Ok(SlackCommandEventResponse {
+                content: SlackMessageContent::new(),
+                response_type: Some(SlackMessageResponseType::Ephemeral),
+            });
         }
     }
 
@@ -496,26 +499,26 @@ async fn handle_interaction_event(
     {
         let perms = adapter_state.permissions.load();
 
-        if let Some(ref filter) = perms.workspace_filter {
-            if !filter.contains(&team_id) {
-                tracing::debug!(
-                    team_id = %team_id,
-                    "block_actions interaction from unauthorized workspace — dropping"
-                );
-                return Ok(());
-            }
+        if let Some(ref filter) = perms.workspace_filter
+            && !filter.contains(&team_id)
+        {
+            tracing::debug!(
+                team_id = %team_id,
+                "block_actions interaction from unauthorized workspace — dropping"
+            );
+            return Ok(());
         }
 
-        if !channel_id.is_empty() {
-            if let Some(allowed) = perms.channel_filter.get(&team_id) {
-                if !allowed.is_empty() && !allowed.contains(&channel_id) {
-                    tracing::debug!(
-                        channel_id = %channel_id,
-                        "block_actions interaction from unauthorized channel — dropping"
-                    );
-                    return Ok(());
-                }
-            }
+        if !channel_id.is_empty()
+            && let Some(allowed) = perms.channel_filter.get(&team_id)
+            && !allowed.is_empty()
+            && !allowed.contains(&channel_id)
+        {
+            tracing::debug!(
+                channel_id = %channel_id,
+                "block_actions interaction from unauthorized channel — dropping"
+            );
+            return Ok(());
         }
     }
 
@@ -548,9 +551,9 @@ async fn handle_interaction_event(
         let action_id = action.action_id.0.clone();
         let block_id = action.block_id.as_ref().map(|b| b.0.clone());
         let value = action.value.clone();
-        let label = action.selected_option.as_ref().and_then(|o| match &o.text {
-            SlackBlockText::Plain(pt) => Some(pt.text.clone()),
-            SlackBlockText::MarkDown(md) => Some(md.text.clone()),
+        let label = action.selected_option.as_ref().map(|o| match &o.text {
+            SlackBlockText::Plain(pt) => pt.text.clone(),
+            SlackBlockText::MarkDown(md) => md.text.clone(),
         });
 
         let content = MessageContent::Interaction {
@@ -672,7 +675,7 @@ impl Messaging for SlackAdapter {
         // The socket mode listener needs its own client instance — it manages
         // a persistent WebSocket connection internally and owns that client for
         // the lifetime of the connection. The shared `self.client` is for REST calls.
-        let listener_client = Arc::new(SlackClient::new(
+        let _listener_client = Arc::new(SlackClient::new(
             SlackClientHyperConnector::new()
                 .context("failed to create slack socket mode connector")?,
         ));
@@ -1362,13 +1365,14 @@ async fn build_metadata_and_author(
     }
 
     // For DMs without a resolved channel name, use the sender's display name.
-    if channel_id.starts_with('D') && !metadata.contains_key("slack_channel_name") {
-        if let Some(display_name) = metadata.get("sender_display_name").and_then(|v| v.as_str()) {
-            metadata.insert(
-                "slack_channel_name".into(),
-                serde_json::Value::String(format!("dm-{display_name}")),
-            );
-        }
+    if channel_id.starts_with('D')
+        && !metadata.contains_key("slack_channel_name")
+        && let Some(display_name) = metadata.get("sender_display_name").and_then(|v| v.as_str())
+    {
+        metadata.insert(
+            "slack_channel_name".into(),
+            serde_json::Value::String(format!("dm-{display_name}")),
+        );
     }
 
     (metadata, formatted_author)

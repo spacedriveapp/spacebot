@@ -157,17 +157,17 @@ fn resolve_broadcast_target(
             }
 
             // Try platform_meta first for the raw discord channel ID
-            if let Some(meta) = &channel.platform_meta {
-                if let Some(channel_id) = meta.get("discord_channel_id") {
-                    let id_str = if let Some(num) = channel_id.as_u64() {
-                        num.to_string()
-                    } else if let Some(s) = channel_id.as_str() {
-                        s.to_string()
-                    } else {
-                        return None;
-                    };
-                    return Some(("discord".to_string(), id_str));
-                }
+            if let Some(meta) = &channel.platform_meta
+                && let Some(channel_id) = meta.get("discord_channel_id")
+            {
+                let id_str = if let Some(num) = channel_id.as_u64() {
+                    num.to_string()
+                } else if let Some(s) = channel_id.as_str() {
+                    s.to_string()
+                } else {
+                    return None;
+                };
+                return Some(("discord".to_string(), id_str));
             }
 
             // Fallback: parse from channel ID format "discord:{guild_id}:{channel_id}"
@@ -177,12 +177,11 @@ fn resolve_broadcast_target(
             }
         }
         "slack" => {
-            if let Some(meta) = &channel.platform_meta {
-                if let Some(channel_id) = meta.get("slack_channel_id") {
-                    if let Some(s) = channel_id.as_str() {
-                        return Some(("slack".to_string(), s.to_string()));
-                    }
-                }
+            if let Some(meta) = &channel.platform_meta
+                && let Some(channel_id) = meta.get("slack_channel_id")
+                && let Some(s) = channel_id.as_str()
+            {
+                return Some(("slack".to_string(), s.to_string()));
             }
             // Fallback: parse from "slack:{team_id}:{channel_id}" or "slack:{team_id}:{channel_id}:{thread_ts}"
             let parts: Vec<&str> = channel.id.split(':').collect();

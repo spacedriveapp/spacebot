@@ -3,9 +3,9 @@
 use crate::conversation::ConversationLogger;
 
 use crate::{ChannelId, OutboundResponse};
+use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -132,13 +132,12 @@ async fn convert_mentions(
             (&msg.sender_name, &msg.sender_id, &msg.metadata)
         {
             // Parse metadata JSON to get clean display name
-            if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str) {
-                if let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str())
-                {
-                    // Older rows may include mention syntax "Name (<@ID>)"; strip it.
-                    let clean_name = display_name.split(" (<@").next().unwrap_or(display_name);
-                    name_to_id.insert(clean_name.to_string(), id.clone());
-                }
+            if let Ok(meta) = serde_json::from_str::<HashMap<String, serde_json::Value>>(meta_str)
+                && let Some(display_name) = meta.get("sender_display_name").and_then(|v| v.as_str())
+            {
+                // Older rows may include mention syntax "Name (<@ID>)"; strip it.
+                let clean_name = display_name.split(" (<@").next().unwrap_or(display_name);
+                name_to_id.insert(clean_name.to_string(), id.clone());
             }
             // Fallback: use sender_name from DB directly
             name_to_id.insert(name.clone(), id.clone());
@@ -153,7 +152,7 @@ async fn convert_mentions(
     // Sort by name length (longest first) to avoid partial replacements
     // e.g., "Alice Smith" before "Alice"
     let mut names: Vec<_> = name_to_id.keys().cloned().collect();
-    names.sort_by(|a, b| b.len().cmp(&a.len()));
+    names.sort_by_key(|a| std::cmp::Reverse(a.len()));
 
     for name in names {
         let name = name.trim();
@@ -172,7 +171,7 @@ async fn convert_mentions(
                 }
                 "slack" => format!("<@{}>", user_id),
                 "telegram" => format!("@{}", name), // Telegram uses @username (already correct)
-                _ => mention_pattern.clone(),          // Unknown platform, leave as-is
+                _ => mention_pattern.clone(),       // Unknown platform, leave as-is
             };
 
             result = result.replace(&mention_pattern, &replacement);
@@ -184,10 +183,7 @@ async fn convert_mentions(
 
 fn sanitize_discord_user_id(user_id: &str) -> Option<String> {
     let trimmed = user_id.trim();
-    if trimmed.len() >= 15
-        && trimmed.len() <= 22
-        && trimmed.chars().all(|c| c.is_ascii_digit())
-    {
+    if trimmed.len() >= 15 && trimmed.len() <= 22 && trimmed.chars().all(|c| c.is_ascii_digit()) {
         return Some(trimmed.to_string());
     }
 
@@ -212,50 +208,13 @@ pub(crate) fn normalize_discord_mention_tokens(content: &str, source: &str) -> S
         normalized = normalized.replace("<<@", "<@");
     }
 
-    normalized = normalized
-        .replace("<@!>", "<@!")
-        .replace("<@>", "<@");
+    normalized = normalized.replace("<@!>", "<@!").replace("<@>", "<@");
 
     normalized = BROKEN_DISCORD_MENTION_REGEX
         .replace_all(&normalized, "<@$1$2>")
         .into_owned();
 
     normalized
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{normalize_discord_mention_tokens, sanitize_discord_user_id};
-
-    #[test]
-    fn normalizes_broken_discord_mentions() {
-        let input = "hello <<@>123> and <<@!>456>";
-        let output = normalize_discord_mention_tokens(input, "discord");
-
-        assert_eq!(output, "hello <@123> and <@!456>");
-    }
-
-    #[test]
-    fn leaves_plain_text_unchanged() {
-        let input = "hello team";
-        let output = normalize_discord_mention_tokens(input, "slack");
-
-        assert_eq!(output, input);
-    }
-
-    #[test]
-    fn normalizes_repeated_prefix_and_html_encoded_tokens() {
-        let input = "<<<@>190291964875374603> and &lt;@!234152400653385729&gt;";
-        let output = normalize_discord_mention_tokens(input, "discord");
-
-        assert_eq!(output, "<@190291964875374603> and <@!234152400653385729>");
-    }
-
-    #[test]
-    fn sanitizes_discord_ids_with_prefix_noise() {
-        let parsed = sanitize_discord_user_id(">234152400653385729").expect("should parse id");
-        assert_eq!(parsed, "234152400653385729");
-    }
 }
 
 impl Tool for ReplyTool {
@@ -434,5 +393,40 @@ impl Tool for ReplyTool {
             conversation_id: self.conversation_id.clone(),
             content: converted_content,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_discord_mention_tokens, sanitize_discord_user_id};
+
+    #[test]
+    fn normalizes_broken_discord_mentions() {
+        let input = "hello <<@>123> and <<@!>456>";
+        let output = normalize_discord_mention_tokens(input, "discord");
+
+        assert_eq!(output, "hello <@123> and <@!456>");
+    }
+
+    #[test]
+    fn leaves_plain_text_unchanged() {
+        let input = "hello team";
+        let output = normalize_discord_mention_tokens(input, "slack");
+
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn normalizes_repeated_prefix_and_html_encoded_tokens() {
+        let input = "<<<@>190291964875374603> and &lt;@!234152400653385729&gt;";
+        let output = normalize_discord_mention_tokens(input, "discord");
+
+        assert_eq!(output, "<@190291964875374603> and <@!234152400653385729>");
+    }
+
+    #[test]
+    fn sanitizes_discord_ids_with_prefix_noise() {
+        let parsed = sanitize_discord_user_id(">234152400653385729").expect("should parse id");
+        assert_eq!(parsed, "234152400653385729");
     }
 }

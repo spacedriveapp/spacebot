@@ -8,12 +8,11 @@ use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, ComponentInteraction, Context, CreateActionRow,
-    CreateAttachment, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
-    CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
-    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
-    EventHandler, GatewayIntents, GetMessages, Http, Interaction, Message, MessageId, ReactionType,
-    Ready, ShardManager, User, UserId,
+    ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow, CreateAttachment, CreateButton,
+    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
+    CreateMessage, CreatePoll, CreatePollAnswer, CreateSelectMenu, CreateSelectMenuKind,
+    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, GetMessages,
+    Http, Interaction, Message, MessageId, ReactionType, Ready, ShardManager, User, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -562,22 +561,20 @@ impl EventHandler for Handler {
         }
 
         // DM filter: if no guild_id, it's a DM — only allow listed users
-        if message.guild_id.is_none() {
-            if permissions.dm_allowed_users.is_empty()
+        if message.guild_id.is_none()
+            && (permissions.dm_allowed_users.is_empty()
                 || !permissions
                     .dm_allowed_users
-                    .contains(&message.author.id.get())
-            {
-                return;
-            }
+                    .contains(&message.author.id.get()))
+        {
+            return;
         }
 
-        if let Some(filter) = &permissions.guild_filter {
-            if let Some(guild_id) = message.guild_id {
-                if !filter.contains(&guild_id.get()) {
-                    return;
-                }
-            }
+        if let Some(filter) = &permissions.guild_filter
+            && let Some(guild_id) = message.guild_id
+            && !filter.contains(&guild_id.get())
+        {
+            return;
         }
 
         let conversation_id = build_conversation_id(&message);
@@ -586,19 +583,19 @@ impl EventHandler for Handler {
 
         // Channel filter: allow if the channel ID or its parent (for threads) is in the allowlist
         if let Some(guild_id) = message.guild_id {
-            if let Some(allowed_channels) = permissions.channel_filter.get(&guild_id.get()) {
-                if !allowed_channels.is_empty() {
-                    let parent_channel_id = metadata
-                        .get("discord_parent_channel_id")
-                        .and_then(|v| v.as_u64());
+            if let Some(allowed_channels) = permissions.channel_filter.get(&guild_id.get())
+                && !allowed_channels.is_empty()
+            {
+                let parent_channel_id = metadata
+                    .get("discord_parent_channel_id")
+                    .and_then(|v| v.as_u64());
 
-                    let direct_match = allowed_channels.contains(&message.channel_id.get());
-                    let parent_match =
-                        parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
+                let direct_match = allowed_channels.contains(&message.channel_id.get());
+                let parent_match =
+                    parent_channel_id.is_some_and(|pid| allowed_channels.contains(&pid));
 
-                    if !direct_match && !parent_match {
-                        return;
-                    }
+                if !direct_match && !parent_match {
+                    return;
                 }
             }
 
@@ -657,20 +654,18 @@ impl EventHandler for Handler {
         let user = &component.user;
         let permissions = self.permissions.load();
 
-        if component.guild_id.is_none() {
-            if permissions.dm_allowed_users.is_empty()
-                || !permissions.dm_allowed_users.contains(&user.id.get())
-            {
-                return;
-            }
+        if component.guild_id.is_none()
+            && (permissions.dm_allowed_users.is_empty()
+                || !permissions.dm_allowed_users.contains(&user.id.get()))
+        {
+            return;
         }
 
-        if let Some(filter) = &permissions.guild_filter {
-            if let Some(guild_id) = component.guild_id {
-                if !filter.contains(&guild_id.get()) {
-                    return;
-                }
-            }
+        if let Some(filter) = &permissions.guild_filter
+            && let Some(guild_id) = component.guild_id
+            && !filter.contains(&guild_id.get())
+        {
+            return;
         }
 
         let conversation_id = match component.guild_id {
@@ -879,19 +874,19 @@ async fn build_metadata(
     }
 
     // Try to get channel name and detect threads
-    if let Ok(channel) = message.channel_id.to_channel(&ctx.http).await {
-        if let Some(guild_channel) = channel.guild() {
-            metadata.insert(
-                "discord_channel_name".into(),
-                guild_channel.name.clone().into(),
-            );
+    if let Ok(channel) = message.channel_id.to_channel(&ctx.http).await
+        && let Some(guild_channel) = channel.guild()
+    {
+        metadata.insert(
+            "discord_channel_name".into(),
+            guild_channel.name.clone().into(),
+        );
 
-            // Threads have a parent_id pointing to the text channel they were created in
-            if guild_channel.thread_metadata.is_some() {
-                metadata.insert("discord_is_thread".into(), true.into());
-                if let Some(parent_id) = guild_channel.parent_id {
-                    metadata.insert("discord_parent_channel_id".into(), parent_id.get().into());
-                }
+        // Threads have a parent_id pointing to the text channel they were created in
+        if guild_channel.thread_metadata.is_some() {
+            metadata.insert("discord_is_thread".into(), true.into());
+            if let Some(parent_id) = guild_channel.parent_id {
+                metadata.insert("discord_parent_channel_id".into(), parent_id.get().into());
             }
         }
     }
@@ -1061,7 +1056,7 @@ fn build_poll(
 
     // Duration must be at least 1 hour, usually up to 720 hours (30 days).
     // The builder just takes std::time::Duration but it has specific allowed values.
-    let hours = poll.duration_hours.max(1).min(720);
+    let hours = poll.duration_hours.clamp(1, 720);
 
     let mut p = CreatePoll::new()
         .question(&poll.question)
@@ -1078,9 +1073,7 @@ fn build_poll(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        Button, ButtonStyle, Card, CardField, InteractiveElements, Poll, SelectMenu, SelectOption,
-    };
+    use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
 
     #[test]
     fn test_build_embed_limits() {
@@ -1094,10 +1087,10 @@ mod tests {
         }
 
         // build_embed should limit fields to 25
-        let embed = build_embed(&card);
+        let _embed = build_embed(&card);
         // Serenity 0.12 CreateEmbed fields are stored internally, but we can't inspect them directly easily
         // We just ensure it doesn't panic.
-        assert!(true); // we'd need to inspect the JSON payload to really test, but it compiles and runs safely.
+        // we'd need to inspect the JSON payload to really test, but it compiles and runs safely.
     }
 
     #[test]

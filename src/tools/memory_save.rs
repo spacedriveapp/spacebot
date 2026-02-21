@@ -1,7 +1,7 @@
 //! Memory save tool for channels and branches.
 
 use crate::error::Result;
-use crate::memory::types::{Association, CreateAssociationInput};
+use crate::memory::types::Association;
 use crate::memory::{Memory, MemorySearch, MemoryType};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;

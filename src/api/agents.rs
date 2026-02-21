@@ -237,7 +237,7 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    drop(defaults);
+    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -537,11 +537,11 @@ pub(super) async fn delete_agent(
         {
             let mut index_to_remove = None;
             for (i, table) in agents_array.iter().enumerate() {
-                if let Some(id) = table.get("id").and_then(|v| v.as_str()) {
-                    if id == agent_id {
-                        index_to_remove = Some(i);
-                        break;
-                    }
+                if let Some(id) = table.get("id").and_then(|v| v.as_str())
+                    && id == agent_id
+                {
+                    index_to_remove = Some(i);
+                    break;
                 }
             }
             if let Some(idx) = index_to_remove {

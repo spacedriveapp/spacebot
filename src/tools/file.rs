@@ -214,12 +214,10 @@ async fn do_file_write(
     create_dirs: bool,
 ) -> Result<FileOutput, FileError> {
     // Ensure parent directory exists if requested
-    if create_dirs {
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| FileError(format!("Failed to create directory: {e}")))?;
-        }
+    if create_dirs && let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(|e| FileError(format!("Failed to create directory: {e}")))?;
     }
 
     tokio::fs::write(path, content)
@@ -326,7 +324,6 @@ pub enum FileType {
 /// System-internal file operations that bypass workspace containment.
 /// These are used by the system itself (not LLM-facing) and operate on
 /// arbitrary paths.
-
 pub async fn file_read(path: impl AsRef<Path>) -> crate::error::Result<String> {
     do_file_read(path.as_ref())
         .await
@@ -370,5 +367,3 @@ pub async fn file_list(path: impl AsRef<Path>) -> crate::error::Result<Vec<FileE
         })
         .collect())
 }
-
-use anyhow::Context as _;

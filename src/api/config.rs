@@ -329,16 +329,16 @@ pub(super) async fn update_agent_config(
             if let Some(rc) = runtime_configs.get(&request.agent_id) {
                 rc.reload_config(&new_config, &request.agent_id);
             }
-            if request.discord.is_some() {
-                if let Some(discord_config) = &new_config.messaging.discord {
-                    let new_perms = crate::config::DiscordPermissions::from_config(
-                        discord_config,
-                        &new_config.bindings,
-                    );
-                    let perms = state.discord_permissions.read().await;
-                    if let Some(arc_swap) = perms.as_ref() {
-                        arc_swap.store(std::sync::Arc::new(new_perms));
-                    }
+            if request.discord.is_some()
+                && let Some(discord_config) = &new_config.messaging.discord
+            {
+                let new_perms = crate::config::DiscordPermissions::from_config(
+                    discord_config,
+                    &new_config.bindings,
+                );
+                let perms = state.discord_permissions.read().await;
+                if let Some(arc_swap) = perms.as_ref() {
+                    arc_swap.store(std::sync::Arc::new(new_perms));
                 }
             }
         }
@@ -373,10 +373,10 @@ pub(super) fn find_or_create_agent_table(
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
 
     for (idx, table) in agents.iter().enumerate() {
-        if let Some(id) = table.get("id").and_then(|v| v.as_str()) {
-            if id == agent_id {
-                return Ok(idx);
-            }
+        if let Some(id) = table.get("id").and_then(|v| v.as_str())
+            && id == agent_id
+        {
+            return Ok(idx);
         }
     }
 

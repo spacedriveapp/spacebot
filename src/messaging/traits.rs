@@ -35,8 +35,8 @@ pub trait Messaging: Send + Sync + 'static {
     /// Send a status update.
     fn send_status(
         &self,
-        message: &InboundMessage,
-        status: StatusUpdate,
+        _message: &InboundMessage,
+        _status: StatusUpdate,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         async { Ok(()) }
     }
@@ -44,8 +44,8 @@ pub trait Messaging: Send + Sync + 'static {
     /// Broadcast a message.
     fn broadcast(
         &self,
-        target: &str,
-        response: OutboundResponse,
+        _target: &str,
+        _response: OutboundResponse,
     ) -> impl std::future::Future<Output = Result<()>> + Send {
         async { Ok(()) }
     }

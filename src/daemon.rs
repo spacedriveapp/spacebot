@@ -375,15 +375,15 @@ pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::R
 
 /// Clean up PID and socket files on shutdown.
 pub fn cleanup(paths: &DaemonPaths) {
-    if let Err(error) = std::fs::remove_file(&paths.pid_file) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, "failed to remove PID file");
-        }
+    if let Err(error) = std::fs::remove_file(&paths.pid_file)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, "failed to remove PID file");
     }
-    if let Err(error) = std::fs::remove_file(&paths.socket) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, "failed to remove socket file");
-        }
+    if let Err(error) = std::fs::remove_file(&paths.socket)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, "failed to remove socket file");
     }
 }
 

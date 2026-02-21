@@ -9,25 +9,25 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error(transparent)]
-    Config(#[from] ConfigError),
+    Config(Box<ConfigError>),
 
     #[error(transparent)]
-    Db(#[from] DbError),
+    Db(Box<DbError>),
 
     #[error(transparent)]
-    Llm(#[from] LlmError),
+    Llm(Box<LlmError>),
 
     #[error(transparent)]
-    Memory(#[from] MemoryError),
+    Memory(Box<MemoryError>),
 
     #[error(transparent)]
-    Agent(#[from] AgentError),
+    Agent(Box<AgentError>),
 
     #[error(transparent)]
-    Secrets(#[from] SecretsError),
+    Secrets(Box<SecretsError>),
 
     #[error(transparent)]
-    Settings(#[from] SettingsError),
+    Settings(Box<SettingsError>),
 
     #[error("database error: {0}")]
     Sqlx(#[from] sqlx::Error),
@@ -37,6 +37,42 @@ pub enum Error {
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),
+}
+
+impl From<ConfigError> for Error {
+    fn from(e: ConfigError) -> Self {
+        Error::Config(Box::new(e))
+    }
+}
+impl From<DbError> for Error {
+    fn from(e: DbError) -> Self {
+        Error::Db(Box::new(e))
+    }
+}
+impl From<LlmError> for Error {
+    fn from(e: LlmError) -> Self {
+        Error::Llm(Box::new(e))
+    }
+}
+impl From<MemoryError> for Error {
+    fn from(e: MemoryError) -> Self {
+        Error::Memory(Box::new(e))
+    }
+}
+impl From<AgentError> for Error {
+    fn from(e: AgentError) -> Self {
+        Error::Agent(Box::new(e))
+    }
+}
+impl From<SecretsError> for Error {
+    fn from(e: SecretsError) -> Self {
+        Error::Secrets(Box::new(e))
+    }
+}
+impl From<SettingsError> for Error {
+    fn from(e: SettingsError) -> Self {
+        Error::Settings(Box::new(e))
+    }
 }
 
 /// Configuration loading errors.

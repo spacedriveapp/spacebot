@@ -371,6 +371,7 @@ impl PromptEngine {
     }
 
     /// Render the complete channel system prompt with all dynamic components.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_channel_prompt(
         &self,
         identity_context: Option<String>,

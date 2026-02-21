@@ -278,6 +278,7 @@ impl OpenCodeWorker {
     }
 
     /// Handle a single SSE event. Returns whether to continue, complete, or error.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_sse_event(
         &self,
         event: &SseEvent,
@@ -292,14 +293,12 @@ impl OpenCodeWorker {
             SseEvent::MessageUpdated { info } => {
                 *has_received_event = true;
                 // Track assistant messages for idle guard
-                if let Some(msg) = info {
-                    if msg.role == "assistant" {
-                        if let Some(sid) = &msg.session_id {
-                            if sid == session_id {
-                                *has_assistant_message = true;
-                            }
-                        }
-                    }
+                if let Some(msg) = info
+                    && msg.role == "assistant"
+                    && let Some(sid) = &msg.session_id
+                    && sid == session_id
+                {
+                    *has_assistant_message = true;
                 }
                 EventAction::Continue
             }
@@ -312,10 +311,10 @@ impl OpenCodeWorker {
                         session_id: part_session,
                         ..
                     } => {
-                        if let Some(sid) = part_session {
-                            if sid != session_id {
-                                return EventAction::Continue;
-                            }
+                        if let Some(sid) = part_session
+                            && sid != session_id
+                        {
+                            return EventAction::Continue;
                         }
                         *has_assistant_message = true;
                         *last_text = text.clone();
@@ -326,35 +325,35 @@ impl OpenCodeWorker {
                         session_id: part_session,
                         ..
                     } => {
-                        if let Some(sid) = part_session {
-                            if sid != session_id {
-                                return EventAction::Continue;
-                            }
+                        if let Some(sid) = part_session
+                            && sid != session_id
+                        {
+                            return EventAction::Continue;
                         }
                         *has_assistant_message = true;
-                        if let Some(tool_name) = tool {
-                            if let Some(tool_state) = state {
-                                match tool_state {
-                                    ToolState::Running { title, .. } => {
-                                        *current_tool = Some(tool_name.clone());
-                                        let label = title.as_deref().unwrap_or(tool_name.as_str());
-                                        self.send_status(&format!("running: {label}"));
+                        if let Some(tool_name) = tool
+                            && let Some(tool_state) = state
+                        {
+                            match tool_state {
+                                ToolState::Running { title, .. } => {
+                                    *current_tool = Some(tool_name.clone());
+                                    let label = title.as_deref().unwrap_or(tool_name.as_str());
+                                    self.send_status(&format!("running: {label}"));
+                                }
+                                ToolState::Completed { .. } => {
+                                    if current_tool.as_deref() == Some(tool_name.as_str()) {
+                                        *current_tool = None;
                                     }
-                                    ToolState::Completed { .. } => {
-                                        if current_tool.as_deref() == Some(tool_name.as_str()) {
-                                            *current_tool = None;
-                                        }
-                                        self.send_status("working");
-                                    }
-                                    ToolState::Error { error, .. } => {
-                                        let description = error.as_deref().unwrap_or("unknown");
-                                        self.send_status(&format!(
-                                            "tool error: {tool_name}: {description}"
-                                        ));
-                                    }
-                                    ToolState::Pending { .. } => {
-                                        // Tool queued, no status update needed
-                                    }
+                                    self.send_status("working");
+                                }
+                                ToolState::Error { error, .. } => {
+                                    let description = error.as_deref().unwrap_or("unknown");
+                                    self.send_status(&format!(
+                                        "tool error: {tool_name}: {description}"
+                                    ));
+                                }
+                                ToolState::Pending { .. } => {
+                                    // Tool queued, no status update needed
                                 }
                             }
                         }

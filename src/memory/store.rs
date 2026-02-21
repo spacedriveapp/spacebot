@@ -1,6 +1,6 @@
 //! Memory graph storage (SQLite).
 
-use crate::error::{MemoryError, Result};
+use crate::error::Result;
 use crate::memory::search::SearchSort;
 use crate::memory::types::{Association, Memory, MemoryType, RelationType};
 
@@ -293,10 +293,10 @@ impl MemoryStore {
 
         let mut neighbors = Vec::new();
         for id in &neighbor_ids {
-            if let Some(memory) = self.load(id).await? {
-                if !memory.forgotten {
-                    neighbors.push(memory);
-                }
+            if let Some(memory) = self.load(id).await?
+                && !memory.forgotten
+            {
+                neighbors.push(memory);
             }
         }
 

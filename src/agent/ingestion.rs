@@ -90,10 +90,10 @@ async fn scan_ingest_dir(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
         if !path.is_file() {
             continue;
         }
-        if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-            if name.starts_with('.') {
-                continue;
-            }
+        if let Some(name) = path.file_name().and_then(|n| n.to_str())
+            && name.starts_with('.')
+        {
+            continue;
         }
 
         // Only process files that look ingestible.

@@ -101,14 +101,13 @@ pub(super) async fn get_global_settings(
                 .get("defaults")
                 .and_then(|d| d.get("brave_search_key"))
                 .and_then(|v| v.as_str())
-                .map(|s| {
+                .and_then(|s| {
                     if let Some(var) = s.strip_prefix("env:") {
                         std::env::var(var).ok()
                     } else {
                         Some(s.to_string())
                     }
-                })
-                .flatten();
+                });
 
             let api_enabled = doc
                 .get("api")

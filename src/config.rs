@@ -608,15 +608,15 @@ impl Binding {
         }
 
         // For webchat messages, match based on agent_id in the message
-        if message.source == "webchat" {
-            if let Some(message_agent_id) = &message.agent_id {
-                return message_agent_id.as_ref() == &self.agent_id;
-            }
+        if message.source == "webchat"
+            && let Some(message_agent_id) = &message.agent_id
+        {
+            return message_agent_id.as_ref() == self.agent_id;
         }
 
         // DM messages have no guild_id — match if the sender is in dm_allowed_users
         let is_dm =
-            message.metadata.get("discord_guild_id").is_none() && message.source == "discord";
+            !message.metadata.contains_key("discord_guild_id") && message.source == "discord";
         if is_dm {
             return !self.dm_allowed_users.is_empty()
                 && self.dm_allowed_users.contains(&message.sender_id);
@@ -804,13 +804,13 @@ impl SlackPermissions {
             let mut filter: std::collections::HashMap<String, Vec<String>> =
                 std::collections::HashMap::new();
             for binding in &slack_bindings {
-                if let Some(workspace_id) = &binding.workspace_id {
-                    if !binding.channel_ids.is_empty() {
-                        filter
-                            .entry(workspace_id.clone())
-                            .or_default()
-                            .extend(binding.channel_ids.clone());
-                    }
+                if let Some(workspace_id) = &binding.workspace_id
+                    && !binding.channel_ids.is_empty()
+                {
+                    filter
+                        .entry(workspace_id.clone())
+                        .or_default()
+                        .extend(binding.channel_ids.clone());
                 }
             }
             filter
@@ -852,15 +852,14 @@ impl DiscordPermissions {
                     .guild_id
                     .as_ref()
                     .and_then(|g| g.parse::<u64>().ok())
+                    && !binding.channel_ids.is_empty()
                 {
-                    if !binding.channel_ids.is_empty() {
-                        let channel_ids: Vec<u64> = binding
-                            .channel_ids
-                            .iter()
-                            .filter_map(|id| id.parse::<u64>().ok())
-                            .collect();
-                        filter.entry(guild_id).or_default().extend(channel_ids);
-                    }
+                    let channel_ids: Vec<u64> = binding
+                        .channel_ids
+                        .iter()
+                        .filter_map(|id| id.parse::<u64>().ok())
+                        .collect();
+                    filter.entry(guild_id).or_default().extend(channel_ids);
                 }
             }
             filter
@@ -911,10 +910,10 @@ impl DiscordPermissions {
         // Also collect dm_allowed_users from bindings
         for binding in &discord_bindings {
             for id in &binding.dm_allowed_users {
-                if let Ok(uid) = id.parse::<u64>() {
-                    if !dm_allowed_users.contains(&uid) {
-                        dm_allowed_users.push(uid);
-                    }
+                if let Ok(uid) = id.parse::<u64>()
+                    && !dm_allowed_users.contains(&uid)
+                {
+                    dm_allowed_users.push(uid);
                 }
             }
         }
@@ -977,10 +976,10 @@ impl TelegramPermissions {
 
         for binding in &telegram_bindings {
             for id in &binding.dm_allowed_users {
-                if let Ok(uid) = id.parse::<i64>() {
-                    if !dm_allowed_users.contains(&uid) {
-                        dm_allowed_users.push(uid);
-                    }
+                if let Ok(uid) = id.parse::<i64>()
+                    && !dm_allowed_users.contains(&uid)
+                {
+                    dm_allowed_users.push(uid);
                 }
             }
         }
@@ -1531,7 +1530,7 @@ fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> 
         let key = key.trim();
         let value = value.trim();
         if key.is_empty() {
-            return Err(ConfigError::Invalid(
+            Err(ConfigError::Invalid(
                 "invalid OTEL_EXPORTER_OTLP_HEADERS entry: empty header name".into(),
             ))?;
         }
@@ -2440,10 +2439,10 @@ impl Config {
             });
         }
 
-        if !agents.iter().any(|a| a.default) {
-            if let Some(first) = agents.first_mut() {
-                first.default = true;
-            }
+        if !agents.iter().any(|a| a.default)
+            && let Some(first) = agents.first_mut()
+        {
+            first.default = true;
         }
 
         let messaging = MessagingConfig {
@@ -2777,6 +2776,7 @@ impl std::fmt::Debug for RuntimeConfig {
 /// Returns a JoinHandle that runs until dropped. File events are debounced
 /// to 2 seconds so rapid edits (e.g. :w in vim hitting multiple writes) are
 /// collapsed into a single reload.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     instance_dir: PathBuf,
@@ -2829,20 +2829,21 @@ pub fn spawn_file_watcher(
 
         // Watch instance-level skills directory
         let instance_skills_dir = instance_dir.join("skills");
-        if instance_skills_dir.is_dir() {
-            if let Err(error) = watcher.watch(&instance_skills_dir, RecursiveMode::Recursive) {
-                tracing::warn!(%error, path = %instance_skills_dir.display(), "failed to watch instance skills dir");
-            }
+        if instance_skills_dir.is_dir()
+            && let Err(error) = watcher.watch(&instance_skills_dir, RecursiveMode::Recursive)
+        {
+            tracing::warn!(%error, path = %instance_skills_dir.display(), "failed to watch instance skills dir");
         }
 
         // Watch per-agent workspace directories (skills, identity)
         for (_, workspace, _) in &agents {
-            for subdir in &["skills"] {
+            {
+                let subdir = &"skills";
                 let path = workspace.join(subdir);
-                if path.is_dir() {
-                    if let Err(error) = watcher.watch(&path, RecursiveMode::Recursive) {
-                        tracing::warn!(%error, path = %path.display(), "failed to watch agent dir");
-                    }
+                if path.is_dir()
+                    && let Err(error) = watcher.watch(&path, RecursiveMode::Recursive)
+                {
+                    tracing::warn!(%error, path = %path.display(), "failed to watch agent dir");
                 }
             }
             // Identity files are in the workspace root
@@ -2866,13 +2867,7 @@ pub fn spawn_file_watcher(
         // Debounce loop: collect events for 2 seconds, then reload
         let debounce = Duration::from_secs(2);
 
-        loop {
-            // Block until the first event arrives
-            let first = match rx.recv() {
-                Ok(event) => event,
-                Err(_) => break,
-            };
-
+        while let Ok(first) = rx.recv() {
             // Drain any additional events within the debounce window
             let mut changed_paths: Vec<PathBuf> = first.paths;
             while let Ok(event) = rx.recv_timeout(debounce) {
@@ -2949,40 +2944,38 @@ pub fn spawn_file_watcher(
                 bindings.store(Arc::new(config.bindings.clone()));
                 tracing::info!("bindings reloaded ({} entries)", config.bindings.len());
 
-                if let Some(ref perms) = discord_permissions {
-                    if let Some(discord_config) = &config.messaging.discord {
-                        let new_perms =
-                            DiscordPermissions::from_config(discord_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("discord permissions reloaded");
-                    }
+                if let Some(ref perms) = discord_permissions
+                    && let Some(discord_config) = &config.messaging.discord
+                {
+                    let new_perms =
+                        DiscordPermissions::from_config(discord_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("discord permissions reloaded");
                 }
 
-                if let Some(ref perms) = slack_permissions {
-                    if let Some(slack_config) = &config.messaging.slack {
-                        let new_perms =
-                            SlackPermissions::from_config(slack_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("slack permissions reloaded");
-                    }
+                if let Some(ref perms) = slack_permissions
+                    && let Some(slack_config) = &config.messaging.slack
+                {
+                    let new_perms = SlackPermissions::from_config(slack_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("slack permissions reloaded");
                 }
 
-                if let Some(ref perms) = telegram_permissions {
-                    if let Some(telegram_config) = &config.messaging.telegram {
-                        let new_perms =
-                            TelegramPermissions::from_config(telegram_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("telegram permissions reloaded");
-                    }
+                if let Some(ref perms) = telegram_permissions
+                    && let Some(telegram_config) = &config.messaging.telegram
+                {
+                    let new_perms =
+                        TelegramPermissions::from_config(telegram_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("telegram permissions reloaded");
                 }
 
-                if let Some(ref perms) = twitch_permissions {
-                    if let Some(twitch_config) = &config.messaging.twitch {
-                        let new_perms =
-                            TwitchPermissions::from_config(twitch_config, &config.bindings);
-                        perms.store(Arc::new(new_perms));
-                        tracing::info!("twitch permissions reloaded");
-                    }
+                if let Some(ref perms) = twitch_permissions
+                    && let Some(twitch_config) = &config.messaging.twitch
+                {
+                    let new_perms = TwitchPermissions::from_config(twitch_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("twitch permissions reloaded");
                 }
 
                 // Hot-start adapters that are newly enabled in the config
@@ -2997,8 +2990,8 @@ pub fn spawn_file_watcher(
 
                     rt.spawn(async move {
                         // Discord: start if enabled and not already running
-                        if let Some(discord_config) = &config.messaging.discord {
-                            if discord_config.enabled && !manager.has_adapter("discord").await {
+                        if let Some(discord_config) = &config.messaging.discord
+                            && discord_config.enabled && !manager.has_adapter("discord").await {
                                 let perms = match discord_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3014,11 +3007,10 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start discord adapter from config change");
                                 }
                             }
-                        }
 
                         // Slack: start if enabled and not already running
-                        if let Some(slack_config) = &config.messaging.slack {
-                            if slack_config.enabled && !manager.has_adapter("slack").await {
+                        if let Some(slack_config) = &config.messaging.slack
+                            && slack_config.enabled && !manager.has_adapter("slack").await {
                                 let perms = match slack_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3042,11 +3034,10 @@ pub fn spawn_file_watcher(
                                     }
                                 }
                             }
-                        }
 
                         // Telegram: start if enabled and not already running
-                        if let Some(telegram_config) = &config.messaging.telegram {
-                            if telegram_config.enabled && !manager.has_adapter("telegram").await {
+                        if let Some(telegram_config) = &config.messaging.telegram
+                            && telegram_config.enabled && !manager.has_adapter("telegram").await {
                                 let perms = match telegram_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3062,11 +3053,10 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start telegram adapter from config change");
                                 }
                             }
-                        }
 
                         // Twitch: start if enabled and not already running
-                        if let Some(twitch_config) = &config.messaging.twitch {
-                            if twitch_config.enabled && !manager.has_adapter("twitch").await {
+                        if let Some(twitch_config) = &config.messaging.twitch
+                            && twitch_config.enabled && !manager.has_adapter("twitch").await {
                                 let perms = match twitch_permissions {
                                     Some(ref existing) => existing.clone(),
                                     None => {
@@ -3085,7 +3075,6 @@ pub fn spawn_file_watcher(
                                     tracing::error!(%error, "failed to hot-start twitch adapter from config change");
                                 }
                             }
-                        }
                     });
                 }
             }
@@ -3727,7 +3716,7 @@ name = "Custom OpenAI"
         let creds = crate::auth::OAuthCredentials {
             access_token: "sk-ant-oat01-test".to_string(),
             refresh_token: "sk-ant-ort01-test".to_string(),
-            expires_at: chrono::Utc::now().timestamp_millis() + 3600_000,
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
         };
         crate::auth::save_credentials(&instance_dir, &creds).expect("failed to save credentials");
 

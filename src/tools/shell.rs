@@ -347,11 +347,9 @@ pub async fn shell(
 
     let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
         .await
-        .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Command timed out").into()))?
+        .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Command timed out")))?
         .map_err(|e| {
-            crate::error::AgentError::Other(
-                anyhow::anyhow!("Failed to execute command: {e}").into(),
-            )
+            crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute command: {e}"))
         })?;
 
     Ok(ShellResult {

@@ -304,15 +304,14 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     };
 
     let has_key = |key: &str, env_var: &str| -> bool {
-        if let Some(llm) = doc.get("llm") {
-            if let Some(val) = llm.get(key) {
-                if let Some(s) = val.as_str() {
-                    if let Some(var_name) = s.strip_prefix("env:") {
-                        return std::env::var(var_name).is_ok();
-                    }
-                    return !s.is_empty();
-                }
+        if let Some(llm) = doc.get("llm")
+            && let Some(val) = llm.get(key)
+            && let Some(s) = val.as_str()
+        {
+            if let Some(var_name) = s.strip_prefix("env:") {
+                return std::env::var(var_name).is_ok();
             }
+            return !s.is_empty();
         }
         std::env::var(env_var).is_ok()
     };

@@ -142,7 +142,7 @@ pub(super) async fn list_bindings(
 
     let filtered: Vec<BindingResponse> = bindings
         .into_iter()
-        .filter(|b| query.agent_id.as_ref().map_or(true, |id| &b.agent_id == id))
+        .filter(|b| query.agent_id.as_ref().is_none_or(|id| &b.agent_id == id))
         .map(|b| BindingResponse {
             agent_id: b.agent_id,
             channel: b.channel,
@@ -190,24 +190,24 @@ pub(super) async fn create_binding(
     let mut new_twitch_creds: Option<(String, String)> = None;
 
     if let Some(credentials) = &request.platform_credentials {
-        if let Some(token) = &credentials.discord_token {
-            if !token.is_empty() {
-                if doc.get("messaging").is_none() {
-                    doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
-                }
-                let messaging = doc["messaging"]
-                    .as_table_mut()
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                if !messaging.contains_key("discord") {
-                    messaging["discord"] = toml_edit::Item::Table(toml_edit::Table::new());
-                }
-                let discord = messaging["discord"]
-                    .as_table_mut()
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                discord["enabled"] = toml_edit::value(true);
-                discord["token"] = toml_edit::value(token.as_str());
-                new_discord_token = Some(token.clone());
+        if let Some(token) = &credentials.discord_token
+            && !token.is_empty()
+        {
+            if doc.get("messaging").is_none() {
+                doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
+            let messaging = doc["messaging"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            if !messaging.contains_key("discord") {
+                messaging["discord"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let discord = messaging["discord"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            discord["enabled"] = toml_edit::value(true);
+            discord["token"] = toml_edit::value(token.as_str());
+            new_discord_token = Some(token.clone());
         }
         if let Some(bot_token) = &credentials.slack_bot_token {
             let app_token = credentials.slack_app_token.as_deref().unwrap_or("");
@@ -230,24 +230,24 @@ pub(super) async fn create_binding(
                 new_slack_tokens = Some((bot_token.clone(), app_token.to_string()));
             }
         }
-        if let Some(token) = &credentials.telegram_token {
-            if !token.is_empty() {
-                if doc.get("messaging").is_none() {
-                    doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
-                }
-                let messaging = doc["messaging"]
-                    .as_table_mut()
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                if !messaging.contains_key("telegram") {
-                    messaging["telegram"] = toml_edit::Item::Table(toml_edit::Table::new());
-                }
-                let telegram = messaging["telegram"]
-                    .as_table_mut()
-                    .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
-                telegram["enabled"] = toml_edit::value(true);
-                telegram["token"] = toml_edit::value(token.as_str());
-                new_telegram_token = Some(token.clone());
+        if let Some(token) = &credentials.telegram_token
+            && !token.is_empty()
+        {
+            if doc.get("messaging").is_none() {
+                doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
             }
+            let messaging = doc["messaging"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            if !messaging.contains_key("telegram") {
+                messaging["telegram"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let telegram = messaging["telegram"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            telegram["enabled"] = toml_edit::value(true);
+            telegram["token"] = toml_edit::value(token.as_str());
+            new_telegram_token = Some(token.clone());
         }
         if let Some(username) = &credentials.twitch_username {
             let oauth_token = credentials.twitch_oauth_token.as_deref().unwrap_or("");
@@ -559,20 +559,20 @@ pub(super) async fn update_binding(
     binding.remove("workspace_id");
     binding.remove("chat_id");
 
-    if let Some(ref guild_id) = request.guild_id {
-        if !guild_id.is_empty() {
-            binding["guild_id"] = toml_edit::value(guild_id);
-        }
+    if let Some(ref guild_id) = request.guild_id
+        && !guild_id.is_empty()
+    {
+        binding["guild_id"] = toml_edit::value(guild_id);
     }
-    if let Some(ref workspace_id) = request.workspace_id {
-        if !workspace_id.is_empty() {
-            binding["workspace_id"] = toml_edit::value(workspace_id);
-        }
+    if let Some(ref workspace_id) = request.workspace_id
+        && !workspace_id.is_empty()
+    {
+        binding["workspace_id"] = toml_edit::value(workspace_id);
     }
-    if let Some(ref chat_id) = request.chat_id {
-        if !chat_id.is_empty() {
-            binding["chat_id"] = toml_edit::value(chat_id);
-        }
+    if let Some(ref chat_id) = request.chat_id
+        && !chat_id.is_empty()
+    {
+        binding["chat_id"] = toml_edit::value(chat_id);
     }
 
     if !request.channel_ids.is_empty() {

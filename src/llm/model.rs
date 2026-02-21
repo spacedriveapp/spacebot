@@ -82,10 +82,10 @@ impl SpacebotModel {
             .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
 
         // For Anthropic, prefer OAuth token from auth.json over static config key
-        if provider_id == "anthropic" {
-            if let Ok(Some(token)) = self.llm_manager.get_anthropic_token().await {
-                provider_config.api_key = token;
-            }
+        if provider_id == "anthropic"
+            && let Ok(Some(token)) = self.llm_manager.get_anthropic_token().await
+        {
+            provider_config.api_key = token;
         }
 
         if provider_id == "zai-coding-plan" || provider_id == "zhipu" {
@@ -348,7 +348,7 @@ impl SpacebotModel {
             .unwrap_or("auto");
         let anthropic_request = crate::llm::anthropic::build_anthropic_request(
             self.llm_manager.http_client(),
-            &api_key,
+            api_key,
             &self.model_name,
             &request,
             effort,
@@ -576,6 +576,7 @@ impl SpacebotModel {
 
     /// Generic OpenAI-compatible API call.
     /// Used by providers that implement the OpenAI chat completions format.
+    #[allow(dead_code)]
     async fn call_openai_compatible(
         &self,
         request: CompletionRequest,
@@ -764,6 +765,7 @@ impl SpacebotModel {
 }
 // --- Helpers ---
 
+#[allow(dead_code)]
 fn normalize_ollama_base_url(configured: Option<String>) -> String {
     let mut base_url = configured
         .unwrap_or_else(|| "http://localhost:11434".to_string())
@@ -1199,27 +1201,26 @@ fn parse_openai_response(
 
     let mut assistant_content = Vec::new();
 
-    if let Some(text) = choice["content"].as_str() {
-        if !text.is_empty() {
-            assistant_content.push(AssistantContent::Text(Text {
-                text: text.to_string(),
-            }));
-        }
+    if let Some(text) = choice["content"].as_str()
+        && !text.is_empty()
+    {
+        assistant_content.push(AssistantContent::Text(Text {
+            text: text.to_string(),
+        }));
     }
 
     // Some reasoning models (e.g., NVIDIA kimi-k2.5) return reasoning in a separate field
-    if assistant_content.is_empty() {
-        if let Some(reasoning) = choice["reasoning_content"].as_str() {
-            if !reasoning.is_empty() {
-                tracing::debug!(
-                    provider = %provider_label,
-                    "extracted reasoning_content as main content"
-                );
-                assistant_content.push(AssistantContent::Text(Text {
-                    text: reasoning.to_string(),
-                }));
-            }
-        }
+    if assistant_content.is_empty()
+        && let Some(reasoning) = choice["reasoning_content"].as_str()
+        && !reasoning.is_empty()
+    {
+        tracing::debug!(
+            provider = %provider_label,
+            "extracted reasoning_content as main content"
+        );
+        assistant_content.push(AssistantContent::Text(Text {
+            text: reasoning.to_string(),
+        }));
     }
 
     if let Some(tool_calls) = choice["tool_calls"].as_array() {
@@ -1281,14 +1282,13 @@ fn parse_openai_responses_response(
             Some("message") => {
                 if let Some(content_items) = output_item["content"].as_array() {
                     for content_item in content_items {
-                        if content_item["type"].as_str() == Some("output_text") {
-                            if let Some(text) = content_item["text"].as_str() {
-                                if !text.is_empty() {
-                                    assistant_content.push(AssistantContent::Text(Text {
-                                        text: text.to_string(),
-                                    }));
-                                }
-                            }
+                        if content_item["type"].as_str() == Some("output_text")
+                            && let Some(text) = content_item["text"].as_str()
+                            && !text.is_empty()
+                        {
+                            assistant_content.push(AssistantContent::Text(Text {
+                                text: text.to_string(),
+                            }));
                         }
                     }
                 }

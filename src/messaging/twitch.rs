@@ -119,11 +119,10 @@ impl Messaging for TwitchAdapter {
                         let permissions = permissions.load();
 
                         // Channel filter
-                        if let Some(filter) = &permissions.channel_filter {
-                            if !filter.iter().any(|c| c.eq_ignore_ascii_case(&privmsg.channel_login)) {
+                        if let Some(filter) = &permissions.channel_filter
+                            && !filter.iter().any(|c| c.eq_ignore_ascii_case(&privmsg.channel_login)) {
                                 continue;
                             }
-                        }
 
                         // User filter
                         if !permissions.allowed_users.is_empty()

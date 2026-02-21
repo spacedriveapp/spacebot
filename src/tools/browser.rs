@@ -595,10 +595,7 @@ impl BrowserTool {
             let name = extract_ax_value_string(&node.name);
             let description = extract_ax_value_string(&node.description);
             let value = extract_ax_value_string(&node.value);
-            let backend_node_id = node
-                .backend_dom_node_id
-                .as_ref()
-                .map(|id| id.inner().clone());
+            let backend_node_id = node.backend_dom_node_id.as_ref().map(|id| *id.inner());
 
             let ref_id = format!("e{}", state.next_ref);
             state.next_ref += 1;
@@ -854,10 +851,10 @@ impl BrowserTool {
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
-        if let Some(mut browser) = state.browser.take() {
-            if let Err(error) = browser.close().await {
-                tracing::warn!(%error, "browser close returned error");
-            }
+        if let Some(mut browser) = state.browser.take()
+            && let Err(error) = browser.close().await
+        {
+            tracing::warn!(%error, "browser close returned error");
         }
 
         state.pages.clear();
@@ -876,11 +873,10 @@ impl BrowserTool {
         state: &'a mut BrowserState,
         url: Option<&str>,
     ) -> Result<&'a chromiumoxide::Page, BrowserError> {
-        if state.active_target.is_some() {
-            let target = state.active_target.as_ref().expect("checked above");
-            if state.pages.contains_key(target) {
-                return Ok(&state.pages[target]);
-            }
+        if let Some(target) = state.active_target.as_ref()
+            && state.pages.contains_key(target)
+        {
+            return Ok(&state.pages[target]);
         }
 
         let browser = state

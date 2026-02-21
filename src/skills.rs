@@ -61,24 +61,22 @@ impl SkillSet {
         let mut set = Self::default();
 
         // Instance skills (lowest precedence)
-        if instance_skills_dir.is_dir() {
-            if let Ok(skills) =
+        if instance_skills_dir.is_dir()
+            && let Ok(skills) =
                 load_skills_from_dir(instance_skills_dir, SkillSource::Instance).await
-            {
-                for skill in skills {
-                    set.skills.insert(skill.name.to_lowercase(), skill);
-                }
+        {
+            for skill in skills {
+                set.skills.insert(skill.name.to_lowercase(), skill);
             }
         }
 
         // Workspace skills (highest precedence, overrides instance)
-        if workspace_skills_dir.is_dir() {
-            if let Ok(skills) =
+        if workspace_skills_dir.is_dir()
+            && let Ok(skills) =
                 load_skills_from_dir(workspace_skills_dir, SkillSource::Workspace).await
-            {
-                for skill in skills {
-                    set.skills.insert(skill.name.to_lowercase(), skill);
-                }
+        {
+            for skill in skills {
+                set.skills.insert(skill.name.to_lowercase(), skill);
             }
         }
 

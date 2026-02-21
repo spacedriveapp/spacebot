@@ -163,13 +163,13 @@ impl MemorySearch {
         {
             Ok(fts_matches) => {
                 for (memory_id, score) in fts_matches {
-                    if let Some(memory) = self.store.load(&memory_id).await? {
-                        if !memory.forgotten {
-                            fts_results.push(ScoredMemory {
-                                memory,
-                                score: score as f64,
-                            });
-                        }
+                    if let Some(memory) = self.store.load(&memory_id).await?
+                        && !memory.forgotten
+                    {
+                        fts_results.push(ScoredMemory {
+                            memory,
+                            score: score as f64,
+                        });
                     }
                 }
             }
@@ -188,13 +188,13 @@ impl MemorySearch {
             Ok(vector_matches) => {
                 for (memory_id, distance) in vector_matches {
                     let similarity = 1.0 - distance;
-                    if let Some(memory) = self.store.load(&memory_id).await? {
-                        if !memory.forgotten {
-                            vector_results.push(ScoredMemory {
-                                memory,
-                                score: similarity as f64,
-                            });
-                        }
+                    if let Some(memory) = self.store.load(&memory_id).await?
+                        && !memory.forgotten
+                    {
+                        vector_results.push(ScoredMemory {
+                            memory,
+                            score: similarity as f64,
+                        });
                     }
                 }
             }

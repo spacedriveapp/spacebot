@@ -213,6 +213,7 @@ pub fn create_branch_tool_server(
 ///
 /// File operations are restricted to `workspace`. Shell and exec commands are
 /// blocked from accessing sensitive files in `instance_dir`.
+#[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
     agent_id: AgentId,
     worker_id: WorkerId,
@@ -258,6 +259,7 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
 /// Combines branch tools (memory) with worker tools (shell, file, exec) to give
 /// the interactive cortex full capabilities. Does not include channel-specific
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+#[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     memory_search: Arc<MemorySearch>,
     conversation_logger: crate::conversation::history::ConversationLogger,

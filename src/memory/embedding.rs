@@ -46,7 +46,7 @@ impl EmbeddingModel {
         let model = self.model.clone();
         let result = tokio::task::spawn_blocking(move || {
             model.embed(vec![text], None).map_err(|e| {
-                crate::Error::Llm(crate::error::LlmError::EmbeddingFailed(e.to_string()))
+                crate::Error::from(crate::error::LlmError::EmbeddingFailed(e.to_string()))
             })
         })
         .await

@@ -392,42 +392,42 @@ impl Channel {
         let unique_sender_count = unique_senders.len();
 
         // Track conversation_id from the first message
-        if self.conversation_id.is_none() {
-            if let Some(first) = messages.first() {
-                self.conversation_id = Some(first.conversation_id.clone());
-            }
+        if self.conversation_id.is_none()
+            && let Some(first) = messages.first()
+        {
+            self.conversation_id = Some(first.conversation_id.clone());
         }
 
         // Capture conversation context from the first message
-        if self.conversation_context.is_none() {
-            if let Some(first) = messages.first() {
-                let prompt_engine = self.deps.runtime_config.prompts.load();
-                let server_name = first
-                    .metadata
-                    .get("discord_guild_name")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        first
-                            .metadata
-                            .get("telegram_chat_title")
-                            .and_then(|v| v.as_str())
-                    });
-                let channel_name = first
-                    .metadata
-                    .get("discord_channel_name")
-                    .and_then(|v| v.as_str())
-                    .or_else(|| {
-                        first
-                            .metadata
-                            .get("telegram_chat_type")
-                            .and_then(|v| v.as_str())
-                    });
-                self.conversation_context = Some(
-                    prompt_engine
-                        .render_conversation_context(&first.source, server_name, channel_name)
-                        .expect("failed to render conversation context"),
-                );
-            }
+        if self.conversation_context.is_none()
+            && let Some(first) = messages.first()
+        {
+            let prompt_engine = self.deps.runtime_config.prompts.load();
+            let server_name = first
+                .metadata
+                .get("discord_guild_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    first
+                        .metadata
+                        .get("telegram_chat_title")
+                        .and_then(|v| v.as_str())
+                });
+            let channel_name = first
+                .metadata
+                .get("discord_channel_name")
+                .and_then(|v| v.as_str())
+                .or_else(|| {
+                    first
+                        .metadata
+                        .get("telegram_chat_type")
+                        .and_then(|v| v.as_str())
+                });
+            self.conversation_context = Some(
+                prompt_engine
+                    .render_conversation_context(&first.source, server_name, channel_name)
+                    .expect("failed to render conversation context"),
+            );
         }
 
         // Persist each message to conversation log (individual audit trail)
@@ -709,9 +709,7 @@ impl Channel {
 
     /// Build the rendered available channels fragment for cross-channel awareness.
     async fn build_available_channels(&self) -> Option<String> {
-        if self.deps.messaging_manager.is_none() {
-            return None;
-        }
+        self.deps.messaging_manager.as_ref()?;
 
         let channels = match self.state.channel_store.list_active().await {
             Ok(channels) => channels,
@@ -861,17 +859,17 @@ impl Channel {
 
         // If the LLM responded with text that looks like tool call syntax, it failed
         // to use the tool calling API. Inject a correction and give it one more try.
-        if let Ok(ref response) = result {
-            if extract_reply_from_tool_syntax(response.trim()).is_some() {
-                tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
-                let prompt_engine = self.deps.runtime_config.prompts.load();
-                let correction = prompt_engine.render_system_tool_syntax_correction()?;
-                result = agent
-                    .prompt(&correction)
-                    .with_history(&mut history)
-                    .with_hook(self.hook.clone())
-                    .await;
-            }
+        if let Ok(ref response) = result
+            && extract_reply_from_tool_syntax(response.trim()).is_some()
+        {
+            tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
+            let prompt_engine = self.deps.runtime_config.prompts.load();
+            let correction = prompt_engine.render_system_tool_syntax_correction()?;
+            result = agent
+                .prompt(&correction)
+                .with_history(&mut history)
+                .with_hook(self.hook.clone())
+                .await;
         }
 
         // Write history back after the agentic loop completes
@@ -1048,30 +1046,28 @@ impl Channel {
         }
 
         // Re-trigger the channel LLM so it can process the result and respond
-        if should_retrigger {
-            if let Some(conversation_id) = &self.conversation_id {
-                let retrigger_message = self
-                    .deps
-                    .runtime_config
-                    .prompts
-                    .load()
-                    .render_system_retrigger()
-                    .expect("failed to render retrigger message");
+        if should_retrigger && let Some(conversation_id) = &self.conversation_id {
+            let retrigger_message = self
+                .deps
+                .runtime_config
+                .prompts
+                .load()
+                .render_system_retrigger()
+                .expect("failed to render retrigger message");
 
-                let synthetic = InboundMessage {
-                    id: uuid::Uuid::new_v4().to_string(),
-                    source: "system".into(),
-                    conversation_id: conversation_id.clone(),
-                    sender_id: "system".into(),
-                    agent_id: None,
-                    content: crate::MessageContent::Text(retrigger_message),
-                    timestamp: chrono::Utc::now(),
-                    metadata: std::collections::HashMap::new(),
-                    formatted_author: None,
-                };
-                if let Err(error) = self.self_tx.try_send(synthetic) {
-                    tracing::warn!(%error, "failed to re-trigger channel after process completion");
-                }
+            let synthetic = InboundMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: "system".into(),
+                conversation_id: conversation_id.clone(),
+                sender_id: "system".into(),
+                agent_id: None,
+                content: crate::MessageContent::Text(retrigger_message),
+                timestamp: chrono::Utc::now(),
+                metadata: std::collections::HashMap::new(),
+                formatted_author: None,
+            };
+            if let Err(error) = self.self_tx.try_send(synthetic) {
+                tracing::warn!(%error, "failed to re-trigger channel after process completion");
             }
         }
 
@@ -1561,10 +1557,10 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
 
     // Try to extract "content" from the JSON payload after the prefix
     let rest = text[matched_prefix.len()..].trim();
-    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rest) {
-        if let Some(content) = parsed.get("content").and_then(|v| v.as_str()) {
-            return Some(content.to_string());
-        }
+    if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(rest)
+        && let Some(content) = parsed.get("content").and_then(|v| v.as_str())
+    {
+        return Some(content.to_string());
     }
 
     // If we can't parse JSON, the rest might just be the message itself (no JSON wrapper)

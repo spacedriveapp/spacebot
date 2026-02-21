@@ -245,15 +245,14 @@ pub(super) async fn get_providers(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
         let has_value = |key: &str, env_var: &str| -> bool {
-            if let Some(llm) = doc.get("llm") {
-                if let Some(val) = llm.get(key) {
-                    if let Some(s) = val.as_str() {
-                        if let Some(var_name) = s.strip_prefix("env:") {
-                            return std::env::var(var_name).is_ok();
-                        }
-                        return !s.is_empty();
-                    }
+            if let Some(llm) = doc.get("llm")
+                && let Some(val) = llm.get(key)
+                && let Some(s) = val.as_str()
+            {
+                if let Some(var_name) = s.strip_prefix("env:") {
+                    return std::env::var(var_name).is_ok();
                 }
+                return !s.is_empty();
             }
             std::env::var(env_var).is_ok()
         };
@@ -410,26 +409,25 @@ pub(super) async fn update_provider(
     if let Some(agents) = doc
         .get_mut("agents")
         .and_then(|agents_item| agents_item.as_array_of_tables_mut())
-    {
-        if let Some(default_agent) = agents.iter_mut().find(|agent| {
+        && let Some(default_agent) = agents.iter_mut().find(|agent| {
             agent
                 .get("default")
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false)
-        }) {
-            if default_agent.get("routing").is_none() {
-                default_agent["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
-            }
-            if let Some(routing_table) = default_agent
-                .get_mut("routing")
-                .and_then(|routing_item| routing_item.as_table_mut())
-            {
-                routing_table["channel"] = toml_edit::value(request.model.as_str());
-                routing_table["branch"] = toml_edit::value(request.model.as_str());
-                routing_table["worker"] = toml_edit::value(request.model.as_str());
-                routing_table["compactor"] = toml_edit::value(request.model.as_str());
-                routing_table["cortex"] = toml_edit::value(request.model.as_str());
-            }
+        })
+    {
+        if default_agent.get("routing").is_none() {
+            default_agent["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(routing_table) = default_agent
+            .get_mut("routing")
+            .and_then(|routing_item| routing_item.as_table_mut())
+        {
+            routing_table["channel"] = toml_edit::value(request.model.as_str());
+            routing_table["branch"] = toml_edit::value(request.model.as_str());
+            routing_table["worker"] = toml_edit::value(request.model.as_str());
+            routing_table["compactor"] = toml_edit::value(request.model.as_str());
+            routing_table["cortex"] = toml_edit::value(request.model.as_str());
         }
     }
 
@@ -561,10 +559,10 @@ pub(super) async fn delete_provider(
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    if let Some(llm) = doc.get_mut("llm") {
-        if let Some(table) = llm.as_table_mut() {
-            table.remove(key_name);
-        }
+    if let Some(llm) = doc.get_mut("llm")
+        && let Some(table) = llm.as_table_mut()
+    {
+        table.remove(key_name);
     }
 
     tokio::fs::write(&config_path, doc.to_string())

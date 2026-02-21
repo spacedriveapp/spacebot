@@ -64,12 +64,11 @@ impl RoutingConfig {
     /// Resolve the model name for a process type and optional task type.
     pub fn resolve(&self, process_type: ProcessType, task_type: Option<&str>) -> &str {
         // Check task-type override first (only for workers and branches)
-        if let Some(task) = task_type {
-            if matches!(process_type, ProcessType::Worker | ProcessType::Branch) {
-                if let Some(override_model) = self.task_overrides.get(task) {
-                    return override_model;
-                }
-            }
+        if let Some(task) = task_type
+            && matches!(process_type, ProcessType::Worker | ProcessType::Branch)
+            && let Some(override_model) = self.task_overrides.get(task)
+        {
+            return override_model;
         }
 
         match process_type {

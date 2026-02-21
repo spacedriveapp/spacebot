@@ -44,17 +44,14 @@ impl ExecTool {
 
         // Block references to sensitive files by name
         for file in super::shell::SENSITIVE_FILES {
-            if all_args.contains(file) {
-                if all_args.contains(instance_str.as_ref())
-                    || !all_args.contains(workspace_str.as_ref())
-                {
-                    return Err(ExecError {
-                        message: format!(
-                            "Cannot access {file} — instance configuration is protected."
-                        ),
-                        exit_code: -1,
-                    });
-                }
+            if all_args.contains(file)
+                && (all_args.contains(instance_str.as_ref())
+                    || !all_args.contains(workspace_str.as_ref()))
+            {
+                return Err(ExecError {
+                    message: format!("Cannot access {file} — instance configuration is protected."),
+                    exit_code: -1,
+                });
             }
         }
 
@@ -319,12 +316,8 @@ pub async fn exec(
 
     let output = tokio::time::timeout(tokio::time::Duration::from_secs(60), cmd.output())
         .await
-        .map_err(|_| {
-            crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out").into())
-        })?
-        .map_err(|e| {
-            crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}").into())
-        })?;
+        .map_err(|_| crate::error::AgentError::Other(anyhow::anyhow!("Execution timed out")))?
+        .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!("Failed to execute: {e}")))?;
 
     Ok(ExecResult {
         success: output.status.success(),
@@ -342,5 +335,3 @@ pub struct ExecResult {
     pub stdout: String,
     pub stderr: String,
 }
-
-use anyhow::Context as _;

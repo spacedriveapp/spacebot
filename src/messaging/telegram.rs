@@ -177,7 +177,7 @@ impl Messaging for TelegramAdapter {
                         }
 
                         for update in updates {
-                            offset = update.id.as_offset() as i32;
+                            offset = update.id.as_offset();
 
                             let message = match &update.kind {
                                 UpdateKind::Message(message) => message,
@@ -187,11 +187,10 @@ impl Messaging for TelegramAdapter {
                             let bot_id = *bot_user_id.read().await;
 
                             // Skip our own messages
-                            if let Some(from) = &message.from {
-                                if bot_id.is_some_and(|id| from.id == id) {
+                            if let Some(from) = &message.from
+                                && bot_id.is_some_and(|id| from.id == id) {
                                     continue;
                                 }
-                            }
 
                             let permissions = permissions.load();
 
@@ -200,8 +199,8 @@ impl Messaging for TelegramAdapter {
 
                             // DM filter: in private chats, check dm_allowed_users
                             if is_private {
-                                if let Some(from) = &message.from {
-                                    if !permissions.dm_allowed_users.is_empty()
+                                if let Some(from) = &message.from
+                                    && !permissions.dm_allowed_users.is_empty()
                                         && !permissions
                                             .dm_allowed_users
                                             .contains(&(from.id.0 as i64))
@@ -216,7 +215,6 @@ impl Messaging for TelegramAdapter {
                                         }
                                         continue;
                                     }
-                                }
                             } else if let Some(filter) = &permissions.chat_filter {
                                 // Chat filter: if configured, only allow listed group/channel chats
                                 if !filter.contains(&chat_id) {
@@ -225,12 +223,12 @@ impl Messaging for TelegramAdapter {
                             }
 
                             // Extract text content
-                            let text = extract_text(&message);
-                            if text.is_none() && !has_attachments(&message) {
+                            let text = extract_text(message);
+                            if text.is_none() && !has_attachments(message) {
                                 continue;
                             }
 
-                            let content = build_content(&bot, &message, &text).await;
+                            let content = build_content(&bot, message, &text).await;
                             let conversation_id = format!("telegram:{chat_id}");
                             let sender_id = message
                                 .from
@@ -239,7 +237,7 @@ impl Messaging for TelegramAdapter {
                                 .unwrap_or_default();
 
                             let (metadata, formatted_author) = build_metadata(
-                                &message,
+                                message,
                                 &*bot_username.read().await,
                             );
 

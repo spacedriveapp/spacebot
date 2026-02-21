@@ -1,7 +1,5 @@
 //! Encrypted credentials storage (AES-256-GCM, redb).
 
-use crate::error::Result;
-
 /// Secrets store.
 pub struct SecretsStore;
 

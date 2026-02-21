@@ -118,7 +118,7 @@ impl Tool for ChannelRecallTool {
             return self.list_channels().await;
         };
 
-        let limit = args.limit.min(MAX_TRANSCRIPT_MESSAGES).max(1);
+        let limit = args.limit.clamp(1, MAX_TRANSCRIPT_MESSAGES);
 
         // Resolve channel name to ID
         let found = self

@@ -267,21 +267,21 @@ impl CronTool {
 }
 
 fn format_interval(secs: u64) -> String {
-    if secs % 86400 == 0 {
+    if secs.is_multiple_of(86400) {
         let days = secs / 86400;
         if days == 1 {
             "every day".into()
         } else {
             format!("every {days} days")
         }
-    } else if secs % 3600 == 0 {
+    } else if secs.is_multiple_of(3600) {
         let hours = secs / 3600;
         if hours == 1 {
             "every hour".into()
         } else {
             format!("every {hours} hours")
         }
-    } else if secs % 60 == 0 {
+    } else if secs.is_multiple_of(60) {
         let minutes = secs / 60;
         if minutes == 1 {
             "every minute".into()
