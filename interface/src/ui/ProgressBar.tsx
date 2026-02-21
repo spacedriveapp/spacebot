@@ -29,9 +29,9 @@ const progressIndicatorStyles = cva(
     variants: {
       variant: {
         default: "bg-accent",
-        success: "bg-green-500",
-        warning: "bg-amber-500",
-        error: "bg-red-500",
+        success: "bg-success",
+        warning: "bg-warning",
+        error: "bg-error",
         neutral: "bg-ink-dull",
       },
       animated: {
@@ -225,7 +225,7 @@ export const ProgressSteps: React.FC<ProgressStepsProps> = ({
                 status === "completed" && "bg-accent text-white",
                 status === "current" && "border-2 border-accent bg-app-box text-accent",
                 status === "pending" && "border-2 border-app-line bg-app-box text-ink-dull",
-                status === "error" && "bg-red-500 text-white"
+                status === "error" && "bg-error text-white"
               )}
             >
               {status === "completed" ? (

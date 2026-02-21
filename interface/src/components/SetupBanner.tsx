@@ -15,7 +15,7 @@ export function SetupBanner() {
 	return (
 		<Banner variant="warning" dot="static">
 			No LLM provider configured.{" "}
-			<Link to="/settings" className="underline hover:text-amber-300">
+			<Link to="/settings" className="underline hover:text-warning">
 				Add an API key in Settings
 			</Link>{" "}
 			to get started.

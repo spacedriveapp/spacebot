@@ -229,7 +229,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 						{name}
 					</DialogTitle>
 					<DialogDescription>
-						{configured ? `Manage ${name} connection and bindings.` : `Connect ${name} to Spacebot.`}
+						{configured ? `Manage ${name} connection and bindings.` : `Connect ${name} to OpenOz.`}
 					</DialogDescription>
 				</DialogHeader>
 
@@ -491,8 +491,8 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 				{message && (
 					<div className={`rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-green-500/20 bg-success/10 text-success"
+							: "border-error/20 bg-error/10 text-error"
 					}`}>
 						{message.text}
 					</div>
@@ -502,19 +502,19 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 				{configured && platform !== "webhook" && (
 					<div className="border-t border-app-line pt-4">
 						{!confirmDisconnect ? (
-							<Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(true)} className="text-red-400 hover:text-red-300">
+							<Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(true)} className="text-error hover:text-error/80">
 								Disconnect {name}
 							</Button>
 						) : (
 							<div className="flex flex-col gap-2">
-								<p className="text-sm text-red-400">
+								<p className="text-sm text-error">
 									This will remove all credentials and bindings for {name}. The bot will stop responding immediately.
 								</p>
 								<div className="flex gap-2">
 									<Button variant="ghost" size="sm" onClick={() => setConfirmDisconnect(false)}>
 										Cancel
 									</Button>
-									<Button size="sm" onClick={() => disconnect.mutate()} loading={disconnect.isPending} className="bg-red-500/20 text-red-400 hover:bg-red-500/30">
+									<Button size="sm" onClick={() => disconnect.mutate()} loading={disconnect.isPending} className="bg-error/20 text-error hover:bg-error/30">
 										Confirm Disconnect
 									</Button>
 								</div>

@@ -1,10 +1,14 @@
-import {useState} from "react";
+import {useState, useCallback} from "react";
 import {
 	createRouter,
 	createRootRoute,
 	createRoute,
 	Outlet,
+	useRouterState,
 } from "@tanstack/react-router";
+import {PageTransition} from "@/ui/PageTransition";
+import {AnimatedTabContent} from "@/ui/AnimatedTabContent";
+import {useKeyboardShortcuts} from "@/hooks/useKeyboardShortcuts";
 import {BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
 import {SetupBanner} from "@/components/SetupBanner";
@@ -28,20 +32,31 @@ import {AgentTabs} from "@/components/AgentTabs";
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
 	const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
+	const routeKey = useRouterState({
+		select: (s) => {
+			const p = s.location.pathname;
+			const agentMatch = p.match(/^\/agents\/[^/]+/);
+			return agentMatch ? agentMatch[0] : p;
+		},
+	});
+	const toggleSidebar = useCallback(() => setSidebarCollapsed((c) => !c), []);
+	useKeyboardShortcuts({ onToggleSidebar: toggleSidebar });
 
 	return (
 		<div className="flex h-screen bg-app">
 			<Sidebar
 				liveStates={liveStates}
 				collapsed={sidebarCollapsed}
-				onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
+				onToggle={toggleSidebar}
 			/>
 			<div className="flex flex-1 flex-col overflow-hidden">
 				<ConnectionBanner state={connectionState} hasData={hasData} />
 				<UpdateBanner />
 				<SetupBanner />
 				<div className="flex-1 overflow-hidden">
-					<Outlet />
+					<PageTransition key={routeKey}>
+						<Outlet />
+					</PageTransition>
 				</div>
 			</div>
 		</div>
@@ -51,7 +66,7 @@ function RootLayout() {
 function AgentHeader({agentId}: {agentId: string}) {
 	return (
 		<>
-			<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
+			<header className="flex h-10 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 				<h1 className="font-plex text-sm font-medium text-ink">{agentId}</h1>
 			</header>
 			<AgentTabs agentId={agentId} />
@@ -91,7 +106,7 @@ const logsRoute = createRoute({
 	component: function LogsPage() {
 		return (
 			<div className="flex h-full flex-col">
-				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
+				<header className="flex h-10 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 					<h1 className="font-plex text-sm font-medium text-ink">Logs</h1>
 				</header>
 				<div className="flex flex-1 items-center justify-center">
@@ -112,7 +127,9 @@ const agentRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentDetail agentId={agentId} liveStates={liveStates} />
+					<AnimatedTabContent tabKey="overview">
+						<AgentDetail agentId={agentId} liveStates={liveStates} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -145,7 +162,9 @@ const agentChannelsRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentChannels agentId={agentId} liveStates={liveStates} />
+					<AnimatedTabContent tabKey="channels">
+						<AgentChannels agentId={agentId} liveStates={liveStates} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -161,7 +180,9 @@ const agentMemoriesRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentMemories agentId={agentId} />
+					<AnimatedTabContent tabKey="memories">
+						<AgentMemories agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -177,7 +198,9 @@ const agentIngestRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentIngest agentId={agentId} />
+					<AnimatedTabContent tabKey="ingest">
+						<AgentIngest agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -211,7 +234,9 @@ const agentCronRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentCron agentId={agentId} />
+					<AnimatedTabContent tabKey="cron">
+						<AgentCron agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -232,7 +257,9 @@ const agentConfigRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentConfig agentId={agentId} />
+					<AnimatedTabContent tabKey="config">
+						<AgentConfig agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -248,7 +275,9 @@ const agentCortexRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentCortex agentId={agentId} />
+					<AnimatedTabContent tabKey="cortex">
+						<AgentCortex agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);
@@ -264,7 +293,9 @@ const agentSkillsRoute = createRoute({
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentSkills agentId={agentId} />
+					<AnimatedTabContent tabKey="skills">
+						<AgentSkills agentId={agentId} />
+					</AnimatedTabContent>
 				</div>
 			</div>
 		);

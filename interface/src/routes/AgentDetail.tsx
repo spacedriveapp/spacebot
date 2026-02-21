@@ -1,10 +1,12 @@
 import { useMemo, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
+import { motion } from "framer-motion";
 import { api, type CortexEvent, type CronJobInfo, MEMORY_TYPES } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { formatTimeAgo, formatDuration } from "@/lib/format";
 import { DeleteAgentDialog } from "@/components/DeleteAgentDialog";
+import { staggerContainer, slideUp, spring } from "@/lib/motion";
 import {
 	ResponsiveContainer,
 	AreaChart,
@@ -89,7 +91,7 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 
 	return (
 		<div className="h-full overflow-y-auto">
-			<div className="mx-auto max-w-6xl p-6 pb-24">
+			<div className="mx-auto max-w-6xl p-4 pb-6">
 				{/* Hero Section */}
 				<HeroSection
 					agentId={agentId}
@@ -108,9 +110,14 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 
 				{/* Charts Grid */}
 				{overviewData && (
-					<div className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2">
+					<motion.div
+						className="mt-8 grid grid-cols-1 gap-6 lg:grid-cols-2"
+						variants={staggerContainer}
+						initial="initial"
+						animate="animate"
+					>
 						{/* Memory Growth Chart */}
-						<div className="col-span-1 lg:col-span-2 rounded-xl bg-app-darkBox p-5">
+						<div className="col-span-1 lg:col-span-2 rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 							<div className="mb-4 flex items-center justify-between">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory Growth</h3>
 								<span className="text-tiny text-ink-faint">Last 30 days</span>
@@ -119,7 +126,7 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 						</div>
 
 						{/* Activity Heatmap */}
-						<div className="rounded-xl bg-app-darkBox p-5">
+						<div className="rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 							<div className="mb-4 flex items-center justify-between">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Activity Heatmap</h3>
 								<span className="text-tiny text-ink-faint">Messages by day/hour</span>
@@ -128,31 +135,31 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 						</div>
 
 						{/* Process Activity Chart */}
-						<div className="rounded-xl bg-app-darkBox p-5">
+						<div className="rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 							<div className="mb-4 flex items-center justify-between">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Process Activity</h3>
 								<span className="text-tiny text-ink-faint">Branches + Workers</span>
 							</div>
 							<ProcessActivityChart data={overviewData.activity_daily} />
 						</div>
-					</div>
+					</motion.div>
 				)}
 
 				{/* Secondary Grid */}
 				{overviewData && (
 					<div className="mt-6 grid grid-cols-1 gap-6 lg:grid-cols-3">
 						{/* Memory Donut */}
-						<div className="rounded-xl bg-app-darkBox p-5">
+						<div className="rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 							<div className="mb-4 flex items-center justify-between">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory Types</h3>
-								<span className="text-2xl font-medium tabular-nums text-ink">{overviewData.memory_total}</span>
+								<span className="text-sm font-semibold tabular-nums text-ink">{overviewData.memory_total}</span>
 							</div>
 							<MemoryDonut counts={overviewData.memory_counts} />
 						</div>
 
 						{/* Model Routing */}
 						{configData && (
-							<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 								<div className="mb-4 flex items-center justify-between">
 									<h3 className="font-plex text-sm font-medium text-ink-dull">Model Routing</h3>
 									<Link
@@ -168,7 +175,7 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 						)}
 
 						{/* Quick Stats */}
-						<div className="rounded-xl bg-app-darkBox p-5">
+						<div className="rounded-xl border border-app-line bg-app-darkBox p-3.5 transition-colors duration-150 hover:border-app-hover">
 							<div className="mb-4">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Configuration</h3>
 							</div>
@@ -222,13 +229,13 @@ function HeroSection({
 	onDelete: () => void;
 }) {
 	return (
-		<div className="flex flex-col gap-4 border-b border-app-line pb-6">
+		<div className="flex flex-col gap-3 border-b border-app-line pb-4">
 			<div className="flex items-start justify-between">
 				<div>
-					<h1 className="font-plex text-3xl font-semibold text-ink">{agentId}</h1>
-					<div className="mt-2 flex items-center gap-4 text-sm">
+					<h1 className="font-plex text-lg font-semibold tracking-tight text-ink">{agentId}</h1>
+					<div className="mt-1.5 flex items-center gap-3 text-[13px]">
 						<div className="flex items-center gap-2">
-							<div className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-amber-400" : "bg-green-500"}`} />
+							<div className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-warning" : "bg-success"}`} />
 							<span className="text-ink-dull">{hasLiveActivity ? "Active" : "Idle"}</span>
 						</div>
 						<Link
@@ -251,15 +258,15 @@ function HeroSection({
 			{(workers > 0 || branches > 0) && (
 				<div className="flex flex-wrap gap-2">
 					{workers > 0 && (
-						<div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 text-sm">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-							<span className="font-medium text-amber-400">{workers} worker{workers !== 1 ? "s" : ""}</span>
+						<div className="flex items-center gap-2 rounded-full bg-warning/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-warning" />
+							<span className="font-medium text-warning">{workers} worker{workers !== 1 ? "s" : ""}</span>
 						</div>
 					)}
 					{branches > 0 && (
-						<div className="flex items-center gap-2 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
-							<span className="font-medium text-violet-400">{branches} branch{branches !== 1 ? "es" : ""}</span>
+						<div className="flex items-center gap-2 rounded-full bg-accent/10 px-3 py-1.5 text-sm">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							<span className="font-medium text-accent">{branches} branch{branches !== 1 ? "es" : ""}</span>
 						</div>
 					)}
 				</div>
@@ -275,7 +282,7 @@ function BulletinSection({ bulletin }: { bulletin: string }) {
 	const displayText = expanded || !shouldTruncate ? bulletin : lines.slice(0, 6).join("\n") + "\n...";
 
 	return (
-		<div className="mt-6 rounded-xl border border-accent/20 bg-accent/5 p-5">
+		<div className="mt-4 rounded-xl border border-accent/20 bg-accent/5 p-3.5">
 			<div className="mb-3 flex items-center gap-2">
 				<div className="h-2 w-2 rounded-full bg-accent" />
 				<h3 className="font-plex text-sm font-medium text-accent">Latest Memory Bulletin</h3>
@@ -298,18 +305,18 @@ function BulletinSection({ bulletin }: { bulletin: string }) {
 // -- Charts --
 
 const CHART_COLORS = {
-	grid: "#2a2a3a",
-	axis: "#4a4a5a",
-	tick: "#8a8a9a",
-	accent: "#6366f1", // indigo
-	amber: "#f59e0b",
-	violet: "#8b5cf6",
-	green: "#10b981",
+	grid: "hsla(225, 12%, 16%, 1)",
+	axis: "hsla(225, 10%, 22%, 1)",
+	tick: "hsla(225, 8%, 45%, 1)",
+	accent: "hsla(250, 80%, 65%, 1)",
+	amber: "hsla(38, 90%, 55%, 1)",
+	violet: "hsla(250, 80%, 65%, 1)",
+	green: "hsla(142, 70%, 50%, 1)",
 	blue: "#3b82f6",
 	tooltip: {
-		bg: "#1a1a2e",
-		border: "#2a2a3a",
-		text: "#e0e0e0",
+		bg: "hsla(225, 18%, 5%, 0.95)",
+		border: "hsla(225, 14%, 16%, 1)",
+		text: "hsla(225, 20%, 95%, 1)",
 	},
 };
 
@@ -578,9 +585,9 @@ function MemoryDonut({ counts }: { counts: Record<string, number> }) {
 
 function ModelRoutingList({ config }: { config: { routing: { channel: string; branch: string; worker: string; compactor: string; cortex: string } } }) {
 	const models = [
-		{ label: "Channel", model: config.routing.channel, color: "text-green-400" },
-		{ label: "Branch", model: config.routing.branch, color: "text-violet-400" },
-		{ label: "Worker", model: config.routing.worker, color: "text-amber-400" },
+		{ label: "Channel", model: config.routing.channel, color: "text-success" },
+		{ label: "Branch", model: config.routing.branch, color: "text-accent" },
+		{ label: "Worker", model: config.routing.worker, color: "text-warning" },
 		{ label: "Compactor", model: config.routing.compactor, color: "text-blue-400" },
 		{ label: "Cortex", model: config.routing.cortex, color: "text-pink-400" },
 	];
@@ -590,7 +597,7 @@ function ModelRoutingList({ config }: { config: { routing: { channel: string; br
 			{models.map(({ label, model, color }) => (
 				<div key={label} className="flex items-center justify-between">
 					<span className="text-tiny text-ink-faint">{label}</span>
-					<span className={`text-sm ${color} truncate max-w-[140px]`} title={model}>
+					<span className={`text-sm ${color} truncate max-w-[180px]`} title={model}>
 						{formatModelName(model)}
 					</span>
 				</div>
@@ -636,7 +643,7 @@ function IdentitySection({
 	if (files.length === 0) return null;
 
 	return (
-		<section className="mt-6">
+		<section className="mt-4">
 			<div className="mb-3 flex items-center justify-between">
 				<h3 className="font-plex text-sm font-medium text-ink-dull">Identity</h3>
 				<Link
@@ -663,7 +670,7 @@ function IdentitySection({
 
 function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }) {
 	return (
-		<section className="mt-6">
+		<section className="mt-4">
 			<div className="mb-3 flex items-center justify-between">
 				<h3 className="font-plex text-sm font-medium text-ink-dull">Cron Jobs</h3>
 				<Link
@@ -681,7 +688,7 @@ function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }
 						className="flex items-center gap-3 rounded-xl bg-app-darkBox px-4 py-3"
 					>
 						<div
-							className={`h-2 w-2 rounded-full ${job.enabled ? "bg-green-500" : "bg-gray-500"}`}
+							className={`h-2 w-2 rounded-full ${job.enabled ? "bg-success" : "bg-ink-faint/50"}`}
 							title={job.enabled ? "Enabled" : "Disabled"}
 						/>
 						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull" title={job.prompt}>
@@ -704,19 +711,19 @@ function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }
 }
 
 const CORTEX_EVENT_COLORS: Record<string, string> = {
-	bulletin_generated: "bg-green-500/20 text-green-400",
-	bulletin_failed: "bg-red-500/20 text-red-400",
+	bulletin_generated: "bg-success/20 text-success",
+	bulletin_failed: "bg-error/20 text-error",
 	maintenance_run: "bg-blue-500/20 text-blue-400",
-	memory_merged: "bg-cyan-500/20 text-cyan-400",
-	memory_decayed: "bg-yellow-500/20 text-yellow-400",
+	memory_merged: "bg-accent/20 text-accent",
+	memory_decayed: "bg-warning/20 text-warning",
 	memory_pruned: "bg-orange-500/20 text-orange-400",
-	association_created: "bg-purple-500/20 text-purple-400",
-	contradiction_flagged: "bg-red-500/20 text-red-400",
-	worker_killed: "bg-red-500/20 text-red-400",
-	branch_killed: "bg-red-500/20 text-red-400",
-	circuit_breaker_tripped: "bg-amber-500/20 text-amber-400",
-	observation_created: "bg-indigo-500/20 text-indigo-400",
-	health_check: "bg-gray-500/20 text-gray-400",
+	association_created: "bg-accent/20 text-accent",
+	contradiction_flagged: "bg-error/20 text-error",
+	worker_killed: "bg-error/20 text-error",
+	branch_killed: "bg-error/20 text-error",
+	circuit_breaker_tripped: "bg-warning/20 text-warning",
+	observation_created: "bg-accent/20 text-accent",
+	health_check: "bg-ink-faint/10 text-ink-faint",
 };
 
 function CortexEventsSection({
@@ -729,7 +736,7 @@ function CortexEventsSection({
 	lastBulletinAt: string | null;
 }) {
 	return (
-		<section className="mt-6">
+		<section className="mt-4">
 			<div className="mb-3 flex items-center justify-between">
 				<h3 className="font-plex text-sm font-medium text-ink-dull">Recent Cortex Events</h3>
 				<div className="flex items-center gap-4">
@@ -765,7 +772,7 @@ function CortexEventsSection({
 }
 
 function CortexEventBadge({ type }: { type: string }) {
-	const color = CORTEX_EVENT_COLORS[type] ?? "bg-gray-500/20 text-gray-400";
+	const color = CORTEX_EVENT_COLORS[type] ?? "bg-ink-faint/50/20 text-ink-faint";
 	const label = type.replace(/_/g, " ");
 	return (
 		<span className={`flex-shrink-0 rounded px-1.5 py-0.5 text-tiny ${color}`}>

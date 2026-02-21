@@ -12,21 +12,22 @@ export const inputSizes = {
 
 export const inputStyles = cva(
 	[
-		"rounded-md border text-sm leading-4",
-		"outline-none transition-colors",
-		"text-ink",
+		"flex w-full rounded-lg border text-sm text-ink",
+		"placeholder:text-ink-faint",
+		"transition-[border-color,box-shadow] duration-150",
+		"disabled:cursor-not-allowed disabled:opacity-50",
 	],
 	{
 		variants: {
 			variant: {
-				default: ["border-app-line bg-app-darkBox", "focus-within:border-accent/50"],
+				default: ["border-app-line bg-app-darkBox", "focus-within:border-accent/60 focus-within:ring-2 focus-within:ring-accent/20 focus-within:ring-offset-1 focus-within:ring-offset-app"],
 				transparent: [
 					"border-transparent bg-app-box",
 					"focus-within:border-app-line",
 				],
 			},
 			error: {
-				true: "border-red-500/50 focus-within:border-red-500",
+				true: "border-error/50 focus-within:border-error",
 			},
 			size: inputSizes,
 		},

@@ -17,17 +17,17 @@ const PAGE_SIZE = 50;
 
 const EVENT_CATEGORY_COLORS: Record<string, string> = {
 	bulletin_generated: "bg-blue-500/15 text-blue-400",
-	bulletin_failed: "bg-red-500/15 text-red-400",
-	maintenance_run: "bg-green-500/15 text-green-400",
-	memory_merged: "bg-green-500/15 text-green-400",
-	memory_decayed: "bg-green-500/15 text-green-400",
-	memory_pruned: "bg-green-500/15 text-green-400",
+	bulletin_failed: "bg-error/15 text-error",
+	maintenance_run: "bg-success/15 text-success",
+	memory_merged: "bg-success/15 text-success",
+	memory_decayed: "bg-success/15 text-success",
+	memory_pruned: "bg-success/15 text-success",
 	association_created: "bg-violet-500/15 text-violet-400",
 	contradiction_flagged: "bg-violet-500/15 text-violet-400",
-	worker_killed: "bg-amber-500/15 text-amber-400",
-	branch_killed: "bg-amber-500/15 text-amber-400",
-	circuit_breaker_tripped: "bg-amber-500/15 text-amber-400",
-	observation_created: "bg-cyan-500/15 text-cyan-400",
+	worker_killed: "bg-warning/15 text-warning",
+	branch_killed: "bg-warning/15 text-warning",
+	circuit_breaker_tripped: "bg-warning/15 text-warning",
+	observation_created: "bg-accent/15 text-accent",
 	health_check: "bg-blue-500/15 text-blue-400",
 };
 
@@ -194,7 +194,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 					</div>
 				) : isError ? (
 					<div className="flex flex-1 items-center justify-center">
-						<p className="text-sm text-red-400">Failed to load cortex events</p>
+						<p className="text-sm text-error">Failed to load cortex events</p>
 					</div>
 				) : events.length === 0 ? (
 					<div className="flex flex-1 items-center justify-center">
@@ -211,7 +211,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 									<div key={event.id} className="border-b border-app-line/30">
 										<button
 											onClick={() => setExpandedId(isExpanded ? null : event.id)}
-											className="flex w-full items-center gap-4 px-6 py-3 text-left transition-colors hover:bg-app-darkBox/30"
+											className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-app-darkBox/30"
 										>
 											<span className="w-20 flex-shrink-0 text-tiny text-ink-faint">
 												{formatTimeAgo(event.created_at)}
@@ -236,7 +236,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 													transition={{ type: "spring", stiffness: 500, damping: 35 }}
 													className="overflow-hidden"
 												>
-													<div className="border-t border-app-line/20 bg-app-darkBox/20 px-6 py-4">
+													<div className="border-t border-app-line/20 bg-app-darkBox/20 px-4 py-3">
 														<DetailsPanel details={event.details} />
 													</div>
 												</motion.div>

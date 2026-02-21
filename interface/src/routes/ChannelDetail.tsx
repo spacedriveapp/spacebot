@@ -32,7 +32,7 @@ function CancelButton({ onClick }: { onClick: () => void }) {
 				setCancelling(true);
 				onClick();
 			}}
-			className="ml-auto h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-red-500/15 hover:text-red-400"
+			className="ml-auto h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-error/15 hover:text-error"
 			title="Cancel"
 		>
 			<HugeiconsIcon icon={Cancel01Icon} className="h-3.5 w-3.5" />
@@ -77,17 +77,17 @@ function LiveWorkerRunItem({ item, live, channelId }: { item: TimelineWorkerRun;
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<div className="rounded-md bg-amber-500/10 px-3 py-2">
+				<div className="rounded-md bg-warning/10 px-3 py-2">
 					<div className="flex items-center gap-2">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-						<span className="text-sm font-medium text-amber-300">Worker</span>
+						<div className="h-2 w-2 animate-pulse rounded-full bg-warning" />
+						<span className="text-sm font-medium text-warning">Worker</span>
 						<span className="truncate text-sm text-ink-dull">{item.task}</span>
 						<CancelButton onClick={() => { api.cancelProcess(channelId, "worker", item.id).catch(console.warn); }} />
 					</div>
 					<div className="mt-1 flex items-center gap-3 pl-4 text-tiny text-ink-faint">
 						<span>{live.status}</span>
 						{live.currentTool && (
-							<span className="text-amber-400/70">{live.currentTool}</span>
+							<span className="text-warning/70">{live.currentTool}</span>
 						)}
 						{live.toolCalls > 0 && (
 							<span>{live.toolCalls} tool calls</span>
@@ -150,11 +150,11 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 					type="button"
 					onClick={() => setExpanded(!expanded)}
 					variant="ghost"
-					className="h-auto w-full justify-start rounded-md bg-amber-500/10 px-3 py-2 text-left hover:bg-amber-500/15"
+					className="h-auto w-full justify-start rounded-md bg-warning/10 px-3 py-2 text-left hover:bg-warning/15"
 				>
 					<div className="flex items-center gap-2">
-						<div className="h-2 w-2 rounded-full bg-amber-400/50" />
-						<span className="text-sm font-medium text-amber-300">Worker</span>
+						<div className="h-2 w-2 rounded-full bg-warning/50" />
+						<span className="text-sm font-medium text-warning">Worker</span>
 						<span className="truncate text-sm text-ink-dull">{item.task}</span>
 						{item.result && (
 							<span className="ml-auto text-tiny text-ink-faint">
@@ -164,7 +164,7 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 					</div>
 				</Button>
 				{expanded && item.result && (
-					<div className="mt-1 rounded-md border border-amber-500/10 bg-amber-500/5 px-3 py-2">
+					<div className="mt-1 rounded-md border border-warning/10 bg-warning/5 px-3 py-2">
 						<div className="text-sm text-ink-dull">
 							<Markdown>{item.result}</Markdown>
 						</div>
@@ -194,7 +194,7 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 					</span>
 					<div className="min-w-0 flex-1">
 						<span className={`text-sm font-medium ${
-							item.role === "user" ? "text-accent-faint" : "text-green-400"
+							item.role === "user" ? "text-accent-faint" : "text-success"
 						}`}>
 							{item.role === "user" ? (item.sender_name ?? "user") : "bot"}
 						</span>
@@ -255,7 +255,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 			{/* Main channel content */}
 			<div className="flex flex-1 flex-col overflow-hidden">
 				{/* Channel sub-header */}
-				<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
+				<div className="flex h-10 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
 					<Link
 						to="/agents/$agentId/channels"
 						params={{ agentId }}
@@ -279,8 +279,8 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 							<div className="flex items-center gap-2">
 								{activeWorkerCount > 0 && (
 									<div className="flex items-center gap-1.5">
-										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-										<span className="text-tiny text-amber-300">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
+										<span className="text-tiny text-warning">
 											{activeWorkerCount} worker{activeWorkerCount !== 1 ? "s" : ""}
 										</span>
 									</div>
@@ -317,7 +317,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 
 				{/* Timeline — flex-col-reverse keeps scroll pinned to bottom */}
 				<div ref={scrollRef} className="flex flex-1 flex-col-reverse overflow-y-auto">
-					<div className="flex flex-col gap-1 p-6">
+					<div className="flex flex-col gap-1 p-4">
 						{/* Sentinel for infinite scroll — sits above the oldest item */}
 						<div ref={sentinelRef} className="h-px" />
 						{loadingMore && (
@@ -349,7 +349,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 									{formatTimestamp(Date.now())}
 								</span>
 								<div className="flex items-center gap-1.5">
-									<span className="text-sm font-medium text-green-400">bot</span>
+									<span className="text-sm font-medium text-success">bot</span>
 									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
 									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
 									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />

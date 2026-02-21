@@ -72,7 +72,7 @@ function InstalledSkill({
 					size="sm"
 					onClick={onRemove}
 					disabled={isRemoving}
-					className="text-red-400 hover:text-red-300"
+					className="text-error hover:text-error/80"
 				>
 					<FontAwesomeIcon
 						icon={isRemoving ? faSpinner : faTrash}
@@ -107,7 +107,7 @@ function RegistrySkillCard({
 				{isInstalled && (
 					<FontAwesomeIcon
 						icon={faCheckCircle}
-						className="shrink-0 text-xs text-green-400"
+						className="shrink-0 text-xs text-success"
 					/>
 				)}
 			</div>
@@ -244,7 +244,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 		<div className="flex h-full flex-col">
 			{/* Header with tabs */}
 			<div className="border-b border-app-line">
-				<div className="flex items-center gap-1 px-6 py-3">
+				<div className="flex items-center gap-1 px-4 py-2.5">
 					<button
 						onClick={() => setActiveTab("browse")}
 						className={clsx(
@@ -280,7 +280,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 				</div>
 
 				{activeTab === "browse" && (
-					<div className="border-t border-app-line px-6 py-3">
+					<div className="border-t border-app-line px-4 py-2.5">
 						<div className="flex items-center gap-3">
 							<div className="relative flex-1">
 								<FontAwesomeIcon
@@ -321,7 +321,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 
 			{/* Content */}
 			<div ref={scrollRef} className="flex-1 overflow-y-auto">
-				<div className="p-6">
+				<div className="p-4">
 					{activeTab === "browse" && (
 						<div className="space-y-4">
 							<div className="flex items-center justify-between">
@@ -340,7 +340,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 							</div>
 
 							{isRegistryLoading && registrySkills.length === 0 && (
-								<div className="rounded-lg border border-app-line bg-app-box p-8 text-center">
+								<div className="rounded-lg border border-app-line bg-app-box p-6 text-center">
 									<FontAwesomeIcon
 										icon={faSpinner}
 										className="animate-spin text-ink-faint"
@@ -352,7 +352,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 							)}
 
 							{!isRegistryLoading && registrySkills.length === 0 && debouncedSearch && (
-								<div className="rounded-lg border border-app-line bg-app-box p-8 text-center">
+								<div className="rounded-lg border border-app-line bg-app-box p-6 text-center">
 									<p className="text-sm text-ink-faint">
 										No skills found matching "{debouncedSearch}"
 									</p>
@@ -394,7 +394,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 								</div>
 							)}
 
-							<div className="mt-8 rounded-lg border border-app-line bg-app-box p-6">
+							<div className="mt-4 rounded-lg border border-app-line bg-app-box p-4">
 								<h3 className="text-sm font-medium text-ink">
 									Install from GitHub
 								</h3>
@@ -442,12 +442,12 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 									</Button>
 								</form>
 								{installMutation.isError && (
-									<p className="mt-2 text-xs text-red-400">
+									<p className="mt-2 text-xs text-error">
 										Failed to install skill. Check the repository format.
 									</p>
 								)}
 								{installMutation.isSuccess && (
-									<p className="mt-2 text-xs text-green-400">
+									<p className="mt-2 text-xs text-success">
 										Installed {installMutation.data.installed.length} skill(s):{" "}
 										{installMutation.data.installed.join(", ")}
 									</p>
@@ -468,7 +468,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 							</div>
 
 							{isLoading && (
-								<div className="rounded-lg border border-app-line bg-app-box p-8 text-center">
+								<div className="rounded-lg border border-app-line bg-app-box p-6 text-center">
 									<FontAwesomeIcon
 										icon={faSpinner}
 										className="animate-spin text-ink-faint"
@@ -480,7 +480,7 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 							)}
 
 							{!isLoading && installedSkills.length === 0 && (
-								<div className="rounded-lg border border-app-line bg-app-box p-8 text-center">
+								<div className="rounded-lg border border-app-line bg-app-box p-6 text-center">
 									<p className="text-sm text-ink-faint">
 										No skills installed yet
 									</p>

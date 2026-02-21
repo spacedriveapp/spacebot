@@ -36,12 +36,12 @@ const SORT_OPTIONS: { value: MemorySort; label: string }[] = [
 const TYPE_COLORS: Record<MemoryType, string> = {
 	fact: "bg-blue-500/15 text-blue-400",
 	preference: "bg-pink-500/15 text-pink-400",
-	decision: "bg-amber-500/15 text-amber-400",
+	decision: "bg-warning/15 text-warning",
 	identity: "bg-purple-500/15 text-purple-400",
-	event: "bg-green-500/15 text-green-400",
-	observation: "bg-cyan-500/15 text-cyan-400",
+	event: "bg-success/15 text-success",
+	observation: "bg-accent/15 text-accent",
 	goal: "bg-orange-500/15 text-orange-400",
-	todo: "bg-red-500/15 text-red-400",
+	todo: "bg-error/15 text-error",
 };
 
 function TypeBadge({ type: memoryType }: { type: MemoryType }) {
@@ -146,7 +146,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		<div className="flex h-full">
 			<div className="flex flex-1 flex-col overflow-hidden">
 			{/* Toolbar */}
-			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
+			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-4 py-2.5">
 				{/* Search */}
 				<SearchInput
 					placeholder="Search memories..."
@@ -199,7 +199,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			</div>
 
 			{/* Type filter pills */}
-			<div className="flex items-center gap-1.5 border-b border-app-line/50 px-6 py-2">
+			<div className="flex items-center gap-1.5 border-b border-app-line/50 px-4 py-1.5">
 				<FilterButton
 					onClick={() => setTypeFilter(null)}
 					active={typeFilter === null}
@@ -228,7 +228,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			) : (
 				<>
 					{/* Table header */}
-					<div className="grid grid-cols-[80px_1fr_100px_120px_100px] gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
+					<div className="grid grid-cols-[80px_1fr_100px_120px_100px] gap-3 border-b border-app-line/50 px-4 py-1.5 text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						<span>Type</span>
 						<span>{isSearching ? "Content / Score" : "Content"}</span>
 						<span>Importance</span>
@@ -246,7 +246,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 						</div>
 					) : isError ? (
 						<div className="flex flex-1 items-center justify-center">
-							<p className="text-sm text-red-400">Failed to load memories</p>
+							<p className="text-sm text-error">Failed to load memories</p>
 						</div>
 					) : memories.length === 0 ? (
 						<div className="flex flex-1 items-center justify-center">
@@ -277,7 +277,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 										<Button
 											onClick={() => setExpandedId(isExpanded ? null : memory.id)}
 											variant="ghost"
-											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
+											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-4 py-2.5 text-left hover:bg-app-darkBox/30"
 										>
 												<TypeBadge type={memory.memory_type} />
 												<div className="min-w-0">
@@ -307,7 +307,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 														animate={{ height: "auto", opacity: 1 }}
 														exit={{ height: 0, opacity: 0 }}
 														transition={{ type: "spring", stiffness: 500, damping: 35 }}
-														className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
+														className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-4"
 													>
 														<div className="py-4">
 															<p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">

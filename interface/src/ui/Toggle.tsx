@@ -5,10 +5,10 @@ import {cx} from "./utils";
 
 const switchStyles = cva(
 	[
-		"peer inline-flex shrink-0 cursor-pointer items-center rounded-full transition-colors",
-		"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2",
+		"peer inline-flex shrink-0 cursor-pointer items-center rounded-full transition-all duration-200",
+		"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-app",
 		"disabled:cursor-not-allowed disabled:opacity-50",
-		"data-[state=checked]:bg-accent data-[state=unchecked]:bg-app-darkBox",
+		"data-[state=checked]:bg-gradient-accent data-[state=checked]:shadow-glow-accent data-[state=unchecked]:bg-app-darkBox",
 	],
 	{
 		variants: {
@@ -26,7 +26,7 @@ const switchStyles = cva(
 
 const thumbStyles = cva(
 	[
-		"pointer-events-none block rounded-full bg-white shadow-sm ring-0 transition-transform",
+		"pointer-events-none block rounded-full bg-white shadow-elevation-1 ring-0 transition-transform duration-200",
 	],
 	{
 		variants: {

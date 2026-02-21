@@ -183,7 +183,7 @@ export function AgentCron({ agentId }: AgentCronProps) {
 		<div className="flex h-full flex-col">
 			{/* Stats bar */}
 			{totalJobs > 0 && (
-				<div className="flex items-center gap-2 border-b border-app-line px-6 py-3">
+				<div className="flex items-center gap-2 border-b border-app-line px-4 py-2.5">
 					<Badge variant="accent" size="md">{totalJobs} total</Badge>
 					<Badge variant="green" size="md">{enabledJobs} enabled</Badge>
 					<Badge variant="outline" size="md">{totalRuns} runs</Badge>
@@ -198,7 +198,7 @@ export function AgentCron({ agentId }: AgentCronProps) {
 			)}
 
 			{/* Content */}
-			<div className="flex-1 overflow-auto p-6">
+			<div className="flex-1 overflow-auto p-4">
 				{isLoading && (
 					<div className="flex items-center justify-center py-12">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
@@ -206,19 +206,19 @@ export function AgentCron({ agentId }: AgentCronProps) {
 				)}
 
 				{error && (
-					<div className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-400">
+					<div className="rounded-xl bg-error/10 px-4 py-3 text-sm text-error">
 						Failed to load cron jobs
 					</div>
 				)}
 
 				{!isLoading && !error && totalJobs === 0 && (
 					<div className="flex h-full items-start justify-center pt-[15vh]">
-						<div className="flex max-w-sm flex-col items-center rounded-xl border border-dashed border-app-line/50 bg-app-darkBox/20 p-8 text-center">
-							<div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-app-line bg-app-darkBox">
-								<HugeiconsIcon icon={Clock05Icon} className="h-6 w-6 text-ink-faint" />
+						<div className="flex max-w-sm flex-col items-center rounded-xl border border-dashed border-app-line/50 bg-app-darkBox/20 p-6 text-center">
+							<div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-app-line bg-app-darkBox">
+								<HugeiconsIcon icon={Clock05Icon} className="h-5 w-5 text-ink-faint" />
 							</div>
-							<h3 className="mb-1 font-plex text-sm font-medium text-ink">No cron jobs yet</h3>
-							<p className="mb-5 max-w-md text-sm text-ink-faint">
+							<h3 className="mb-1 text-[13px] font-medium text-ink">No cron jobs yet</h3>
+							<p className="mb-3 max-w-md text-[13px] text-ink-faint leading-snug">
 								Schedule automated tasks that run on a timer and deliver results to messaging channels
 							</p>
 							<Button onClick={openCreate} variant="secondary" size="sm">
@@ -439,7 +439,7 @@ function CronJobCard({
 				{/* Status dot */}
 				<div
 					className={`mt-1.5 h-2.5 w-2.5 shrink-0 rounded-full ${
-						job.enabled ? "bg-green-500" : "bg-gray-500"
+						job.enabled ? "bg-success" : "bg-ink-faint/50"
 					}`}
 				/>
 
@@ -455,7 +455,7 @@ function CronJobCard({
 							</span>
 						)}
 						{!job.enabled && (
-							<span className="rounded bg-gray-500/20 px-1.5 py-0.5 text-tiny text-gray-400">disabled</span>
+							<span className="rounded bg-ink-faint/50/20 px-1.5 py-0.5 text-tiny text-ink-faint">disabled</span>
 						)}
 					</div>
 
@@ -476,7 +476,7 @@ function CronJobCard({
 						{successRate !== null && (
 							<>
 								<span className="text-ink-faint/50">·</span>
-								<span className={successRate >= 90 ? "text-green-500" : successRate >= 50 ? "text-yellow-500" : "text-red-500"}>
+								<span className={successRate >= 90 ? "text-success" : successRate >= 50 ? "text-warning" : "text-error"}>
 									{successRate}% success ({job.success_count}/{totalRuns})
 								</span>
 							</>
@@ -501,7 +501,7 @@ function CronJobCard({
 						⚡
 					</ActionButton>
 					<ActionButton title="Edit" onClick={onEdit}>✎</ActionButton>
-					<ActionButton title="Delete" onClick={onDelete} className="hover:text-red-400">
+					<ActionButton title="Delete" onClick={onDelete} className="hover:text-error">
 						✕
 					</ActionButton>
 				</div>
@@ -509,7 +509,7 @@ function CronJobCard({
 
 			{/* Execution history (expandable) */}
 			{isExpanded && (
-				<div className="border-t border-app-line bg-app-darkBox/50 px-4 py-3">
+				<div className="border-t border-app-line bg-app-darkBox/90 backdrop-blur-sm px-4 py-3">
 					<JobExecutions agentId={agentId} jobId={job.id} />
 				</div>
 			)}
@@ -579,7 +579,7 @@ function JobExecutions({ agentId, jobId }: { agentId: string; jobId: string }) {
 					key={execution.id}
 					className="flex items-center gap-3 rounded-lg px-3 py-1.5"
 				>
-					<span className={`text-xs ${execution.success ? "text-green-500" : "text-red-500"}`}>
+					<span className={`text-xs ${execution.success ? "text-success" : "text-error"}`}>
 						{execution.success ? "✓" : "✗"}
 					</span>
 					<span className="text-tiny tabular-nums text-ink-faint">

@@ -510,7 +510,7 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 			)}
 			{error && (
 				<div className="absolute inset-0 flex items-center justify-center">
-					<p className="text-sm text-red-400">{error}</p>
+					<p className="text-sm text-error">{error}</p>
 				</div>
 			)}
 			{!isLoading && !error && nodeCount === 0 && (

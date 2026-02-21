@@ -1,4 +1,4 @@
-export const BASE_PATH: string = (window as any).__SPACEBOT_BASE_PATH || "";
+export const BASE_PATH: string = (window as any).__OPENOZ_BASE_PATH || (window as any).__SPACEBOT_BASE_PATH || "";
 const API_BASE = BASE_PATH + "/api";
 
 export interface StatusResponse {

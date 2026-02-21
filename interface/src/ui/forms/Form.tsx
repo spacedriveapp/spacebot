@@ -15,6 +15,6 @@ export interface ErrorMessageProps {
 export const ErrorMessage = ({ error, className }: ErrorMessageProps) => {
   if (!error) return null;
   return (
-    <p className={cx("text-xs text-red-500 mt-1", className)}>{error}</p>
+    <p className={cx("text-xs text-error mt-1", className)}>{error}</p>
   );
 };

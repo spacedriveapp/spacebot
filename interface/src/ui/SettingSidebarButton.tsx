@@ -14,10 +14,10 @@ export const SettingSidebarButton = React.forwardRef<
 	<button
 		ref={ref}
 		className={cx(
-			"flex items-center gap-2 rounded-md px-2.5 py-2 text-left text-sm transition-colors",
+			"flex w-full items-center gap-2 rounded-md py-1.5 text-left text-[13px] transition-colors duration-150 relative",
 			active
-				? "bg-app-darkBox text-ink"
-				: "text-ink-dull hover:bg-app-darkBox/50 hover:text-ink",
+				? "bg-accent/10 text-accent font-medium pl-[9px] border-l-2 border-accent"
+				: "text-ink-dull hover:bg-white/[0.04] hover:text-ink pl-[11px]",
 			className
 		)}
 		{...props}

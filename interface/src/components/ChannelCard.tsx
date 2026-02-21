@@ -9,11 +9,11 @@ const VISIBLE_MESSAGES = 6;
 
 function WorkerBadge({ worker }: { worker: ActiveWorker }) {
 	return (
-		<div className="flex items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
-			<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+		<div className="flex items-center gap-2 rounded-md bg-warning/10 px-2.5 py-1.5 text-tiny">
+			<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-1.5">
-					<span className="font-medium text-amber-300">Worker</span>
+					<span className="font-medium text-warning">Worker</span>
 					<span className="truncate text-ink-dull">{worker.task}</span>
 				</div>
 				<div className="mt-0.5 flex items-center gap-2 text-ink-faint">
@@ -21,7 +21,7 @@ function WorkerBadge({ worker }: { worker: ActiveWorker }) {
 					{worker.currentTool && (
 						<>
 							<span className="text-ink-faint/50">·</span>
-							<span className="text-amber-400/70">{worker.currentTool}</span>
+							<span className="text-warning/70">{worker.currentTool}</span>
 						</>
 					)}
 					{worker.toolCalls > 0 && (
@@ -120,9 +120,9 @@ export function ChannelCard({
 				</div>
 				<div className="ml-2 flex-shrink-0">
 					<div className={`h-2 w-2 rounded-full ${
-						hasActivity ? "bg-amber-400 animate-pulse" :
+						hasActivity ? "bg-warning animate-pulse" :
 						isTyping ? "bg-accent animate-pulse" :
-						"bg-green-500/60"
+						"bg-success/60"
 					}`} />
 				</div>
 			</div>
@@ -163,7 +163,7 @@ export function ChannelCard({
 										{formatTimestamp(new Date(message.created_at).getTime())}
 									</span>
 									<span className={`flex-shrink-0 text-tiny font-medium ${
-										message.role === "user" ? "text-accent-faint" : "text-green-400"
+										message.role === "user" ? "text-accent-faint" : "text-success"
 									}`}>
 										{message.role === "user" ? (message.sender_name ?? "user") : "bot"}
 									</span>

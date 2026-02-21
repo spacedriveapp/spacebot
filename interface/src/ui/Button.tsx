@@ -5,9 +5,10 @@ import {Loader} from "./Loader";
 
 export const buttonStyles = cva(
 	[
-		"inline-flex items-center justify-center rounded-lg font-medium transition-colors",
+		"inline-flex items-center justify-center rounded-lg font-medium",
+		"transition-all duration-150 active:scale-[0.97]",
 		"disabled:pointer-events-none disabled:opacity-50",
-		"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2",
+		"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50 focus-visible:ring-offset-2 focus-visible:ring-offset-app",
 	],
 	{
 		variants: {
@@ -18,15 +19,25 @@ export const buttonStyles = cva(
 				icon: "h-8 w-8 rounded-md p-0",
 			},
 			variant: {
-				default: ["bg-accent text-white shadow", "hover:bg-accent/90"],
-				destructive: ["bg-red-600 text-white shadow-sm", "hover:bg-red-700"],
+				default: [
+					"bg-gradient-accent text-white shadow-elevation-1",
+					"hover:bg-gradient-accent-hover hover:shadow-glow-accent",
+				],
+				destructive: [
+					"bg-error text-white shadow-elevation-1",
+					"hover:bg-error/90 hover:shadow-elevation-2",
+				],
 				outline: [
 					"border border-app-line bg-transparent",
-					"hover:bg-app-hover/40 hover:text-ink",
+					"hover:bg-app-hover/40 hover:text-ink hover:border-app-hover",
+				],
+				"accent-outline": [
+					"border border-accent/30 bg-accent/10 text-accent",
+					"hover:bg-accent/20 hover:border-accent/50 hover:shadow-glow-accent",
 				],
 				secondary: [
-					"bg-app-darkBox text-ink-dull",
-					"hover:bg-app-lightBox hover:text-ink",
+					"bg-app-darkBox text-ink-dull shadow-elevation-1",
+					"hover:bg-app-lightBox hover:text-ink hover:shadow-elevation-2",
 				],
 				ghost: ["hover:bg-app-darkBox hover:text-ink-dull", "text-ink-faint"],
 				link: ["text-accent underline-offset-4", "hover:underline"],

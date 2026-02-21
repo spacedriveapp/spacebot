@@ -42,7 +42,7 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 	return (
 		<div className="flex h-full flex-col">
 			{hasChannels && (
-				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
+				<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-4 py-2.5">
 					<SearchInput
 						placeholder="Search channels..."
 						value={searchQuery}
@@ -51,7 +51,7 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 					/>
 				</div>
 			)}
-			<div className="flex-1 overflow-y-auto p-6">
+			<div className="flex-1 overflow-y-auto p-4">
 				{isLoading ? (
 					<div className="flex items-center gap-2 text-ink-dull">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
@@ -69,12 +69,12 @@ export function AgentChannels({ agentId, liveStates }: AgentChannelsProps) {
 					</div>
 				) : (
 					<div className="flex h-full items-start justify-center pt-[15vh]">
-						<div className="flex max-w-sm flex-col items-center rounded-xl border border-dashed border-app-line/50 bg-app-darkBox/20 p-8 text-center">
-							<div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full border border-app-line bg-app-darkBox">
-								<HugeiconsIcon icon={Settings02Icon} className="h-6 w-6 text-ink-faint" />
-							</div>
-							<h3 className="mb-1 font-plex text-sm font-medium text-ink">No channels yet</h3>
-							<p className="mb-5 max-w-md text-sm text-ink-faint">
+					<div className="flex max-w-sm flex-col items-center rounded-xl border border-dashed border-app-line/50 bg-app-darkBox/20 p-6 text-center">
+						<div className="mb-3 flex h-10 w-10 items-center justify-center rounded-full border border-app-line bg-app-darkBox">
+							<HugeiconsIcon icon={Settings02Icon} className="h-5 w-5 text-ink-faint" />
+						</div>
+						<h3 className="mb-1 text-[13px] font-medium text-ink">No channels yet</h3>
+						<p className="mb-3 max-w-md text-[13px] text-ink-faint leading-snug">
 								Channels appear here once the bot receives its first message. Make sure a messaging platform is configured and bound to this agent in Settings.
 							</p>
 							<Button 

@@ -22,9 +22,9 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 					className="flex items-center gap-2 rounded bg-app-darkBox/40 px-2 py-1"
 				>
 					{tool.status === "running" ? (
-						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
 					) : (
-						<span className="h-1.5 w-1.5 rounded-full bg-green-400" />
+						<span className="h-1.5 w-1.5 rounded-full bg-success" />
 					)}
 					<span className="font-mono text-tiny text-ink-faint">{tool.tool}</span>
 					{tool.status === "done" && tool.result_preview && (
@@ -69,7 +69,7 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 				<div className="flex items-center gap-2">
 					<span className="text-sm font-medium text-ink">Cortex</span>
 					{channelId && (
-						<span className="rounded bg-violet-500/10 px-1.5 py-0.5 text-tiny text-violet-400">
+						<span className="rounded bg-accent/10 px-1.5 py-0.5 text-tiny text-accent">
 							{channelId.length > 24 ? `${channelId.slice(0, 24)}...` : channelId}
 						</span>
 					)}
@@ -117,7 +117,7 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 							}`}
 						>
 							<span className={`text-tiny font-medium ${
-								message.role === "user" ? "text-accent-faint" : "text-violet-400"
+								message.role === "user" ? "text-accent-faint" : "text-accent"
 							}`}>
 								{message.role === "user" ? "admin" : "cortex"}
 							</span>
@@ -132,20 +132,20 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 					))}
 					{isStreaming && (
 						<div className="mr-2 rounded-md bg-app-darkBox/50 px-3 py-2">
-							<span className="text-tiny font-medium text-violet-400">cortex</span>
+							<span className="text-tiny font-medium text-accent">cortex</span>
 							<ToolActivityIndicator activity={toolActivity} />
 							{toolActivity.length === 0 && (
 								<div className="mt-1 flex items-center gap-1">
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400 [animation-delay:0.2s]" />
-									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400 [animation-delay:0.4s]" />
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.2s]" />
+									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent [animation-delay:0.4s]" />
 									<span className="ml-1 text-tiny text-ink-faint">thinking...</span>
 								</div>
 							)}
 						</div>
 					)}
 					{error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-md border border-error/20 bg-error/10 px-3 py-2 text-sm text-error">
 							{error}
 						</div>
 					)}
@@ -163,13 +163,13 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 						onChange={(event) => setInput(event.target.value)}
 						placeholder={isStreaming ? "Waiting for response..." : "Message the cortex..."}
 						disabled={isStreaming}
-						className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-violet-500/50 focus:outline-none disabled:opacity-50"
+						className="flex-1 rounded-md border border-app-line bg-app-darkBox px-3 py-1.5 text-sm text-ink placeholder:text-ink-faint focus:border-accent/60 focus:ring-2 focus:ring-accent/20 focus:outline-none disabled:opacity-50"
 					/>
 				<Button
 					type="submit"
 					disabled={isStreaming || !input.trim()}
 					size="sm"
-					className="bg-violet-500/20 text-violet-400 hover:bg-violet-500/30"
+					className="bg-accent/20 text-accent hover:bg-accent/30"
 				>
 					Send
 				</Button>

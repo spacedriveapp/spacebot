@@ -15,10 +15,10 @@ function formatFileSize(bytes: number): string {
 
 function StatusBadge({status}: {status: IngestFileInfo["status"]}) {
 	const styles: Record<string, string> = {
-		queued: "bg-amber-500/20 text-amber-400",
+		queued: "bg-warning/20 text-warning",
 		processing: "bg-blue-500/20 text-blue-400",
-		completed: "bg-green-500/20 text-green-400",
-		failed: "bg-red-500/20 text-red-400",
+		completed: "bg-success/20 text-success",
+		failed: "bg-error/20 text-error",
 	};
 	return (
 		<span
@@ -26,7 +26,7 @@ function StatusBadge({status}: {status: IngestFileInfo["status"]}) {
 		>
 			{(status === "processing" || status === "queued") && (
 				<span
-					className={`mr-1.5 h-1.5 w-1.5 animate-pulse rounded-full ${status === "queued" ? "bg-amber-400" : "bg-blue-400"}`}
+					className={`mr-1.5 h-1.5 w-1.5 animate-pulse rounded-full ${status === "queued" ? "bg-warning" : "bg-blue-400"}`}
 				/>
 			)}
 			{status}
@@ -124,7 +124,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 			onDrop={handleDrop}
 		>
 			{/* Stats bar */}
-			<div className="flex items-center gap-2 border-b border-app-line px-6 py-3">
+			<div className="flex items-center gap-2 border-b border-app-line px-4 py-2.5">
 				<Badge variant="accent" size="md">
 					{files.length} total
 				</Badge>
@@ -152,20 +152,20 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 				</span>
 			</div>
 
-			<div className="flex-1 overflow-auto p-6">
+			<div className="flex-1 overflow-auto p-4">
 				{/* Drop zone */}
 				<button
 					type="button"
 					onClick={() => fileInputRef.current?.click()}
 					className={clsx(
-						"mb-6 flex h-auto w-full cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed py-10 transition-colors hover:bg-app-box/20",
+						"mb-4 flex h-auto w-full cursor-pointer flex-col items-center justify-center rounded-lg border-2 border-dashed py-8 transition-colors hover:bg-app-box/20",
 						isDragging
 							? "border-accent/30 bg-accent/[0.02]"
 							: "border-app-line bg-transparent hover:border-app-line/80",
 					)}
 				>
 					<div
-						className={`mb-3 text-3xl ${isDragging ? "text-accent" : "text-ink-faint"}`}
+						className={`mb-2 text-xl ${isDragging ? "text-accent" : "text-ink-faint"}`}
 					>
 						{uploadMutation.isPending ? (
 							<span className="inline-block h-6 w-6 animate-spin rounded-full border-2 border-accent border-t-transparent" />
@@ -185,7 +185,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 						structured memories
 					</p>
 					{uploadMutation.isError && (
-						<p className="mt-2 text-xs text-red-400">
+						<p className="mt-2 text-xs text-error">
 							Upload failed. Please try again.
 						</p>
 					)}
@@ -213,7 +213,7 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 				)}
 
 				{error && (
-					<div className="rounded-xl bg-red-500/10 px-4 py-3 text-sm text-red-400">
+					<div className="rounded-xl bg-error/10 px-4 py-3 text-sm text-error">
 						Failed to load ingestion files
 					</div>
 				)}

@@ -131,7 +131,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	if (isError) {
 		return (
 			<div className="flex h-full items-center justify-center">
-				<p className="text-sm text-red-400">Failed to load configuration</p>
+				<p className="text-sm text-error">Failed to load configuration</p>
 			</div>
 		);
 	}
@@ -159,7 +159,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 							>
 								<span className="flex-1">{section.label}</span>
 								{!hasContent && (
-									<span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">empty</span>
+									<span className="rounded bg-warning/10 px-1 py-0.5 text-tiny text-warning/70">empty</span>
 								)}
 							</SettingSidebarButton>
 						);
@@ -782,14 +782,14 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 					<span className="text-tiny text-ink-faint">{description}</span>
 				</div>
 				{localDirty ? (
-					<span className="text-tiny text-amber-400">Unsaved changes</span>
+					<span className="text-tiny text-warning">Unsaved changes</span>
 				) : (
 					<span className="text-tiny text-ink-faint/50">Changes saved to config.toml</span>
 				)}
 			</div>
-			<div className="flex-1 overflow-y-auto px-8 py-8">
-				<div className="mb-6 rounded-lg border border-app-line/30 bg-app-darkBox/20 px-5 py-4">
-					<p className="text-sm leading-relaxed text-ink-dull">{detail}</p>
+			<div className="flex-1 overflow-y-auto px-5 py-4">
+				<div className="mb-3 rounded-lg border border-app-line/30 bg-app-darkBox/20 px-4 py-3">
+					<p className="text-[13px] leading-snug text-ink-dull">{detail}</p>
 				</div>
 				{renderFields()}
 			</div>

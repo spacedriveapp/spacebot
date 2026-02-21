@@ -1,22 +1,32 @@
 import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
+import { motion, type HTMLMotionProps } from "framer-motion";
 import { cx } from "./utils";
+import { slideUp, spring } from "@/lib/motion";
 
 export const cardStyles = cva(
   [
-    "rounded-xl border transition-colors",
+    "rounded-xl border transition-[border-color,box-shadow,background-color,transform] duration-150",
+    "shadow-elevation-1",
   ],
   {
     variants: {
       variant: {
         default: [
-          "border-app-line bg-app-darkBox",
+          "border-app-line/80 bg-app-darkBox",
+          "hover:border-app-hover hover:shadow-elevation-2",
         ],
         darker: [
-          "border-app-line bg-app-darkerBox",
+          "border-app-line/80 bg-app-darkerBox",
+          "hover:border-app-hover hover:shadow-elevation-2",
         ],
         ghost: [
-          "border-transparent bg-transparent",
+          "border-transparent bg-transparent shadow-none",
+        ],
+        interactive: [
+          "border-app-line/80 bg-app-darkBox cursor-pointer",
+          "hover:border-accent/30 hover:shadow-elevation-3 hover:shadow-glow-accent hover:bg-app-box",
+          "active:scale-[0.985]",
         ],
       },
       padding: {
@@ -53,6 +63,30 @@ export const Card = React.forwardRef<HTMLDivElement, CardProps>(
 
 Card.displayName = "Card";
 
+export interface AnimatedCardProps
+  extends Omit<HTMLMotionProps<"div">, "variant">,
+    CardBaseProps {
+  animate?: boolean;
+}
+
+export const AnimatedCard = React.forwardRef<HTMLDivElement, AnimatedCardProps>(
+  ({ className, variant, padding, animate = true, ...props }, ref) => {
+    return (
+      <motion.div
+        ref={ref}
+        className={cx(cardStyles({ variant, padding }), className)}
+        variants={animate ? slideUp : undefined}
+        initial={animate ? "initial" : undefined}
+        animate={animate ? "animate" : undefined}
+        transition={spring}
+        {...props}
+      />
+    );
+  }
+);
+
+AnimatedCard.displayName = "AnimatedCard";
+
 export const CardHeader = React.forwardRef<
   HTMLDivElement,
   React.HTMLAttributes<HTMLDivElement>
@@ -71,7 +105,7 @@ export const CardTitle = React.forwardRef<
 >(({ className, ...props }, ref) => (
   <h3
     ref={ref}
-    className={cx("font-plex text-base font-semibold text-ink", className)}
+    className={cx("text-base font-semibold tracking-tight text-ink", className)}
     {...props}
   />
 ));

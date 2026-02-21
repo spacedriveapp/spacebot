@@ -290,7 +290,7 @@ export function ChannelSettingCard({
 						<span className="text-sm font-medium text-ink">{name}</span>
 						{configured && (
 							<span
-								className={`text-tiny ${enabled ? "text-green-400" : "text-ink-faint"}`}
+								className={`text-tiny ${enabled ? "text-success" : "text-ink-faint"}`}
 							>
 								{enabled ? "● Active" : "○ Disabled"}
 							</span>
@@ -384,8 +384,8 @@ export function ChannelSettingCard({
 								<div
 									className={`rounded-md border px-3 py-2 text-sm ${
 										message.type === "success"
-											? "border-green-500/20 bg-green-500/10 text-green-400"
-											: "border-red-500/20 bg-red-500/10 text-red-400"
+											? "border-green-500/20 bg-success/10 text-success"
+											: "border-error/20 bg-error/10 text-error"
 									}`}
 								>
 									{message.text}
@@ -492,7 +492,7 @@ function CredentialsSection({
 					/>
 					<p className="mt-1.5 text-xs text-ink-faint">
 						Need help?{" "}
-						<a href="https://docs.spacebot.sh/discord-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+						<a href="https://docs.openoz.sh/discord-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
 							Read the Discord setup docs &rarr;
 						</a>
 					</p>
@@ -544,7 +544,7 @@ function CredentialsSection({
 					</div>
 					<p className="text-xs text-ink-faint">
 						Need help?{" "}
-						<a href="https://docs.spacebot.sh/slack-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+						<a href="https://docs.openoz.sh/slack-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
 							Read the Slack setup docs &rarr;
 						</a>
 					</p>
@@ -577,7 +577,7 @@ function CredentialsSection({
 					/>
 					<p className="mt-1.5 text-xs text-ink-faint">
 						Need help?{" "}
-						<a href="https://docs.spacebot.sh/telegram-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+						<a href="https://docs.openoz.sh/telegram-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
 							Read the Telegram setup docs &rarr;
 						</a>
 					</p>
@@ -968,7 +968,7 @@ function DisconnectSection({
 				</Button>
 			) : (
 				<div className="flex flex-col gap-2">
-					<p className="text-sm text-red-400">
+					<p className="text-sm text-error">
 						This will remove all credentials and bindings for {name}. The bot
 						will stop responding immediately.
 					</p>
@@ -984,7 +984,7 @@ function DisconnectSection({
 							size="sm"
 							onClick={onDisconnect}
 							loading={disconnecting}
-							className="bg-red-500/20 text-red-400 hover:bg-red-500/30"
+							className="bg-error/20 text-error hover:bg-error/30"
 						>
 							Confirm Disconnect
 						</Button>

@@ -64,7 +64,7 @@ export function CreateAgentDialog({open, onOpenChange}: CreateAgentDialogProps) 
 						</p>
 					</div>
 					{error && (
-						<div className="rounded-md border border-red-500/20 bg-red-500/10 px-3 py-2 text-sm text-red-400">
+						<div className="rounded-md border border-error/20 bg-error/10 px-3 py-2 text-sm text-error">
 							{error}
 						</div>
 					)}

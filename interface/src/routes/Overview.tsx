@@ -1,11 +1,23 @@
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState, useEffect, useCallback, type ComponentType, type ForwardRefExoticComponent } from "react";
+import { BotIcon } from "@/components/icons/bot";
+import { BrainIcon } from "@/components/icons/brain";
+import { CpuIcon } from "@/components/icons/cpu";
+import { ZapIcon } from "@/components/icons/zap";
+import { ActivityIcon } from "@/components/icons/activity";
+import { AtomIcon } from "@/components/icons/atom";
+import { SparklesIcon } from "@/components/icons/sparkles";
+import { RocketIcon } from "@/components/icons/rocket";
+import { FlameIcon } from "@/components/icons/flame";
 import { Link } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { api, type AgentSummary } from "@/api/client";
+import { motion, AnimatePresence } from "framer-motion";
+import { api, type AgentSummary, type CortexEvent } from "@/api/client";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { formatTimeAgo, formatUptime } from "@/lib/format";
-import { ResponsiveContainer, AreaChart, Area } from "recharts";
+import { staggerContainer, cardEntrance } from "@/lib/motion";
+import { SkeletonCard } from "@/ui/Skeleton";
+import { FilterButton } from "@/ui/FilterButton";
 
 interface OverviewProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -13,6 +25,8 @@ interface OverviewProps {
 
 export function Overview({ liveStates }: OverviewProps) {
 	const [createOpen, setCreateOpen] = useState(false);
+	const [hoveredAgent, setHoveredAgent] = useState<string | null>(null);
+	const [activityFilter, setActivityFilter] = useState<string>("all");
 
 	const { data: statusData } = useQuery({
 		queryKey: ["status"],
@@ -35,7 +49,6 @@ export function Overview({ liveStates }: OverviewProps) {
 	const channels = channelsData?.channels ?? [];
 	const agents = overviewData?.agents ?? [];
 
-	// Aggregate live activity across all agents
 	const activity = useMemo(() => {
 		let workers = 0;
 		let branches = 0;
@@ -48,7 +61,6 @@ export function Overview({ liveStates }: OverviewProps) {
 		return { workers, branches, typing };
 	}, [liveStates]);
 
-	// Get live activity for a specific agent
 	const getAgentActivity = (agentId: string) => {
 		let workers = 0;
 		let branches = 0;
@@ -62,16 +74,34 @@ export function Overview({ liveStates }: OverviewProps) {
 		return { workers, branches, hasActivity: workers > 0 || branches > 0 };
 	};
 
-	// Recent channels (sorted by last activity, max 6)
-	const recentChannels = useMemo(() => {
-		return [...channels]
-			.sort((a, b) => new Date(b.last_activity_at).getTime() - new Date(a.last_activity_at).getTime())
-			.slice(0, 6);
-	}, [channels]);
+	const allEvents = useQuery({
+		queryKey: ["global-cortex-events", agents.map((a) => a.id).join(",")],
+		queryFn: async () => {
+			if (agents.length === 0) return [];
+			const results = await Promise.all(
+				agents.map((a) =>
+					api.cortexEvents(a.id, { limit: 8 }).then((r) =>
+						r.events.map((e) => ({ ...e, agentId: a.id, agentName: a.profile?.display_name ?? a.id }))
+					)
+				)
+			);
+			return results
+				.flat()
+				.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
+				.slice(0, 20);
+		},
+		enabled: agents.length > 0,
+		refetchInterval: 15_000,
+	});
+
+	const totalMemories = agents.reduce((sum, a) => sum + a.memory_total, 0);
+	const activeAgents = agents.filter((a) => {
+		const act = getAgentActivity(a.id);
+		return act.hasActivity || (a.last_activity_at && new Date(a.last_activity_at).getTime() > Date.now() - 5 * 60 * 1000);
+	}).length;
 
 	return (
 		<div className="flex flex-col h-full">
-			{/* Instance Hero */}
 			<HeroSection
 				status={statusData}
 				totalChannels={channels.length}
@@ -79,75 +109,99 @@ export function Overview({ liveStates }: OverviewProps) {
 				activity={activity}
 			/>
 
-			{/* Content */}
-			<main className="flex-1 overflow-y-auto p-6">
+			<main className="relative flex-1 min-h-0 overflow-hidden px-8 py-6">
 				{overviewLoading ? (
-					<div className="flex items-center gap-2 text-ink-dull">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-						Loading dashboard...
+					<div className="grid grid-cols-3 gap-5">
+						{[1, 2, 3].map((i) => <SkeletonCard key={i} className="h-48" />)}
 					</div>
 				) : agents.length === 0 ? (
-					<div className="rounded-lg border border-dashed border-app-line p-8 text-center">
-						<p className="text-sm text-ink-faint">No agents configured.</p>
-						<button
-							onClick={() => setCreateOpen(true)}
-							className="mt-3 text-sm text-accent hover:text-accent/80 transition-colors"
-						>
-							Create your first agent
-						</button>
-						<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
+					<div className="flex h-full items-center justify-center">
+						<div className="rounded-lg border border-dashed border-app-line p-8 text-center">
+							<p className="text-[14px] text-ink-faint">No agents configured.</p>
+							<button
+								onClick={() => setCreateOpen(true)}
+								className="mt-3 text-[14px] text-accent hover:text-accent/80 transition-colors"
+							>
+								Create your first agent
+							</button>
+							<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
+						</div>
 					</div>
 				) : (
-					<div className="flex flex-col gap-6">
-						{/* Agent Cards */}
+					<div className="flex flex-col h-full gap-6">
 						<section>
-							<div className="mb-4 flex items-center justify-between">
-								<h2 className="font-plex text-sm font-medium text-ink-dull">Agents</h2>
-								<button
-									onClick={() => setCreateOpen(true)}
-									className="text-sm text-ink-faint hover:text-ink transition-colors"
-								>
-									+ New Agent
-								</button>
-							</div>
-							<div className="grid grid-cols-1 gap-5 sm:grid-cols-2 xl:grid-cols-3">
+							<SectionHeader title="Agents" right={
+								<button onClick={() => setCreateOpen(true)} className="text-[12px] text-ink-faint/60 hover:text-accent transition-colors">+ New</button>
+							} />
+							<motion.div
+								className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4"
+								variants={staggerContainer}
+								initial="initial"
+								animate="animate"
+							>
 								{agents.map((agent) => (
 									<AgentCard
 										key={agent.id}
 										agent={agent}
 										liveActivity={getAgentActivity(agent.id)}
+										isHovered={hoveredAgent === agent.id}
+										isDimmed={hoveredAgent !== null && hoveredAgent !== agent.id}
+										onHover={setHoveredAgent}
 									/>
 								))}
-							</div>
+							</motion.div>
 							<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
 						</section>
 
-						{/* Recent Channels */}
-						{recentChannels.length > 0 && (
-							<section>
-								<div className="mb-4 flex items-center justify-between">
-									<h2 className="font-plex text-sm font-medium text-ink-dull">Recent Activity</h2>
-									<span className="text-tiny text-ink-faint">{channels.length} total channels</span>
-								</div>
-								<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
-									{recentChannels.map((channel) => (
-										<ChannelCard
-											key={channel.id}
-											channel={channel}
-											liveState={liveStates[channel.id]}
-										/>
-										))}
-								</div>
-							</section>
-							)}
+					<StatsPills
+						uptime={statusData?.uptime_seconds ?? 0}
+						totalAgents={agents.length}
+						activeAgents={activeAgents}
+						totalChannels={channels.length}
+						totalMemories={totalMemories}
+						activity={activity}
+					/>
+
+					<section className="flex flex-col flex-1 min-h-0">
+						<SectionHeader title="Activity" right={
+							<span className="text-[12px] tabular-nums text-ink-faint/50">{allEvents.data?.length ?? 0} events</span>
+						} />
+						<div className="flex items-center gap-1.5 mb-2">
+							<FilterButton active={activityFilter === "all"} onClick={() => setActivityFilter("all")}>All</FilterButton>
+							<FilterButton active={activityFilter === "errors"} onClick={() => setActivityFilter("errors")}>Errors</FilterButton>
+							{agents.map(a => (
+								<FilterButton key={a.id} active={activityFilter === a.id} onClick={() => setActivityFilter(a.id)}>
+									{a.profile?.display_name ?? a.id}
+								</FilterButton>
+							))}
 						</div>
-					)}
-				</main>
-			</div>
+						<div className="relative flex-1 min-h-0">
+							<div className="absolute inset-0 overflow-y-auto scrollbar-sleek">
+								<ActivityFeed
+									events={allEvents.data ?? []}
+									agents={agents}
+									hoveredAgent={hoveredAgent}
+									activityFilter={activityFilter}
+								/>
+							</div>
+							<div className="pointer-events-none absolute bottom-0 left-0 right-0 h-20 bg-gradient-to-t from-app-darkerBox via-app-darkerBox/60 to-transparent" />
+						</div>
+					</section>
+					</div>
+				)}
+			</main>
+		</div>
 	);
 }
 
-// -- Components --
+function SectionHeader({ title, right }: { title: string; right?: React.ReactNode }) {
+	return (
+		<div className="mb-3.5 flex items-center justify-between">
+			<h2 className="text-[12px] font-semibold uppercase tracking-[0.12em] text-ink-dull">{title}</h2>
+			{right}
+		</div>
+	);
+}
 
 function HeroSection({
 	status,
@@ -163,72 +217,54 @@ function HeroSection({
 	const uptime = status?.uptime_seconds ?? 0;
 
 	return (
-		<div className="border-b border-app-line bg-app-darkBox/50 px-6 py-6">
-			<div className="mx-auto max-w-6xl">
-				<div className="flex flex-col gap-4">
-					{/* Title row */}
-					<div className="flex items-center justify-between">
-						<div className="flex items-center gap-3">
-							<h1 className="font-plex text-2xl font-semibold text-ink">Spacebot</h1>
-							{status ? (
-								<div className="flex items-center gap-2 rounded-full bg-app-darkBox px-3 py-1 text-tiny">
-									<div className="h-2 w-2 rounded-full bg-green-500" />
-									<span className="text-ink-dull">Running</span>
-								</div>
-							) : (
-								<div className="flex items-center gap-2 rounded-full bg-app-darkBox px-3 py-1 text-tiny">
-									<div className="h-2 w-2 rounded-full bg-red-500" />
-									<span className="text-red-400">Unreachable</span>
-								</div>
-							)}
+		<div className="border-b border-app-line/60 bg-app-darkBox/80 px-4 py-2.5">
+			<div className="mx-auto flex items-center justify-between">
+				<div className="flex items-center gap-3">
+					<h1 className="font-plex text-[17px] font-semibold tracking-tight text-ink">OpenOz</h1>
+					{status ? (
+						<div className="flex items-center gap-1.5 text-[12px] text-ink-faint">
+							<div className="h-1.5 w-1.5 rounded-full bg-success" />
+							<span>{formatUptime(uptime)}</span>
 						</div>
-
-						<span className="text-tiny text-ink-faint">
-							{formatUptime(uptime)} uptime
-						</span>
-					</div>
-
-					{/* Stats row */}
-					<div className="flex flex-wrap items-center gap-4">
-						<div className="flex items-center gap-6 text-sm">
-							<div className="flex items-baseline gap-1.5">
-								<span className="text-lg font-medium tabular-nums text-ink">{totalAgents}</span>
-								<span className="text-ink-faint">agent{totalAgents !== 1 ? "s" : ""}</span>
-							</div>
-							<div className="flex items-baseline gap-1.5">
-								<span className="text-lg font-medium tabular-nums text-ink">{totalChannels}</span>
-								<span className="text-ink-faint">channel{totalChannels !== 1 ? "s" : ""}</span>
-							</div>
+					) : (
+						<div className="flex items-center gap-1.5 text-[12px]">
+							<div className="h-1.5 w-1.5 rounded-full bg-error" />
+							<span className="text-error">Offline</span>
 						</div>
+					)}
+					<span className="text-[12px] text-ink-faint/60">·</span>
+					<span className="text-[12px] tabular-nums text-ink-faint">{totalAgents} agents</span>
+					<span className="text-[12px] text-ink-faint/60">·</span>
+					<span className="text-[12px] tabular-nums text-ink-faint">{totalChannels} channels</span>
+				</div>
 
-						{(activity.workers > 0 || activity.branches > 0) && (
-							<div className="flex items-center gap-2">
-								{activity.workers > 0 && (
-									<div className="flex items-center gap-2 rounded-full bg-amber-500/10 px-3 py-1.5 text-sm">
-										<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
-										<span className="font-medium text-amber-400">
-											{activity.workers} worker{activity.workers !== 1 ? "s" : ""}
-										</span>
-									</div>
-								)}
-								{activity.branches > 0 && (
-									<div className="flex items-center gap-2 rounded-full bg-violet-500/10 px-3 py-1.5 text-sm">
-										<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
-										<span className="font-medium text-violet-400">
-											{activity.branches} branch{activity.branches !== 1 ? "es" : ""}
-										</span>
-									</div>
-								)}
-							</div>
+				{(activity.workers > 0 || activity.branches > 0) && (
+					<div className="flex items-center gap-2">
+						{activity.workers > 0 && (
+							<span className="flex items-center gap-1.5 rounded-full bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
+								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-warning" />
+								{activity.workers}w
+							</span>
+						)}
+						{activity.branches > 0 && (
+							<span className="flex items-center gap-1.5 rounded-full bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+								{activity.branches}b
+							</span>
 						)}
 					</div>
-				</div>
+				)}
 			</div>
 		</div>
 	);
 }
 
-/** Deterministic gradient from a seed string. Produces two HSL colors. */
+function hashCode(s: string): number {
+	let h = 0;
+	for (let i = 0; i < s.length; i++) { h = s.charCodeAt(i) + ((h << 5) - h); h |= 0; }
+	return h;
+}
+
 function seedGradient(seed: string): [string, string] {
 	let hash = 0;
 	for (let i = 0; i < seed.length; i++) {
@@ -243,249 +279,322 @@ function seedGradient(seed: string): [string, string] {
 	];
 }
 
-function AgentAvatar({ seed, size = 64 }: { seed: string; size?: number }) {
-	const [c1, c2] = seedGradient(seed);
-	const gradientId = `avatar-${seed.replace(/[^a-z0-9]/gi, "")}`;
-	return (
-		<svg width={size} height={size} viewBox="0 0 64 64" className="flex-shrink-0 rounded-full">
-			<defs>
-				<linearGradient id={gradientId} x1="0%" y1="0%" x2="100%" y2="100%">
-					<stop offset="0%" stopColor={c1} />
-					<stop offset="100%" stopColor={c2} />
-				</linearGradient>
-			</defs>
-			<circle cx="32" cy="32" r="32" fill={`url(#${gradientId})`} />
-		</svg>
-	);
+function seedColorAlpha(color: string, alpha: number): string {
+	return color.replace('hsl(', 'hsla(').replace(')', `, ${alpha})`);
 }
 
-/** Gradient banner SVG that fills the card top. Uses the same seed as the avatar. */
-function BannerGradient({ seed }: { seed: string }) {
+const AGENT_ICONS = [BotIcon, BrainIcon, CpuIcon, ZapIcon, ActivityIcon, AtomIcon, SparklesIcon, RocketIcon, FlameIcon];
+
+function AgentAvatar({ seed, size = 64 }: { seed: string; size?: number }) {
 	const [c1, c2] = seedGradient(seed);
-	const bannerId = `banner-${seed.replace(/[^a-z0-9]/gi, "")}`;
+	const h = hashCode(seed);
+	const IconComponent = AGENT_ICONS[Math.abs(h) % AGENT_ICONS.length];
+	const iconSize = Math.round(size * 0.55);
+
 	return (
-		<svg className="absolute inset-0 h-full w-full rounded-t-xl" preserveAspectRatio="none" viewBox="0 0 400 100">
-			<defs>
-				<linearGradient id={bannerId} x1="0%" y1="0%" x2="100%" y2="100%">
-					<stop offset="0%" stopColor={c1} stopOpacity={0.25} />
-					<stop offset="100%" stopColor={c2} stopOpacity={0.15} />
-				</linearGradient>
-			</defs>
-			<rect width="400" height="100" fill={`url(#${bannerId})`} />
-		</svg>
+		<div
+			className="flex-shrink-0 flex items-center justify-center rounded-full"
+			style={{
+				width: size,
+				height: size,
+				background: `linear-gradient(135deg, ${c1}, ${c2})`,
+			}}
+		>
+			<IconComponent size={iconSize} className="text-white/90" />
+		</div>
 	);
 }
 
 function AgentCard({
 	agent,
 	liveActivity,
+	isHovered,
+	isDimmed,
+	onHover,
 }: {
 	agent: AgentSummary;
 	liveActivity: { workers: number; branches: number; hasActivity: boolean };
+	isHovered: boolean;
+	isDimmed: boolean;
+	onHover: (id: string | null) => void;
 }) {
 	const isActive = liveActivity.hasActivity || (agent.last_activity_at && new Date(agent.last_activity_at).getTime() > Date.now() - 5 * 60 * 1000);
 	const profile = agent.profile;
 	const displayName = profile?.display_name ?? agent.id;
 	const avatarSeed = profile?.avatar_seed ?? agent.id;
+	const [c1, c2] = seedGradient(avatarSeed);
 
 	return (
-		<Link
-			to="/agents/$agentId"
-			params={{ agentId: agent.id }}
-			className="group flex flex-col rounded-xl border border-app-line bg-app-darkBox overflow-hidden transition-all hover:border-app-line/80 hover:bg-app-darkBox/80"
-		>
-			{/* Banner + Avatar */}
-			<div className="relative h-20">
-				<BannerGradient seed={avatarSeed} />
-				{/* Live activity badges — top right */}
-				{(liveActivity.workers > 0 || liveActivity.branches > 0) && (
-					<div className="absolute top-2.5 right-3 flex items-center gap-1.5 z-10">
-						{liveActivity.workers > 0 && (
-							<span className="flex items-center gap-1 rounded-full bg-amber-500/20 backdrop-blur-sm px-2 py-0.5 text-tiny text-amber-400">
-								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-								{liveActivity.workers}w
-							</span>
-						)}
-						{liveActivity.branches > 0 && (
-							<span className="flex items-center gap-1 rounded-full bg-violet-500/20 backdrop-blur-sm px-2 py-0.5 text-tiny text-violet-400">
-								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-								{liveActivity.branches}b
-							</span>
-						)}
+		<motion.div variants={cardEntrance} className="h-full">
+			<Link
+				to="/agents/$agentId"
+				params={{ agentId: agent.id }}
+				className="group relative flex flex-col h-full rounded-xl overflow-hidden transition-all duration-300"
+				style={{
+					border: `1px solid color-mix(in srgb, ${c1} ${isHovered ? "18%" : "10%"}, rgba(255,255,255,${isHovered ? "0.1" : "0.06"}))`,
+					boxShadow: isHovered ? `0 4px 16px rgba(0,0,0,0.3), 0 1px 3px rgba(0,0,0,0.2), 0 0 0 1px rgba(255,255,255,0.06), 0 2px 12px ${seedColorAlpha(c1, 0.14)}, inset 0 1px 0 rgba(255,255,255,0.05)` : `0 1px 2px rgba(0,0,0,0.25), 0 0 0 1px rgba(255,255,255,0.03), 0 1px 4px rgba(0,0,0,0.2)`,
+					background: `linear-gradient(170deg, ${seedColorAlpha(c1, 0.06)} 0%, ${seedColorAlpha(c2, 0.02)} 40%, hsla(245,12%,12%,1) 100%)`,
+					opacity: isDimmed ? 0.4 : 1,
+					filter: isDimmed ? "brightness(0.7)" : "none",
+				}}
+				onMouseEnter={() => onHover(agent.id)}
+				onMouseLeave={() => onHover(null)}
+			>
+				<div
+					className="pointer-events-none absolute inset-0 z-10 animate-card-shine"
+					style={{
+						"--shine-duration": `${30 + Math.abs(hashCode(avatarSeed) % 20)}s`,
+						"--shine-delay": `${Math.abs(hashCode(avatarSeed + "d") % 20)}s`,
+						backgroundImage: `linear-gradient(105deg, transparent 40%, rgba(255,255,255,0.01) 45%, rgba(255,255,255,0.01) 55%, transparent 60%)`,
+						backgroundSize: "250% 100%",
+					} as React.CSSProperties}
+				/>
+				<div className="relative flex-1 p-5">
+					<div className="flex items-start gap-3">
+						<div className="relative shrink-0 mt-0.5">
+							<AgentAvatar seed={avatarSeed} size={36} />
+							<div
+								className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-[1.5px] ${
+									isActive ? "bg-success shadow-[0_0_6px_rgba(74,222,128,0.4)]" : "bg-ink-faint/30"
+								}`}
+								style={{ borderColor: `hsla(245,12%,12%,1)` }}
+							/>
+						</div>
+						<div className="min-w-0 flex-1">
+							<div className="flex items-center justify-between">
+								<h3 className="truncate flex-1 min-w-0 text-[15px] font-semibold tracking-[-0.01em] text-ink group-hover:text-white transition-colors">{displayName}</h3>
+								{(liveActivity.workers > 0 || liveActivity.branches > 0) && (
+									<div className="flex items-center gap-1 ml-2 shrink-0">
+										{liveActivity.workers > 0 && (
+											<span className="flex items-center gap-1 rounded-full bg-warning/10 px-1.5 py-0.5 text-[10px] font-medium text-warning">
+												<span className="h-1 w-1 animate-pulse rounded-full bg-warning" />
+												{liveActivity.workers}
+											</span>
+										)}
+										{liveActivity.branches > 0 && (
+											<span className="flex items-center gap-1 rounded-full bg-accent/10 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+												<span className="h-1 w-1 animate-pulse rounded-full bg-accent" />
+												{liveActivity.branches}
+											</span>
+										)}
+									</div>
+								)}
+							</div>
+							{profile?.bio && (
+								<ScrollOnHover text={profile.bio} className="mt-1 text-[13px] leading-[1.5] text-ink-dull/70" lines={1} />
+							)}
+						</div>
 					</div>
-				)}
-			</div>
 
-			{/* Avatar — overlapping the banner */}
-			<div className="relative px-5 -mt-8">
-				<div className="relative inline-block">
-					<div className="rounded-full border-[3px] border-app-darkBox">
-						<AgentAvatar seed={avatarSeed} size={64} />
+					<div className="flex items-center gap-4 mt-auto pt-3 border-t border-white/[0.05] text-[12px]">
+						<StatusRow label="Status" value={isActive ? "Active" : "Idle"} active={!!isActive} />
+						<StatusRow label="Last" value={agent.last_activity_at ? formatTimeAgo(agent.last_activity_at) : "—"} />
+						<StatusRow label="Ch" value={String(agent.channel_count)} />
+						<StatusRow label="Mem" value={agent.memory_total >= 1000 ? `${(agent.memory_total / 1000).toFixed(1)}k` : String(agent.memory_total)} />
 					</div>
-					<div
-						className={`absolute bottom-0.5 right-0.5 h-4 w-4 rounded-full border-[2.5px] border-app-darkBox ${
-							isActive ? "bg-green-500" : "bg-gray-500"
-						}`}
-					/>
 				</div>
-			</div>
-
-			{/* Name + status */}
-			<div className="px-5 mt-2">
-				<h3 className="font-plex text-xl font-semibold text-ink truncate">
-					{displayName}
-				</h3>
-				{profile?.status ? (
-					<p className="mt-1 text-sm text-ink-dull italic">
-						{profile.status}
-					</p>
-				) : agent.last_activity_at ? (
-					<p className="mt-1 text-tiny text-ink-faint">
-						Active {formatTimeAgo(agent.last_activity_at)}
-					</p>
-				) : null}
-			</div>
-
-			{/* Bio — full text, no truncation */}
-			{profile?.bio ? (
-				<p className="px-5 mt-3 text-sm leading-relaxed text-ink-dull">
-					{profile.bio}
-				</p>
-			) : (
-				<p className="px-5 mt-3 text-sm leading-relaxed text-ink-faint">
-					This agent will fill out its own profile as it develops a personality through conversations.
-				</p>
-			)}
-
-			{/* Spacer pushes footer down when bio is short */}
-			<div className="flex-1" />
-
-			{/* Sparkline */}
-			{agent.activity_sparkline?.some((v) => v > 0) && (
-				<div className="mx-5 mt-4 h-10">
-					<SparklineChart data={agent.activity_sparkline} />
-				</div>
-			)}
-
-			{/* Stats footer */}
-			<div className="flex items-center gap-4 px-5 py-3.5 mt-3 border-t border-app-line/50 text-tiny">
-				<StatPill label="channels" value={agent.channel_count} />
-				<StatPill label="memories" value={agent.memory_total} />
-				{agent.cron_job_count > 0 && (
-					<StatPill label="cron" value={agent.cron_job_count} />
-				)}
-				{agent.last_bulletin_at && (
-					<span className="ml-auto text-accent/60">
-						Bulletin {formatTimeAgo(agent.last_bulletin_at)}
-					</span>
-				)}
-			</div>
-		</Link>
+			</Link>
+		</motion.div>
 	);
 }
 
-function StatPill({ label, value }: { label: string; value: number }) {
+function ScrollOnHover({ text, className, lines = 2 }: { text: string; className?: string; lines?: number }) {
+	const innerRef = useRef<HTMLParagraphElement>(null);
+	const [expanded, setExpanded] = useState(false);
+	const [animating, setAnimating] = useState(false);
+	const [hasOverflow, setHasOverflow] = useState(false);
+	const [clampedH, setClampedH] = useState(0);
+	const [naturalH, setNaturalH] = useState(0);
+
+	useEffect(() => {
+		const el = innerRef.current;
+		if (!el) return;
+		const clamped = el.clientHeight;
+		setClampedH(clamped);
+		el.style.webkitLineClamp = "unset";
+		const natural = el.scrollHeight;
+		el.style.webkitLineClamp = "";
+		setNaturalH(natural);
+		setHasOverflow(natural > clamped + 2);
+	}, [text, lines]);
+
+	const useClamp = !expanded && !animating;
+
 	return (
-		<span className="text-ink-faint">
-			<span className="font-medium tabular-nums text-ink-dull">
-				{value >= 1000 ? `${(value / 1000).toFixed(1)}k` : value}
-			</span>
-			{" "}{label}
+		<div
+			className="overflow-hidden transition-[max-height] ease-[cubic-bezier(0.25,0.1,0.25,1)]"
+			style={{
+				maxHeight: expanded ? `${naturalH}px` : clampedH ? `${clampedH}px` : `${lines * 1.5}em`,
+				transitionDuration: expanded ? "250ms" : "350ms",
+			}}
+			onMouseEnter={() => {
+				if (!hasOverflow) return;
+				setAnimating(true);
+				setExpanded(true);
+			}}
+			onMouseLeave={() => setExpanded(false)}
+			onTransitionEnd={(e) => {
+				if (e.propertyName === "max-height" && !expanded) setAnimating(false);
+			}}
+		>
+			<p
+				ref={innerRef}
+				className={`${useClamp ? `line-clamp-${lines}` : ""} ${className ?? ""}`}
+			>
+				{text}
+			</p>
+		</div>
+	);
+}
+
+function StatusRow({ label, value, active }: { label: string; value: string; active?: boolean }) {
+	return (
+		<div className="flex items-center gap-1.5">
+			{active !== undefined && (
+				<div className={`h-1.5 w-1.5 rounded-full ${active ? "bg-success" : "bg-ink-faint/30"}`} />
+			)}
+			<span className="text-ink-faint/50">{label}</span>
+			<span className="tabular-nums text-ink-dull/80">{value}</span>
+		</div>
+	);
+}
+
+type ActivityEvent = CortexEvent & { agentId: string; agentName: string };
+
+const EVENT_ICONS: Record<string, string> = {
+	inbound_message: "💬",
+	outbound_message: "→",
+	worker_started: "⚡",
+	worker_completed: "✓",
+	worker_failed: "✗",
+	branch_started: "⎇",
+	branch_completed: "✓",
+	bulletin_generated: "📋",
+	memory_merged: "🧠",
+	association_created: "🔗",
+	observation_created: "👁",
+	cron_triggered: "⏰",
+};
+
+function getEventIndicator(eventType: string): { border: string; bg: string } | null {
+	if (eventType.includes("failed") || eventType.includes("error")) {
+		return { border: "border-l-2 border-red-500/60", bg: "bg-red-500/[0.03]" };
+	}
+	if (eventType.includes("completed") || eventType.includes("success")) {
+		return { border: "border-l-2 border-emerald-500/40", bg: "" };
+	}
+	return null;
+}
+
+function ActivityFeed({ events, agents, hoveredAgent, activityFilter }: { events: ActivityEvent[]; agents: AgentSummary[]; hoveredAgent: string | null; activityFilter: string }) {
+	const filteredEvents = useMemo(() => {
+		if (activityFilter === "all") return events;
+		if (activityFilter === "errors") return events.filter(e => e.event_type.includes("failed") || e.event_type.includes("error"));
+		return events.filter(e => e.agentId === activityFilter);
+	}, [events, activityFilter]);
+
+	if (filteredEvents.length === 0) {
+		return (
+			<div className="rounded-lg border border-dashed border-white/[0.06] p-6 text-center">
+				<p className="text-[12px] text-ink-faint/50">No recent activity</p>
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex flex-col pb-12">
+			<AnimatePresence mode="popLayout" initial={false}>
+				{filteredEvents.map((event, i) => {
+					const agent = agents.find((a) => a.id === event.agentId);
+					const avatarSeed = agent?.profile?.avatar_seed ?? event.agentId;
+					const icon = EVENT_ICONS[event.event_type] ?? "·";
+					const isHighlighted = hoveredAgent === null || hoveredAgent === event.agentId;
+					const indicator = getEventIndicator(event.event_type);
+					const isError = event.event_type.includes("failed") || event.event_type.includes("error");
+
+					return (
+						<motion.div
+							key={event.id}
+							initial={{ opacity: 0, y: 6 }}
+							animate={{ opacity: isHighlighted ? 1 : 0.25, y: 0, filter: isHighlighted ? "none" : "brightness(0.6)" }}
+							exit={{ opacity: 0, y: -4 }}
+							transition={{ type: "spring", stiffness: 400, damping: 30 }}
+							className={`flex items-start gap-3 py-1.5 px-2.5 rounded-lg ${i > 0 ? "border-t border-white/[0.04]" : ""} ${indicator?.border ?? ""} ${indicator?.bg ?? ""}`}
+						>
+							<AgentAvatar seed={avatarSeed} size={28} />
+							<div className="min-w-0 flex-1">
+								<div className="flex items-center gap-2">
+									<span className="text-[13px] font-medium text-ink">{event.agentName}</span>
+									<span className="text-[11px] text-ink-faint">{formatTimeAgo(event.created_at)}</span>
+								</div>
+								<p className={`mt-0.5 text-[13px] leading-[1.5] line-clamp-1 ${isError ? "font-mono text-red-400/80" : "text-ink-dull"}`}>
+									<span className="mr-1.5">{icon}</span>
+									{event.summary}
+								</p>
+							</div>
+							<EventTypeBadge type={event.event_type} />
+						</motion.div>
+					);
+				})}
+			</AnimatePresence>
+		</div>
+	);
+}
+
+const BADGE_COLORS: Record<string, string> = {
+	inbound_message: "bg-blue-500/10 text-blue-400",
+	outbound_message: "bg-violet-500/10 text-violet-400",
+	worker_started: "bg-amber-500/10 text-amber-400",
+	worker_completed: "bg-emerald-500/10 text-emerald-400",
+	worker_failed: "bg-red-500/10 text-red-400",
+	branch_started: "bg-cyan-500/10 text-cyan-400",
+	bulletin_generated: "bg-indigo-500/10 text-indigo-400",
+	memory_merged: "bg-purple-500/10 text-purple-400",
+	cron_triggered: "bg-orange-500/10 text-orange-400",
+};
+
+function EventTypeBadge({ type }: { type: string }) {
+	const shortName = type.replace(/_/g, " ").replace(/^(\w)/, (c) => c.toUpperCase());
+	const colorClass = BADGE_COLORS[type] ?? "bg-white/[0.04] text-ink-faint/60";
+	return (
+		<span className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-medium ${colorClass}`}>
+			{shortName.length > 14 ? shortName.slice(0, 12) + "…" : shortName}
 		</span>
 	);
 }
 
-const CHART_COLORS = {
-	accent: "#6366f1",
-	accentBg: "#1e1b4b",
-};
-
-function SparklineChart({ data }: { data: number[] }) {
-	if (data.length === 0 || data.every((v) => v === 0)) {
-		return <div className="h-full w-full bg-app-box/30 rounded" />;
-	}
-
-	// Simple line chart without axes - just the sparkline
-	const chartData = data.map((value, idx) => ({ idx, value }));
-	const hasGradient = data.length > 0;
-
-	return (
-		<ResponsiveContainer width="100%" height="100%">
-			<AreaChart data={chartData} margin={{ top: 0, right: 0, left: 0, bottom: 0 }}>
-				{hasGradient && (
-					<defs>
-						<linearGradient id="sparklineGradient" x1="0" y1="0" x2="0" y2="1">
-							<stop offset="5%" stopColor={CHART_COLORS.accent} stopOpacity={0.5} />
-							<stop offset="95%" stopColor={CHART_COLORS.accent} stopOpacity={0.05} />
-						</linearGradient>
-					</defs>
-				)}
-				<Area
-					type="monotone"
-					dataKey="value"
-					stroke={CHART_COLORS.accent}
-					strokeWidth={2}
-					fill={hasGradient ? "url(#sparklineGradient)" : "transparent"}
-					fillOpacity={1}
-					dot={false}
-					activeDot={false}
-				/>
-			</AreaChart>
-		</ResponsiveContainer>
-	);
-}
-
-// -- Channel Card (lightweight version) --
-
-interface ChannelInfo {
-	id: string;
-	agent_id: string;
-	platform: string;
-	display_name: string | null;
-	last_activity_at: string;
-}
-
-function ChannelCard({
-	channel,
-	liveState,
+function StatsPills({
+	uptime,
+	totalAgents,
+	activeAgents,
+	totalChannels,
+	totalMemories,
+	activity,
 }: {
-	channel: ChannelInfo;
-	liveState: ChannelLiveState | undefined;
+	uptime: number;
+	totalAgents: number;
+	activeAgents: number;
+	totalChannels: number;
+	totalMemories: number;
+	activity: { workers: number; branches: number; typing: number };
 }) {
-	const isTyping = liveState?.isTyping ?? false;
-	const workers = Object.keys(liveState?.workers ?? {}).length;
-	const branches = Object.keys(liveState?.branches ?? {}).length;
-	const hasActivity = workers > 0 || branches > 0;
+	const stats = [
+		{ label: "Uptime", value: formatUptime(uptime), accent: true },
+		{ label: "Active", value: `${activeAgents}/${totalAgents}`, accent: activeAgents > 0 },
+		{ label: "Channels", value: String(totalChannels), accent: false },
+		{ label: "Memories", value: totalMemories >= 1000 ? `${(totalMemories / 1000).toFixed(1)}k` : String(totalMemories), accent: false },
+		...(activity.workers > 0 ? [{ label: "Workers", value: String(activity.workers), accent: true }] : []),
+		...(activity.branches > 0 ? [{ label: "Branches", value: String(activity.branches), accent: true }] : []),
+	];
 
 	return (
-		<Link
-			to="/agents/$agentId/channels/$channelId"
-			params={{ agentId: channel.agent_id, channelId: channel.id }}
-			className="flex flex-col gap-2 rounded-lg border border-app-line bg-app-darkBox p-3 transition-colors hover:border-app-line/80 hover:bg-app-darkBox/80"
-		>
-			<div className="flex items-start justify-between">
-				<h4 className="truncate text-sm font-medium text-ink">
-					{channel.display_name ?? channel.id}
-				</h4>
-				<div className="ml-2 flex-shrink-0">
-					<div
-						className={`h-2 w-2 rounded-full ${
-							hasActivity ? "animate-pulse bg-amber-400" : isTyping ? "animate-pulse bg-accent" : "bg-green-500/60"
-						}`}
-					/>
-				</div>
-			</div>
-			<div className="flex items-center gap-2 text-tiny">
-				<span className="rounded bg-app-box px-1.5 py-0.5 text-ink-faint">{channel.platform}</span>
-				<span className="text-ink-faint">{formatTimeAgo(channel.last_activity_at)}</span>
-				{hasActivity && (
-					<span className="text-ink-faint">
-						{workers > 0 && `${workers}w`}
-						{workers > 0 && branches > 0 && " "}
-						{branches > 0 && `${branches}b`}
-					</span>
-				)}
-			</div>
-		</Link>
+		<div className="flex flex-wrap gap-2 mb-4">
+			{stats.map(stat => (
+				<span key={stat.label} className="flex items-center gap-1.5 rounded-md bg-app-darkBox/80 border border-app-line/40 px-2.5 py-1 text-xs">
+					<span className="text-ink-faint">{stat.label}</span>
+					<span className={`font-medium ${stat.accent ? "text-accent" : "text-ink"}`}>{stat.value}</span>
+				</span>
+			))}
+		</div>
 	);
 }

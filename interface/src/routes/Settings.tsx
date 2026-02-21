@@ -1,3 +1,4 @@
+import { SkeletonCard } from "@/ui/Skeleton";
 import {useState, useEffect, useRef} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api, type GlobalSettingsResponse} from "@/api/client";
@@ -266,48 +267,64 @@ export function Settings() {
 	return (
 		<div className="flex h-full">
 			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
-				<div className="px-3 pb-1 pt-4">
-					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
+			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/30 overflow-y-auto">
+				<div className="px-3 pb-2 pt-5">
+					<span className="text-[11px] font-semibold uppercase tracking-[0.14em] text-ink-faint/60">
 						Settings
 					</span>
 				</div>
-				<div className="flex flex-col gap-0.5 px-2">
-					{SECTIONS.map((section) => (
-						<SettingSidebarButton
-							key={section.id}
-							onClick={() => handleSectionChange(section.id)}
-							active={activeSection === section.id}
-						>
-							<span className="flex-1">{section.label}</span>
-						</SettingSidebarButton>
-					))}
-				</div>
+				{(["general", "messaging", "system"] as const).map((group) => {
+					const groupSections = SECTIONS.filter(s => s.group === group);
+					if (groupSections.length === 0) return null;
+					return (
+						<div key={group} className="mb-1">
+							<div className="px-3 pb-1 pt-3">
+								<span className="text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint/40">
+									{group}
+								</span>
+							</div>
+							<div className="flex flex-col gap-0.5 px-2">
+								{groupSections.map((section) => (
+									<SettingSidebarButton
+										key={section.id}
+										onClick={() => handleSectionChange(section.id)}
+										active={activeSection === section.id}
+									>
+										<span className="flex-1">{section.label}</span>
+									</SettingSidebarButton>
+								))}
+							</div>
+						</div>
+					);
+				})}
 			</div>
 
 			{/* Content */}
 			<div className="flex flex-1 flex-col overflow-hidden">
-				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
-					<h1 className="font-plex text-sm font-medium text-ink">
+				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/90 backdrop-blur-sm px-6">
+					<h1 className="font-plex text-[15px] font-medium text-ink">
 						{SECTIONS.find((s) => s.id === activeSection)?.label}
 					</h1>
+					<span className="text-[12px] text-ink-faint/50 ml-3">
+						{SECTIONS.find((s) => s.id === activeSection)?.description}
+					</span>
 				</header>
-				<div className="flex-1 overflow-y-auto">
+				<div className="flex-1 overflow-y-auto scrollbar-sleek">
 					{activeSection === "providers" ? (
-					<div className="mx-auto max-w-2xl px-6 py-6">
+					<div className="mx-auto max-w-3xl px-6 py-5">
 						{/* Section header */}
-						<div className="mb-6">
-							<h2 className="font-plex text-sm font-semibold text-ink">
+						<div className="mb-3">
+							<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">
 								LLM Providers
 							</h2>
-							<p className="mt-1 text-sm text-ink-dull">
+							<p className="mt-1 text-[13px] text-ink-dull/80">
 								Configure credentials/endpoints for LLM providers. At least one provider is
 								required for agents to function.
 							</p>
 						</div>
 
-						<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
+						<div className="mb-4 rounded-md border-l-2 border-accent/40 bg-accent/[0.03] px-4 py-3">
+							<p className="text-[13px] text-ink-faint">
 								To customise which model is used, go to{" "}
 								<span className="text-ink-dull">Agent &gt; Config &gt; Model Routing</span>.
 								{" "}Model routing is configured per agent.
@@ -320,7 +337,7 @@ export function Settings() {
 								Loading providers...
 							</div>
 						) : (
-							<div className="flex flex-col gap-3">
+							<div className="flex flex-col gap-3.5">
 								{PROVIDERS.map((provider) => (
 									<ProviderCard
 										key={provider.id}
@@ -342,15 +359,15 @@ export function Settings() {
 						)}
 
 						{/* Info note */}
-						<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
+						<div className="mt-4 rounded-md border-l-2 border-accent/40 bg-accent/[0.03] px-4 py-2.5">
+							<p className="text-[13px] text-ink-faint leading-snug">
 								Provider values are written to{" "}
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+								<code className="rounded bg-white/[0.04] px-1 py-0.5 text-tiny text-ink-dull">
 									config.toml
 								</code>{" "}
 								in your instance directory. You can also set them via
 								environment variables (
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+								<code className="rounded bg-white/[0.04] px-1 py-0.5 text-tiny text-ink-dull">
 									ANTHROPIC_API_KEY
 								</code>
 								, etc.).
@@ -400,8 +417,8 @@ export function Settings() {
 						<div
 							className={`rounded-md border px-3 py-2 text-sm ${
 								message.type === "success"
-									? "border-green-500/20 bg-green-500/10 text-green-400"
-									: "border-red-500/20 bg-red-500/10 text-red-400"
+									? "border-success/20 bg-success/10 text-success"
+									: "border-error/20 bg-error/10 text-error"
 							}`}
 						>
 							{message.text}
@@ -454,10 +471,10 @@ function ChannelsSection() {
 	];
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Messaging Platforms</h2>
-				<p className="mt-1 text-sm text-ink-dull">
+		<div className="mx-auto max-w-3xl px-6 py-5">
+			<div className="mb-3">
+				<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">Messaging Platforms</h2>
+				<p className="mt-1 text-[13px] text-ink-dull/80">
 					Connect messaging platforms and configure how conversations route to agents.
 				</p>
 			</div>
@@ -468,7 +485,7 @@ function ChannelsSection() {
 					Loading channels...
 				</div>
 			) : (
-				<div className="flex flex-col gap-3">
+				<div className="flex flex-col gap-3.5">
 					{PLATFORMS.map(({platform: p, name: n, description: d}) => (
 						<ChannelSettingCard
 							key={p}
@@ -528,10 +545,10 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	};
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Third-Party API Keys</h2>
-				<p className="mt-1 text-sm text-ink-dull">
+		<div className="mx-auto max-w-3xl px-6 py-5">
+			<div className="mb-3">
+				<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">Third-Party API Keys</h2>
+				<p className="mt-1 text-[13px] text-ink-dull/80">
 					Configure API keys for third-party services used by workers.
 				</p>
 			</div>
@@ -542,18 +559,18 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 					Loading settings...
 				</div>
 			) : (
-				<div className="flex flex-col gap-3">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+				<div className="flex flex-col gap-3.5">
+					<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 						<div className="flex items-center gap-3">
 							<FontAwesomeIcon icon={faSearch} className="text-ink-faint" />
 							<div className="flex-1">
 								<div className="flex items-center gap-2">
-									<span className="text-sm font-medium text-ink">Brave Search</span>
+									<span className="text-[14px] font-medium text-ink">Brave Search</span>
 									{settings?.brave_search_key && (
-										<span className="text-tiny text-green-400">● Configured</span>
+										<span className="text-tiny text-success">● Configured</span>
 									)}
 								</div>
-								<p className="mt-0.5 text-sm text-ink-dull">
+								<p className="mt-0.5 text-[13px] text-ink-dull">
 									Powers web search capabilities for workers
 								</p>
 							</div>
@@ -589,8 +606,8 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-success/20 bg-success/10 text-success"
+							: "border-error/20 bg-error/10 text-error"
 					}`}
 				>
 					{message.text}
@@ -680,10 +697,10 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	};
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">API Server Configuration</h2>
-				<p className="mt-1 text-sm text-ink-dull">
+		<div className="mx-auto max-w-3xl px-6 py-5">
+			<div className="mb-3">
+				<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">API Server Configuration</h2>
+				<p className="mt-1 text-[13px] text-ink-dull/80">
 					Configure the HTTP API server. Changes require a restart to take effect.
 				</p>
 			</div>
@@ -695,11 +712,11 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				</div>
 			) : (
 				<div className="flex flex-col gap-4">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 						<div className="flex items-center justify-between">
 							<div>
-								<span className="text-sm font-medium text-ink">Enable API Server</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
+								<span className="text-[14px] font-medium text-ink">Enable API Server</span>
+								<p className="mt-0.5 text-[13px] text-ink-dull">
 									Disable to prevent the HTTP API from starting
 								</p>
 							</div>
@@ -711,10 +728,10 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 						</div>
 					</div>
 
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 						<label className="block">
-							<span className="text-sm font-medium text-ink">Port</span>
-							<p className="mt-0.5 text-sm text-ink-dull">Port number for the API server</p>
+							<span className="text-[14px] font-medium text-ink">Port</span>
+							<p className="mt-0.5 text-[13px] text-ink-dull">Port number for the API server</p>
 							<Input
 								type="number"
 								value={apiPort}
@@ -726,10 +743,10 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 						</label>
 					</div>
 
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 						<label className="block">
-							<span className="text-sm font-medium text-ink">Bind Address</span>
-							<p className="mt-0.5 text-sm text-ink-dull">
+							<span className="text-[14px] font-medium text-ink">Bind Address</span>
+							<p className="mt-0.5 text-[13px] text-ink-dull">
 								IP address to bind to (127.0.0.1 for local, 0.0.0.0 for all interfaces)
 							</p>
 							<Input
@@ -752,13 +769,13 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-success/20 bg-success/10 text-success"
+							: "border-error/20 bg-error/10 text-error"
 					}`}
 				>
 					{message.text}
 					{message.requiresRestart && (
-						<div className="mt-1 text-yellow-400">
+						<div className="mt-1 text-warning">
 							⚠️ Restart required for changes to take effect
 						</div>
 					)}
@@ -818,10 +835,10 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	];
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Worker Execution Logs</h2>
-				<p className="mt-1 text-sm text-ink-dull">
+		<div className="mx-auto max-w-3xl px-6 py-5">
+			<div className="mb-3">
+				<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">Worker Execution Logs</h2>
+				<p className="mt-1 text-[13px] text-ink-dull/80">
 					Control how worker execution logs are stored in the logs directory.
 				</p>
 			</div>
@@ -833,14 +850,14 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				</div>
 			) : (
 				<div className="flex flex-col gap-4">
-					<div className="flex flex-col gap-3">
+					<div className="flex flex-col gap-3.5">
 						{modes.map((mode) => (
 							<div
 								key={mode.value}
-								className={`rounded-lg border p-4 cursor-pointer transition-colors ${
+								className={`rounded-lg border p-4 cursor-pointer transition-all duration-150 ${
 									logMode === mode.value
 										? "border-accent bg-accent/5"
-										: "border-app-line bg-app-box hover:border-app-line/80"
+										: "border-app-line bg-app-box hover:border-app-hover"
 								}`}
 								onClick={() => setLogMode(mode.value)}
 							>
@@ -853,8 +870,8 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 										className="mt-0.5"
 									/>
 									<div className="flex-1">
-										<span className="text-sm font-medium text-ink">{mode.label}</span>
-										<p className="mt-0.5 text-sm text-ink-dull">{mode.description}</p>
+										<span className="text-[14px] font-medium text-ink">{mode.label}</span>
+										<p className="mt-0.5 text-[13px] text-ink-dull">{mode.description}</p>
 									</div>
 								</label>
 							</div>
@@ -871,8 +888,8 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-success/20 bg-success/10 text-success"
+							: "border-error/20 bg-error/10 text-error"
 					}`}
 				>
 					{message.text}
@@ -961,11 +978,11 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	};
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
-			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">OpenCode Workers</h2>
-				<p className="mt-1 text-sm text-ink-dull">
-					Spawn <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">OpenCode</a> coding agents as worker subprocesses. Requires the <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">opencode</code> binary on PATH or a custom path below.
+		<div className="mx-auto max-w-3xl px-6 py-5">
+			<div className="mb-3">
+				<h2 className="font-plex text-[15px] font-semibold text-ink tracking-[-0.01em]">OpenCode Workers</h2>
+				<p className="mt-1 text-[13px] text-ink-dull/80">
+					Spawn <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">OpenCode</a> coding agents as worker subprocesses. Requires the <code className="rounded bg-white/[0.04] px-1 py-0.5 text-tiny text-ink-dull">opencode</code> binary on PATH or a custom path below.
 				</p>
 			</div>
 
@@ -977,7 +994,7 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 			) : (
 				<div className="flex flex-col gap-4">
 					{/* Enable toggle */}
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+					<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 						<label className="flex items-center gap-3">
 							<input
 								type="checkbox"
@@ -986,8 +1003,8 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 								className="h-4 w-4"
 							/>
 							<div>
-								<span className="text-sm font-medium text-ink">Enable OpenCode Workers</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
+								<span className="text-[14px] font-medium text-ink">Enable OpenCode Workers</span>
+								<p className="mt-0.5 text-[13px] text-ink-dull">
 									Allow agents to spawn OpenCode coding sessions
 								</p>
 							</div>
@@ -997,10 +1014,10 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 					{enabled && (
 						<>
 							{/* Binary path */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
+							<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
 								<label className="block">
-									<span className="text-sm font-medium text-ink">Binary Path</span>
-									<p className="mt-0.5 text-sm text-ink-dull">
+									<span className="text-[14px] font-medium text-ink">Binary Path</span>
+									<p className="mt-0.5 text-[13px] text-ink-dull">
 										Path to the OpenCode binary, or just the name if it's on PATH
 									</p>
 									<Input
@@ -1014,9 +1031,9 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 							</div>
 
 							{/* Pool settings */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Server Pool</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
+							<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
+								<span className="text-[14px] font-medium text-ink">Server Pool</span>
+								<p className="mt-0.5 text-[13px] text-ink-dull">
 									Controls how many OpenCode server processes can run concurrently
 								</p>
 								<div className="mt-3 grid grid-cols-3 gap-3">
@@ -1055,12 +1072,12 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 							</div>
 
 							{/* Permissions */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Permissions</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
+							<div className="rounded-lg border border-app-line bg-app-box p-4 transition-colors duration-150 hover:border-white/[0.08]">
+								<span className="text-[14px] font-medium text-ink">Permissions</span>
+								<p className="mt-0.5 text-[13px] text-ink-dull">
 									Control which tools OpenCode workers can use
 								</p>
-								<div className="mt-3 flex flex-col gap-3">
+								<div className="mt-3 flex flex-col gap-3.5">
 									{([
 										{label: "File Edit", value: editPerm, setter: setEditPerm},
 										{label: "Shell / Bash", value: bashPerm, setter: setBashPerm},
@@ -1097,8 +1114,8 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 				<div
 					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
 						message.type === "success"
-							? "border-green-500/20 bg-green-500/10 text-green-400"
-							: "border-red-500/20 bg-red-500/10 text-red-400"
+							? "border-success/20 bg-success/10 text-success"
+							: "border-error/20 bg-error/10 text-error"
 					}`}
 				>
 					{message.text}
@@ -1268,8 +1285,8 @@ function ConfigFileSection() {
 	return (
 		<div className="flex h-full flex-col">
 			{/* Description + actions */}
-			<div className="flex items-center justify-between px-6 py-4 border-b border-app-line/30">
-				<p className="text-sm text-ink-dull">
+			<div className="flex items-center justify-between px-4 py-3 border-b border-app-line/30">
+				<p className="text-[13px] text-ink-dull">
 					Edit the raw configuration file. Changes are validated as TOML before saving.
 				</p>
 				<div className="flex items-center gap-2 flex-shrink-0 ml-4">
@@ -1291,12 +1308,12 @@ function ConfigFileSection() {
 
 			{/* Validation / status bar */}
 			{(validationError || message) && (
-				<div className={`border-b px-6 py-2 text-sm ${
+				<div className={`border-b px-4 py-1.5 text-[13px] ${
 					validationError
-						? "border-red-500/20 bg-red-500/5 text-red-400"
+						? "border-error/20 bg-error/5 text-error"
 						: message?.type === "success"
-							? "border-green-500/20 bg-green-500/5 text-green-400"
-							: "border-red-500/20 bg-red-500/5 text-red-400"
+							? "border-success/20 bg-success/5 text-success"
+							: "border-error/20 bg-error/5 text-error"
 				}`}>
 					{validationError ? `Syntax error: ${validationError}` : message?.text}
 				</div>
@@ -1305,7 +1322,7 @@ function ConfigFileSection() {
 			{/* Editor */}
 			<div className="flex-1 overflow-hidden">
 				{isLoading ? (
-					<div className="flex items-center gap-2 p-6 text-ink-dull">
+					<div className="flex items-center gap-2 p-4 text-ink-dull">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
 						Loading config...
 					</div>
@@ -1330,19 +1347,19 @@ interface ProviderCardProps {
 
 function ProviderCard({ provider, name, description, configured, defaultModel, onEdit, onRemove, removing }: ProviderCardProps) {
 	return (
-		<div className="rounded-lg border border-app-line bg-app-box p-4">
+		<div className={`rounded-lg border border-app-line bg-app-box p-4 transition-all duration-200 hover:border-white/[0.08]${!configured ? " opacity-60" : ""}`}>
 			<div className="flex items-center gap-3">
 				<ProviderIcon provider={provider} size={32} />
 				<div className="flex-1">
 					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium text-ink">{name}</span>
+						<span className="text-[14px] font-medium text-ink">{name}</span>
 						{configured && (
-							<span className="text-tiny text-green-400">
-								● Configured
+							<span className="rounded-full bg-success/10 text-success px-2 py-0.5 text-[10px] font-medium">
+								Configured
 							</span>
 						)}
 					</div>
-					<p className="mt-0.5 text-sm text-ink-dull">{description}</p>
+					<p className="mt-0.5 text-[13px] text-ink-dull">{description}</p>
 					<p className="mt-1 text-tiny text-ink-faint">
 						Default model: <span className="text-ink-dull">{defaultModel}</span>
 					</p>

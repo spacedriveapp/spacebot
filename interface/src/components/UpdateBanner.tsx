@@ -33,7 +33,7 @@ export function UpdateBanner() {
 
 	return (
 		<div>
-			<Banner variant="cyan" dot="static" className="border-cyan-500/20">
+			<Banner variant="accent" dot="static" className="border-accent/20">
 				<span>
 					Version <strong>{data.latest_version}</strong> is available
 					<span className="text-ink-faint ml-1">(current: {data.current_version})</span>
@@ -43,7 +43,7 @@ export function UpdateBanner() {
 						href={data.release_url}
 						target="_blank"
 						rel="noopener noreferrer"
-						className="underline hover:text-cyan-300"
+						className="underline hover:text-accent-faint"
 					>
 						Release notes
 					</a>
@@ -57,7 +57,7 @@ export function UpdateBanner() {
 							}}
 							size="sm"
 							loading={isApplying}
-							className="bg-cyan-500/20 text-xs text-cyan-300 hover:bg-cyan-500/30"
+							className="bg-accent/20 text-xs text-accent-faint hover:bg-accent/30"
 						>
 							Update now
 						</Button>
@@ -78,7 +78,7 @@ export function UpdateBanner() {
 				</BannerActions>
 			</Banner>
 			{applyError && (
-				<div className="border-b border-red-500/20 bg-red-500/10 px-4 py-1 text-xs text-red-400">
+				<div className="border-b border-error/20 bg-error/10 px-4 py-1 text-xs text-error">
 					{applyError}
 				</div>
 			)}

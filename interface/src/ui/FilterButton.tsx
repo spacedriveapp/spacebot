@@ -15,10 +15,10 @@ export const FilterButton = React.forwardRef<
 	<button
 		ref={ref}
 		className={cx(
-			"h-6 rounded-md px-2 text-tiny font-medium transition-colors",
+			"h-6 rounded-md px-2.5 text-tiny font-medium transition-all duration-200 ease-out",
 			active
-				? colorClass || "bg-app-selected text-ink"
-				: "text-ink-faint hover:text-ink-dull",
+				? colorClass || "bg-app-selected text-ink shadow-sm"
+				: "text-ink-faint hover:text-ink-dull hover:bg-app-hover/50 active:scale-[0.97]",
 			className
 		)}
 		{...props}
