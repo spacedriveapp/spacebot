@@ -106,8 +106,8 @@ impl Tool for SendMessageTool {
                 ))
             })?;
 
-        let (adapter_name, broadcast_target) =
-            resolve_broadcast_target(&channel).ok_or_else(|| {
+        let broadcast_target = crate::messaging::target::resolve_broadcast_target(&channel)
+            .ok_or_else(|| {
                 SendMessageError(format!(
                     "could not resolve platform target for channel '{}' (platform: {})",
                     channel.display_name.as_deref().unwrap_or(&channel.id),
@@ -117,16 +117,16 @@ impl Tool for SendMessageTool {
 
         self.messaging_manager
             .broadcast(
-                &adapter_name,
-                &broadcast_target,
+                &broadcast_target.adapter,
+                &broadcast_target.target,
                 crate::OutboundResponse::Text(args.message),
             )
             .await
             .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
 
         tracing::info!(
-            adapter = %adapter_name,
-            broadcast_target = %broadcast_target,
+            adapter = %broadcast_target.adapter,
+            broadcast_target = %broadcast_target.target,
             channel_name = channel.display_name.as_deref().unwrap_or("unknown"),
             "message sent to channel"
         );
@@ -134,73 +134,7 @@ impl Tool for SendMessageTool {
         Ok(SendMessageOutput {
             success: true,
             target: channel.display_name.unwrap_or_else(|| channel.id.clone()),
-            platform: adapter_name,
+            platform: broadcast_target.adapter,
         })
-    }
-}
-
-/// Extract the adapter name and raw platform target ID from a ChannelInfo.
-///
-/// For Discord: adapter="discord", target=discord_channel_id (u64 as string)
-/// For Slack: adapter="slack", target=slack_channel_id (string)
-/// For Telegram: adapter="telegram", target=chat_id (parsed from channel ID)
-fn resolve_broadcast_target(
-    channel: &crate::conversation::channels::ChannelInfo,
-) -> Option<(String, String)> {
-    match channel.platform.as_str() {
-        "discord" => {
-            let parts: Vec<&str> = channel.id.split(':').collect();
-
-            // DM channels: "discord:dm:{user_id}" -> broadcast target "dm:{user_id}"
-            if let ["discord", "dm", user_id] = parts.as_slice() {
-                return Some(("discord".to_string(), format!("dm:{user_id}")));
-            }
-
-            // Try platform_meta first for the raw discord channel ID
-            if let Some(meta) = &channel.platform_meta {
-                if let Some(channel_id) = meta.get("discord_channel_id") {
-                    let id_str = if let Some(num) = channel_id.as_u64() {
-                        num.to_string()
-                    } else if let Some(s) = channel_id.as_str() {
-                        s.to_string()
-                    } else {
-                        return None;
-                    };
-                    return Some(("discord".to_string(), id_str));
-                }
-            }
-
-            // Fallback: parse from channel ID format "discord:{guild_id}:{channel_id}"
-            match parts.as_slice() {
-                ["discord", _, channel_id] => Some(("discord".to_string(), channel_id.to_string())),
-                _ => None,
-            }
-        }
-        "slack" => {
-            if let Some(meta) = &channel.platform_meta {
-                if let Some(channel_id) = meta.get("slack_channel_id") {
-                    if let Some(s) = channel_id.as_str() {
-                        return Some(("slack".to_string(), s.to_string()));
-                    }
-                }
-            }
-            // Fallback: parse from "slack:{team_id}:{channel_id}" or "slack:{team_id}:{channel_id}:{thread_ts}"
-            let parts: Vec<&str> = channel.id.split(':').collect();
-            if parts.len() >= 3 {
-                Some(("slack".to_string(), parts[2].to_string()))
-            } else {
-                None
-            }
-        }
-        "telegram" => {
-            // Telegram channel IDs are "telegram:{chat_id}"
-            let parts: Vec<&str> = channel.id.split(':').collect();
-            if parts.len() >= 2 {
-                Some(("telegram".to_string(), parts[1].to_string()))
-            } else {
-                None
-            }
-        }
-        _ => None,
     }
 }

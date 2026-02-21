@@ -476,11 +476,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         Ok(bulletin) => {
             let word_count = bulletin.split_whitespace().count();
             let duration_ms = started.elapsed().as_millis() as u64;
-            tracing::info!(
-                words = word_count,
-                bulletin = %bulletin,
-                "cortex bulletin generated"
-            );
+            tracing::info!(words = word_count, "cortex bulletin generated");
             deps.runtime_config
                 .memory_bulletin
                 .store(Arc::new(bulletin));

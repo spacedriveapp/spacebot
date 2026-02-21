@@ -13,6 +13,7 @@ pub(super) struct RoutingSection {
     worker: String,
     compactor: String,
     cortex: String,
+    voice: String,
     rate_limit_cooldown_secs: u64,
 }
 
@@ -117,6 +118,7 @@ pub(super) struct RoutingUpdate {
     worker: Option<String>,
     compactor: Option<String>,
     cortex: Option<String>,
+    voice: Option<String>,
     rate_limit_cooldown_secs: Option<u64>,
 }
 
@@ -200,6 +202,7 @@ pub(super) async fn get_agent_config(
             worker: routing.worker.clone(),
             compactor: routing.compactor.clone(),
             cortex: routing.cortex.clone(),
+            voice: routing.voice.clone(),
             rate_limit_cooldown_secs: routing.rate_limit_cooldown_secs,
         },
         tuning: TuningSection {
@@ -428,6 +431,9 @@ fn update_routing_table(
     }
     if let Some(ref v) = routing.cortex {
         table["cortex"] = toml_edit::value(v.as_str());
+    }
+    if let Some(ref v) = routing.voice {
+        table["voice"] = toml_edit::value(v.as_str());
     }
     if let Some(v) = routing.rate_limit_cooldown_secs {
         table["rate_limit_cooldown_secs"] = toml_edit::value(v as i64);

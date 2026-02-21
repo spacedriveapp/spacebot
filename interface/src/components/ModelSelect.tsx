@@ -9,6 +9,7 @@ interface ModelSelectProps {
   value: string;
   onChange: (value: string) => void;
   provider?: string;
+  capability?: "input_audio";
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -38,6 +39,7 @@ export function ModelSelect({
   value,
   onChange,
   provider,
+  capability,
 }: ModelSelectProps) {
   const [open, setOpen] = useState(false);
   const [filter, setFilter] = useState("");
@@ -45,8 +47,8 @@ export function ModelSelect({
   const inputRef = useRef<HTMLInputElement>(null);
 
   const { data } = useQuery({
-    queryKey: ["models", provider ?? "configured"],
-    queryFn: () => api.models(provider),
+    queryKey: ["models", provider ?? "configured", capability ?? "all"],
+    queryFn: () => api.models(provider, capability),
     staleTime: 60_000,
   });
 
