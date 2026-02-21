@@ -7,11 +7,11 @@
 //!
 //! ```rust
 //! // At startup (main.rs):
-//! prompts::text::init("en").expect("invalid language");
+//! spacebot::prompts::text::init("en").expect("invalid language");
 //!
 //! // Anywhere:
-//! let desc = prompts::text::get("tools/file");
-//! let prompt = prompts::text::get("channel");
+//! let desc = spacebot::prompts::text::get("tools/file");
+//! let prompt = spacebot::prompts::text::get("channel");
 //! ```
 
 use std::sync::OnceLock;
