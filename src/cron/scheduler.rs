@@ -9,6 +9,7 @@ use crate::agent::channel::Channel;
 use crate::cron::store::CronStore;
 use crate::error::Result;
 use crate::messaging::MessagingManager;
+use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
 use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
 use chrono::Timelike;
 use std::collections::HashMap;
@@ -22,7 +23,7 @@ pub struct CronJob {
     pub id: String,
     pub prompt: String,
     pub interval_secs: u64,
-    pub delivery_target: DeliveryTarget,
+    pub delivery_target: BroadcastTarget,
     pub active_hours: Option<(u8, u8)>,
     pub enabled: bool,
     pub run_once: bool,
@@ -30,35 +31,6 @@ pub struct CronJob {
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
-}
-
-/// Where to send cron job results.
-#[derive(Debug, Clone)]
-pub struct DeliveryTarget {
-    /// Messaging adapter name (e.g. "discord").
-    pub adapter: String,
-    /// Platform-specific target (e.g. a Discord channel ID).
-    pub target: String,
-}
-
-impl DeliveryTarget {
-    /// Parse a delivery target string in the format "adapter:target".
-    pub fn parse(raw: &str) -> Option<Self> {
-        let (adapter, target) = raw.split_once(':')?;
-        if adapter.is_empty() || target.is_empty() {
-            return None;
-        }
-        Some(Self {
-            adapter: adapter.to_string(),
-            target: target.to_string(),
-        })
-    }
-}
-
-impl std::fmt::Display for DeliveryTarget {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}:{}", self.adapter, self.target)
-    }
 }
 
 /// Serializable cron job config (for storage and TOML parsing).
@@ -128,13 +100,12 @@ impl Scheduler {
 
     /// Register and start a cron job from config.
     pub async fn register(&self, config: CronConfig) -> Result<()> {
-        let delivery_target =
-            normalize_delivery_target(&config.delivery_target).ok_or_else(|| {
-                crate::error::Error::Other(anyhow::anyhow!(
-                    "invalid delivery target '{}': expected format 'adapter:target'",
-                    config.delivery_target
-                ))
-            })?;
+        let delivery_target = parse_delivery_target(&config.delivery_target).ok_or_else(|| {
+            crate::error::Error::Other(anyhow::anyhow!(
+                "invalid delivery target '{}': expected format 'adapter:target'",
+                config.delivery_target
+            ))
+        })?;
 
         let job = CronJob {
             id: config.id.clone(),
@@ -435,7 +406,7 @@ impl Scheduler {
                 })?;
 
             let delivery_target =
-                normalize_delivery_target(&config.delivery_target).ok_or_else(|| {
+                parse_delivery_target(&config.delivery_target).ok_or_else(|| {
                     crate::error::Error::Other(anyhow::anyhow!(
                         "invalid delivery target '{}': expected format 'adapter:target'",
                         config.delivery_target
@@ -631,46 +602,4 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     }
 
     Ok(())
-}
-
-fn normalize_delivery_target(raw: &str) -> Option<DeliveryTarget> {
-    let (adapter, target) = raw.split_once(':')?;
-    if adapter.is_empty() || target.is_empty() {
-        return None;
-    }
-
-    if adapter == "discord" {
-        // DM targets pass through as `dm:{user_id}`
-        if let Some(user_id) = target.strip_prefix("dm:") {
-            if !user_id.is_empty() && user_id.chars().all(|c| c.is_ascii_digit()) {
-                return Some(DeliveryTarget {
-                    adapter: adapter.to_string(),
-                    target: target.to_string(),
-                });
-            }
-            return None;
-        }
-
-        // Accept legacy `discord:{guild_id}:{channel_id}` by normalizing to `{channel_id}`.
-        if let Some((_, channel_id)) = target.split_once(':') {
-            if !channel_id.is_empty() && channel_id.chars().all(|c| c.is_ascii_digit()) {
-                return Some(DeliveryTarget {
-                    adapter: adapter.to_string(),
-                    target: channel_id.to_string(),
-                });
-            }
-            return None;
-        }
-
-        if target.chars().all(|c| c.is_ascii_digit()) {
-            return Some(DeliveryTarget {
-                adapter: adapter.to_string(),
-                target: target.to_string(),
-            });
-        }
-
-        return None;
-    }
-
-    DeliveryTarget::parse(raw)
 }

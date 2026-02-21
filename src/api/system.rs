@@ -1,7 +1,7 @@
 use super::state::{ApiEvent, ApiState};
 
-use axum::body::Bytes;
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::header;
 use axum::response::IntoResponse;
@@ -274,22 +274,23 @@ pub(super) async fn backup_restore(
     let instance_dir = runtime_config.instance_dir.clone();
     let archive = body.to_vec();
 
-    let restore_report = tokio::task::spawn_blocking(move || restore_backup_zip(&instance_dir, archive))
-        .await
-        .map_err(|error| {
-            (
-                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                format!("restore task failed: {error}"),
-            )
-        })
-        .and_then(|result| {
-            result.map_err(|error| {
+    let restore_report =
+        tokio::task::spawn_blocking(move || restore_backup_zip(&instance_dir, archive))
+            .await
+            .map_err(|error| {
                 (
                     axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("restore failed: {error}"),
+                    format!("restore task failed: {error}"),
                 )
             })
-        })?;
+            .and_then(|result| {
+                result.map_err(|error| {
+                    (
+                        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("restore failed: {error}"),
+                    )
+                })
+            })?;
 
     Ok(Json(serde_json::json!({
         "restored": true,
@@ -330,7 +331,10 @@ fn build_backup_zip(instance_dir: &Path) -> anyhow::Result<Vec<u8>> {
     Ok(cursor.into_inner())
 }
 
-fn restore_backup_zip(instance_dir: &Path, archive_bytes: Vec<u8>) -> anyhow::Result<RestoreReport> {
+fn restore_backup_zip(
+    instance_dir: &Path,
+    archive_bytes: Vec<u8>,
+) -> anyhow::Result<RestoreReport> {
     let restore_root = instance_dir.join(format!(".restore-{}", uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&restore_root)?;
 

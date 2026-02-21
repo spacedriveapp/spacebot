@@ -3,9 +3,9 @@
 use crate::conversation::ConversationLogger;
 
 use crate::{ChannelId, OutboundResponse};
+use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
-use regex::Regex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -172,7 +172,7 @@ async fn convert_mentions(
                 }
                 "slack" => format!("<@{}>", user_id),
                 "telegram" => format!("@{}", name), // Telegram uses @username (already correct)
-                _ => mention_pattern.clone(),          // Unknown platform, leave as-is
+                _ => mention_pattern.clone(),       // Unknown platform, leave as-is
             };
 
             result = result.replace(&mention_pattern, &replacement);
@@ -184,10 +184,7 @@ async fn convert_mentions(
 
 fn sanitize_discord_user_id(user_id: &str) -> Option<String> {
     let trimmed = user_id.trim();
-    if trimmed.len() >= 15
-        && trimmed.len() <= 22
-        && trimmed.chars().all(|c| c.is_ascii_digit())
-    {
+    if trimmed.len() >= 15 && trimmed.len() <= 22 && trimmed.chars().all(|c| c.is_ascii_digit()) {
         return Some(trimmed.to_string());
     }
 
@@ -212,9 +209,7 @@ pub(crate) fn normalize_discord_mention_tokens(content: &str, source: &str) -> S
         normalized = normalized.replace("<<@", "<@");
     }
 
-    normalized = normalized
-        .replace("<@!>", "<@!")
-        .replace("<@>", "<@");
+    normalized = normalized.replace("<@!>", "<@!").replace("<@>", "<@");
 
     normalized = BROKEN_DISCORD_MENTION_REGEX
         .replace_all(&normalized, "<@$1$2>")

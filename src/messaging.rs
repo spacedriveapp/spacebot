@@ -3,6 +3,7 @@
 pub mod discord;
 pub mod manager;
 pub mod slack;
+pub mod target;
 pub mod telegram;
 pub mod traits;
 pub mod twitch;

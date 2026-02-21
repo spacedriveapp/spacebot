@@ -233,6 +233,15 @@ where
             }
         }
 
+        // Channel turns should end immediately after a successful reply tool call.
+        // This avoids extra post-reply LLM iterations that add latency, cost, and
+        // noisy logs when providers return empty trailing responses.
+        if self.process_type == ProcessType::Channel && tool_name == "reply" {
+            return HookAction::Terminate {
+                reason: "reply delivered".into(),
+            };
+        }
+
         HookAction::Continue
     }
 }

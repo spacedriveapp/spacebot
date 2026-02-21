@@ -679,6 +679,24 @@ impl Binding {
             }
         }
 
+        if self.channel == "discord" && self.require_mention {
+            let is_guild_message = message
+                .metadata
+                .get("discord_guild_id")
+                .and_then(|v| v.as_u64())
+                .is_some();
+            if is_guild_message {
+                let mentions_or_replies_to_bot = message
+                    .metadata
+                    .get("discord_mentions_or_replies_to_bot")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+                if !mentions_or_replies_to_bot {
+                    return false;
+                }
+            }
+        }
+
         if let Some(chat_id) = &self.chat_id {
             let message_chat = message.metadata.get("telegram_chat_id").and_then(|value| {
                 value
@@ -766,8 +784,6 @@ pub struct SlackConfig {
 pub struct DiscordPermissions {
     pub guild_filter: Option<Vec<u64>>,
     pub channel_filter: std::collections::HashMap<u64, Vec<u64>>,
-    pub mention_required_guilds: Vec<u64>,
-    pub mention_required_channels: std::collections::HashMap<u64, Vec<u64>>,
     pub dm_allowed_users: Vec<u64>,
     pub allow_bot_messages: bool,
 }
@@ -866,42 +882,6 @@ impl DiscordPermissions {
             filter
         };
 
-        let mut mention_required_guilds: Vec<u64> = Vec::new();
-        let mention_required_channels = {
-            let mut filter: std::collections::HashMap<u64, Vec<u64>> =
-                std::collections::HashMap::new();
-
-            for binding in &discord_bindings {
-                if !binding.require_mention {
-                    continue;
-                }
-
-                if let Some(guild_id) = binding
-                    .guild_id
-                    .as_ref()
-                    .and_then(|g| g.parse::<u64>().ok())
-                {
-                    if binding.channel_ids.is_empty() {
-                        if !mention_required_guilds.contains(&guild_id) {
-                            mention_required_guilds.push(guild_id);
-                        }
-                        continue;
-                    }
-
-                    let channel_ids: Vec<u64> = binding
-                        .channel_ids
-                        .iter()
-                        .filter_map(|id| id.parse::<u64>().ok())
-                        .collect();
-                    if !channel_ids.is_empty() {
-                        filter.entry(guild_id).or_default().extend(channel_ids);
-                    }
-                }
-            }
-
-            filter
-        };
-
         let mut dm_allowed_users: Vec<u64> = discord
             .dm_allowed_users
             .iter()
@@ -922,8 +902,6 @@ impl DiscordPermissions {
         Self {
             guild_filter,
             channel_filter,
-            mention_required_guilds,
-            mention_required_channels,
             dm_allowed_users,
             allow_bot_messages: discord.allow_bot_messages,
         }
