@@ -132,11 +132,22 @@ Wraps an `rmcp` client session.
 - Caches tool list after `initialize` (refreshed on `notifications/tools/list_changed`)
 - Tracks connection state: `Connecting`, `Connected`, `Failed(String)`, `Disconnected`
 
+### Exponential backoff retry
+
+`McpConnection::connect_with_retry()` retries failed connections with exponential backoff:
+
+- **Initial delay:** 5 seconds
+- **Backoff multiplier:** 2x (5s, 10s, 20s, 40s, 60s, 60s, ...)
+- **Maximum delay cap:** 60 seconds
+- **Maximum attempts:** 12
+
+Follows the same retry pattern as `MessagingManager::spawn_retry_task`. `connect_all()` and `reconcile()` spawn background retry tasks on failure so a single broken server never blocks agent startup or config reload.
+
 ### Lifecycle rules
 
 - Connections are established during agent startup after config resolution.
-- If a server fails to connect, log it and move on. The agent works without it.
-- On config hot-reload: diff old vs new config, connect new servers, disconnect removed ones, reconnect changed ones.
+- If a server fails to connect, log it and spawn a background retry task. The agent works without it.
+- On config hot-reload: diff old vs new config, connect new servers, disconnect removed ones, reconnect changed ones. Failed connections during reconciliation also get background retry tasks.
 - Child processes (stdio) are killed on disconnect via `rmcp`'s drop semantics.
 - Connection health is exposed via API for the dashboard.
 
@@ -230,10 +241,19 @@ mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
 ### API endpoints
 
-Two new endpoints on the control API for visibility:
+Per-agent visibility endpoints:
 
 - `GET /api/agents/mcp` — list configured MCP servers and their connection status
 - `POST /api/agents/mcp/reconnect` — force reconnect a specific server by name
+
+CRUD endpoints for managing `[[mcp_servers]]` in config.toml:
+
+- `GET /api/mcp/servers` — list all configured servers with live connection state
+- `POST /api/mcp/servers` — add a new server definition to config.toml
+- `PUT /api/mcp/servers` — update an existing server definition
+- `DELETE /api/mcp/servers/{name}` — remove a server definition
+- `POST /api/mcp/servers/{name}/reconnect` — force-reconnect a specific server across all agents
+- `GET /api/mcp/status` — per-agent connection status
 
 ### Shutdown
 

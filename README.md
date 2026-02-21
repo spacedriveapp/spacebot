@@ -211,6 +211,31 @@ spacebot skill add anthropics/skills/pdf
 spacebot skill list
 ```
 
+### MCP Integration
+
+Connect workers to external [MCP](https://modelcontextprotocol.io/) (Model Context Protocol) servers for arbitrary tool access -- databases, APIs, SaaS products, custom integrations -- without native Rust implementations:
+
+- **Per-agent config** — each agent declares its own MCP servers in `config.toml`
+- **Both transports** — stdio (subprocess) for local tools, streamable HTTP for remote servers
+- **Automatic tool discovery** — tools are discovered via the MCP protocol and registered on worker ToolServers with namespaced names (`{server}_{tool}`)
+- **Automatic retry** — failed connections retry in the background with exponential backoff (5s initial, 60s cap, 12 attempts). A broken server never blocks agent startup
+- **Hot-reloadable** — add, remove, or change servers in config and they reconcile live
+- **API management** — full CRUD API under `/api/mcp/` for managing server definitions and monitoring connection status programmatically
+
+```toml
+[[mcp_servers]]
+name = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+
+[[mcp_servers]]
+name = "sentry"
+transport = "http"
+url = "https://mcp.sentry.io"
+headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
+```
+
 ---
 
 ## How It Works
@@ -455,6 +480,7 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, Twitch, Webchat, webhook) |
 | [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
 | [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
+| [MCP](docs/content/docs/(features)/mcp.mdx)                      | External tool servers via Model Context Protocol         |
 | [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                             |
 | [Philosophy](docs/content/docs/(core)/philosophy.mdx)            | Why Rust                                                 |
 
