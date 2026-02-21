@@ -478,7 +478,6 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::info!(
                 words = word_count,
-                bulletin = %bulletin,
                 "cortex bulletin generated"
             );
             deps.runtime_config

@@ -43,6 +43,8 @@ pub struct ChannelState {
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
     pub process_run_logger: ProcessRunLogger,
+    /// Discord message ID to reply to for work spawned in the current turn.
+    pub reply_target_message_id: Arc<RwLock<Option<u64>>>,
     pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
@@ -120,6 +122,8 @@ pub struct Channel {
     message_count: usize,
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
+    /// Optional Discord reply target captured when each branch was started.
+    branch_reply_targets: HashMap<BranchId, u64>,
     /// Buffer for coalescing rapid-fire messages.
     coalesce_buffer: Vec<InboundMessage>,
     /// Deadline for flushing the coalesce buffer.
@@ -171,6 +175,7 @@ impl Channel {
             deps: deps.clone(),
             conversation_logger,
             process_run_logger,
+            reply_target_message_id: Arc::new(RwLock::new(None)),
             channel_store,
             screenshot_dir,
             logs_dir,
@@ -197,6 +202,7 @@ impl Channel {
             compactor,
             message_count: 0,
             memory_persistence_branches: HashSet::new(),
+            branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
             coalesce_deadline: None,
         };
@@ -520,6 +526,14 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await;
 
+        {
+            let mut reply_target = self.state.reply_target_message_id.write().await;
+            *reply_target = messages
+                .iter()
+                .rev()
+                .find_map(extract_discord_message_id);
+        }
+
         // Run agent turn with any image/audio attachments preserved
         let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
@@ -680,6 +694,11 @@ impl Channel {
         }
 
         let system_prompt = self.build_system_prompt().await;
+
+        {
+            let mut reply_target = self.state.reply_target_message_id.write().await;
+            *reply_target = extract_discord_message_id(&message);
+        }
 
         let (result, skip_flag, replied_flag) = self
             .run_agent_turn(
@@ -942,7 +961,11 @@ impl Channel {
                 tracing::warn!(channel_id = %self.id, "channel hit max turns");
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
-                tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
+                if reason == "reply delivered" {
+                    tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
+                } else {
+                    tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
+                }
             }
             Err(error) => {
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
@@ -970,6 +993,7 @@ impl Channel {
         }
 
         let mut should_retrigger = false;
+        let mut retrigger_metadata = std::collections::HashMap::new();
         let run_logger = &self.state.process_run_logger;
 
         match &event {
@@ -977,9 +1001,13 @@ impl Channel {
                 branch_id,
                 channel_id,
                 description,
+                reply_to_message_id,
                 ..
             } => {
                 run_logger.log_branch_started(channel_id, *branch_id, description);
+                if let Some(message_id) = reply_to_message_id {
+                    self.branch_reply_targets.insert(*branch_id, *message_id);
+                }
             }
             ProcessEvent::BranchResult {
                 branch_id,
@@ -996,6 +1024,7 @@ impl Channel {
                 // injection, no re-trigger. The work (memory saves) already
                 // happened inside the branch via tool calls.
                 if self.memory_persistence_branches.remove(branch_id) {
+                    self.branch_reply_targets.remove(branch_id);
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
                 } else {
                     // Regular branch: inject conclusion into history
@@ -1003,6 +1032,13 @@ impl Channel {
                     let branch_message = format!("[Branch result]: {conclusion}");
                     history.push(rig::message::Message::from(branch_message));
                     should_retrigger = true;
+
+                    if let Some(message_id) = self.branch_reply_targets.remove(branch_id) {
+                        retrigger_metadata.insert(
+                            "discord_reply_to_message_id".to_string(),
+                            serde_json::Value::from(message_id),
+                        );
+                    }
 
                     tracing::info!(branch_id = %branch_id, "branch result incorporated");
                 }
@@ -1066,7 +1102,7 @@ impl Channel {
                     agent_id: None,
                     content: crate::MessageContent::Text(retrigger_message),
                     timestamp: chrono::Utc::now(),
-                    metadata: std::collections::HashMap::new(),
+                    metadata: retrigger_metadata,
                     formatted_author: None,
                 };
                 if let Err(error) = self.self_tx.try_send(synthetic) {
@@ -1251,6 +1287,7 @@ async fn spawn_branch(
             branch_id,
             channel_id: state.channel_id.clone(),
             description: status_label.to_string(),
+            reply_to_message_id: *state.reply_target_message_id.read().await,
         })
         .ok();
 
@@ -1627,6 +1664,17 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         .unwrap_or_default();
 
     format!("{display_name}{bot_tag}{reply_context}: {raw_text}")
+}
+
+fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
+    if message.source != "discord" {
+        return None;
+    }
+
+    message
+        .metadata
+        .get("discord_message_id")
+        .and_then(|value| value.as_u64())
 }
 
 /// Check if a ProcessEvent is targeted at a specific channel.

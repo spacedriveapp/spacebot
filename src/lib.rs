@@ -99,6 +99,7 @@ pub enum ProcessEvent {
         branch_id: BranchId,
         channel_id: ChannelId,
         description: String,
+        reply_to_message_id: Option<u64>,
     },
     BranchResult {
         agent_id: AgentId,

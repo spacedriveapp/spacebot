@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
+use tracing_subscriber::fmt::format;
 use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
@@ -128,6 +129,32 @@ pub fn init_background_tracing(
 ) -> Option<SdkTracerProvider> {
     let file_appender = tracing_appender::rolling::daily(&paths.log_dir, "spacebot.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+    let field_formatter = format::debug_fn(|writer, field, value| {
+        let field_name = field.name();
+
+        if field_name == "gen_ai.system_instructions"
+            || field_name == "gen_ai.tool.call.arguments"
+            || field_name == "gen_ai.tool.call.result"
+        {
+            Ok(())
+        } else if field_name == "message" {
+            let formatted = format!("{value:?}");
+            const MAX_MESSAGE_CHARS: usize = 280;
+            if formatted.len() > MAX_MESSAGE_CHARS {
+                write!(
+                    writer,
+                    "{}={}",
+                    field_name,
+                    &formatted[..MAX_MESSAGE_CHARS]
+                )?;
+                write!(writer, "...")
+            } else {
+                write!(writer, "{}={formatted}", field_name)
+            }
+        } else {
+            write!(writer, "{}={value:?}", field_name)
+        }
+    });
 
     // Leak the guard so the non-blocking writer lives for the entire process.
     // The process owns this — it's cleaned up on exit.
@@ -136,7 +163,9 @@ pub fn init_background_tracing(
     let filter = build_env_filter(debug);
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(non_blocking)
-        .with_ansi(false);
+        .with_ansi(false)
+        .fmt_fields(field_formatter)
+        .compact();
 
     match build_otlp_provider(telemetry) {
         Some(provider) => {
@@ -165,8 +194,36 @@ pub fn init_foreground_tracing(
     debug: bool,
     telemetry: &TelemetryConfig,
 ) -> Option<SdkTracerProvider> {
+    let field_formatter = format::debug_fn(|writer, field, value| {
+        let field_name = field.name();
+
+        if field_name == "gen_ai.system_instructions"
+            || field_name == "gen_ai.tool.call.arguments"
+            || field_name == "gen_ai.tool.call.result"
+        {
+            Ok(())
+        } else if field_name == "message" {
+            let formatted = format!("{value:?}");
+            const MAX_MESSAGE_CHARS: usize = 280;
+            if formatted.len() > MAX_MESSAGE_CHARS {
+                write!(
+                    writer,
+                    "{}={}",
+                    field_name,
+                    &formatted[..MAX_MESSAGE_CHARS]
+                )?;
+                write!(writer, "...")
+            } else {
+                write!(writer, "{}={formatted}", field_name)
+            }
+        } else {
+            write!(writer, "{}={value:?}", field_name)
+        }
+    });
     let filter = build_env_filter(debug);
-    let fmt_layer = tracing_subscriber::fmt::layer();
+    let fmt_layer = tracing_subscriber::fmt::layer()
+        .fmt_fields(field_formatter)
+        .compact();
 
     match build_otlp_provider(telemetry) {
         Some(provider) => {
