@@ -27,6 +27,8 @@ pub mod tasks;
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 pub mod tools;
+#[cfg(feature = "stt-whisper")]
+pub mod stt;
 pub mod update;
 
 pub use error::{Error, Result};
