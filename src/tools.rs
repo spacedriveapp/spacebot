@@ -243,6 +243,23 @@ pub fn create_worker_tool_server(
     server.run()
 }
 
+/// Register MCP tools from a manager onto an existing tool server handle.
+///
+/// Called after creating worker or cortex chat tool servers to add any
+/// configured MCP tools alongside built-in tools.
+#[cfg(feature = "mcp")]
+pub async fn register_mcp_tools(
+    handle: &ToolServerHandle,
+    mcp_manager: &crate::mcp::McpManager,
+) {
+    for (tool, sink) in mcp_manager.tools().await {
+        let mcp_tool = rig::tool::rmcp::McpTool::from_mcp_server(tool, sink);
+        if let Err(error) = handle.add_tool(mcp_tool).await {
+            tracing::warn!(%error, "failed to register MCP tool");
+        }
+    }
+}
+
 /// Create a ToolServer for the cortex process.
 ///
 /// The cortex only needs memory_save for consolidation. Additional tools can be

@@ -1288,6 +1288,19 @@ async fn initialize_agents(
             runtime_config.clone(),
         ));
 
+        #[cfg(feature = "mcp")]
+        let mcp_manager = if !config.mcp_servers.is_empty()
+            && !agent_config.mcp.servers.is_empty()
+        {
+            let manager = std::sync::Arc::new(spacebot::mcp::McpManager::new(
+                std::sync::Arc::new(config.mcp_servers.clone()),
+            ));
+            manager.start(&agent_config.mcp).await;
+            Some(manager)
+        } else {
+            None
+        };
+
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
             memory_search,
@@ -1297,6 +1310,8 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            #[cfg(feature = "mcp")]
+            mcp_manager,
         };
 
         let agent = spacebot::Agent {
@@ -1589,6 +1604,12 @@ async fn initialize_agents(
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.runtime_config.instance_dir.clone(),
             );
+
+            #[cfg(feature = "mcp")]
+            if let Some(mcp_manager) = &agent.deps.mcp_manager {
+                spacebot::tools::register_mcp_tools(&tool_server, mcp_manager).await;
+            }
+
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
             let session = spacebot::agent::cortex_chat::CortexChatSession::new(
                 agent.deps.clone(),

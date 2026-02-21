@@ -1,0 +1,159 @@
+---
+title: MCP Tools
+description: Connect agents to external tool providers via the Model Context Protocol.
+---
+
+# MCP Tools
+
+Connect Spacebot agents to any [MCP](https://modelcontextprotocol.io/)-compatible server — GitHub, Notion, databases, filesystems, custom APIs. Workers get MCP tools alongside their built-in tools, extending what agents can do without writing new Rust code.
+
+## Prerequisites
+
+Build with the `mcp` feature flag:
+
+```bash
+cargo build --release --features mcp
+```
+
+Without the flag, MCP code is compiled out entirely. The `[[mcp_servers]]` config block is parsed but has no effect.
+
+## Quick Start
+
+1. Define an MCP server in `config.toml`:
+
+```toml
+[[mcp_servers]]
+id = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/shared"]
+```
+
+2. Tell agents to use it:
+
+```toml
+[defaults.mcp]
+servers = ["filesystem"]
+```
+
+3. Start Spacebot. Workers now have `filesystem_read_file`, `filesystem_write_file`, and other tools from the MCP server available alongside shell, file, and exec.
+
+## Configuration
+
+### Server Definitions
+
+Servers are defined at instance level with `[[mcp_servers]]`:
+
+```toml
+[[mcp_servers]]
+id = "github"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "env:GITHUB_TOKEN" }
+
+[[mcp_servers]]
+id = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/shared"]
+```
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `id` | string | Yes | Unique identifier, referenced in `servers` lists |
+| `transport` | string | Yes | `"stdio"` (spawn a child process) |
+| `command` | string | Yes (stdio) | Executable to spawn |
+| `args` | string[] | No | Command arguments |
+| `env` | map | No | Environment variables. Supports `env:VAR_NAME` syntax |
+
+### Agent Assignment
+
+Assign servers to agents via `[defaults.mcp]` and per-agent `[agents.mcp]`:
+
+```toml
+# All agents get these by default
+[defaults.mcp]
+servers = ["github"]
+
+# This agent gets github + filesystem
+[[agents]]
+id = "coder"
+[agents.mcp]
+servers = ["github", "filesystem"]
+
+# This agent gets no MCP tools (empty override)
+[[agents]]
+id = "chatbot"
+[agents.mcp]
+servers = []
+```
+
+Per-agent `servers` replaces the defaults list entirely — it does not merge.
+
+## How It Works
+
+### Connection
+
+When an agent starts, Spacebot:
+
+1. Spawns a child process for each configured stdio MCP server
+2. Performs the MCP protocol handshake
+3. Calls `list_tools()` to discover available tools
+4. Caches tool definitions for registration onto worker ToolServers
+
+Each agent gets independent connections. Two agents using the same server definition get separate child processes.
+
+### Tool Naming
+
+MCP tool names are prefixed with the server ID to prevent collisions:
+
+| Server ID | MCP Tool Name | Registered As |
+|-----------|---------------|---------------|
+| `github` | `create_issue` | `github_create_issue` |
+| `filesystem` | `read_file` | `filesystem_read_file` |
+
+This means MCP tools never shadow built-in tools like `file` or `shell`.
+
+### Where Tools Appear
+
+MCP tools are added to **worker** and **cortex chat** ToolServers only:
+
+- **Workers** — the right home for external execution. Workers already have shell, file, exec, and browser tools. MCP tools extend this set.
+- **Cortex Chat** — interactive admin sessions get full tool access.
+- **Channels and branches** — do not get MCP tools. Channels orchestrate; branches think. Neither should call external services directly.
+
+### Retry and Recovery
+
+If a server fails to connect, Spacebot retries with exponential backoff (5s → 10s → 20s → 40s → 60s cap, max 12 attempts). Failed servers don't block the agent — it starts with whatever tools are available.
+
+### Hot Reload
+
+MCP config is hot-reloadable. Edit `config.toml` to add or remove servers:
+
+- **New servers** → connected in the background
+- **Removed servers** → disconnected and cleaned up
+- **Existing workers** keep their current tools until they finish
+- **New workers** pick up the latest configuration
+
+## Example: GitHub + Filesystem
+
+```toml
+[[mcp_servers]]
+id = "github"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-github"]
+env = { GITHUB_PERSONAL_ACCESS_TOKEN = "env:GITHUB_TOKEN" }
+
+[[mcp_servers]]
+id = "filesystem"
+transport = "stdio"
+command = "npx"
+args = ["-y", "@modelcontextprotocol/server-filesystem", "/home/user/projects"]
+
+[defaults.mcp]
+servers = ["github", "filesystem"]
+```
+
+With this config, when a user says "create a GitHub issue for the auth bug and save the details to a file", the channel spawns a worker that has access to both `github_create_issue` and `filesystem_write_file` — alongside the built-in shell, file, and exec tools.

@@ -235,6 +235,7 @@ pub(super) async fn create_agent(
         browser: None,
         brave_search_key: None,
         cron: Vec::new(),
+        mcp: None,
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
     drop(defaults);
@@ -366,6 +367,8 @@ pub(super) async fn create_agent(
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
         },
+        #[cfg(feature = "mcp")]
+        mcp_manager: None,
     };
 
     let event_rx = event_tx.subscribe();
@@ -405,6 +408,12 @@ pub(super) async fn create_agent(
         runtime_config.workspace_dir.clone(),
         runtime_config.instance_dir.clone(),
     );
+
+    #[cfg(feature = "mcp")]
+    if let Some(mcp_manager) = &deps.mcp_manager {
+        crate::tools::register_mcp_tools(&cortex_tool_server, mcp_manager).await;
+    }
+
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
         deps.clone(),

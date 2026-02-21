@@ -85,6 +85,7 @@ Workers come loaded with tools for real work:
 - **[OpenCode](https://opencode.ai)** — spawn a full coding agent as a persistent worker with codebase exploration, LSP awareness, and deep context management
 - **Browser** — headless Chrome automation with an accessibility-tree ref system. Navigate, click, type, screenshot, manage tabs — the LLM addresses elements by short refs (`e0`, `e1`) instead of fragile CSS selectors
 - **[Brave](https://brave.com/search/api/) web search** — search the web with freshness filters, localization, and configurable result count
+- **[MCP](https://modelcontextprotocol.io/) tools** — connect to any MCP-compatible server (GitHub, Notion, filesystems, databases, custom APIs). Configured per-agent, hot-reloadable, with automatic tool discovery and namespaced registration. Build with `--features mcp`
 
 ### Messaging
 
@@ -311,7 +312,7 @@ Channel context hits 80%
 | --------- | ------------------ | ----------------------------------------- | ----------------------------------- |
 | Channel   | LLM                | Reply, branch, spawn workers, route       | Conversation + compaction summaries |
 | Branch    | LLM                | Memory recall, memory save, spawn workers | Fork of channel's context           |
-| Worker    | Pluggable          | Shell, file, exec, browser (configurable) | Fresh prompt + task description     |
+| Worker    | Pluggable          | Shell, file, exec, browser, MCP (configurable) | Fresh prompt + task description     |
 | Compactor | Programmatic       | Monitor context, trigger workers          | N/A                                 |
 | Cortex    | LLM + Programmatic | Memory, consolidation, system monitor     | Entire agent scope                  |
 
@@ -432,6 +433,7 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently
 | Slack           | **slack-morphism** — Socket Mode, events, Block Kit, slash commands, streaming via message edits |
 | Telegram        | **teloxide** — long-poll, media attachments, group/DM support                                   |
 | Twitch          | **twitch-irc** — chat integration with trigger prefix                                           |
+| MCP             | **[rmcp](https://github.com/nicepkg/rmcp)** — Model Context Protocol client (optional, `--features mcp`) |
 | Browser         | **Chromiumoxide** — headless Chrome via CDP                                                     |
 | CLI             | **Clap** — command line interface                                                                               |
 
@@ -454,6 +456,7 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
 | [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, Twitch, Webchat, webhook) |
 | [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
+| [MCP Tools](docs/content/docs/(features)/mcp.mdx)                | External tool providers via Model Context Protocol       |
 | [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
 | [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                             |
 | [Philosophy](docs/content/docs/(core)/philosophy.mdx)            | Why Rust                                                 |

@@ -138,8 +138,12 @@ pdf-extract = "0.10.0"
 open = "5.3.3"
 urlencoding = "2.1.3"
 
+# MCP (Model Context Protocol) client (optional, behind "mcp" feature)
+rmcp = { version = "0.13", optional = true, features = ["client", "transport-child-process"] }
+
 [features]
 metrics = ["dep:prometheus"]
+mcp = ["dep:rmcp", "rig/rmcp"]
 
 [lints.clippy]
 dbg_macro = "forbid"

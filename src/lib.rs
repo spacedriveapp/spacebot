@@ -12,6 +12,7 @@ pub mod error;
 pub mod hooks;
 pub mod identity;
 pub mod llm;
+pub mod mcp;
 pub mod memory;
 pub mod messaging;
 pub mod opencode;
@@ -181,6 +182,8 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
+    #[cfg(feature = "mcp")]
+    pub mcp_manager: Option<Arc<mcp::McpManager>>,
 }
 
 impl AgentDeps {
