@@ -341,6 +341,8 @@ Phase 6 — Hardening:
 
 **Don't abbreviate variable names.** `queue` not `q`, `message` not `msg`, `channel` not `ch`. Common abbreviations like `config` are fine.
 
+**Don't add new features without updating existing docs.** When a feature change affects user-facing configuration, behaviour, or architecture, update the relevant existing documentation (`README.md`, `docs/`) in the same commit or PR. Don't create new doc files for this — update what's already there.
+
 ## Patterns to Implement
 
 These are validated patterns from research (see `docs/research/pattern-analysis.md`). Implement them when building the relevant module.
