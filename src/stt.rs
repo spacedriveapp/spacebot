@@ -194,9 +194,7 @@ mod local {
         let track = format
             .tracks()
             .iter()
-            .find(|t| {
-                t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL
-            })
+            .find(|t| t.codec_params.codec != symphonia::core::codecs::CODEC_TYPE_NULL)
             .ok_or_else(|| WhisperError::Decode("no audio track found".into()))?
             .clone();
 
@@ -206,11 +204,7 @@ mod local {
 
         let track_id = track.id;
         let sample_rate = track.codec_params.sample_rate.unwrap_or(16000);
-        let channels = track
-            .codec_params
-            .channels
-            .map(|c| c.count())
-            .unwrap_or(1);
+        let channels = track.codec_params.channels.map(|c| c.count()).unwrap_or(1);
 
         let mut raw_samples: Vec<f32> = Vec::new();
 
@@ -233,10 +227,8 @@ mod local {
             // Convert to f32 mono using a sample-converting audio buffer.
             use symphonia::core::audio::{AudioBuffer, Signal as _};
 
-            let mut f32_buf: AudioBuffer<f32> = AudioBuffer::new(
-                decoded.capacity() as u64,
-                decoded.spec().clone(),
-            );
+            let mut f32_buf: AudioBuffer<f32> =
+                AudioBuffer::new(decoded.capacity() as u64, decoded.spec().clone());
             decoded.convert(&mut f32_buf);
 
             // Mix down to mono.
@@ -289,11 +281,14 @@ mod local {
                         sample_rate = 48000;
                     }
                     decoder = Some(
-                        opus::Decoder::new(sample_rate, if channels == 2 {
-                            opus::Channels::Stereo
-                        } else {
-                            opus::Channels::Mono
-                        })
+                        opus::Decoder::new(
+                            sample_rate,
+                            if channels == 2 {
+                                opus::Channels::Stereo
+                            } else {
+                                opus::Channels::Mono
+                            },
+                        )
                         .map_err(|e| WhisperError::Decode(e.to_string()))?,
                     );
                 }

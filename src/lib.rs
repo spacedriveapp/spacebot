@@ -20,11 +20,11 @@ pub mod prompts;
 pub mod secrets;
 pub mod settings;
 pub mod skills;
+#[cfg(feature = "stt-whisper")]
+pub mod stt;
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 pub mod tools;
-#[cfg(feature = "stt-whisper")]
-pub mod stt;
 pub mod update;
 
 pub use error::{Error, Result};
