@@ -165,9 +165,13 @@ mod local {
 
     /// Decode arbitrary audio bytes to 16 kHz mono f32 samples for Whisper.
     ///
-    /// Uses symphonia so ogg/opus, mp3, flac, wav, etc. all work without manual
-    /// format detection.
+    /// Ogg/Opus (Telegram voice messages) is handled directly via the `ogg` +
+    /// `opus` crates. Everything else falls through to symphonia.
     fn decode_to_f32(audio: &[u8]) -> Result<Vec<f32>, WhisperError> {
+        if is_ogg_opus(audio) {
+            return decode_ogg_opus(audio);
+        }
+
         use symphonia::core::codecs::DecoderOptions;
         use symphonia::core::formats::FormatOptions;
         use symphonia::core::io::MediaSourceStream;
@@ -252,6 +256,75 @@ mod local {
         }
 
         Ok(raw_samples)
+    }
+
+    /// Check if the audio is an Ogg container with an Opus stream.
+    fn is_ogg_opus(audio: &[u8]) -> bool {
+        // OggS capture pattern at offset 0, and OpusHead magic at offset 28
+        // (first packet of the first logical stream).
+        audio.starts_with(b"OggS") && audio.len() > 36 && &audio[28..36] == b"OpusHead"
+    }
+
+    /// Decode Ogg/Opus audio to 16 kHz mono f32 samples.
+    fn decode_ogg_opus(audio: &[u8]) -> Result<Vec<f32>, WhisperError> {
+        use ogg::reading::PacketReader;
+
+        let cursor = std::io::Cursor::new(audio);
+        let mut reader = PacketReader::new(cursor);
+
+        // Skip the OpusHead and OpusTags header packets.
+        let mut header_packets = 0;
+        let mut decoder: Option<opus::Decoder> = None;
+        let mut sample_rate = 48000u32;
+        let mut channels = 1usize;
+        let mut samples: Vec<f32> = Vec::new();
+
+        while let Ok(Some(packet)) = reader.read_packet() {
+            if header_packets < 2 {
+                if header_packets == 0 {
+                    // Parse OpusHead to get channel count and pre-skip.
+                    if packet.data.len() >= 11 && &packet.data[0..8] == b"OpusHead" {
+                        channels = packet.data[9] as usize;
+                        // Output sample rate is always 48000 for libopus.
+                        sample_rate = 48000;
+                    }
+                    decoder = Some(
+                        opus::Decoder::new(sample_rate, if channels == 2 {
+                            opus::Channels::Stereo
+                        } else {
+                            opus::Channels::Mono
+                        })
+                        .map_err(|e| WhisperError::Decode(e.to_string()))?,
+                    );
+                }
+                header_packets += 1;
+                continue;
+            }
+
+            let dec = decoder.as_mut().unwrap();
+            // Max Opus frame: 120ms at 48kHz = 5760 samples per channel.
+            let max_samples = 5760 * channels;
+            let mut pcm = vec![0f32; max_samples];
+            let n = dec
+                .decode_float(&packet.data, &mut pcm, false)
+                .map_err(|e| WhisperError::Decode(e.to_string()))?;
+
+            // Mix down to mono.
+            if channels == 1 {
+                samples.extend_from_slice(&pcm[..n]);
+            } else {
+                for frame in 0..n {
+                    let mut sum = 0f32;
+                    for ch in 0..channels {
+                        sum += pcm[frame * channels + ch];
+                    }
+                    samples.push(sum / channels as f32);
+                }
+            }
+        }
+
+        // Resample from 48 kHz to 16 kHz.
+        Ok(resample(samples, sample_rate, 16000))
     }
 
     /// Simple linear resampler (good enough for speech; not for music).
