@@ -33,6 +33,7 @@ fastembed = "4"
 
 # Encoding
 base64 = "0.22"
+hex = "0.4"
 
 # Logging and tracing
 tracing = "0.1"
