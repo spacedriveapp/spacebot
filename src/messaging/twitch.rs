@@ -220,53 +220,46 @@ impl Messaging for TwitchAdapter {
 
         match response {
             OutboundResponse::Text(text) => {
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    client
-                        .say(channel.to_owned(), chunk)
-                        .await
-                        .context("failed to send twitch message")?;
-                }
+                client
+                    .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
+                    .await
+                    .context("failed to send twitch message")?;
             }
             OutboundResponse::RichMessage { text, .. } => {
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    client
-                        .say(channel.to_owned(), chunk)
-                        .await
-                        .context("failed to send twitch message")?;
-                }
+                client
+                    .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
+                    .await
+                    .context("failed to send twitch message")?;
             }
             OutboundResponse::ThreadReply { text, .. } => {
-                // Twitch has no threads — reply to the source message instead
+                let truncated = truncate_message(&text, MAX_MESSAGE_LENGTH);
                 let reply_to_id = message
                     .metadata
                     .get("twitch_message_id")
                     .and_then(|v| v.as_str());
 
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    if let Some(parent_id) = reply_to_id {
-                        let reply_ref = (channel, parent_id);
-                        client
-                            .say_in_reply_to(&reply_ref, chunk)
-                            .await
-                            .context("failed to send twitch reply")?;
-                    } else {
-                        client
-                            .say(channel.to_owned(), chunk)
-                            .await
-                            .context("failed to send twitch message")?;
-                    }
+                if let Some(parent_id) = reply_to_id {
+                    let reply_ref = (channel, parent_id);
+                    client
+                        .say_in_reply_to(&reply_ref, truncated)
+                        .await
+                        .context("failed to send twitch reply")?;
+                } else {
+                    client
+                        .say(channel.to_owned(), truncated)
+                        .await
+                        .context("failed to send twitch message")?;
                 }
             }
             OutboundResponse::File {
                 filename, caption, ..
             } => {
-                // Twitch is text-only — send a note about the file
                 let text = match caption {
                     Some(caption) => format!("[File: {filename}] {caption}"),
                     None => format!("[File: {filename}]"),
                 };
                 client
-                    .say(channel.to_owned(), text)
+                    .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
                     .await
                     .context("failed to send twitch file notice")?;
             }
@@ -283,16 +276,14 @@ impl Messaging for TwitchAdapter {
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_) => {}
             OutboundResponse::Ephemeral { text, .. } => {
-                // No ephemeral concept in Twitch — send as regular chat message
                 client
-                    .say(channel.to_owned(), text)
+                    .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
                     .await
                     .context("failed to send ephemeral fallback on twitch")?;
             }
             OutboundResponse::ScheduledMessage { text, .. } => {
-                // No scheduled messages on Twitch — send immediately
                 client
-                    .say(channel.to_owned(), text)
+                    .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
                     .await
                     .context("failed to send scheduled message fallback on twitch")?;
             }
@@ -309,20 +300,16 @@ impl Messaging for TwitchAdapter {
 
         if let OutboundResponse::Text(text) = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                client
-                    .say(channel.to_owned(), chunk)
-                    .await
-                    .context("failed to broadcast twitch message")?;
-            }
+            client
+                .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
+                .await
+                .context("failed to broadcast twitch message")?;
         } else if let OutboundResponse::RichMessage { text, .. } = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                client
-                    .say(channel.to_owned(), chunk)
-                    .await
-                    .context("failed to broadcast twitch message")?;
-            }
+            client
+                .say(channel.to_owned(), truncate_message(&text, MAX_MESSAGE_LENGTH))
+                .await
+                .context("failed to broadcast twitch message")?;
         }
 
         Ok(())
@@ -350,30 +337,18 @@ impl Messaging for TwitchAdapter {
     }
 }
 
-/// Split a message into chunks that fit within Twitch's character limit.
-/// Tries to split at newlines, then spaces, then hard-cuts.
-fn split_message(text: &str, max_len: usize) -> Vec<String> {
+/// Truncate a message to fit within Twitch's single-message character limit.
+/// Cuts at the last word boundary before the limit and appends "…" when truncated.
+fn truncate_message(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
-        return vec![text.to_string()];
+        return text.to_string();
     }
+    let budget = max_len.saturating_sub("…".len());
+    let candidate = &text[..text.floor_char_boundary(budget)];
 
-    let mut chunks = Vec::new();
-    let mut remaining = text;
+    let cut = candidate
+        .rfind(|c: char| c.is_whitespace())
+        .unwrap_or(candidate.len());
 
-    while !remaining.is_empty() {
-        if remaining.len() <= max_len {
-            chunks.push(remaining.to_string());
-            break;
-        }
-
-        let split_at = remaining[..max_len]
-            .rfind('\n')
-            .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
-
-        chunks.push(remaining[..split_at].to_string());
-        remaining = remaining[split_at..].trim_start();
-    }
-
-    chunks
+    format!("{}…", candidate[..cut].trim_end())
 }
