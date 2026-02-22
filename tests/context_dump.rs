@@ -85,6 +85,18 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     Ok((deps, config))
 }
 
+async fn bootstrap_deps_or_skip() -> Option<(spacebot::AgentDeps, spacebot::config::Config)> {
+    match bootstrap_deps().await {
+        Ok(deps_and_config) => Some(deps_and_config),
+        Err(error) => {
+            eprintln!(
+                "skipping context_dump integration test (requires local ~/.spacebot with credentials and embedding model cache): {error:#}"
+            );
+            None
+        }
+    }
+}
+
 /// Print a labeled section with a separator.
 fn print_section(label: &str, content: &str) {
     let separator = "=".repeat(80);
@@ -158,7 +170,9 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
 
 #[tokio::test]
 async fn dump_channel_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some((deps, _config)) = bootstrap_deps_or_skip().await else {
+        return;
+    };
     let rc = &deps.runtime_config;
 
     let prompt = build_channel_system_prompt(rc);
@@ -238,7 +252,9 @@ async fn dump_channel_context() {
 
 #[tokio::test]
 async fn dump_branch_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some((deps, _config)) = bootstrap_deps_or_skip().await else {
+        return;
+    };
     let rc = &deps.runtime_config;
 
     let prompt_engine = rc.prompts.load();
@@ -291,7 +307,9 @@ async fn dump_branch_context() {
 
 #[tokio::test]
 async fn dump_worker_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some((deps, _config)) = bootstrap_deps_or_skip().await else {
+        return;
+    };
     let rc = &deps.runtime_config;
 
     let prompt_engine = rc.prompts.load();
@@ -356,7 +374,9 @@ async fn dump_worker_context() {
 
 #[tokio::test]
 async fn dump_all_contexts() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some((deps, _config)) = bootstrap_deps_or_skip().await else {
+        return;
+    };
     let rc = &deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let instance_dir = rc.instance_dir.to_string_lossy();

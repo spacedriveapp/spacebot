@@ -391,8 +391,11 @@ impl Channel {
 
         if messages.len() == 1 {
             // Single message - process normally
-            let message = messages.into_iter().next().ok_or_else(|| anyhow::anyhow!("empty iterator after length check"))?;
-            self.handle_message(message).await
+            if let Some(message) = messages.into_iter().next() {
+                self.handle_message(message).await
+            } else {
+                Ok(())
+            }
         } else {
             // Multiple messages - batch them
             self.handle_message_batch(messages).await
@@ -1147,8 +1150,10 @@ impl Channel {
                 for (key, value) in retrigger_metadata {
                     self.pending_retrigger_metadata.insert(key, value);
                 }
-                self.retrigger_deadline =
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS));
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
             }
         }
 

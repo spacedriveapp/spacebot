@@ -6,12 +6,12 @@
 //! # Usage
 //!
 //! ```rust
-//! // At startup (main.rs):
-//! prompts::text::init("en").expect("invalid language");
+//! use spacebot::prompts::text;
 //!
-//! // Anywhere:
-//! let desc = prompts::text::get("tools/file");
-//! let prompt = prompts::text::get("channel");
+//! let desc = text::get("tools/file");
+//! let prompt = text::get("channel");
+//! assert!(!desc.is_empty());
+//! assert!(!prompt.is_empty());
 //! ```
 
 use std::sync::OnceLock;

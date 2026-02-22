@@ -2365,10 +2365,9 @@ impl Config {
                 .into_iter()
                 .map(|(provider_id, config)| {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "failed to resolve API key for provider '{}'",
-                            provider_id
-                        )
+                        ConfigError::Invalid(format!(
+                            "Failed to resolve API key for provider '{provider_id}': env var missing"
+                        ))
                     })?;
                     Ok((
                         provider_id.to_lowercase(),
@@ -2380,7 +2379,7 @@ impl Config {
                         },
                     ))
                 })
-                .collect::<anyhow::Result<_>>()?,
+                .collect::<std::result::Result<HashMap<_, _>, ConfigError>>()?,
         };
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
@@ -4091,6 +4090,28 @@ api_key = "static-provider-key"
         assert_eq!(second_provider.api_type, ApiType::Anthropic);
         assert_eq!(second_provider.base_url, "https://api.anthropic.com/v1");
         assert_eq!(second_provider.api_key, "static-provider-key");
+    }
+
+    #[test]
+    fn test_provider_env_key_missing_returns_error() {
+        let _lock = env_test_lock().lock().unwrap_or_else(|e| e.into_inner());
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[llm.provider.MissingKeyProv]
+api_type = "openai_responses"
+base_url = "https://api.example.com/v1"
+api_key = "env:OPENAI_API_KEY"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let result = Config::from_toml(parsed, PathBuf::from("."));
+        let error = result.expect_err("missing env var should return an error");
+        assert!(
+            error
+                .to_string()
+                .contains("Failed to resolve API key for provider 'MissingKeyProv'")
+        );
     }
 
     #[test]

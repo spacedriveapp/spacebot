@@ -129,7 +129,7 @@ struct ActiveChannel {
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
+        .map_err(|error| anyhow::anyhow!("failed to install rustls crypto provider: {error:?}"))?;
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
@@ -559,21 +559,20 @@ fn get_agent_config<'a>(
     config: &'a spacebot::config::Config,
     agent_id: Option<&str>,
 ) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
-    let agent_id = match agent_id {
+    let resolved_agent_id = match agent_id {
         Some(id) => id,
-        None => {
-            if config.agents.is_empty() {
-                anyhow::bail!("no agents configured");
-            }
-            &config.agents[0].id
-        }
+        None => config
+            .agents
+            .first()
+            .map(|agent| agent.id.as_str())
+            .ok_or_else(|| anyhow::anyhow!("no agents configured"))?,
     };
 
     config
         .agents
         .iter()
-        .find(|a| a.id == agent_id)
-        .with_context(|| format!("agent not found: {agent_id}"))
+        .find(|agent| agent.id == resolved_agent_id)
+        .with_context(|| format!("agent not found: {resolved_agent_id}"))
 }
 
 fn load_config(
@@ -610,11 +609,8 @@ async fn run(
     let (agent_remove_tx, mut agent_remove_rx) = mpsc::channel::<String>(8);
 
     // Start HTTP API server if enabled
-    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
-        provider_tx,
-        agent_tx,
-        agent_remove_tx,
-    );
+    let mut api_state =
+        spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx, agent_remove_tx);
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
 

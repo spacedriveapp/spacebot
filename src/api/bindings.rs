@@ -131,6 +131,31 @@ pub(super) struct UpdateBindingResponse {
     message: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HotReloadDisposition {
+    NoCredentials,
+    Start,
+    MissingConfig,
+}
+
+fn hot_reload_disposition(
+    platform: &'static str,
+    has_credentials: bool,
+    has_config: bool,
+) -> HotReloadDisposition {
+    match (has_credentials, has_config) {
+        (false, _) => HotReloadDisposition::NoCredentials,
+        (true, true) => HotReloadDisposition::Start,
+        (true, false) => {
+            tracing::warn!(
+                platform,
+                "credentials provided but messaging config is missing after reload"
+            );
+            HotReloadDisposition::MissingConfig
+        }
+    }
+}
+
 /// List all bindings, optionally filtered by agent_id.
 pub(super) async fn list_bindings(
     State(state): State<Arc<ApiState>>,
@@ -370,141 +395,148 @@ pub(super) async fn create_binding(
 
         let manager_guard = state.messaging_manager.read().await;
         if let Some(manager) = manager_guard.as_ref() {
-            if let Some(token) = new_discord_token {
-                let discord_perms = {
-                    let perms_guard = state.discord_permissions.read().await;
-                    match perms_guard.as_ref() {
-                        Some(existing) => existing.clone(),
-                        None => {
-                            drop(perms_guard);
-                            let Some(discord_config) = new_config
-                                .messaging
-                                .discord
-                                .as_ref()
-                            else {
-                                tracing::error!("discord config missing despite token being provided");
-                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                            };
-                            let perms = crate::config::DiscordPermissions::from_config(
-                                discord_config,
-                                &new_config.bindings,
-                            );
-                            let arc_swap =
-                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                            state.set_discord_permissions(arc_swap.clone()).await;
-                            arc_swap
+            let discord_config = new_config.messaging.discord.as_ref();
+            if matches!(
+                hot_reload_disposition(
+                    "discord",
+                    new_discord_token.is_some(),
+                    discord_config.is_some(),
+                ),
+                HotReloadDisposition::Start
+            ) {
+                if let (Some(token), Some(discord_config)) =
+                    (new_discord_token.as_ref(), discord_config)
+                {
+                    let discord_perms = {
+                        let perms_guard = state.discord_permissions.read().await;
+                        match perms_guard.as_ref() {
+                            Some(existing) => existing.clone(),
+                            None => {
+                                drop(perms_guard);
+                                let perms = crate::config::DiscordPermissions::from_config(
+                                    discord_config,
+                                    &new_config.bindings,
+                                );
+                                let arc_swap =
+                                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                                state.set_discord_permissions(arc_swap.clone()).await;
+                                arc_swap
+                            }
                         }
-                    }
-                };
-                let adapter = crate::messaging::discord::DiscordAdapter::new(&token, discord_perms);
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start discord adapter");
-                }
-            }
-
-            if let Some((bot_token, app_token)) = new_slack_tokens {
-                let slack_perms = {
-                    let perms_guard = state.slack_permissions.read().await;
-                    match perms_guard.as_ref() {
-                        Some(existing) => existing.clone(),
-                        None => {
-                            drop(perms_guard);
-                            let Some(slack_config) = new_config
-                                .messaging
-                                .slack
-                                .as_ref()
-                            else {
-                                tracing::error!("slack config missing despite tokens being provided");
-                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                            };
-                            let perms = crate::config::SlackPermissions::from_config(
-                                slack_config,
-                                &new_config.bindings,
-                            );
-                            let arc_swap =
-                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                            state.set_slack_permissions(arc_swap.clone()).await;
-                            arc_swap
-                        }
-                    }
-                };
-                let slack_commands = new_config
-                    .messaging
-                    .slack
-                    .as_ref()
-                    .map(|s| s.commands.clone())
-                    .unwrap_or_default();
-                match crate::messaging::slack::SlackAdapter::new(
-                    &bot_token,
-                    &app_token,
-                    slack_perms,
-                    slack_commands,
-                ) {
-                    Ok(adapter) => {
-                        if let Err(error) = manager.register_and_start(adapter).await {
-                            tracing::error!(%error, "failed to hot-start slack adapter");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "failed to build slack adapter");
-                    }
-                }
-            }
-
-            if let Some(token) = new_telegram_token {
-                let telegram_perms = {
-                    let Some(telegram_config) = new_config
-                        .messaging
-                        .telegram
-                        .as_ref()
-                    else {
-                        tracing::error!("telegram config missing despite token being provided");
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
                     };
-                    let perms = crate::config::TelegramPermissions::from_config(
-                        telegram_config,
-                        &new_config.bindings,
-                    );
-                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                };
-                let adapter =
-                    crate::messaging::telegram::TelegramAdapter::new(&token, telegram_perms);
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start telegram adapter");
+                    let adapter =
+                        crate::messaging::discord::DiscordAdapter::new(token, discord_perms);
+                    if let Err(error) = manager.register_and_start(adapter).await {
+                        tracing::error!(%error, "failed to hot-start discord adapter");
+                    }
                 }
             }
 
-            if let Some((username, oauth_token)) = new_twitch_creds {
-                let Some(twitch_config) = new_config
-                    .messaging
-                    .twitch
-                    .as_ref()
-                else {
-                    tracing::error!("twitch config missing despite credentials being provided");
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                };
-                let twitch_perms = {
-                    let perms = crate::config::TwitchPermissions::from_config(
-                        twitch_config,
-                        &new_config.bindings,
+            let slack_config = new_config.messaging.slack.as_ref();
+            if matches!(
+                hot_reload_disposition("slack", new_slack_tokens.is_some(), slack_config.is_some()),
+                HotReloadDisposition::Start
+            ) {
+                if let (Some((bot_token, app_token)), Some(slack_config)) =
+                    (new_slack_tokens.as_ref(), slack_config)
+                {
+                    let slack_perms = {
+                        let perms_guard = state.slack_permissions.read().await;
+                        match perms_guard.as_ref() {
+                            Some(existing) => existing.clone(),
+                            None => {
+                                drop(perms_guard);
+                                let perms = crate::config::SlackPermissions::from_config(
+                                    slack_config,
+                                    &new_config.bindings,
+                                );
+                                let arc_swap =
+                                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                                state.set_slack_permissions(arc_swap.clone()).await;
+                                arc_swap
+                            }
+                        }
+                    };
+                    match crate::messaging::slack::SlackAdapter::new(
+                        bot_token,
+                        app_token,
+                        slack_perms,
+                        slack_config.commands.clone(),
+                    ) {
+                        Ok(adapter) => {
+                            if let Err(error) = manager.register_and_start(adapter).await {
+                                tracing::error!(%error, "failed to hot-start slack adapter");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "failed to build slack adapter");
+                        }
+                    }
+                }
+            }
+
+            let telegram_config = new_config.messaging.telegram.as_ref();
+            if matches!(
+                hot_reload_disposition(
+                    "telegram",
+                    new_telegram_token.is_some(),
+                    telegram_config.is_some(),
+                ),
+                HotReloadDisposition::Start
+            ) {
+                if let (Some(token), Some(telegram_config)) =
+                    (new_telegram_token.as_ref(), telegram_config)
+                {
+                    let telegram_perms = {
+                        let perms = crate::config::TelegramPermissions::from_config(
+                            telegram_config,
+                            &new_config.bindings,
+                        );
+                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                    };
+                    let adapter =
+                        crate::messaging::telegram::TelegramAdapter::new(token, telegram_perms);
+                    if let Err(error) = manager.register_and_start(adapter).await {
+                        tracing::error!(%error, "failed to hot-start telegram adapter");
+                    }
+                }
+            }
+
+            let twitch_config = new_config.messaging.twitch.as_ref();
+            if matches!(
+                hot_reload_disposition(
+                    "twitch",
+                    new_twitch_creds.is_some(),
+                    twitch_config.is_some(),
+                ),
+                HotReloadDisposition::Start
+            ) {
+                if let (Some((username, oauth_token)), Some(twitch_config)) =
+                    (new_twitch_creds.as_ref(), twitch_config)
+                {
+                    let twitch_perms = {
+                        let perms = crate::config::TwitchPermissions::from_config(
+                            twitch_config,
+                            &new_config.bindings,
+                        );
+                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                    };
+                    let instance_dir = state.instance_dir.load();
+                    let token_path = instance_dir.join("twitch_token.json");
+                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                        username,
+                        oauth_token,
+                        twitch_config.client_id.clone(),
+                        twitch_config.client_secret.clone(),
+                        twitch_config.refresh_token.clone(),
+                        Some(token_path),
+                        twitch_config.channels.clone(),
+                        twitch_config.trigger_prefix.clone(),
+                        twitch_perms,
                     );
-                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                };
-                let instance_dir = state.instance_dir.load();
-                let token_path = instance_dir.join("twitch_token.json");
-                let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                    &username,
-                    &oauth_token,
-                    twitch_config.client_id.clone(),
-                    twitch_config.client_secret.clone(),
-                    twitch_config.refresh_token.clone(),
-                    Some(token_path),
-                    twitch_config.channels.clone(),
-                    twitch_config.trigger_prefix.clone(),
-                    twitch_perms,
-                );
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start twitch adapter");
+                    if let Err(error) = manager.register_and_start(adapter).await {
+                        tracing::error!(%error, "failed to hot-start twitch adapter");
+                    }
                 }
             }
         }
@@ -805,4 +837,61 @@ pub(super) async fn delete_binding(
         success: true,
         message: "Binding deleted.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{HotReloadDisposition, hot_reload_disposition};
+
+    #[test]
+    fn hot_reload_disposition_starts_when_credentials_and_config_exist() {
+        assert_eq!(
+            hot_reload_disposition("discord", true, true),
+            HotReloadDisposition::Start
+        );
+        assert_eq!(
+            hot_reload_disposition("slack", true, true),
+            HotReloadDisposition::Start
+        );
+        assert_eq!(
+            hot_reload_disposition("telegram", true, true),
+            HotReloadDisposition::Start
+        );
+        assert_eq!(
+            hot_reload_disposition("twitch", true, true),
+            HotReloadDisposition::Start
+        );
+    }
+
+    #[test]
+    fn hot_reload_disposition_skips_when_credentials_missing() {
+        assert_eq!(
+            hot_reload_disposition("discord", false, true),
+            HotReloadDisposition::NoCredentials
+        );
+        assert_eq!(
+            hot_reload_disposition("slack", false, false),
+            HotReloadDisposition::NoCredentials
+        );
+    }
+
+    #[test]
+    fn hot_reload_disposition_marks_missing_config_when_token_present() {
+        assert_eq!(
+            hot_reload_disposition("discord", true, false),
+            HotReloadDisposition::MissingConfig
+        );
+        assert_eq!(
+            hot_reload_disposition("slack", true, false),
+            HotReloadDisposition::MissingConfig
+        );
+        assert_eq!(
+            hot_reload_disposition("telegram", true, false),
+            HotReloadDisposition::MissingConfig
+        );
+        assert_eq!(
+            hot_reload_disposition("twitch", true, false),
+            HotReloadDisposition::MissingConfig
+        );
+    }
 }

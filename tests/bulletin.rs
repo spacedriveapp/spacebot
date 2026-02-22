@@ -83,6 +83,18 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
     })
 }
 
+async fn bootstrap_deps_or_skip() -> Option<spacebot::AgentDeps> {
+    match bootstrap_deps().await {
+        Ok(deps) => Some(deps),
+        Err(error) => {
+            eprintln!(
+                "skipping bulletin integration test (requires local ~/.spacebot with credentials and embedding model cache): {error:#}"
+            );
+            None
+        }
+    }
+}
+
 /// The cortex user prompt references memory types inline. If a new variant is
 /// added to MemoryType::ALL, this test fails until the type list is updated.
 #[test]
@@ -120,7 +132,9 @@ fn test_bulletin_prompts_cover_all_memory_types() {
 
 #[tokio::test]
 async fn test_memory_recall_returns_results() {
-    let deps = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some(deps) = bootstrap_deps_or_skip().await else {
+        return;
+    };
 
     let config = spacebot::memory::search::SearchConfig::default();
     let results = deps
@@ -147,7 +161,9 @@ async fn test_memory_recall_returns_results() {
 
 #[tokio::test]
 async fn test_bulletin_generation() {
-    let deps = bootstrap_deps().await.expect("failed to bootstrap");
+    let Some(deps) = bootstrap_deps_or_skip().await else {
+        return;
+    };
 
     // Verify the bulletin starts empty
     let before = deps.runtime_config.memory_bulletin.load();

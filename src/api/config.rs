@@ -409,7 +409,7 @@ fn get_or_create_subtable<'a>(
     agent: &'a mut toml_edit::Table,
     key: &str,
 ) -> Result<&'a mut toml_edit::Table, StatusCode> {
-    if !agent.contains_key(key) {
+    if !agent.contains_key(key) || !agent[key].is_table() {
         agent[key] = toml_edit::Item::Table(toml_edit::Table::new());
     }
     agent[key]
