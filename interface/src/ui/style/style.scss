@@ -20,6 +20,13 @@ html {
 	background: hsla(var(--color-app), 1);
 }
 
+@media (max-width: 768px) {
+	input,
+	textarea {
+		font-size: 16px;
+	}
+}
+
 body {
 	@apply font-plex text-ink bg-app;
 }
