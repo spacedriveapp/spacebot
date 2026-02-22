@@ -48,6 +48,9 @@ struct ActiveStream {
 /// Telegram's per-message character limit.
 const MAX_MESSAGE_LENGTH: usize = 4096;
 
+/// Smaller source-chunk target for markdown that expands heavily when HTML-escaped.
+const FORMATTED_SPLIT_LENGTH: usize = MAX_MESSAGE_LENGTH / 2;
+
 /// Minimum interval between streaming edits to avoid rate limits.
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
 
@@ -391,11 +394,7 @@ impl Messaging for TelegramAdapter {
                         tracing::debug!(%html_error, "HTML edit failed, retrying as plain text");
                         if let Err(error) = self
                             .bot
-                            .edit_message_text(
-                                stream.chat_id,
-                                stream.message_id,
-                                &display_text,
-                            )
+                            .edit_message_text(stream.chat_id, stream.message_id, &display_text)
                             .send()
                             .await
                         {
@@ -885,8 +884,12 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 static BOLD_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("hardcoded regex"));
+static BOLD_UNDERSCORE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"__(.+?)__").expect("hardcoded regex"));
 static ITALIC_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*(.+?)\*").expect("hardcoded regex"));
+static ITALIC_UNDERSCORE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"_(.+?)_").expect("hardcoded regex"));
 static STRIKETHROUGH_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"~~(.+?)~~").expect("hardcoded regex"));
 static LINK_PATTERN: LazyLock<Regex> =
@@ -1036,10 +1039,30 @@ fn format_inline(line: &str) -> String {
 /// are consumed first and single stars only match true italic spans.
 fn format_markdown_spans(text: &str) -> String {
     let text = BOLD_PATTERN.replace_all(text, "<b>$1</b>");
+    let text = BOLD_UNDERSCORE_PATTERN.replace_all(&text, "<b>$1</b>");
     let text = ITALIC_PATTERN.replace_all(&text, "<i>$1</i>");
+    let text = ITALIC_UNDERSCORE_PATTERN.replace_all(&text, "<i>$1</i>");
     let text = STRIKETHROUGH_PATTERN.replace_all(&text, "<s>$1</s>");
     let text = LINK_PATTERN.replace_all(&text, r#"<a href="$2">$1</a>"#);
     text.into_owned()
+}
+
+/// Send a plain text Telegram message for formatting fallback paths.
+async fn send_plain_text(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    reply_to: Option<MessageId>,
+) -> anyhow::Result<()> {
+    let mut request = bot.send_message(chat_id, text);
+    if let Some(reply_id) = reply_to {
+        request = request.reply_parameters(ReplyParameters::new(reply_id));
+    }
+    request
+        .send()
+        .await
+        .context("failed to send telegram message")?;
+    Ok(())
 }
 
 /// Send a message with Telegram HTML formatting, splitting at the message
@@ -1050,25 +1073,35 @@ async fn send_formatted(
     text: &str,
     reply_to: Option<MessageId>,
 ) -> anyhow::Result<()> {
-    let html = markdown_to_telegram_html(text);
-    for chunk in split_message(&html, MAX_MESSAGE_LENGTH) {
+    let mut pending_chunks: VecDeque<String> =
+        VecDeque::from(split_message(text, MAX_MESSAGE_LENGTH));
+    while let Some(markdown_chunk) = pending_chunks.pop_front() {
+        let html_chunk = markdown_to_telegram_html(&markdown_chunk);
+
+        if html_chunk.len() > MAX_MESSAGE_LENGTH {
+            let smaller_chunks = split_message(&markdown_chunk, FORMATTED_SPLIT_LENGTH);
+            if smaller_chunks.len() > 1 {
+                for chunk in smaller_chunks.into_iter().rev() {
+                    pending_chunks.push_front(chunk);
+                }
+                continue;
+            }
+
+            let plain_chunk = strip_html_tags(&html_chunk);
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
+            continue;
+        }
+
         let mut request = bot
-            .send_message(chat_id, &chunk)
+            .send_message(chat_id, &html_chunk)
             .parse_mode(ParseMode::Html);
         if let Some(reply_id) = reply_to {
             request = request.reply_parameters(ReplyParameters::new(reply_id));
         }
         if let Err(error) = request.send().await {
             tracing::debug!(%error, "HTML send failed, retrying as plain text");
-            let plain = strip_html_tags(&chunk);
-            let mut fallback = bot.send_message(chat_id, &plain);
-            if let Some(reply_id) = reply_to {
-                fallback = fallback.reply_parameters(ReplyParameters::new(reply_id));
-            }
-            fallback
-                .send()
-                .await
-                .context("failed to send telegram message")?;
+            let plain_chunk = strip_html_tags(&html_chunk);
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
         }
     }
     Ok(())
@@ -1090,6 +1123,22 @@ mod tests {
     fn italic() {
         assert_eq!(
             markdown_to_telegram_html("*italic text*"),
+            "<i>italic text</i>"
+        );
+    }
+
+    #[test]
+    fn bold_with_underscores() {
+        assert_eq!(
+            markdown_to_telegram_html("__bold text__"),
+            "<b>bold text</b>"
+        );
+    }
+
+    #[test]
+    fn italic_with_underscores() {
+        assert_eq!(
+            markdown_to_telegram_html("_italic text_"),
             "<i>italic text</i>"
         );
     }
