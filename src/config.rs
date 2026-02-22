@@ -225,7 +225,7 @@ const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
-const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
+const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
@@ -2002,7 +2002,7 @@ impl Config {
             llm.providers
                 .entry("minimax".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
+                    api_type: ApiType::OpenAiCompletions,
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
@@ -2343,7 +2343,7 @@ impl Config {
             llm.providers
                 .entry("minimax".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::Anthropic,
+                    api_type: ApiType::OpenAiCompletions,
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
