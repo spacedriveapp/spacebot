@@ -124,7 +124,7 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 	const agents = agentsData?.agents ?? [];
 	const channels = channelsData?.channels ?? [];
-	
+
 	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
 	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
 
@@ -167,7 +167,8 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 	return (
 		<motion.nav
-			className="flex h-full flex-col overflow-hidden border-r border-sidebar-line bg-sidebar"
+			className="flex h-full shrink-0 flex-col overflow-hidden border-r border-sidebar-line bg-sidebar"
+			initial={{ width: collapsed ? 56 : 224 }}
 			animate={{ width: collapsed ? 56 : 224 }}
 			transition={{ type: "spring", stiffness: 500, damping: 35 }}
 		>
