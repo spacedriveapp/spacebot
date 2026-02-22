@@ -129,7 +129,7 @@ struct ActiveChannel {
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls crypto provider");
+        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
@@ -559,12 +559,15 @@ fn get_agent_config<'a>(
     config: &'a spacebot::config::Config,
     agent_id: Option<&str>,
 ) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
-    let agent_id = agent_id.unwrap_or_else(|| {
-        if config.agents.is_empty() {
-            panic!("no agents configured");
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => {
+            if config.agents.is_empty() {
+                anyhow::bail!("no agents configured");
+            }
+            &config.agents[0].id
         }
-        &config.agents[0].id
-    });
+    };
 
     config
         .agents
@@ -1373,9 +1376,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::discord::DiscordAdapter::new(
             &discord_config.token,
-            discord_permissions
-                .clone()
-                .expect("discord permissions initialized when discord is enabled"),
+            discord_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("discord permissions not initialized when discord is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1395,9 +1398,9 @@ async fn initialize_agents(
         match spacebot::messaging::slack::SlackAdapter::new(
             &slack_config.bot_token,
             &slack_config.app_token,
-            slack_permissions
-                .clone()
-                .expect("slack permissions initialized when slack is enabled"),
+            slack_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("slack permissions not initialized when slack is enabled")
+            })?,
             slack_config.commands.clone(),
         ) {
             Ok(adapter) => {
@@ -1421,9 +1424,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
             &telegram_config.token,
-            telegram_permissions
-                .clone()
-                .expect("telegram permissions initialized when telegram is enabled"),
+            telegram_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("telegram permissions not initialized when telegram is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1454,9 +1457,9 @@ async fn initialize_agents(
             &twitch_config.oauth_token,
             twitch_config.channels.clone(),
             twitch_config.trigger_prefix.clone(),
-            twitch_permissions
-                .clone()
-                .expect("twitch permissions initialized when twitch is enabled"),
+            twitch_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("twitch permissions not initialized when twitch is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }

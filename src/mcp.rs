@@ -306,6 +306,13 @@ impl McpConnection {
                     .collect::<HashMap<_, _>>();
 
                 let mut child_command = tokio::process::Command::new(&resolved_command);
+                child_command.env_clear();
+                // Keep PATH so stdio servers launched via shims/shebangs
+                // (for example `npx` -> `/usr/bin/env node`) can still
+                // resolve their runtime without inheriting unrelated secrets.
+                if let Ok(path) = std::env::var("PATH") {
+                    child_command.env("PATH", path);
+                }
                 child_command.args(&resolved_args);
                 child_command.envs(&resolved_env);
 

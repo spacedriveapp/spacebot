@@ -52,16 +52,16 @@ pub enum CortexChatEvent {
 /// Prompt hook that forwards tool events to an mpsc channel for SSE streaming.
 #[derive(Clone)]
 struct CortexChatHook {
-    event_tx: mpsc::UnboundedSender<CortexChatEvent>,
+    event_tx: mpsc::Sender<CortexChatEvent>,
 }
 
 impl CortexChatHook {
-    fn new(event_tx: mpsc::UnboundedSender<CortexChatEvent>) -> Self {
+    fn new(event_tx: mpsc::Sender<CortexChatEvent>) -> Self {
         Self { event_tx }
     }
 
-    fn send(&self, event: CortexChatEvent) {
-        let _ = self.event_tx.send(event);
+    async fn send(&self, event: CortexChatEvent) {
+        let _ = self.event_tx.send(event).await;
     }
 }
 
@@ -75,7 +75,7 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     ) -> ToolCallHookAction {
         self.send(CortexChatEvent::ToolStarted {
             tool: tool_name.to_string(),
-        });
+        }).await;
         ToolCallHookAction::Continue
     }
 
@@ -95,7 +95,7 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         self.send(CortexChatEvent::ToolCompleted {
             tool: tool_name.to_string(),
             result_preview: preview,
-        });
+        }).await;
         HookAction::Continue
     }
 
@@ -232,7 +232,7 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
-    ) -> Result<mpsc::UnboundedReceiver<CortexChatEvent>, anyhow::Error> {
+    ) -> Result<mpsc::Receiver<CortexChatEvent>, anyhow::Error> {
         let _guard = self.send_lock.lock().await;
 
         // Save the user message
@@ -271,7 +271,7 @@ impl CortexChatSession {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(256);
         let hook = CortexChatHook::new(event_tx.clone());
 
         // Clone what the spawned task needs
@@ -296,7 +296,7 @@ impl CortexChatSession {
                         .await;
                     let _ = event_tx.send(CortexChatEvent::Done {
                         full_text: response,
-                    });
+                    }).await;
                 }
                 Err(error) => {
                     let error_text = format!("Cortex chat error: {error}");
@@ -305,7 +305,7 @@ impl CortexChatSession {
                         .await;
                     let _ = event_tx.send(CortexChatEvent::Error {
                         message: error_text,
-                    });
+                    }).await;
                 }
             }
         });
