@@ -1,9 +1,10 @@
 import {useState, useEffect, useRef} from "react";
 import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
 import {api, type GlobalSettingsResponse} from "@/api/client";
-import {Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle} from "@/ui";
+import {Button, Input, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle} from "@/ui";
 import {useSearch, useNavigate} from "@tanstack/react-router";
 import {ChannelSettingCard, DisabledChannelCard} from "@/components/ChannelSettingCard";
+import {SettingSectionNav} from "@/components/SettingSectionNav";
 import {ModelSelect} from "@/components/ModelSelect";
 import {ProviderIcon} from "@/lib/providerIcons";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
@@ -354,26 +355,12 @@ export function Settings() {
 	};
 
 	return (
-		<div className="flex h-full">
-			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
-				<div className="px-3 pb-1 pt-4">
-					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
-						Settings
-					</span>
-				</div>
-				<div className="flex flex-col gap-0.5 px-2">
-					{SECTIONS.map((section) => (
-						<SettingSidebarButton
-							key={section.id}
-							onClick={() => handleSectionChange(section.id)}
-							active={activeSection === section.id}
-						>
-							<span className="flex-1">{section.label}</span>
-						</SettingSidebarButton>
-					))}
-				</div>
-			</div>
+		<div className="flex h-full flex-col md:flex-row">
+			<SettingSectionNav
+				groups={[{label: "Settings", sections: SECTIONS.map((s) => ({id: s.id, label: s.label}))}]}
+				activeSection={activeSection}
+				onSectionChange={(id) => handleSectionChange(id as SectionId)}
+			/>
 
 			{/* Content */}
 			<div className="flex flex-1 flex-col overflow-hidden">

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
+import { Button, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
+import {SettingSectionNav} from "@/components/SettingSectionNav";
 import { ModelSelect } from "@/components/ModelSelect";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
@@ -146,51 +147,30 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	const isIdentitySection = active.group === "identity";
 
 	return (
-		<div className="flex h-full relative">
-			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
-				{/* Identity Group */}
-				<div className="px-3 pb-1 pt-4">
-					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">Identity</span>
-				</div>
-					<div className="flex flex-col gap-0.5 px-2">
-					{SECTIONS.filter((s) => s.group === "identity").map((section) => {
-						const isActive = activeSection === section.id;
-						const hasContent = !!getIdentityField(identityQuery.data ?? { soul: null, identity: null, user: null }, section.id)?.trim();
-						return (
-							<SettingSidebarButton
-								key={section.id}
-								onClick={() => handleSectionChange(section.id)}
-								active={isActive}
-							>
-								<span className="flex-1">{section.label}</span>
-								{!hasContent && (
-									<span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">empty</span>
-								)}
-							</SettingSidebarButton>
-						);
-					})}
-				</div>
-
-				{/* Config Group */}
-				<div className="px-3 pb-1 pt-4 mt-2">
-					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">Configuration</span>
-				</div>
-					<div className="flex flex-col gap-0.5 px-2">
-					{SECTIONS.filter((s) => s.group === "config").map((section) => {
-						const isActive = activeSection === section.id;
-						return (
-							<SettingSidebarButton
-								key={section.id}
-								onClick={() => handleSectionChange(section.id)}
-								active={isActive}
-							>
-								<span className="flex-1">{section.label}</span>
-							</SettingSidebarButton>
-						);
-					})}
-				</div>
-			</div>
+		<div className="flex h-full flex-col md:flex-row relative">
+			<SettingSectionNav
+				groups={[
+					{
+						label: "Identity",
+						sections: SECTIONS.filter((s) => s.group === "identity").map((s) => ({
+							id: s.id,
+							label: s.label,
+							badge: !getIdentityField(identityQuery.data ?? {soul: null, identity: null, user: null}, s.id)?.trim()
+								? <span className="rounded bg-amber-500/10 px-1 py-0.5 text-tiny text-amber-400/70">empty</span>
+								: undefined,
+						})),
+					},
+					{
+						label: "Configuration",
+						sections: SECTIONS.filter((s) => s.group === "config").map((s) => ({
+							id: s.id,
+							label: s.label,
+						})),
+					},
+				]}
+				activeSection={activeSection}
+				onSectionChange={(id) => handleSectionChange(id as SectionId)}
+			/>
 
 			{/* Editor */}
 			<div className="flex flex-1 flex-col overflow-hidden">
