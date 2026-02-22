@@ -58,6 +58,10 @@ function itemTimestamp(item: TimelineItem): string {
 	}
 }
 
+function itemKey(item: TimelineItem): string {
+	return `${item.type}:${item.id}`;
+}
+
 /**
  * Manages all live channel state from SSE events, message history loading,
  * and status snapshot fetching. Returns the state map and SSE event handlers.
@@ -579,12 +583,15 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 					setLiveStates((current) => {
 						const existing = current[channelId];
 						if (!existing) return current;
+						const existingKeys = new Set(existing.timeline.map(itemKey));
+						const olderItems = data.items.filter((item) => !existingKeys.has(itemKey(item)));
+						const hasMore = olderItems.length === 0 ? false : data.has_more;
 						return {
 							...current,
 							[channelId]: {
 								...existing,
-								timeline: [...data.items, ...existing.timeline],
-								hasMore: data.has_more,
+								timeline: [...olderItems, ...existing.timeline],
+								hasMore,
 								loadingMore: false,
 							},
 						};

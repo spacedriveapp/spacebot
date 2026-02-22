@@ -805,12 +805,14 @@ export interface RegistrySkill {
 	skillId: string;
 	name: string;
 	installs: number;
+	description?: string;
 	id?: string;
 }
 
 export interface RegistryBrowseResponse {
 	skills: RegistrySkill[];
 	has_more: boolean;
+	total?: number;
 }
 
 export interface RegistrySearchResponse {
