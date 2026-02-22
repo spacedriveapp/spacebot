@@ -46,33 +46,60 @@ impl Identity {
 }
 
 /// Default identity file templates for new agents.
-const DEFAULT_IDENTITY_FILES: &[(&str, &str)] = &[
-    (
-        "SOUL.md",
-        "<!-- Define this agent's soul: personality, values, communication style, boundaries. -->\n",
-    ),
-    (
-        "IDENTITY.md",
-        "<!-- Define this agent's identity: name, nature, purpose. -->\n",
-    ),
-    (
-        "USER.md",
-        "<!-- Describe the human this agent interacts with: name, preferences, context. -->\n",
-    ),
-];
+const DEFAULT_SOUL_TEMPLATE: &str = include_str!("../../prompts/en/identity/default_soul.md.j2");
+const DEFAULT_IDENTITY_TEMPLATE: &str =
+    include_str!("../../prompts/en/identity/default_identity.md.j2");
+
+const DEFAULT_IDENTITY_FILES: &[(&str, &str)] = &[(
+    "USER.md",
+    "<!-- Describe the human this agent interacts with: name, preferences, context. -->\n",
+)];
 
 /// Write template identity files into an agent's workspace if they don't already exist.
 ///
 /// Only writes files that are missing — existing files are left untouched.
 pub async fn scaffold_identity_files(workspace: &Path) -> crate::error::Result<()> {
+    let rendered_soul = render_jinja_template("default_soul", DEFAULT_SOUL_TEMPLATE)?;
+    write_identity_file_if_missing(workspace, "SOUL.md", &rendered_soul).await?;
+
+    let rendered_identity = render_jinja_template("default_identity", DEFAULT_IDENTITY_TEMPLATE)?;
+    write_identity_file_if_missing(workspace, "IDENTITY.md", &rendered_identity).await?;
+
     for (filename, content) in DEFAULT_IDENTITY_FILES {
-        let target = workspace.join(filename);
-        if !target.exists() {
-            tokio::fs::write(&target, content).await.with_context(|| {
-                format!("failed to write identity template: {}", target.display())
-            })?;
-            tracing::info!(path = %target.display(), "wrote identity template");
-        }
+        write_identity_file_if_missing(workspace, filename, content).await?;
+    }
+
+    Ok(())
+}
+
+fn render_jinja_template(
+    template_name: &str,
+    template_source: &str,
+) -> crate::error::Result<String> {
+    let mut environment = minijinja::Environment::new();
+    environment
+        .add_template(template_name, template_source)
+        .with_context(|| format!("failed to load identity template '{template_name}'"))?;
+
+    environment
+        .get_template(template_name)
+        .with_context(|| format!("missing identity template '{template_name}'"))?
+        .render(minijinja::context! {})
+        .with_context(|| format!("failed to render identity template '{template_name}'"))
+        .map_err(Into::into)
+}
+
+async fn write_identity_file_if_missing(
+    workspace: &Path,
+    filename: &str,
+    content: &str,
+) -> crate::error::Result<()> {
+    let target = workspace.join(filename);
+    if !target.exists() {
+        tokio::fs::write(&target, content)
+            .await
+            .with_context(|| format!("failed to write identity template: {}", target.display()))?;
+        tracing::info!(path = %target.display(), "wrote identity template");
     }
 
     Ok(())

@@ -249,7 +249,10 @@ Or via config: add an `[[agents]]` entry to config.toml and restart. On next sta
 Creation does:
 
 1. Validate ID (lowercase alphanumeric + hyphens, unique)
-2. Create `agents/{id}/workspace/` with template SOUL.md, IDENTITY.md, USER.md
+2. Create `agents/{id}/workspace/` with default identity files:
+   - `SOUL.md` seeded with the Spacebot voice/personality baseline
+   - `IDENTITY.md` seeded with a short starter identity profile
+   - `USER.md` scaffolded as an editable template
 3. Create `agents/{id}/data/` with empty databases
 4. Add entry to config.toml
 
