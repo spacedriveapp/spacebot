@@ -328,7 +328,7 @@ Spacebot supports both rootful and rootless Podman socket paths.
 **Rootful Podman** — start the socket service and mount it:
 
 ```bash
-systemctl enable --now podman.socket
+sudo systemctl enable --now podman.socket
 ```
 
 ```bash
@@ -338,6 +338,7 @@ podman run -d \
   -e SPACEBOT_DEPLOYMENT=docker \
   -v spacebot-data:/data \
   -v /run/podman/podman.sock:/run/podman/podman.sock \
+  --security-opt label=disable \
   -p 19898:19898 \
   ghcr.io/spacedriveapp/spacebot:slim
 ```
@@ -356,12 +357,19 @@ podman run -d \
   -e XDG_RUNTIME_DIR=/run/user/$(id -u) \
   -v spacebot-data:/data \
   -v $XDG_RUNTIME_DIR/podman/podman.sock:$XDG_RUNTIME_DIR/podman/podman.sock \
+  --security-opt label=disable \
   -p 19898:19898 \
   ghcr.io/spacedriveapp/spacebot:slim
 ```
 
 You can also set `DOCKER_HOST=unix:///path/to/podman.sock` to point Spacebot at
 any custom socket location.
+
+> **SELinux note (Fedora, RHEL, and derivatives):** SELinux blocks containers
+> from connecting to the Podman socket by default. Add
+> `--security-opt label=disable` to the `podman run` command, or
+> `security_opt: [label=disable]` in your `podman-compose.yml`, when mounting
+> the socket.
 
 ### Podman Compose
 
@@ -379,6 +387,8 @@ services:
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SPACEBOT_DEPLOYMENT=docker
+    security_opt:
+      - label=disable
 
 volumes:
   spacebot-data:
