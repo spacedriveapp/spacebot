@@ -1803,7 +1803,9 @@ impl Config {
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
         let mut llm = LlmConfig {
-            anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_key: std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
@@ -1826,11 +1828,13 @@ impl Config {
 
         // Populate providers from env vars (same as from_toml does)
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });
@@ -1938,8 +1942,16 @@ impl Config {
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        // Env-only routing: check for env overrides on channel/worker models
+        // Env-only routing: check for env overrides on channel/worker models.
+        // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
         let mut routing = RoutingConfig::default();
+        if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
+            routing.channel = model.clone();
+            routing.branch = model.clone();
+            routing.worker = model.clone();
+            routing.compactor = model.clone();
+            routing.cortex = model;
+        }
         if let Ok(channel_model) = std::env::var("SPACEBOT_CHANNEL_MODEL") {
             routing.channel = channel_model;
         }
@@ -2039,7 +2051,8 @@ impl Config {
                 .anthropic_key
                 .as_deref()
                 .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: toml
                 .llm
                 .openai_key
@@ -2162,11 +2175,13 @@ impl Config {
         };
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });

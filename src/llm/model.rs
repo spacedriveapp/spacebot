@@ -352,6 +352,7 @@ impl SpacebotModel {
         let anthropic_request = crate::llm::anthropic::build_anthropic_request(
             self.llm_manager.http_client(),
             api_key,
+            &provider_config.base_url,
             &self.model_name,
             &request,
             effort,
