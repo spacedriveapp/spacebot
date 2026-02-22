@@ -81,6 +81,71 @@ jobs:
           cache-from: type=gha,scope=full-${{ steps.platform.outputs.pair }}
           cache-to: type=gha,mode=max,scope=full-${{ steps.platform.outputs.pair }}
 
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: linux-amd64
+          - runner: ubuntu-24.04-arm
+            target: linux-arm64
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version tag
+        id: version
+        run: |
+          if [ -n "${{ github.event.inputs.tag }}" ]; then
+            VERSION="${{ github.event.inputs.tag }}"
+          elif [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+          else
+            VERSION="dev-$(echo $GITHUB_SHA | head -c 7)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake pkg-config libssl-dev libsqlite3-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Build frontend
+        run: |
+          cd interface
+          bun install
+          bun run build
+
+      - name: Build release binary
+        run: cargo build --release
+        env:
+          SPACEBOT_SKIP_FRONTEND_BUILD: "1"
+
+      - name: Package binary
+        id: package
+        run: |
+          ARCHIVE="spacebot-${{ steps.version.outputs.version }}-${{ matrix.target }}.tar.gz"
+          tar -czf "$ARCHIVE" -C target/release spacebot
+          sha256sum "$ARCHIVE" > "$ARCHIVE.sha256"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: spacebot-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.archive }}.sha256
+
   merge:
     needs: build
     runs-on: ubuntu-24.04
@@ -144,3 +209,29 @@ jobs:
         with:
           tag_name: ${{ needs.build.outputs.version }}
           generate_release_notes: true
+
+  release-binaries:
+    needs: [build, binaries]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: spacebot-*
+          merge-multiple: true
+          path: release-artifacts
+
+      - name: Prepare checksums
+        run: cat release-artifacts/*.sha256 > release-artifacts/SHA256SUMS
+
+      - name: Attach binaries to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.version }}
+          files: |
+            release-artifacts/*.tar.gz
+            release-artifacts/SHA256SUMS
