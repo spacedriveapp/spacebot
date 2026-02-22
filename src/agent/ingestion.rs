@@ -466,8 +466,9 @@ async fn process_chunk(
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
-    let model =
-        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "branch")
+        .with_routing((**routing).clone());
 
     let conversation_logger =
         crate::conversation::history::ConversationLogger::new(deps.sqlite_pool.clone());

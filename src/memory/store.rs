@@ -12,6 +12,8 @@ use std::sync::Arc;
 /// Memory store for CRUD and graph operations.
 pub struct MemoryStore {
     pool: SqlitePool,
+    #[cfg_attr(not(feature = "metrics"), allow(dead_code))]
+    agent_id: String,
 }
 
 impl std::fmt::Debug for MemoryStore {
@@ -25,7 +27,18 @@ impl std::fmt::Debug for MemoryStore {
 impl MemoryStore {
     /// Create a new memory store with the given SQLite pool.
     pub fn new(pool: SqlitePool) -> Arc<Self> {
-        Arc::new(Self { pool })
+        Arc::new(Self {
+            pool,
+            agent_id: String::new(),
+        })
+    }
+
+    /// Create a new memory store with agent context for metrics.
+    pub fn with_agent_id(pool: SqlitePool, agent_id: impl Into<String>) -> Arc<Self> {
+        Arc::new(Self {
+            pool,
+            agent_id: agent_id.into(),
+        })
     }
 
     /// Get a reference to the SQLite pool.
@@ -37,7 +50,7 @@ impl MemoryStore {
     pub async fn save(&self, memory: &Memory) -> Result<()> {
         sqlx::query(
             r#"
-            INSERT INTO memories (id, content, memory_type, importance, created_at, updated_at, 
+            INSERT INTO memories (id, content, memory_type, importance, created_at, updated_at,
                                  last_accessed_at, access_count, source, channel_id, forgotten)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
@@ -56,6 +69,24 @@ impl MemoryStore {
         .execute(&self.pool)
         .await
         .with_context(|| format!("failed to save memory {}", memory.id))?;
+
+        #[cfg(feature = "metrics")]
+        {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .memory_entry_count
+                .with_label_values(&[agent_label])
+                .inc();
+            metrics
+                .memory_updates_total
+                .with_label_values(&[agent_label, "save"])
+                .inc();
+        }
 
         Ok(())
     }
@@ -108,11 +139,29 @@ impl MemoryStore {
 
     /// Delete a memory by ID.
     pub async fn delete(&self, id: &str) -> Result<()> {
-        sqlx::query("DELETE FROM memories WHERE id = ?")
+        let _result = sqlx::query("DELETE FROM memories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
             .await
             .with_context(|| format!("failed to delete memory {}", id))?;
+
+        #[cfg(feature = "metrics")]
+        if _result.rows_affected() > 0 {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .memory_entry_count
+                .with_label_values(&[agent_label])
+                .dec();
+            metrics
+                .memory_updates_total
+                .with_label_values(&[agent_label, "delete"])
+                .inc();
+        }
 
         Ok(())
     }
@@ -420,7 +469,10 @@ impl MemoryStore {
             .run(&pool)
             .await
             .expect("migrations");
-        Arc::new(Self { pool })
+        Arc::new(Self {
+            pool,
+            agent_id: String::new(),
+        })
     }
 }
 

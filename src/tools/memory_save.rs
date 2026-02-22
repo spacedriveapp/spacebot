@@ -245,9 +245,14 @@ impl Tool for MemorySaveTool {
         }
 
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .memory_writes_total
-            .inc();
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics.memory_writes_total.inc();
+            metrics
+                .memory_updates_total
+                .with_label_values(&["unknown", "save"])
+                .inc();
+        }
 
         Ok(MemorySaveOutput {
             memory_id: memory.id,
