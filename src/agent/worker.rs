@@ -264,7 +264,10 @@ impl Worker {
                                     None
                                 }
                             })
-                            .unwrap_or_else(|| "Worker reached maximum segments without a final response.".to_string());
+                            .unwrap_or_else(|| {
+                                "Worker reached maximum segments without a final response."
+                                    .to_string()
+                            });
                     }
 
                     self.maybe_compact_history(&mut history).await;

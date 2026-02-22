@@ -145,7 +145,10 @@ impl StatusBlock {
 
     /// Remove an active worker by ID.
     pub fn remove_worker(&mut self, worker_id: WorkerId) -> bool {
-        if let Some(position) = self.active_workers.iter().position(|worker| worker.id == worker_id)
+        if let Some(position) = self
+            .active_workers
+            .iter()
+            .position(|worker| worker.id == worker_id)
         {
             self.active_workers.remove(position);
             true

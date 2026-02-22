@@ -466,8 +466,11 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            match prompt_engine.render_conversation_context(&first.source, server_name, channel_name)
-            {
+            match prompt_engine.render_conversation_context(
+                &first.source,
+                server_name,
+                channel_name,
+            ) {
                 Ok(context) => {
                     self.conversation_context = Some(context);
                 }
@@ -724,8 +727,11 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            match prompt_engine.render_conversation_context(&message.source, server_name, channel_name)
-            {
+            match prompt_engine.render_conversation_context(
+                &message.source,
+                server_name,
+                channel_name,
+            ) {
                 Ok(context) => {
                     self.conversation_context = Some(context);
                 }
