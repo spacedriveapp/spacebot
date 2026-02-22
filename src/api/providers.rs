@@ -1,3 +1,4 @@
+use super::config::{reload_all_runtime_configs, write_validated_config};
 use super::state::ApiState;
 
 use axum::Json;
@@ -459,9 +460,8 @@ pub(super) async fn update_provider(
         }
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     state
         .provider_setup_tx
@@ -593,9 +593,8 @@ pub(super) async fn delete_provider(
         table.remove(key_name);
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(ProviderUpdateResponse {
         success: true,

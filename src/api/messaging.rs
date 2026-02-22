@@ -1,3 +1,6 @@
+use super::config::{
+    reload_all_runtime_configs, sync_bindings_and_permissions, write_validated_config,
+};
 use super::state::ApiState;
 
 use axum::Json;
@@ -222,19 +225,9 @@ pub(super) async fn disconnect_platform(
         }
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
-    }
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     let manager_guard = state.messaging_manager.read().await;
     if let Some(manager) = manager_guard.as_ref()
@@ -286,20 +279,15 @@ pub(super) async fn toggle_platform(
 
     table["enabled"] = toml_edit::value(request.enabled);
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     let manager_guard = state.messaging_manager.read().await;
     let manager = manager_guard.as_ref();
 
     if request.enabled {
-        if let Ok(new_config) = crate::config::Config::load_from_path(&config_path)
-            && let Some(manager) = manager
-        {
+        if let Some(manager) = manager {
             match platform.as_str() {
                 "discord" => {
                     if let Some(discord_config) = &new_config.messaging.discord {

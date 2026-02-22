@@ -1,3 +1,6 @@
+use super::config::{
+    reload_all_runtime_configs, sync_bindings_and_permissions, write_validated_config,
+};
 use super::state::ApiState;
 
 use axum::Json;
@@ -353,12 +356,7 @@ pub(super) async fn create_binding(
     }
     bindings_array.push(binding_table);
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -366,177 +364,151 @@ pub(super) async fn create_binding(
         "binding created via API"
     );
 
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
-        drop(bindings_guard);
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
-        if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms = crate::config::DiscordPermissions::from_config(
-                discord_config,
-                &new_config.bindings,
-            );
-            let perms = state.discord_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-
-        if let Some(slack_config) = &new_config.messaging.slack {
-            let new_perms =
-                crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings);
-            let perms = state.slack_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-
-        let manager_guard = state.messaging_manager.read().await;
-        if let Some(manager) = manager_guard.as_ref() {
-            let discord_config = new_config.messaging.discord.as_ref();
-            if matches!(
-                hot_reload_disposition(
-                    "discord",
-                    new_discord_token.is_some(),
-                    discord_config.is_some(),
-                ),
-                HotReloadDisposition::Start
-            ) {
-                if let (Some(token), Some(discord_config)) =
-                    (new_discord_token.as_ref(), discord_config)
-                {
-                    let discord_perms = {
-                        let perms_guard = state.discord_permissions.read().await;
-                        match perms_guard.as_ref() {
-                            Some(existing) => existing.clone(),
-                            None => {
-                                drop(perms_guard);
-                                let perms = crate::config::DiscordPermissions::from_config(
-                                    discord_config,
-                                    &new_config.bindings,
-                                );
-                                let arc_swap =
-                                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                                state.set_discord_permissions(arc_swap.clone()).await;
-                                arc_swap
-                            }
+    let manager_guard = state.messaging_manager.read().await;
+    if let Some(manager) = manager_guard.as_ref() {
+        let discord_config = new_config.messaging.discord.as_ref();
+        if matches!(
+            hot_reload_disposition(
+                "discord",
+                new_discord_token.is_some(),
+                discord_config.is_some(),
+            ),
+            HotReloadDisposition::Start
+        ) {
+            if let (Some(token), Some(discord_config)) =
+                (new_discord_token.as_ref(), discord_config)
+            {
+                let discord_perms = {
+                    let perms_guard = state.discord_permissions.read().await;
+                    match perms_guard.as_ref() {
+                        Some(existing) => existing.clone(),
+                        None => {
+                            drop(perms_guard);
+                            let perms = crate::config::DiscordPermissions::from_config(
+                                discord_config,
+                                &new_config.bindings,
+                            );
+                            let arc_swap =
+                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                            state.set_discord_permissions(arc_swap.clone()).await;
+                            arc_swap
                         }
-                    };
-                    let adapter =
-                        crate::messaging::discord::DiscordAdapter::new(token, discord_perms);
-                    if let Err(error) = manager.register_and_start(adapter).await {
-                        tracing::error!(%error, "failed to hot-start discord adapter");
+                    }
+                };
+                let adapter = crate::messaging::discord::DiscordAdapter::new(token, discord_perms);
+                if let Err(error) = manager.register_and_start(adapter).await {
+                    tracing::error!(%error, "failed to hot-start discord adapter");
+                }
+            }
+        }
+
+        let slack_config = new_config.messaging.slack.as_ref();
+        if matches!(
+            hot_reload_disposition("slack", new_slack_tokens.is_some(), slack_config.is_some(),),
+            HotReloadDisposition::Start
+        ) {
+            if let (Some((bot_token, app_token)), Some(slack_config)) =
+                (new_slack_tokens.as_ref(), slack_config)
+            {
+                let slack_perms = {
+                    let perms_guard = state.slack_permissions.read().await;
+                    match perms_guard.as_ref() {
+                        Some(existing) => existing.clone(),
+                        None => {
+                            drop(perms_guard);
+                            let perms = crate::config::SlackPermissions::from_config(
+                                slack_config,
+                                &new_config.bindings,
+                            );
+                            let arc_swap =
+                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                            state.set_slack_permissions(arc_swap.clone()).await;
+                            arc_swap
+                        }
+                    }
+                };
+                match crate::messaging::slack::SlackAdapter::new(
+                    bot_token,
+                    app_token,
+                    slack_perms,
+                    slack_config.commands.clone(),
+                ) {
+                    Ok(adapter) => {
+                        if let Err(error) = manager.register_and_start(adapter).await {
+                            tracing::error!(%error, "failed to hot-start slack adapter");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to build slack adapter");
                     }
                 }
             }
+        }
 
-            let slack_config = new_config.messaging.slack.as_ref();
-            if matches!(
-                hot_reload_disposition("slack", new_slack_tokens.is_some(), slack_config.is_some()),
-                HotReloadDisposition::Start
-            ) {
-                if let (Some((bot_token, app_token)), Some(slack_config)) =
-                    (new_slack_tokens.as_ref(), slack_config)
-                {
-                    let slack_perms = {
-                        let perms_guard = state.slack_permissions.read().await;
-                        match perms_guard.as_ref() {
-                            Some(existing) => existing.clone(),
-                            None => {
-                                drop(perms_guard);
-                                let perms = crate::config::SlackPermissions::from_config(
-                                    slack_config,
-                                    &new_config.bindings,
-                                );
-                                let arc_swap =
-                                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                                state.set_slack_permissions(arc_swap.clone()).await;
-                                arc_swap
-                            }
-                        }
-                    };
-                    match crate::messaging::slack::SlackAdapter::new(
-                        bot_token,
-                        app_token,
-                        slack_perms,
-                        slack_config.commands.clone(),
-                    ) {
-                        Ok(adapter) => {
-                            if let Err(error) = manager.register_and_start(adapter).await {
-                                tracing::error!(%error, "failed to hot-start slack adapter");
-                            }
-                        }
-                        Err(error) => {
-                            tracing::error!(%error, "failed to build slack adapter");
-                        }
-                    }
-                }
-            }
-
-            let telegram_config = new_config.messaging.telegram.as_ref();
-            if matches!(
-                hot_reload_disposition(
-                    "telegram",
-                    new_telegram_token.is_some(),
-                    telegram_config.is_some(),
-                ),
-                HotReloadDisposition::Start
-            ) {
-                if let (Some(token), Some(telegram_config)) =
-                    (new_telegram_token.as_ref(), telegram_config)
-                {
-                    let telegram_perms = {
-                        let perms = crate::config::TelegramPermissions::from_config(
-                            telegram_config,
-                            &new_config.bindings,
-                        );
-                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                    };
-                    let adapter =
-                        crate::messaging::telegram::TelegramAdapter::new(token, telegram_perms);
-                    if let Err(error) = manager.register_and_start(adapter).await {
-                        tracing::error!(%error, "failed to hot-start telegram adapter");
-                    }
-                }
-            }
-
-            let twitch_config = new_config.messaging.twitch.as_ref();
-            if matches!(
-                hot_reload_disposition(
-                    "twitch",
-                    new_twitch_creds.is_some(),
-                    twitch_config.is_some(),
-                ),
-                HotReloadDisposition::Start
-            ) {
-                if let (Some((username, oauth_token)), Some(twitch_config)) =
-                    (new_twitch_creds.as_ref(), twitch_config)
-                {
-                    let twitch_perms = {
-                        let perms = crate::config::TwitchPermissions::from_config(
-                            twitch_config,
-                            &new_config.bindings,
-                        );
-                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                    };
-                    let instance_dir = state.instance_dir.load();
-                    let token_path = instance_dir.join("twitch_token.json");
-                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                        username,
-                        oauth_token,
-                        twitch_config.client_id.clone(),
-                        twitch_config.client_secret.clone(),
-                        twitch_config.refresh_token.clone(),
-                        Some(token_path),
-                        twitch_config.channels.clone(),
-                        twitch_config.trigger_prefix.clone(),
-                        twitch_perms,
+        let telegram_config = new_config.messaging.telegram.as_ref();
+        if matches!(
+            hot_reload_disposition(
+                "telegram",
+                new_telegram_token.is_some(),
+                telegram_config.is_some(),
+            ),
+            HotReloadDisposition::Start
+        ) {
+            if let (Some(token), Some(telegram_config)) =
+                (new_telegram_token.as_ref(), telegram_config)
+            {
+                let telegram_perms = {
+                    let perms = crate::config::TelegramPermissions::from_config(
+                        telegram_config,
+                        &new_config.bindings,
                     );
-                    if let Err(error) = manager.register_and_start(adapter).await {
-                        tracing::error!(%error, "failed to hot-start twitch adapter");
-                    }
+                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                };
+                let adapter =
+                    crate::messaging::telegram::TelegramAdapter::new(token, telegram_perms);
+                if let Err(error) = manager.register_and_start(adapter).await {
+                    tracing::error!(%error, "failed to hot-start telegram adapter");
+                }
+            }
+        }
+
+        let twitch_config = new_config.messaging.twitch.as_ref();
+        if matches!(
+            hot_reload_disposition(
+                "twitch",
+                new_twitch_creds.is_some(),
+                twitch_config.is_some(),
+            ),
+            HotReloadDisposition::Start
+        ) {
+            if let (Some((username, oauth_token)), Some(twitch_config)) =
+                (new_twitch_creds.as_ref(), twitch_config)
+            {
+                let twitch_perms = {
+                    let perms = crate::config::TwitchPermissions::from_config(
+                        twitch_config,
+                        &new_config.bindings,
+                    );
+                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+                };
+                let instance_dir = state.instance_dir.load();
+                let token_path = instance_dir.join("twitch_token.json");
+                let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                    username,
+                    oauth_token,
+                    twitch_config.client_id.clone(),
+                    twitch_config.client_secret.clone(),
+                    twitch_config.refresh_token.clone(),
+                    Some(token_path),
+                    twitch_config.channels.clone(),
+                    twitch_config.trigger_prefix.clone(),
+                    twitch_perms,
+                );
+                if let Err(error) = manager.register_and_start(adapter).await {
+                    tracing::error!(%error, "failed to hot-start twitch adapter");
                 }
             }
         }
@@ -672,12 +644,7 @@ pub(super) async fn update_binding(
         binding.remove("dm_allowed_users");
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -685,33 +652,8 @@ pub(super) async fn update_binding(
         "binding updated via API"
     );
 
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
-        drop(bindings_guard);
-
-        if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms = crate::config::DiscordPermissions::from_config(
-                discord_config,
-                &new_config.bindings,
-            );
-            let perms = state.discord_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-
-        if let Some(slack_config) = &new_config.messaging.slack {
-            let new_perms =
-                crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings);
-            let perms = state.slack_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-    }
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(UpdateBindingResponse {
         success: true,
@@ -792,12 +734,7 @@ pub(super) async fn delete_binding(
 
     bindings_array.remove(idx);
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -805,33 +742,8 @@ pub(super) async fn delete_binding(
         "binding deleted via API"
     );
 
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
-        drop(bindings_guard);
-
-        if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms = crate::config::DiscordPermissions::from_config(
-                discord_config,
-                &new_config.bindings,
-            );
-            let perms = state.discord_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-
-        if let Some(slack_config) = &new_config.messaging.slack {
-            let new_perms =
-                crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings);
-            let perms = state.slack_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
-            }
-        }
-    }
+    sync_bindings_and_permissions(&state, &new_config).await;
+    reload_all_runtime_configs(&state, &new_config).await;
 
     Ok(Json(DeleteBindingResponse {
         success: true,

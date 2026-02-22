@@ -6,6 +6,99 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Validate, persist, and reload a config.toml update.
+///
+/// Returns the fully parsed `Config` snapshot that was persisted.
+pub(super) async fn write_validated_config(
+    config_path: &std::path::Path,
+    updated_content: String,
+) -> Result<crate::config::Config, StatusCode> {
+    if let Err(error) = crate::config::Config::validate_toml(&updated_content) {
+        tracing::warn!(%error, "config update validation failed");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    tokio::fs::write(config_path, updated_content)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    crate::config::Config::load_from_path(config_path).map_err(|error| {
+        tracing::warn!(%error, "config.toml written but failed to reload immediately");
+        StatusCode::BAD_REQUEST
+    })
+}
+
+/// Reload all live RuntimeConfig instances from a parsed config snapshot.
+pub(super) async fn reload_all_runtime_configs(
+    state: &Arc<ApiState>,
+    new_config: &crate::config::Config,
+) {
+    let runtime_configs = state.runtime_configs.load();
+    let mcp_managers = state.mcp_managers.load();
+    let reload_targets = runtime_configs
+        .iter()
+        .filter_map(|(agent_id, runtime_config)| {
+            mcp_managers.get(agent_id).map(|mcp_manager| {
+                (
+                    agent_id.clone(),
+                    runtime_config.clone(),
+                    mcp_manager.clone(),
+                )
+            })
+        })
+        .collect::<Vec<_>>();
+    drop(runtime_configs);
+    drop(mcp_managers);
+
+    for (agent_id, runtime_config, mcp_manager) in reload_targets {
+        runtime_config
+            .reload_config(new_config, &agent_id, &mcp_manager)
+            .await;
+    }
+}
+
+/// Sync bindings and messaging permission snapshots from a parsed config snapshot.
+pub(super) async fn sync_bindings_and_permissions(
+    state: &Arc<ApiState>,
+    new_config: &crate::config::Config,
+) {
+    let bindings_guard = state.bindings.read().await;
+    if let Some(bindings_swap) = bindings_guard.as_ref() {
+        bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
+    }
+    drop(bindings_guard);
+
+    let discord_permissions = new_config
+        .messaging
+        .discord
+        .as_ref()
+        .map(|discord_config| {
+            crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings)
+        })
+        .unwrap_or_default();
+    let discord_guard = state.discord_permissions.read().await;
+    if let Some(arc_swap) = discord_guard.as_ref() {
+        arc_swap.store(std::sync::Arc::new(discord_permissions));
+    }
+    drop(discord_guard);
+
+    let slack_permissions = new_config
+        .messaging
+        .slack
+        .as_ref()
+        .map(|slack_config| {
+            crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings)
+        })
+        .unwrap_or_default();
+    let slack_guard = state.slack_permissions.read().await;
+    if let Some(arc_swap) = slack_guard.as_ref() {
+        arc_swap.store(std::sync::Arc::new(slack_permissions));
+    }
+}
+
 #[derive(Serialize, Debug)]
 pub(super) struct RoutingSection {
     channel: String,
@@ -317,25 +410,8 @@ pub(super) async fn update_agent_config(
         update_discord_table(&mut doc, discord)?;
     }
 
-    let updated_content = doc.to_string();
-    if let Err(error) = crate::config::Config::validate_toml(&updated_content) {
-        tracing::warn!(%error, agent_id = %request.agent_id, "config update validation failed");
-        return Err(StatusCode::BAD_REQUEST);
-    }
-
-    tokio::fs::write(&config_path, updated_content)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
+    let new_config = write_validated_config(&config_path, doc.to_string()).await?;
     tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
-
-    let new_config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
-        tracing::warn!(%error, "config.toml written but failed to reload immediately");
-        StatusCode::BAD_REQUEST
-    })?;
 
     let runtime_configs = state.runtime_configs.load();
     let mcp_managers = state.mcp_managers.load();
