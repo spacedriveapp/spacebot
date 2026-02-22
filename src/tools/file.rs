@@ -51,6 +51,41 @@ impl FileTool {
             )));
         }
 
+        // Prevent writes to identity files — these define the agent's core
+        // personality and must only be modified through the dedicated API.
+        let file_name = canonical
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("");
+        const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+        if PROTECTED_FILES.iter().any(|f| file_name.eq_ignore_ascii_case(f)) {
+            return Err(FileError(
+                "ACCESS DENIED: Identity files are protected and cannot be modified \
+                 through file operations. Use the identity management API instead."
+                    .to_string(),
+            ));
+        }
+
+        // Reject paths containing symlinks to prevent TOCTOU races where a
+        // path component is replaced with a symlink between resolution and I/O.
+        {
+            let mut check = workspace_canonical.clone();
+            if let Ok(relative) = canonical.strip_prefix(&workspace_canonical) {
+                for component in relative.components() {
+                    check.push(component);
+                    if let Ok(metadata) = std::fs::symlink_metadata(&check) {
+                        if metadata.file_type().is_symlink() {
+                            return Err(FileError(
+                                "ACCESS DENIED: Symlinks are not allowed within the workspace \
+                                 for security reasons. Use direct paths instead."
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(canonical)
     }
 }

@@ -206,6 +206,29 @@ impl Tool for MemorySaveTool {
                 _ => crate::memory::types::RelationType::RelatedTo,
             };
 
+            // Verify the target memory exists before creating a graph edge
+            // to prevent dangling associations from LLM hallucinated IDs.
+            match store.load(&assoc.target_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        target_id = %assoc.target_id,
+                        "skipping association to non-existent memory"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        target_id = %assoc.target_id,
+                        %error,
+                        "failed to verify target memory for association"
+                    );
+                    continue;
+                }
+            }
+
             let association = Association::new(&memory.id, &assoc.target_id, relation_type)
                 .with_weight(assoc.weight);
 

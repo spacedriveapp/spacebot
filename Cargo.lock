@@ -8086,6 +8086,7 @@ dependencies = [
  "dirs",
  "fastembed",
  "futures",
+ "hex",
  "ignore",
  "indoc",
  "lance-index",
