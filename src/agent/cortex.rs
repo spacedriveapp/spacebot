@@ -18,12 +18,12 @@ use crate::{AgentDeps, ProcessEvent, ProcessType};
 
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sqlx::{Row as _, SqlitePool};
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 /// The cortex observes system-wide activity and maintains the memory bulletin.
 pub struct Cortex {
@@ -73,6 +73,58 @@ pub struct CortexEvent {
     pub summary: String,
     pub details: Option<serde_json::Value>,
     pub created_at: String,
+}
+
+const MEMORY_SAVE_TOOL_NAME: &str = "memory_save";
+const MAX_SIGNAL_BUFFER_SIZE: usize = 100;
+const MEMORY_SUMMARY_MAX_BYTES: usize = 160;
+
+#[derive(Debug, Deserialize)]
+struct MemorySaveOutputPayload {
+    memory_id: String,
+}
+
+fn parse_memory_id_from_memory_save_result(result: &str) -> Option<String> {
+    let payload: MemorySaveOutputPayload = match serde_json::from_str(result) {
+        Ok(payload) => payload,
+        Err(error) => {
+            tracing::debug!(%error, "failed to parse memory_save tool result");
+            return None;
+        }
+    };
+
+    let memory_id = payload.memory_id.trim();
+    if memory_id.is_empty() {
+        tracing::debug!("memory_save result missing memory_id");
+        return None;
+    }
+
+    Some(memory_id.to_string())
+}
+
+fn summarize_memory_content(content: &str) -> String {
+    let first_non_empty_line = content
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
+
+    let source = if first_non_empty_line.is_empty() {
+        content.trim()
+    } else {
+        first_non_empty_line
+    };
+
+    if source.is_empty() {
+        return "(empty memory)".to_string();
+    }
+
+    if source.len() <= MEMORY_SUMMARY_MAX_BYTES {
+        return source.to_string();
+    }
+
+    let end = source.floor_char_boundary(MEMORY_SUMMARY_MAX_BYTES);
+    format!("{}...", &source[..end])
 }
 
 /// Persists cortex actions to SQLite for audit and UI display.
@@ -194,19 +246,47 @@ impl Cortex {
         Self {
             deps,
             hook,
-            signal_buffer: Arc::new(RwLock::new(Vec::with_capacity(100))),
+            signal_buffer: Arc::new(RwLock::new(Vec::with_capacity(MAX_SIGNAL_BUFFER_SIZE))),
             system_prompt: system_prompt.into(),
         }
     }
 
+    async fn memory_saved_signal(&self, memory_id: &str) -> Option<Signal> {
+        let store = self.deps.memory_search.store();
+        let memory = match store.load(memory_id).await {
+            Ok(Some(memory)) => memory,
+            Ok(None) => {
+                tracing::debug!(memory_id, "memory not found while extracting cortex signal");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(memory_id, %error, "failed to load memory for cortex signal");
+                return None;
+            }
+        };
+
+        Some(Signal::MemorySaved {
+            memory_type: memory.memory_type.to_string(),
+            content_summary: summarize_memory_content(&memory.content),
+            importance: memory.importance,
+        })
+    }
+
     /// Process a process event and extract signals.
     pub async fn observe(&self, event: ProcessEvent) {
-        let signal = match &event {
-            ProcessEvent::MemorySaved { memory_id, .. } => Some(Signal::MemorySaved {
-                memory_type: "unknown".into(),
-                content_summary: format!("memory {}", memory_id),
-                importance: 0.5,
-            }),
+        let signal = match event {
+            ProcessEvent::MemorySaved { memory_id, .. } => {
+                self.memory_saved_signal(&memory_id).await
+            }
+            ProcessEvent::ToolCompleted {
+                tool_name, result, ..
+            } if tool_name == MEMORY_SAVE_TOOL_NAME => {
+                if let Some(memory_id) = parse_memory_id_from_memory_save_result(&result) {
+                    self.memory_saved_signal(&memory_id).await
+                } else {
+                    None
+                }
+            }
             ProcessEvent::WorkerComplete { result, .. } => Some(Signal::WorkerCompleted {
                 task_summary: "completed task".into(),
                 result_summary: result.lines().next().unwrap_or("done").into(),
@@ -217,7 +297,7 @@ impl Cortex {
                 ..
             } => Some(Signal::Compaction {
                 channel_id: channel_id.to_string(),
-                turns_compacted: (*threshold_reached * 100.0) as i64,
+                turns_compacted: (threshold_reached * 100.0) as i64,
             }),
             _ => None,
         };
@@ -226,11 +306,11 @@ impl Cortex {
             let mut buffer = self.signal_buffer.write().await;
             buffer.push(signal);
 
-            if buffer.len() > 100 {
+            if buffer.len() > MAX_SIGNAL_BUFFER_SIZE {
                 buffer.remove(0);
             }
 
-            tracing::debug!("cortex received signal, buffer size: {}", buffer.len());
+            tracing::debug!(buffer_size = buffer.len(), "cortex received signal");
         }
     }
 
@@ -239,6 +319,26 @@ impl Cortex {
         tracing::info!("cortex running consolidation");
         Ok(())
     }
+}
+
+/// Spawn the cortex observer loop for an agent.
+///
+/// Subscribes to the process event bus and maps raw events into high-level
+/// signals buffered by the cortex.
+pub fn spawn_observer_loop(cortex: Arc<Cortex>) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut event_rx = cortex.deps.event_tx.subscribe();
+
+        loop {
+            match event_rx.recv().await {
+                Ok(event) => cortex.observe(event).await,
+                Err(broadcast::error::RecvError::Lagged(count)) => {
+                    tracing::debug!(skipped_events = count, "cortex observer loop lagged");
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
 }
 
 /// Spawn the cortex bulletin loop for an agent.
@@ -890,4 +990,35 @@ async fn fetch_memories_for_association(
     };
 
     Ok(rows.iter().map(|row| row.get("id")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{parse_memory_id_from_memory_save_result, summarize_memory_content};
+
+    #[test]
+    fn parse_memory_id_from_valid_memory_save_output() {
+        let result =
+            r#"{"memory_id":"abc123","success":true,"message":"Memory saved successfully"}"#;
+        assert_eq!(
+            parse_memory_id_from_memory_save_result(result),
+            Some("abc123".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_memory_id_returns_none_for_invalid_json() {
+        assert_eq!(parse_memory_id_from_memory_save_result("not-json"), None);
+    }
+
+    #[test]
+    fn summarize_memory_uses_first_non_empty_line() {
+        let content = "\n\nfirst line\nsecond line";
+        assert_eq!(summarize_memory_content(content), "first line");
+    }
+
+    #[test]
+    fn summarize_memory_handles_empty_content() {
+        assert_eq!(summarize_memory_content("  \n \n"), "(empty memory)");
+    }
 }
