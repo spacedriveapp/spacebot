@@ -22,19 +22,19 @@ WORKDIR /build
 # 1. Fetch and cache Rust dependencies.
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target,target=/build/target \
     mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && cargo build --release \
     && rm -rf src
 
 # 2. Build the frontend.
 COPY interface/package.json interface/
-RUN --mount=type=cache,target=/root/.bun/install/cache \
+RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
     cd interface && bun install
 COPY interface/ interface/
-RUN --mount=type=cache,target=/root/.bun/install/cache \
+RUN --mount=type=cache,id=bun-cache,target=/root/.bun/install/cache \
     cd interface && bun run build
 
 # 3. Copy source and compile the real binary.
@@ -45,9 +45,9 @@ COPY build.rs ./
 COPY prompts/ prompts/
 COPY migrations/ migrations/
 COPY src/ src/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
+RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git \
+    --mount=type=cache,id=cargo-target,target=/build/target \
     SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
