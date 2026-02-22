@@ -31,6 +31,9 @@ redb = "2.4"
 # Vector / embedding operations
 fastembed = "4"
 
+# URL parsing
+url = "2"
+
 # Encoding
 base64 = "0.22"
 
