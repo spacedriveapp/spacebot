@@ -78,8 +78,9 @@ Available environment variables:
 | `SLACK_BOT_TOKEN`        | Slack bot token        |
 | `SLACK_APP_TOKEN`        | Slack app token        |
 | `BRAVE_SEARCH_API_KEY`   | Brave Search API key   |
-| `SPACEBOT_CHANNEL_MODEL` | Override channel model |
-| `SPACEBOT_WORKER_MODEL`  | Override worker model  |
+| `SPACEBOT_CHANNEL_MODEL`        | Override channel model                    |
+| `SPACEBOT_WORKER_MODEL`         | Override worker model                     |
+| `SPACEBOT_BROWSER_CONNECT_URL`  | CDP URL of an external browser (`http://host:9222`) |
 
 ### Config File
 
@@ -148,6 +149,137 @@ volumes:
 ```
 
 The `shm_size` and `seccomp` settings are needed for Chromium to run properly in a container.
+
+### External Browser
+
+Run `chromedp/headless-shell` as a separate container and point Spacebot at it via
+`connect_url`. This decouples the browser lifecycle from the main process and avoids
+bundling Chromium into the Spacebot image.
+
+Workers spawned by the same agent share one Chrome process (each gets its own tab). A
+Chrome crash kills all tabs for that agent.
+
+#### Spacebot on host, browser in Docker
+
+When Spacebot runs as a binary directly on the host, expose port 9222 so the host process
+can reach the container:
+
+```yaml
+# docker-compose.yml
+services:
+  browser:
+    image: chromedp/headless-shell:latest
+    ports:
+      - "127.0.0.1:9222:9222"
+    shm_size: 1gb
+    restart: unless-stopped
+```
+
+Then configure Spacebot via env var or config:
+
+```bash
+export SPACEBOT_BROWSER_CONNECT_URL=http://localhost:9222
+```
+
+```toml
+# or in config.toml
+[defaults.browser]
+connect_url = "http://localhost:9222"
+```
+
+#### Both in Docker
+
+When both Spacebot and the browser run in containers, use a Docker network instead of
+exposing ports:
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    ports:
+      - "19898:19898"
+    volumes:
+      - spacebot-data:/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SPACEBOT_BROWSER_CONNECT_URL=http://browser:9222
+    networks:
+      - spacebot-net
+
+  browser:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 1gb
+    restart: unless-stopped
+
+networks:
+  spacebot-net:
+
+volumes:
+  spacebot-data:
+```
+
+#### Per-agent dedicated sandboxes
+
+Use a `config.toml` to route each agent to its own container:
+
+```toml
+[defaults.browser]
+connect_url = "http://browser-main:9222"
+
+[[agents]]
+id = "research"
+[agents.browser]
+connect_url = "http://browser-research:9222"
+
+[[agents]]
+id = "internal"
+[agents.browser]
+enabled = false
+```
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    volumes:
+      - spacebot-data:/data
+      - ./config.toml:/data/config.toml:ro
+    networks:
+      - spacebot-net
+
+  browser-main:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 512mb
+    restart: unless-stopped
+
+  browser-research:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 1gb
+    restart: unless-stopped
+
+networks:
+  spacebot-net:
+
+volumes:
+  spacebot-data:
+```
+
+#### `connect_url`
+
+Accepted formats:
+- `http://host:9222` — auto-discovers the WebSocket URL via `/json/version` (preferred)
+- `ws://host:9222/devtools/browser/<id>` — direct WebSocket URL
+
+An empty string is treated as unset and falls back to the embedded launch path.
+
+`SPACEBOT_BROWSER_CONNECT_URL` overrides `[defaults.browser].connect_url` from config but
+does not override per-agent `connect_url`.
 
 ## Building the Image
 

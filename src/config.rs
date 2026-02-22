@@ -364,6 +364,8 @@ pub struct BrowserConfig {
     pub executable_path: Option<String>,
     /// Directory for storing screenshots and other browser artifacts.
     pub screenshot_dir: Option<PathBuf>,
+    /// CDP URL of an external browser to connect to instead of launching one locally.
+    pub connect_url: Option<String>,
 }
 
 impl Default for BrowserConfig {
@@ -374,6 +376,7 @@ impl Default for BrowserConfig {
             evaluate_enabled: false,
             executable_path: None,
             screenshot_dir: None,
+            connect_url: None,
         }
     }
 }
@@ -1379,6 +1382,7 @@ struct TomlBrowserConfig {
     evaluate_enabled: Option<bool>,
     executable_path: Option<String>,
     screenshot_dir: Option<String>,
+    connect_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2430,6 +2434,7 @@ impl Config {
                             .screenshot_dir
                             .map(PathBuf::from)
                             .or_else(|| base.screenshot_dir.clone()),
+                        connect_url: b.connect_url.or_else(|| base.connect_url.clone()),
                     }
                 })
                 .unwrap_or_else(|| base_defaults.browser.clone()),
@@ -2480,6 +2485,12 @@ impl Config {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(base_defaults.worker_log_mode),
         };
+
+        // Apply env var overrides to defaults. These override the config file but do not
+        // override per-agent settings (per-agent configs inherit from defaults at merge time).
+        if let Ok(url) = std::env::var("SPACEBOT_BROWSER_CONNECT_URL") {
+            defaults.browser.connect_url = Some(url);
+        }
 
         let mut agents: Vec<AgentConfig> = toml
             .agents
@@ -2599,6 +2610,9 @@ impl Config {
                             .screenshot_dir
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
+                        connect_url: b
+                            .connect_url
+                            .or_else(|| defaults.browser.connect_url.clone()),
                     }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(
@@ -2774,6 +2788,13 @@ impl Config {
                 sample_rate,
             }
         };
+
+        warn_browser_config("defaults", &defaults.browser);
+        for agent in &agents {
+            if let Some(browser) = &agent.browser {
+                warn_browser_config(&agent.id, browser);
+            }
+        }
 
         Ok(Config {
             instance_dir,
@@ -2980,6 +3001,28 @@ impl RuntimeConfig {
 impl std::fmt::Debug for RuntimeConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeConfig").finish_non_exhaustive()
+    }
+}
+
+/// Warn at config load time about `BrowserConfig` fields that have no effect when
+/// `connect_url` is set.
+fn warn_browser_config(context: &str, config: &BrowserConfig) {
+    let Some(url) = config.connect_url.as_deref().filter(|u| !u.is_empty()) else {
+        return;
+    };
+    if config.executable_path.is_some() {
+        tracing::warn!(
+            context,
+            connect_url = url,
+            "connect_url is set; executable_path has no effect"
+        );
+    }
+    if !config.headless {
+        tracing::warn!(
+            context,
+            connect_url = url,
+            "connect_url is set; headless flag has no effect"
+        );
     }
 }
 

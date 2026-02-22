@@ -5,6 +5,7 @@
 //! ref system for LLM-friendly element addressing.
 
 use crate::config::BrowserConfig;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::ScreenshotParams;
@@ -32,7 +33,7 @@ use tokio::task::JoinHandle;
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
 /// to prevent server-side request forgery.
 fn validate_url(url: &str) -> Result<(), BrowserError> {
-    let parsed = Url::parse(url)
+    let parsed = url::Url::parse(url)
         .map_err(|error| BrowserError::new(format!("invalid URL '{url}': {error}")))?;
 
     match parsed.scheme() {
@@ -147,12 +148,15 @@ struct BrowserState {
     element_refs: HashMap<String, ElementRef>,
     /// Counter for generating element refs.
     next_ref: usize,
+    /// True when connected to an external browser process rather than a locally launched one.
+    external: bool,
 }
 
 impl std::fmt::Debug for BrowserState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserState")
             .field("has_browser", &self.browser.is_some())
+            .field("external", &self.external)
             .field("pages", &self.pages.len())
             .field("active_target", &self.active_target)
             .field("element_refs", &self.element_refs.len())
@@ -182,6 +186,7 @@ impl BrowserTool {
                 active_target: None,
                 element_refs: HashMap::new(),
                 next_ref: 0,
+                external: false,
             })),
             config,
             screenshot_dir,
@@ -474,12 +479,54 @@ impl BrowserTool {
             return Ok(BrowserOutput::success("Browser already running"));
         }
 
+        let use_external = self
+            .config
+            .connect_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty());
+
+        if use_external {
+            self.launch_external(&mut state).await
+        } else {
+            self.launch_embedded(&mut state).await
+        }
+    }
+
+    async fn launch_external(
+        &self,
+        state: &mut BrowserState,
+    ) -> Result<BrowserOutput, BrowserError> {
+        let connect_url = self.config.connect_url.as_deref().unwrap();
+
+        tracing::info!(connect_url, "connecting to external browser");
+
+        let (browser, mut handler) = Browser::connect(connect_url).await.map_err(|error| {
+            BrowserError::new(format!(
+                "failed to connect to browser at {connect_url}: {error}"
+            ))
+        })?;
+
+        let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+        state.browser = Some(browser);
+        state._handler_task = Some(handler_task);
+        state.external = true;
+
+        tracing::info!(connect_url, "connected to external browser");
+        Ok(BrowserOutput::success(format!(
+            "Connected to external browser at {connect_url}"
+        )))
+    }
+
+    async fn launch_embedded(
+        &self,
+        state: &mut BrowserState,
+    ) -> Result<BrowserOutput, BrowserError> {
         let mut builder = ChromeConfig::builder().no_sandbox();
 
         if !self.config.headless {
             builder = builder.with_head().window_size(1280, 900);
         }
-
         if let Some(path) = &self.config.executable_path {
             builder = builder.chrome_executable(path);
         }
@@ -491,7 +538,7 @@ impl BrowserTool {
         tracing::info!(
             headless = self.config.headless,
             executable = ?self.config.executable_path,
-            "launching chrome"
+            "launching embedded browser"
         );
 
         let (browser, mut handler) = Browser::launch(chrome_config)
@@ -502,8 +549,9 @@ impl BrowserTool {
 
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
+        state.external = false;
 
-        tracing::info!("browser launched");
+        tracing::info!("embedded browser launched");
         Ok(BrowserOutput::success("Browser launched successfully"))
     }
 
@@ -957,20 +1005,45 @@ impl BrowserTool {
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
-        if let Some(mut browser) = state.browser.take()
-            && let Err(error) = browser.close().await
-        {
-            tracing::warn!(%error, "browser close returned error");
+        if state.external {
+            self.close_external(&mut state).await
+        } else {
+            self.close_embedded(&mut state).await
         }
+    }
 
+    async fn close_external(
+        &self,
+        state: &mut BrowserState,
+    ) -> Result<BrowserOutput, BrowserError> {
+        // Drop without Browser.close — that CDP command would terminate the external process.
+        state.browser.take();
+        self.reset_state(state);
+        tracing::info!("external browser disconnected");
+        Ok(BrowserOutput::success("Browser closed"))
+    }
+
+    async fn close_embedded(
+        &self,
+        state: &mut BrowserState,
+    ) -> Result<BrowserOutput, BrowserError> {
+        if let Some(mut browser) = state.browser.take() {
+            if let Err(error) = browser.close().await {
+                tracing::warn!(%error, "embedded browser close returned error");
+            }
+        }
+        self.reset_state(state);
+        tracing::info!("embedded browser closed");
+        Ok(BrowserOutput::success("Browser closed"))
+    }
+
+    fn reset_state(&self, state: &mut BrowserState) {
         state.pages.clear();
         state.active_target = None;
         state.element_refs.clear();
         state.next_ref = 0;
         state._handler_task = None;
-
-        tracing::info!("browser closed");
-        Ok(BrowserOutput::success("Browser closed"))
+        state.external = false;
     }
 
     /// Get the active page, or create a first one if the browser has no pages yet.
