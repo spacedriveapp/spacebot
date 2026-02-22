@@ -378,6 +378,32 @@ export interface MemoriesSearchParams {
 	memory_type?: MemoryType;
 }
 
+export interface MemoryCreateRequest {
+	agent_id: string;
+	content: string;
+	memory_type?: MemoryType;
+	importance?: number;
+}
+
+export interface MemoryUpdateRequest {
+	agent_id: string;
+	memory_id: string;
+	content?: string;
+	memory_type?: MemoryType;
+	importance?: number;
+}
+
+export interface MemoryWriteResponse {
+	success: boolean;
+	memory: MemoryItem;
+}
+
+export interface MemoryDeleteResponse {
+	success: boolean;
+	forgotten: boolean;
+	message: string;
+}
+
 export type CortexEventType =
 	| "bulletin_generated"
 	| "bulletin_failed"
@@ -960,6 +986,38 @@ export const api = {
 		if (params.memory_type) search.set("memory_type", params.memory_type);
 		if (params.sort) search.set("sort", params.sort);
 		return fetchJson<MemoriesListResponse>(`/agents/memories?${search}`);
+	},
+	createMemory: async (request: MemoryCreateRequest) => {
+		const response = await fetch(`${API_BASE}/agents/memories`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MemoryWriteResponse>;
+	},
+	updateMemory: async (request: MemoryUpdateRequest) => {
+		const response = await fetch(`${API_BASE}/agents/memories`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MemoryWriteResponse>;
+	},
+	deleteMemory: async (agentId: string, memoryId: string) => {
+		const search = new URLSearchParams({ agent_id: agentId, memory_id: memoryId });
+		const response = await fetch(`${API_BASE}/agents/memories?${search}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MemoryDeleteResponse>;
 	},
 	searchMemories: (agentId: string, query: string, params: MemoriesSearchParams = {}) => {
 		const search = new URLSearchParams({ agent_id: agentId, q: query });
