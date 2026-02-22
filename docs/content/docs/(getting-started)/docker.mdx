@@ -319,7 +319,10 @@ podman run -d \
   ghcr.io/spacedriveapp/spacebot:slim
 ```
 
-**Rootless Podman** — enable the user socket and pass `XDG_RUNTIME_DIR`:
+**Rootless Podman** — enable the user socket and map it to the standard rootful
+path inside the container. The container has no user profile, so mapping to
+`/run/podman/podman.sock` (not the host's user-scoped path) is cleaner and
+requires no extra environment variables:
 
 ```bash
 systemctl --user enable --now podman.socket
@@ -330,9 +333,8 @@ podman run -d \
   --name spacebot \
   -e ANTHROPIC_API_KEY="sk-ant-..." \
   -e SPACEBOT_DEPLOYMENT=docker \
-  -e XDG_RUNTIME_DIR=/run/user/$(id -u) \
   -v spacebot-data:/data \
-  -v $XDG_RUNTIME_DIR/podman/podman.sock:$XDG_RUNTIME_DIR/podman/podman.sock \
+  -v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock \
   --security-opt label=disable \
   -p 19898:19898 \
   ghcr.io/spacedriveapp/spacebot:slim
@@ -349,6 +351,8 @@ any custom socket location.
 
 ### Podman Compose
 
+For rootful Podman, use the system socket directly:
+
 ```yaml
 services:
   spacebot:
@@ -360,6 +364,30 @@ services:
     volumes:
       - spacebot-data:/data
       - /run/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SPACEBOT_DEPLOYMENT=docker
+    security_opt:
+      - label=disable
+
+volumes:
+  spacebot-data:
+```
+
+For rootless Podman, map the user socket to the standard rootful path inside
+the container (no `XDG_RUNTIME_DIR` needed inside the container):
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    container_name: spacebot
+    restart: unless-stopped
+    ports:
+      - "19898:19898"
+    volumes:
+      - spacebot-data:/data
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock
     environment:
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - SPACEBOT_DEPLOYMENT=docker
