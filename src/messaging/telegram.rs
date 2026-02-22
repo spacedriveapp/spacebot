@@ -317,16 +317,31 @@ impl Messaging for TelegramAdapter {
             } => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let input_file = InputFile::memory(data).file_name(filename);
-                let mut request = self.bot.send_document(chat_id, input_file);
-                if let Some(caption_text) = caption {
-                    let html_caption = markdown_to_telegram_html(&caption_text);
-                    request = request.caption(html_caption).parse_mode(ParseMode::Html);
+                let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                let sent = if let Some(ref caption_text) = caption {
+                    let html_caption = markdown_to_telegram_html(caption_text);
+                    self.bot
+                        .send_document(chat_id, input_file)
+                        .caption(&html_caption)
+                        .parse_mode(ParseMode::Html)
+                        .send()
+                        .await
+                } else {
+                    self.bot.send_document(chat_id, input_file).send().await
+                };
+
+                if let Err(error) = sent {
+                    tracing::debug!(%error, "HTML caption send failed, retrying as plain text");
+                    let fallback_file = InputFile::memory(data).file_name(filename);
+                    let mut request = self.bot.send_document(chat_id, fallback_file);
+                    if let Some(caption_text) = caption {
+                        request = request.caption(caption_text);
+                    }
+                    request
+                        .send()
+                        .await
+                        .context("failed to send telegram file")?;
                 }
-                request
-                    .send()
-                    .await
-                    .context("failed to send telegram file")?;
             }
             OutboundResponse::Reaction(emoji) => {
                 let message_id = self.extract_message_id(message)?;
