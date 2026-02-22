@@ -753,7 +753,90 @@ pub(super) async fn delete_binding(
 
 #[cfg(test)]
 mod tests {
-    use super::{HotReloadDisposition, hot_reload_disposition};
+    use super::{CreateBindingRequest, HotReloadDisposition, hot_reload_disposition};
+    use crate::api::providers;
+    use crate::api::state::ApiState;
+    use crate::config::{Config, DiscordPermissions, RuntimeConfig, SlackPermissions};
+    use arc_swap::ArcSwap;
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    const VALID_BASE_CONFIG: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+branch = "anthropic/claude-sonnet-4"
+worker = "anthropic/claude-sonnet-4"
+compactor = "anthropic/claude-sonnet-4"
+cortex = "anthropic/claude-sonnet-4"
+
+[[agents]]
+id = "main"
+default = true
+"#;
+
+    const VALID_DISCORD_CONFIG: &str = r#"
+[llm]
+anthropic_key = "test-anthropic-key"
+
+[[agents]]
+id = "main"
+default = true
+
+[messaging.discord]
+enabled = true
+token = "discord-test-token"
+dm_allowed_users = ["111"]
+"#;
+
+    fn new_test_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_tx, _) = tokio::sync::mpsc::channel(8);
+        let (agent_remove_tx, _) = tokio::sync::mpsc::channel(8);
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+        ))
+    }
+
+    async fn configure_runtime_for_main(
+        state: &Arc<ApiState>,
+        config_path: &std::path::Path,
+    ) -> Arc<RuntimeConfig> {
+        let config = Config::load_from_path(config_path).expect("config should load for test");
+        let resolved_agent = config
+            .resolve_agents()
+            .into_iter()
+            .find(|agent| agent.id == "main")
+            .expect("main agent should exist in resolved config");
+        let runtime_config = Arc::new(RuntimeConfig::new(
+            &config.instance_dir,
+            &resolved_agent,
+            &config.defaults,
+            crate::prompts::PromptEngine::new("en").expect("prompt engine should build"),
+            crate::identity::Identity::default(),
+            crate::skills::SkillSet::default(),
+        ));
+
+        let mut runtime_configs = HashMap::new();
+        runtime_configs.insert("main".to_string(), runtime_config.clone());
+        state.set_runtime_configs(runtime_configs);
+
+        let mut mcp_managers = HashMap::new();
+        mcp_managers.insert(
+            "main".to_string(),
+            Arc::new(crate::mcp::McpManager::new(resolved_agent.mcp.clone())),
+        );
+        state.set_mcp_managers(mcp_managers);
+
+        runtime_config
+    }
 
     #[test]
     fn hot_reload_disposition_starts_when_credentials_and_config_exist() {
@@ -805,5 +888,204 @@ mod tests {
             hot_reload_disposition("twitch", true, false),
             HotReloadDisposition::MissingConfig
         );
+    }
+
+    #[tokio::test]
+    async fn create_binding_returns_bad_request_when_config_validation_fails() {
+        const MISSING_ENV_VAR: &str = "SPACEBOT_TEST_MISSING_PROVIDER_KEY_4E845CE0234A45D6AAB6";
+        let config_toml = format!(
+            r#"
+[llm.provider.invalid]
+api_type = "openai_completions"
+base_url = "https://api.example.com/v1"
+api_key = "env:{MISSING_ENV_VAR}"
+"#
+        );
+
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, config_toml)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path).await;
+
+        let result = super::create_binding(
+            State(state),
+            Json(CreateBindingRequest {
+                agent_id: "main".to_string(),
+                channel: "discord".to_string(),
+                guild_id: Some("123".to_string()),
+                workspace_id: None,
+                chat_id: None,
+                channel_ids: vec!["456".to_string()],
+                require_mention: false,
+                dm_allowed_users: Vec::new(),
+                platform_credentials: None,
+            }),
+        )
+        .await;
+
+        assert!(
+            matches!(result, Err(StatusCode::BAD_REQUEST)),
+            "invalid config update should return BAD_REQUEST"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_provider_writes_config_and_reloads_runtime_routing() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, VALID_BASE_CONFIG)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+        let runtime_config = configure_runtime_for_main(&state, &config_path).await;
+
+        let initial_routing = runtime_config.routing.load();
+        assert_eq!(initial_routing.channel, "anthropic/claude-sonnet-4");
+
+        let request_body = serde_json::json!({
+            "provider": "openai",
+            "api_key": "test-openai-key",
+            "model": "openai/gpt-4.1-mini"
+        });
+        let result = providers::update_provider(
+            State(state),
+            Json(
+                serde_json::from_value(request_body).expect("provider request should deserialize"),
+            ),
+        )
+        .await
+        .expect("provider update should succeed");
+
+        let response_json =
+            serde_json::to_value(result.0).expect("provider response should serialize");
+        assert_eq!(response_json["success"], true);
+
+        let config_after_update = tokio::fs::read_to_string(&config_path)
+            .await
+            .expect("config should be readable");
+        assert!(
+            config_after_update.contains("openai_key = \"test-openai-key\""),
+            "updated config should persist provider key"
+        );
+
+        let updated_routing = runtime_config.routing.load();
+        assert_eq!(updated_routing.channel, "openai/gpt-4.1-mini");
+        assert_eq!(updated_routing.branch, "openai/gpt-4.1-mini");
+        assert_eq!(updated_routing.worker, "openai/gpt-4.1-mini");
+        assert_eq!(updated_routing.compactor, "openai/gpt-4.1-mini");
+        assert_eq!(updated_routing.cortex, "openai/gpt-4.1-mini");
+    }
+
+    #[tokio::test]
+    async fn create_binding_writes_config_and_syncs_bindings_and_permissions() {
+        let temp_dir = tempfile::tempdir().expect("temp dir should be created");
+        let config_path = temp_dir.path().join("config.toml");
+        tokio::fs::write(&config_path, VALID_DISCORD_CONFIG)
+            .await
+            .expect("config.toml should be written");
+
+        let state = new_test_state();
+        state.set_config_path(config_path.clone()).await;
+        let _runtime_config = configure_runtime_for_main(&state, &config_path).await;
+        state
+            .set_bindings(Arc::new(ArcSwap::from_pointee(Vec::new())))
+            .await;
+        state
+            .set_discord_permissions(Arc::new(ArcSwap::from_pointee(
+                DiscordPermissions::default(),
+            )))
+            .await;
+        state
+            .set_slack_permissions(Arc::new(ArcSwap::from_pointee(SlackPermissions {
+                workspace_filter: Some(vec!["stale-workspace".to_string()]),
+                channel_filter: HashMap::from([(
+                    "stale-workspace".to_string(),
+                    vec!["stale-channel".to_string()],
+                )]),
+                dm_allowed_users: vec!["stale-user".to_string()],
+            })))
+            .await;
+
+        let result = super::create_binding(
+            State(state.clone()),
+            Json(CreateBindingRequest {
+                agent_id: "main".to_string(),
+                channel: "discord".to_string(),
+                guild_id: Some("123".to_string()),
+                workspace_id: None,
+                chat_id: None,
+                channel_ids: vec!["456".to_string()],
+                require_mention: true,
+                dm_allowed_users: vec!["789".to_string()],
+                platform_credentials: None,
+            }),
+        )
+        .await
+        .expect("binding create should succeed");
+
+        assert!(result.0.success);
+
+        let written_config =
+            Config::load_from_path(&config_path).expect("written config should parse");
+        assert_eq!(written_config.bindings.len(), 1);
+        assert_eq!(written_config.bindings[0].channel, "discord");
+        assert_eq!(
+            written_config.bindings[0].guild_id.as_deref(),
+            Some("123"),
+            "binding should be persisted to config.toml"
+        );
+
+        let bindings_guard = state.bindings.read().await;
+        let bindings_swap = bindings_guard
+            .as_ref()
+            .expect("bindings ArcSwap should be registered")
+            .clone();
+        drop(bindings_guard);
+        let live_bindings = bindings_swap.load();
+        assert_eq!(live_bindings.len(), 1);
+        assert_eq!(live_bindings[0].channel, "discord");
+        assert_eq!(live_bindings[0].guild_id.as_deref(), Some("123"));
+
+        let discord_guard = state.discord_permissions.read().await;
+        let discord_swap = discord_guard
+            .as_ref()
+            .expect("discord permissions ArcSwap should be registered")
+            .clone();
+        drop(discord_guard);
+        let discord_permissions = discord_swap.load();
+        assert_eq!(discord_permissions.guild_filter, Some(vec![123]));
+        let guild_channels = discord_permissions
+            .channel_filter
+            .get(&123)
+            .expect("channel filter should include the guild");
+        assert_eq!(guild_channels, &vec![456]);
+        assert!(
+            discord_permissions.dm_allowed_users.contains(&111),
+            "dm user from messaging.discord config should be retained"
+        );
+        assert!(
+            discord_permissions.dm_allowed_users.contains(&789),
+            "dm user from binding should be merged into permissions"
+        );
+
+        let slack_guard = state.slack_permissions.read().await;
+        let slack_swap = slack_guard
+            .as_ref()
+            .expect("slack permissions ArcSwap should be registered")
+            .clone();
+        drop(slack_guard);
+        let slack_permissions = slack_swap.load();
+        assert_eq!(
+            slack_permissions.workspace_filter, None,
+            "slack permissions should reset when slack config is absent"
+        );
+        assert!(slack_permissions.channel_filter.is_empty());
+        assert!(slack_permissions.dm_allowed_users.is_empty());
     }
 }
