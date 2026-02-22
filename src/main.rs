@@ -684,6 +684,43 @@ async fn run(
     let prompt_engine = spacebot::prompts::PromptEngine::new("en")
         .with_context(|| "failed to initialize prompt engine")?;
 
+    // Instance-level database for cross-agent data (agent links)
+    let instance_db = spacebot::db::InstanceDb::connect(&config.instance_dir)
+        .await
+        .with_context(|| "failed to connect instance database")?;
+    let link_store = Arc::new(spacebot::links::LinkStore::new(instance_db.sqlite.clone()));
+
+    // Sync config-defined links to database
+    for link_def in &config.links {
+        use spacebot::links::types::{AgentLink, LinkDirection, LinkRelationship};
+        let direction: LinkDirection = link_def.direction.parse().map_err(|e: String| {
+            anyhow::anyhow!("{e} (link {} → {})", link_def.from, link_def.to)
+        })?;
+        let relationship: LinkRelationship =
+            link_def.relationship.parse().map_err(|e: String| {
+                anyhow::anyhow!("{e} (link {} → {})", link_def.from, link_def.to)
+            })?;
+        let link = AgentLink {
+            id: uuid::Uuid::new_v4().to_string(),
+            from_agent_id: link_def.from.clone(),
+            to_agent_id: link_def.to.clone(),
+            direction,
+            relationship,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        link_store.upsert_from_config(&link).await.with_context(|| {
+            format!(
+                "failed to sync link {} → {} from config",
+                link_def.from, link_def.to
+            )
+        })?;
+    }
+    if !config.links.is_empty() {
+        tracing::info!(count = config.links.len(), "synced config links to instance database");
+    }
+
     // These hold the initialized subsystems. Empty until agents are initialized.
     let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
     let mut messaging_manager: Arc<spacebot::messaging::MessagingManager> =
@@ -707,6 +744,7 @@ async fn run(
     api_state.set_embedding_model(embedding_model.clone()).await;
     api_state.set_prompt_engine(prompt_engine.clone()).await;
     api_state.set_defaults_config(config.defaults.clone()).await;
+    api_state.set_link_store(link_store.clone());
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;
@@ -738,6 +776,7 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            Some(link_store.clone()),
         )
         .await?;
         agents_initialized = true;
@@ -1065,6 +1104,7 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    Some(link_store.clone()),
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -1128,6 +1168,8 @@ async fn run(
         agent.db.close().await;
     }
 
+    instance_db.close().await;
+
     tracing::info!("spacebot stopped");
 
     // Flush buffered OTLP spans before the process exits. Without this the
@@ -1172,6 +1214,7 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    link_store: Option<Arc<spacebot::links::LinkStore>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
@@ -1306,6 +1349,7 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            link_store: link_store.clone(),
         };
 
         let agent = spacebot::Agent {

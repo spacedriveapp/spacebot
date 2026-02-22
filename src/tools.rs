@@ -35,6 +35,7 @@ pub mod memory_save;
 pub mod react;
 pub mod reply;
 pub mod route;
+pub mod send_agent_message;
 pub mod send_file;
 pub mod send_message_to_another_channel;
 pub mod set_status;
@@ -68,6 +69,9 @@ pub use memory_save::{
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
+pub use send_agent_message::{
+    SendAgentMessageArgs, SendAgentMessageError, SendAgentMessageOutput, SendAgentMessageTool,
+};
 pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
     SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
@@ -133,6 +137,7 @@ pub async fn add_channel_tools(
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
     cron_tool: Option<CronTool>,
+    send_agent_message_tool: Option<SendAgentMessageTool>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     handle
         .add_tool(ReplyTool::new(
@@ -165,6 +170,9 @@ pub async fn add_channel_tools(
     if let Some(cron) = cron_tool {
         handle.add_tool(cron).await?;
     }
+    if let Some(agent_msg) = send_agent_message_tool {
+        handle.add_tool(agent_msg).await?;
+    }
     Ok(())
 }
 
@@ -183,9 +191,10 @@ pub async fn remove_channel_tools(
     handle.remove_tool(SkipTool::NAME).await?;
     handle.remove_tool(SendFileTool::NAME).await?;
     handle.remove_tool(ReactTool::NAME).await?;
-    // Cron and send_message removal is best-effort since not all channels have them
+    // Cron, send_message, and send_agent_message removal is best-effort since not all channels have them
     let _ = handle.remove_tool(CronTool::NAME).await;
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
+    let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
     Ok(())
 }
 

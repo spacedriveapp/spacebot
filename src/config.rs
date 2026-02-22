@@ -39,6 +39,8 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     /// Agent definitions.
     pub agents: Vec<AgentConfig>,
+    /// Agent communication graph links.
+    pub links: Vec<LinkDef>,
     /// Messaging platform credentials.
     pub messaging: MessagingConfig,
     /// Routing bindings (maps platform conversations to agents).
@@ -49,6 +51,15 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+}
+
+/// A link definition from config, connecting two agents.
+#[derive(Debug, Clone)]
+pub struct LinkDef {
+    pub from: String,
+    pub to: String,
+    pub direction: String,
+    pub relationship: String,
 }
 
 /// HTTP API server configuration.
@@ -1090,6 +1101,8 @@ struct TomlConfig {
     #[serde(default)]
     agents: Vec<TomlAgentConfig>,
     #[serde(default)]
+    links: Vec<TomlLinkDef>,
+    #[serde(default)]
     messaging: TomlMessagingConfig,
     #[serde(default)]
     bindings: Vec<TomlBinding>,
@@ -1099,6 +1112,24 @@ struct TomlConfig {
     metrics: TomlMetricsConfig,
     #[serde(default)]
     telemetry: TomlTelemetryConfig,
+}
+
+#[derive(Deserialize)]
+struct TomlLinkDef {
+    from: String,
+    to: String,
+    #[serde(default = "default_link_direction")]
+    direction: String,
+    #[serde(default = "default_link_relationship")]
+    relationship: String,
+}
+
+fn default_link_direction() -> String {
+    "two_way".into()
+}
+
+fn default_link_relationship() -> String {
+    "peer".into()
 }
 
 #[derive(Deserialize, Default)]
@@ -1991,6 +2022,7 @@ impl Config {
             llm,
             defaults: DefaultsConfig::default(),
             agents,
+            links: Vec::new(),
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api,
@@ -2775,11 +2807,23 @@ impl Config {
             }
         };
 
+        let links = toml
+            .links
+            .into_iter()
+            .map(|l| LinkDef {
+                from: l.from,
+                to: l.to,
+                direction: l.direction,
+                relationship: l.relationship,
+            })
+            .collect();
+
         Ok(Config {
             instance_dir,
             llm,
             defaults,
             agents,
+            links,
             messaging,
             bindings,
             api,

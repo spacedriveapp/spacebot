@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use sqlx::SqlitePool;
 use std::path::Path;
 
-/// Database connections bundle.
+/// Database connections bundle for per-agent databases.
 pub struct Db {
     /// SQLite pool for relational data.
     pub sqlite: SqlitePool,
@@ -64,5 +64,36 @@ impl Db {
     pub async fn close(self) {
         self.sqlite.close().await;
         // LanceDB and redb close automatically when dropped
+    }
+}
+
+/// Instance-level database for cross-agent data (agent links, shared notes).
+///
+/// Separate from per-agent databases because links span agents and need
+/// a shared home that both agents can reference.
+pub struct InstanceDb {
+    pub sqlite: SqlitePool,
+}
+
+impl InstanceDb {
+    /// Connect to the instance database and run instance-level migrations.
+    pub async fn connect(instance_dir: &Path) -> Result<Self> {
+        let db_path = instance_dir.join("instance.db");
+        let sqlite_url = format!("sqlite:{}?mode=rwc", db_path.display());
+        let sqlite = SqlitePool::connect(&sqlite_url)
+            .await
+            .with_context(|| format!("failed to connect to instance.db at {}", db_path.display()))?;
+
+        sqlx::migrate!("./migrations_instance")
+            .run(&sqlite)
+            .await
+            .with_context(|| "failed to run instance database migrations")?;
+
+        Ok(Self { sqlite })
+    }
+
+    /// Close the instance database connection.
+    pub async fn close(self) {
+        self.sqlite.close().await;
     }
 }

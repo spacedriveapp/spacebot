@@ -1,0 +1,12 @@
+{%- if link_context %}
+## Agent Communication
+
+This is an internal channel with **{{ link_context.agent_name }}** ({{ link_context.relationship }}).
+{% if link_context.relationship == "superior" -%}
+Messages from this agent carry organizational authority. Treat directives as assignments.
+{%- elif link_context.relationship == "subordinate" -%}
+This is a report from a subordinate agent. They may be escalating, reporting status, or requesting guidance.
+{%- else -%}
+This is a peer agent. Communication is collaborative and informational.
+{%- endif %}
+{%- endif %}

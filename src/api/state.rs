@@ -93,6 +93,8 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Instance-level link store for agent communication graph.
+    pub link_store: ArcSwap<Option<Arc<crate::links::LinkStore>>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -172,6 +174,20 @@ pub enum ApiEvent {
     },
     /// Configuration was reloaded (skills, identity, etc.).
     ConfigReloaded,
+    /// A message was sent from one agent to another.
+    AgentMessageSent {
+        from_agent_id: String,
+        to_agent_id: String,
+        link_id: String,
+        channel_id: String,
+    },
+    /// A message was received by an agent from another agent.
+    AgentMessageReceived {
+        from_agent_id: String,
+        to_agent_id: String,
+        link_id: String,
+        channel_id: String,
+    },
 }
 
 impl ApiState {
@@ -211,6 +227,7 @@ impl ApiState {
             agent_tx,
             agent_remove_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
+            link_store: ArcSwap::from_pointee(None),
         }
     }
 
@@ -364,6 +381,38 @@ impl ApiState {
                                     })
                                     .ok();
                             }
+                            ProcessEvent::AgentMessageSent {
+                                from_agent_id,
+                                to_agent_id,
+                                link_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::AgentMessageSent {
+                                        from_agent_id: from_agent_id.to_string(),
+                                        to_agent_id: to_agent_id.to_string(),
+                                        link_id: link_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::AgentMessageReceived {
+                                from_agent_id,
+                                to_agent_id,
+                                link_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::AgentMessageReceived {
+                                        from_agent_id: from_agent_id.to_string(),
+                                        to_agent_id: to_agent_id.to_string(),
+                                        link_id: link_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                    })
+                                    .ok();
+                            }
                             _ => {}
                         }
                     }
@@ -475,6 +524,11 @@ impl ApiState {
     /// Set the shared webchat adapter for API handlers.
     pub fn set_webchat_adapter(&self, adapter: Arc<WebChatAdapter>) {
         self.webchat_adapter.store(Arc::new(Some(adapter)));
+    }
+
+    /// Set the link store for the agent communication graph.
+    pub fn set_link_store(&self, store: Arc<crate::links::LinkStore>) {
+        self.link_store.store(Arc::new(Some(store)));
     }
 
     /// Send an event to all SSE subscribers.

@@ -2,8 +2,8 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
-    providers, settings, skills, system, webchat,
+    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
+    models, providers, settings, skills, system, webchat,
 };
 
 use axum::Json;
@@ -148,6 +148,18 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route(
+            "/links",
+            get(links::list_links).post(links::create_link),
+        )
+        .route(
+            "/links/{id}",
+            get(links::get_link)
+                .put(links::update_link)
+                .delete(links::delete_link),
+        )
+        .route("/agents/{id}/links", get(links::agent_links))
+        .route("/topology", get(links::topology))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,
