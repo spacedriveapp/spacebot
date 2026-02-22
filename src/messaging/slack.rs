@@ -995,8 +995,11 @@ impl Messaging for SlackAdapter {
             }
 
             OutboundResponse::StreamChunk(text) => {
-                let active = self.active_messages.read().await;
-                if let Some(ts) = active.get(&message.id) {
+                let stream_ts = {
+                    let active = self.active_messages.read().await;
+                    active.get(&message.id).cloned()
+                };
+                if let Some(ts) = stream_ts {
                     let display_text = if text.len() > 12_000 {
                         let end = text.floor_char_boundary(11_997);
                         format!("{}...", &text[..end])
@@ -1006,7 +1009,7 @@ impl Messaging for SlackAdapter {
                     let req = SlackApiChatUpdateRequest::new(
                         channel_id.clone(),
                         markdown_content(display_text),
-                        SlackTs(ts.clone()),
+                        SlackTs(ts),
                     );
                     if let Err(error) = session.chat_update(&req).await {
                         tracing::warn!(%error, "failed to edit streaming message");

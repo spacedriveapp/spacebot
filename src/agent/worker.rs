@@ -358,9 +358,19 @@ impl Worker {
                             self.hook.send_status("compacting (overflow recovery)");
                             self.force_compact_history(&mut history).await;
                             let prompt_engine = self.deps.runtime_config.prompts.load();
-                            let overflow_msg =
-                                prompt_engine.render_system_worker_overflow()?;
-                            follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
+                            match prompt_engine.render_system_worker_overflow() {
+                                Ok(overflow_msg) => {
+                                    follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
+                                }
+                                Err(render_error) => {
+                                    tracing::warn!(
+                                        worker_id = %self.id,
+                                        %render_error,
+                                        "failed to render worker overflow message"
+                                    );
+                                    follow_up_prompt = follow_up.clone();
+                                }
+                            }
                         }
                         Err(error) => {
                             self.write_failure_log(&history, &format!("follow-up failed: {error}"));

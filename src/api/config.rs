@@ -317,7 +317,13 @@ pub(super) async fn update_agent_config(
         update_discord_table(&mut doc, discord)?;
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
+    let updated_content = doc.to_string();
+    if let Err(error) = crate::config::Config::validate_toml(&updated_content) {
+        tracing::warn!(%error, agent_id = %request.agent_id, "config update validation failed");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    tokio::fs::write(&config_path, updated_content)
         .await
         .map_err(|error| {
             tracing::warn!(%error, "failed to write config.toml");
@@ -326,32 +332,28 @@ pub(super) async fn update_agent_config(
 
     tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
 
-    match crate::config::Config::load_from_path(&config_path) {
-        Ok(new_config) => {
-            let runtime_configs = state.runtime_configs.load();
-            let mcp_managers = state.mcp_managers.load();
-            if let (Some(rc), Some(mcp_manager)) = (
-                runtime_configs.get(&request.agent_id).cloned(),
-                mcp_managers.get(&request.agent_id).cloned(),
-            ) {
-                rc.reload_config(&new_config, &request.agent_id, &mcp_manager)
-                    .await;
-            }
-            if request.discord.is_some()
-                && let Some(discord_config) = &new_config.messaging.discord
-            {
-                let new_perms = crate::config::DiscordPermissions::from_config(
-                    discord_config,
-                    &new_config.bindings,
-                );
-                let perms = state.discord_permissions.read().await;
-                if let Some(arc_swap) = perms.as_ref() {
-                    arc_swap.store(std::sync::Arc::new(new_perms));
-                }
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "config.toml written but failed to reload immediately");
+    let new_config = crate::config::Config::load_from_path(&config_path).map_err(|error| {
+        tracing::warn!(%error, "config.toml written but failed to reload immediately");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let runtime_configs = state.runtime_configs.load();
+    let mcp_managers = state.mcp_managers.load();
+    if let (Some(rc), Some(mcp_manager)) = (
+        runtime_configs.get(&request.agent_id).cloned(),
+        mcp_managers.get(&request.agent_id).cloned(),
+    ) {
+        rc.reload_config(&new_config, &request.agent_id, &mcp_manager)
+            .await;
+    }
+    if request.discord.is_some()
+        && let Some(discord_config) = &new_config.messaging.discord
+    {
+        let new_perms =
+            crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+        let perms = state.discord_permissions.read().await;
+        if let Some(arc_swap) = perms.as_ref() {
+            arc_swap.store(std::sync::Arc::new(new_perms));
         }
     }
 

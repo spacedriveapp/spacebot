@@ -109,10 +109,14 @@ impl Compactor {
         let deps = self.deps.clone();
         let prompt_engine = deps.runtime_config.prompts.load();
         let compactor_prompt = match prompt_engine.render_static("compactor") {
-            Ok(p) => p,
+            Ok(prompt) => prompt,
             Err(error) => {
-                tracing::error!(%error, "failed to render compactor prompt");
-                let mut flag = is_compacting.write().await;
+                tracing::error!(
+                    channel_id = %self.channel_id,
+                    %error,
+                    "failed to render compactor prompt"
+                );
+                let mut flag = self.is_compacting.write().await;
                 *flag = false;
                 return;
             }
