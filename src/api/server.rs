@@ -7,8 +7,8 @@ use super::{
 };
 
 use axum::Json;
-use axum::Router;
 use axum::extract::{Request, State};
+use axum::Router;
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
@@ -177,11 +177,7 @@ pub async fn start_http_server(
     Ok(handle)
 }
 
-async fn api_auth_middleware(
-    State(state): State<Arc<ApiState>>,
-    request: Request,
-    next: Next,
-) -> Response {
+async fn api_auth_middleware(State(state): State<Arc<ApiState>>, request: Request, next: Next) -> Response {
     let Some(expected_token) = state.auth_token.as_deref() else {
         return next.run(request).await;
     };
@@ -201,11 +197,7 @@ async fn api_auth_middleware(
     if is_authorized {
         next.run(request).await
     } else {
-        (
-            StatusCode::UNAUTHORIZED,
-            Json(json!({"error": "unauthorized"})),
-        )
-            .into_response()
+        (StatusCode::UNAUTHORIZED, Json(json!({"error": "unauthorized"}))).into_response()
     }
 }
 
