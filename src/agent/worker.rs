@@ -459,13 +459,16 @@ impl Worker {
 
         let recap = build_worker_recap(&removed);
         let prompt_engine = self.deps.runtime_config.prompts.load();
-        let marker = match prompt_engine.render_system_worker_compact(remove_count, &recap) {
-            Ok(m) => m,
-            Err(error) => {
-                tracing::error!(%error, "failed to render worker compact marker");
-                return;
-            }
-        };
+        let marker = prompt_engine
+            .render_system_worker_compact(remove_count, &recap)
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    worker_id = %self.id,
+                    %error,
+                    "failed to render worker compact message"
+                );
+                format!("[Compacted worker history: removed {remove_count} messages]")
+            });
         history.insert(0, rig::message::Message::from(marker));
 
         tracing::info!(
