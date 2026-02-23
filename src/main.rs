@@ -1644,6 +1644,17 @@ async fn initialize_agents(
         }
     }
 
+    // Register learning stores with the API
+    {
+        let mut learning_stores = std::collections::HashMap::new();
+        for (agent_id, agent) in agents.iter() {
+            if let Some(ref store) = agent.deps.learning_store {
+                learning_stores.insert(agent_id.to_string(), store.clone());
+            }
+        }
+        api_state.set_learning_stores(learning_stores);
+    }
+
     // Create cortex chat sessions for each agent
     {
         let mut sessions = std::collections::HashMap::new();

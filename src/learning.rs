@@ -40,8 +40,17 @@ pub(crate) mod tuneables;
 // -- Milestone 3: Domain Chips (Layer 4) --
 pub(crate) mod chips;
 
+// -- Milestone 4: Introspection & Metrics --
+pub(crate) mod commands;
+pub(crate) mod metrics;
+
+// -- Observatory --
+pub mod observatory;
+
+pub use commands::{LearningCommand, parse_learning_command, handle_learning_command};
 pub use config::LearningConfig;
 pub use engine::spawn_learning_loop;
+pub use metrics::MetricsCalculator;
 pub use store::LearningStore;
 pub use tuneables::TuneableStore;
 pub use types::*;

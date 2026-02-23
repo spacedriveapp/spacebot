@@ -61,6 +61,8 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
+    /// Per-agent learning stores for the learning dashboard API.
+    pub learning_stores: arc_swap::ArcSwap<HashMap<String, Arc<crate::learning::LearningStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Per-agent MCP managers for status and reconnect APIs.
@@ -195,6 +197,7 @@ impl ApiState {
             config_path: RwLock::new(PathBuf::new()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            learning_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             discord_permissions: RwLock::new(None),
@@ -415,6 +418,14 @@ impl ApiState {
     /// Set the cron schedulers for all agents.
     pub fn set_cron_schedulers(&self, schedulers: HashMap<String, Arc<Scheduler>>) {
         self.cron_schedulers.store(Arc::new(schedulers));
+    }
+
+    /// Set the learning stores for all agents.
+    pub fn set_learning_stores(
+        &self,
+        stores: HashMap<String, Arc<crate::learning::LearningStore>>,
+    ) {
+        self.learning_stores.store(Arc::new(stores));
     }
 
     /// Set the runtime configs for all agents.

@@ -2,8 +2,8 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
-    providers, settings, skills, system, webchat,
+    agents, bindings, channels, config, cortex, cron, ingest, learning, mcp, memories, messaging,
+    models, providers, settings, skills, system, webchat,
 };
 
 use axum::Json;
@@ -159,6 +159,26 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        // Learning dashboard
+        .route("/learning/distillations", get(learning::get_distillations))
+        .route("/learning/episodes", get(learning::get_episodes))
+        .route("/learning/episodes/steps", get(learning::get_episode_steps))
+        .route("/learning/insights", get(learning::get_insights))
+        .route("/learning/insights/dismiss", post(learning::dismiss_insight))
+        .route("/learning/insights/correct", put(learning::correct_insight))
+        .route("/learning/insights/promote", post(learning::promote_insight))
+        .route("/learning/chips", get(learning::get_chips))
+        .route("/learning/chips/insights", get(learning::get_chip_insights))
+        .route("/learning/quarantine", get(learning::get_quarantine))
+        .route("/learning/metrics", get(learning::get_metrics))
+        .route("/learning/metrics/history", get(learning::get_metrics_history))
+        .route("/learning/contradictions", get(learning::get_contradictions))
+        .route("/learning/evidence", get(learning::get_evidence))
+        .route("/learning/truth", get(learning::get_truth))
+        .route("/learning/tuneables", get(learning::get_tuneables).put(learning::update_tuneable))
+        .route("/learning/tuneables/history", get(learning::get_tuneables_history))
+        .route("/learning/distillations/dismiss", post(learning::dismiss_distillation))
+        .route("/learning/distillations/correct", put(learning::correct_distillation))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
