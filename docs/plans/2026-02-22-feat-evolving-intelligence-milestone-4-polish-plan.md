@@ -6,6 +6,7 @@ milestone: 4 of 4
 depends_on: milestone-3-intelligence
 brainstorm: docs/brainstorms/2026-02-22-evolving-intelligence-system-brainstorm.md
 research: docs/research/spark-parity.md
+status: completed
 ---
 
 # Evolving Intelligence — Milestone 4: Polish (Introspection, Metrics & Observatory)
@@ -410,37 +411,37 @@ Replace the current flat `decay_rate` with the category-aware model. The mainten
 
 ### Functional Requirements
 
-- [ ] `/learned` command returns summary in chat
-- [ ] `/learned` sub-commands work: distillations, episodes, insights, chips, metrics, contradictions
-- [ ] Platform-aware formatting (Discord 2000 char limit, Slack blocks, Telegram markdown)
-- [ ] All GET API endpoints return correct data with filtering and pagination
-- [ ] All write API endpoints work: dismiss, correct, promote insights/distillations
-- [ ] Manual tuneable override via API works
-- [ ] SSE stream includes learning events for real-time dashboard updates
-- [ ] Frontend dashboard renders: overview, distillations, episodes, insights, chips, advisory, truth, tuneables
-- [ ] Quarantine view shows human-readable reasons
-- [ ] Observatory generates correct markdown structure from learning.db
-- [ ] Observatory auto-sync runs on configurable interval when enabled
-- [ ] Observatory Mermaid diagram renders in Obsidian
-- [ ] Observatory explorer pages have correct YAML frontmatter for Dataview
-- [ ] Observatory respects max-per-type limits
-- [ ] CLI `observatory generate` subcommand works
-- [ ] Compounding Rate metric calculated correctly with conservative attribution
-- [ ] All 8 additional metrics tracked and recorded
-- [ ] Metric time-series stored for trend charts
-- [ ] `maintenance.rs` activated and called on timer
-- [ ] Category-specific decay rates applied correctly
-- [ ] Distillation pruning runs during maintenance
-- [ ] Evidence cleanup runs during maintenance
-- [ ] Unified `MaintenanceReport` includes all actions
-- [ ] `cargo clippy` and `cargo test` pass
+- [x] `/learned` command returns summary in chat
+- [x] `/learned` sub-commands work: distillations, episodes, insights, chips, metrics, contradictions
+- [x] Platform-aware formatting (Discord 2000 char limit, Slack blocks, Telegram markdown)
+- [x] All GET API endpoints return correct data with filtering and pagination
+- [x] All write API endpoints work: dismiss, correct, promote insights/distillations
+- [x] Manual tuneable override via API works
+- [x] SSE stream includes learning events for real-time dashboard updates
+- [x] Frontend dashboard renders: overview, distillations, episodes, insights, chips, advisory, truth, tuneables
+- [x] Quarantine view shows human-readable reasons
+- [x] Observatory generates correct markdown structure from learning.db
+- [x] Observatory auto-sync runs on configurable interval when enabled
+- [x] Observatory Mermaid diagram renders in Obsidian
+- [x] Observatory explorer pages have correct YAML frontmatter for Dataview
+- [x] Observatory respects max-per-type limits
+- [x] CLI `observatory generate` subcommand works
+- [x] Compounding Rate metric calculated correctly with conservative attribution
+- [x] All 8 additional metrics tracked and recorded
+- [x] Metric time-series stored for trend charts
+- [x] `maintenance.rs` activated and called on timer
+- [x] Category-specific decay rates applied correctly
+- [x] Distillation pruning runs during maintenance
+- [x] Evidence cleanup runs during maintenance
+- [x] Unified `MaintenanceReport` includes all actions
+- [x] `cargo clippy` and `cargo test` pass
 
 ### Quality Gates
 
-- [ ] `/learned` response renders correctly on Discord (< 2000 chars for summary)
-- [ ] API response times < 200ms for all GET endpoints
-- [ ] Observatory generation < 5 seconds for 500 items
-- [ ] Compounding Rate calculation matches manual verification on test data
+- [x] `/learned` response renders correctly on Discord (< 2000 chars for summary)
+- [x] API response times < 200ms for all GET endpoints
+- [x] Observatory generation < 5 seconds for 500 items
+- [x] Compounding Rate calculation matches manual verification on test data
 
 ## Technical Considerations
 
