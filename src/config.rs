@@ -46,6 +46,8 @@ pub struct Config {
     pub links: Vec<LinkDef>,
     /// Visual grouping of agents in the topology UI.
     pub groups: Vec<GroupDef>,
+    /// Org-level humans (real people, shown in topology graph).
+    pub humans: Vec<HumanDef>,
     /// Messaging platform credentials.
     pub messaging: MessagingConfig,
     /// Routing bindings (maps platform conversations to agents).
@@ -65,6 +67,16 @@ pub struct LinkDef {
     pub to: String,
     pub direction: String,
     pub relationship: String,
+}
+
+/// An org-level human definition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HumanDef {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
 }
 
 /// A visual group definition for the topology UI.
@@ -1251,6 +1263,8 @@ struct TomlConfig {
     #[serde(default)]
     groups: Vec<TomlGroupDef>,
     #[serde(default)]
+    humans: Vec<TomlHumanDef>,
+    #[serde(default)]
     messaging: TomlMessagingConfig,
     #[serde(default)]
     bindings: Vec<TomlBinding>,
@@ -1286,6 +1300,13 @@ struct TomlGroupDef {
     #[serde(default)]
     agent_ids: Vec<String>,
     color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlHumanDef {
+    id: String,
+    display_name: Option<String>,
+    role: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -2255,6 +2276,11 @@ impl Config {
             agents,
             links: Vec::new(),
             groups: Vec::new(),
+            humans: vec![HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+            }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api,
@@ -3114,6 +3140,25 @@ impl Config {
             })
             .collect();
 
+        let mut humans: Vec<HumanDef> = toml
+            .humans
+            .into_iter()
+            .map(|h| HumanDef {
+                id: h.id,
+                display_name: h.display_name,
+                role: h.role,
+            })
+            .collect();
+
+        // Default admin human if none defined
+        if humans.is_empty() {
+            humans.push(HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+            });
+        }
+
         Ok(Config {
             instance_dir,
             llm,
@@ -3121,6 +3166,7 @@ impl Config {
             agents,
             links,
             groups,
+            humans,
             messaging,
             bindings,
             api,

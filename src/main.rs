@@ -732,6 +732,7 @@ async fn run(
     api_state.set_defaults_config(config.defaults.clone()).await;
     api_state.set_agent_links((**agent_links.load()).clone());
     api_state.set_agent_groups(config.groups.clone());
+    api_state.set_agent_humans(config.humans.clone());
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;

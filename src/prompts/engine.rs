@@ -491,11 +491,13 @@ pub struct OrgContext {
     pub peers: Vec<LinkedAgent>,
 }
 
-/// Information about a linked agent for prompt rendering.
+/// Information about a linked agent or human for prompt rendering.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LinkedAgent {
     pub name: String,
     pub id: String,
+    /// Whether this is a human (true) or an agent (false).
+    pub is_human: bool,
 }
 
 /// Context for the current link channel.

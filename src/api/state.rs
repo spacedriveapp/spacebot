@@ -101,6 +101,8 @@ pub struct ApiState {
     pub agent_links: ArcSwap<Vec<crate::links::AgentLink>>,
     /// Visual agent groups for the topology UI.
     pub agent_groups: ArcSwap<Vec<crate::config::GroupDef>>,
+    /// Org-level humans for the topology UI.
+    pub agent_humans: ArcSwap<Vec<crate::config::HumanDef>>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -235,6 +237,7 @@ impl ApiState {
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
             agent_groups: ArcSwap::from_pointee(Vec::new()),
+            agent_humans: ArcSwap::from_pointee(Vec::new()),
         }
     }
 
@@ -541,6 +544,11 @@ impl ApiState {
     /// Set the visual agent groups for the topology UI.
     pub fn set_agent_groups(&self, groups: Vec<crate::config::GroupDef>) {
         self.agent_groups.store(Arc::new(groups));
+    }
+
+    /// Set the org-level humans for the topology UI.
+    pub fn set_agent_humans(&self, humans: Vec<crate::config::HumanDef>) {
+        self.agent_humans.store(Arc::new(humans));
     }
 
     /// Send an event to all SSE subscribers.

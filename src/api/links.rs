@@ -30,8 +30,18 @@ pub async fn agent_links(
 #[derive(Debug, Serialize)]
 struct TopologyResponse {
     agents: Vec<TopologyAgent>,
+    humans: Vec<TopologyHuman>,
     links: Vec<TopologyLink>,
     groups: Vec<TopologyGroup>,
+}
+
+#[derive(Debug, Serialize)]
+struct TopologyHuman {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    role: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -94,8 +104,19 @@ pub async fn topology(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
         })
         .collect();
 
+    let all_humans = state.agent_humans.load();
+    let humans: Vec<TopologyHuman> = all_humans
+        .iter()
+        .map(|h| TopologyHuman {
+            id: h.id.clone(),
+            display_name: h.display_name.clone(),
+            role: h.role.clone(),
+        })
+        .collect();
+
     Json(TopologyResponse {
         agents,
+        humans,
         links,
         groups,
     })
@@ -142,12 +163,21 @@ pub async fn create_link(
         .parse()
         .map_err(|_| StatusCode::BAD_REQUEST)?;
 
-    // Validate agents exist
+    // Validate node IDs exist (agents or humans)
     let agent_configs = state.agent_configs.load();
-    let from_exists = agent_configs.iter().any(|a| a.id == request.from);
-    let to_exists = agent_configs.iter().any(|a| a.id == request.to);
-    if !from_exists || !to_exists {
+    let human_configs = state.agent_humans.load();
+    let from_is_agent = agent_configs.iter().any(|a| a.id == request.from);
+    let from_is_human = human_configs.iter().any(|h| h.id == request.from);
+    let to_is_agent = agent_configs.iter().any(|a| a.id == request.to);
+    let to_is_human = human_configs.iter().any(|h| h.id == request.to);
+
+    if (!from_is_agent && !from_is_human) || (!to_is_agent && !to_is_human) {
         return Err(StatusCode::NOT_FOUND);
+    }
+
+    // Reject human↔human links
+    if from_is_human && to_is_human {
+        return Err(StatusCode::BAD_REQUEST);
     }
 
     if request.from == request.to {
@@ -576,6 +606,254 @@ pub async fn delete_group(
     state.set_agent_groups(groups);
 
     tracing::info!(name = %group_name, "agent group deleted via API");
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+// -- Human CRUD --
+
+#[derive(Debug, Deserialize)]
+pub struct CreateHumanRequest {
+    pub id: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateHumanRequest {
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+}
+
+/// List all humans.
+pub async fn list_humans(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
+    let humans = state.agent_humans.load();
+    Json(serde_json::json!({ "humans": &**humans }))
+}
+
+/// Create an org-level human.
+pub async fn create_human(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<CreateHumanRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let id = request.id.trim().to_string();
+    if id.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let existing = state.agent_humans.load();
+    if existing.iter().any(|h| h.id == id) {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Also reject IDs that collide with agent IDs
+    let agent_configs = state.agent_configs.load();
+    if agent_configs.iter().any(|a| a.id == id) {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if doc.get("humans").is_none() {
+        doc["humans"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
+    }
+    let humans_array = doc["humans"]
+        .as_array_of_tables_mut()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let mut table = toml_edit::Table::new();
+    table["id"] = toml_edit::value(&id);
+    if let Some(display_name) = &request.display_name {
+        if !display_name.is_empty() {
+            table["display_name"] = toml_edit::value(display_name.as_str());
+        }
+    }
+    if let Some(role) = &request.role {
+        if !role.is_empty() {
+            table["role"] = toml_edit::value(role.as_str());
+        }
+    }
+    humans_array.push(table);
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let new_human = crate::config::HumanDef {
+        id: id.clone(),
+        display_name: request.display_name.clone().filter(|s| !s.is_empty()),
+        role: request.role.clone().filter(|s| !s.is_empty()),
+    };
+    let mut humans = (**existing).clone();
+    humans.push(new_human.clone());
+    state.set_agent_humans(humans);
+
+    tracing::info!(id = %id, "human created via API");
+
+    Ok((StatusCode::CREATED, Json(serde_json::json!({ "human": new_human }))))
+}
+
+/// Update a human by ID.
+pub async fn update_human(
+    State(state): State<Arc<ApiState>>,
+    Path(human_id): Path<String>,
+    Json(request): Json<UpdateHumanRequest>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let existing = state.agent_humans.load();
+    let index = existing
+        .iter()
+        .position(|h| h.id == human_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let mut updated = existing[index].clone();
+    if let Some(display_name) = &request.display_name {
+        updated.display_name = if display_name.is_empty() {
+            None
+        } else {
+            Some(display_name.clone())
+        };
+    }
+    if let Some(role) = &request.role {
+        updated.role = if role.is_empty() { None } else { Some(role.clone()) };
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if let Some(humans_array) = doc.get_mut("humans").and_then(|h| h.as_array_of_tables_mut()) {
+        for table in humans_array.iter_mut() {
+            let table_id = table.get("id").and_then(|v| v.as_str());
+            if table_id == Some(&human_id) {
+                if let Some(display_name) = &updated.display_name {
+                    table["display_name"] = toml_edit::value(display_name.as_str());
+                } else if request.display_name.is_some() {
+                    table.remove("display_name");
+                }
+                if let Some(role) = &updated.role {
+                    table["role"] = toml_edit::value(role.as_str());
+                } else if request.role.is_some() {
+                    table.remove("role");
+                }
+                break;
+            }
+        }
+    }
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut humans = (**existing).clone();
+    humans[index] = updated.clone();
+    state.set_agent_humans(humans);
+
+    tracing::info!(id = %human_id, "human updated via API");
+
+    Ok(Json(serde_json::json!({ "human": updated })))
+}
+
+/// Delete a human by ID. Also removes any links involving this human.
+pub async fn delete_human(
+    State(state): State<Arc<ApiState>>,
+    Path(human_id): Path<String>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let existing = state.agent_humans.load();
+    if !existing.iter().any(|h| h.id == human_id) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Remove the human entry
+    if let Some(humans_array) = doc.get_mut("humans").and_then(|h| h.as_array_of_tables_mut()) {
+        let mut remove_index = None;
+        for (idx, table) in humans_array.iter().enumerate() {
+            if table.get("id").and_then(|v| v.as_str()) == Some(&human_id) {
+                remove_index = Some(idx);
+                break;
+            }
+        }
+        if let Some(idx) = remove_index {
+            humans_array.remove(idx);
+        }
+    }
+
+    // Remove any links involving this human
+    if let Some(links_array) = doc.get_mut("links").and_then(|l| l.as_array_of_tables_mut()) {
+        let mut indices_to_remove = Vec::new();
+        for (idx, table) in links_array.iter().enumerate() {
+            let from = table.get("from").and_then(|v| v.as_str());
+            let to = table.get("to").and_then(|v| v.as_str());
+            if from == Some(&human_id) || to == Some(&human_id) {
+                indices_to_remove.push(idx);
+            }
+        }
+        // Remove in reverse order to preserve indices
+        for idx in indices_to_remove.into_iter().rev() {
+            links_array.remove(idx);
+        }
+    }
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    // Update in-memory state
+    let humans: Vec<_> = existing
+        .iter()
+        .filter(|h| h.id != human_id)
+        .cloned()
+        .collect();
+    state.set_agent_humans(humans);
+
+    // Also remove links involving this human
+    let existing_links = state.agent_links.load();
+    let links: Vec<_> = existing_links
+        .iter()
+        .filter(|l| l.from_agent_id != human_id && l.to_agent_id != human_id)
+        .cloned()
+        .collect();
+    state.set_agent_links(links);
+
+    tracing::info!(id = %human_id, "human deleted via API");
 
     Ok(StatusCode::NO_CONTENT)
 }

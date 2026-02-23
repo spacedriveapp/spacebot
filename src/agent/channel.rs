@@ -848,14 +848,14 @@ impl Channel {
 
         for link in &links {
             let is_from = link.from_agent_id == agent_id;
-            let other_agent_id = if is_from {
+            let other_id = if is_from {
                 &link.to_agent_id
             } else {
                 &link.from_agent_id
             };
 
             // The link's relationship describes from_agent's role relative to to_agent.
-            // When we ARE from_agent, we need to invert to get the other agent's role
+            // When we ARE from_agent, we need to invert to get the other node's role
             // relative to us. When we ARE to_agent, the relationship already describes
             // from_agent's role relative to us.
             let relationship = if is_from {
@@ -864,15 +864,25 @@ impl Channel {
                 link.relationship
             };
 
-            let agent_info = crate::prompts::engine::LinkedAgent {
-                name: other_agent_id.clone(),
-                id: other_agent_id.clone(),
+            // If the other ID is in the agent names map, it's an agent; otherwise a human
+            let is_human = !self.deps.agent_names.contains_key(other_id.as_str());
+            let name = self
+                .deps
+                .agent_names
+                .get(other_id.as_str())
+                .cloned()
+                .unwrap_or_else(|| other_id.clone());
+
+            let info = crate::prompts::engine::LinkedAgent {
+                name,
+                id: other_id.clone(),
+                is_human,
             };
 
             match relationship {
-                crate::links::LinkRelationship::Superior => superiors.push(agent_info),
-                crate::links::LinkRelationship::Subordinate => subordinates.push(agent_info),
-                crate::links::LinkRelationship::Peer => peers.push(agent_info),
+                crate::links::LinkRelationship::Superior => superiors.push(info),
+                crate::links::LinkRelationship::Subordinate => subordinates.push(info),
+                crate::links::LinkRelationship::Peer => peers.push(info),
             }
         }
 

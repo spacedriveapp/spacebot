@@ -142,23 +142,25 @@ function GroupNode({ data, selected }: NodeProps) {
 	);
 }
 
-// -- Custom Node: Agent Profile Card --
+// -- Shared Profile Node (used for both agent and human) --
 
 const NODE_WIDTH = 240;
 
-function AgentNode({ data, selected }: NodeProps) {
-	const avatarSeed = (data.avatarSeed as string) ?? (data.agentId as string);
+function ProfileNode({ data, selected }: NodeProps) {
+	const nodeId = (data.nodeId as string) ?? "";
+	const avatarSeed = (data.avatarSeed as string) ?? nodeId;
 	const [c1, c2] = seedGradient(avatarSeed);
-	const agentId = data.agentId as string;
 	const configDisplayName = data.configDisplayName as string | null;
 	const configRole = data.configRole as string | null;
 	const chosenName = data.chosenName as string | null;
 	const bio = data.bio as string | null;
 	const isOnline = data.isOnline as boolean;
-	const channelCount = data.channelCount as number;
-	const memoryCount = data.memoryCount as number;
+	const channelCount = (data.channelCount as number) ?? 0;
+	const memoryCount = (data.memoryCount as number) ?? 0;
 	const connected = (data.connectedHandles as Record<string, boolean>) ?? {};
-	const primaryName = configDisplayName ?? agentId;
+	const nodeKind = (data.nodeKind as string) ?? "agent";
+	const isAgent = nodeKind === "agent";
+	const primaryName = configDisplayName ?? nodeId;
 
 	return (
 		<div
@@ -178,7 +180,7 @@ function AgentNode({ data, selected }: NodeProps) {
 				>
 					<defs>
 						<linearGradient
-							id={`node-grad-${agentId}`}
+							id={`node-grad-${nodeId}`}
 							x1="0%"
 							y1="0%"
 							x2="100%"
@@ -188,8 +190,18 @@ function AgentNode({ data, selected }: NodeProps) {
 							<stop offset="100%" stopColor={c2} stopOpacity={0.2} />
 						</linearGradient>
 					</defs>
-					<rect width="240" height="48" fill={`url(#node-grad-${agentId})`} />
+					<rect width="240" height="48" fill={`url(#node-grad-${nodeId})`} />
 				</svg>
+				{/* Badge */}
+				<span
+					className={`absolute top-2 right-2 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider ${
+						isAgent
+							? "bg-accent/20 text-accent"
+							: "bg-amber-500/20 text-amber-400"
+					}`}
+				>
+					{nodeKind}
+				</span>
 			</div>
 
 			{/* Avatar overlapping banner */}
@@ -203,7 +215,7 @@ function AgentNode({ data, selected }: NodeProps) {
 					>
 						<defs>
 							<linearGradient
-								id={`av-${agentId}`}
+								id={`av-${nodeId}`}
 								x1="0%"
 								y1="0%"
 								x2="100%"
@@ -213,34 +225,44 @@ function AgentNode({ data, selected }: NodeProps) {
 								<stop offset="100%" stopColor={c2} />
 							</linearGradient>
 						</defs>
-						<circle cx="32" cy="32" r="32" fill={`url(#av-${agentId})`} />
+						<circle cx="32" cy="32" r="32" fill={`url(#av-${nodeId})`} />
 					</svg>
-					<div
-						className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-[2px] border-app-darkBox ${
-							isOnline ? "bg-green-500" : "bg-gray-500"
-						}`}
-					/>
+					{isAgent && (
+						<div
+							className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-[2px] border-app-darkBox ${
+								isOnline ? "bg-green-500" : "bg-gray-500"
+							}`}
+						/>
+					)}
 				</div>
 			</div>
 
 			{/* Profile content */}
 			<div className="px-4 pt-1.5 pb-3">
 				{/* Primary name + self-chosen name inline */}
-				<Link
-					to="/agents/$agentId"
-					params={{ agentId }}
-					className="flex items-baseline gap-1.5 truncate"
-					onClick={(e) => e.stopPropagation()}
-				>
-					<span className="font-plex text-sm font-semibold text-ink hover:text-accent transition-colors truncate">
-						{primaryName}
-					</span>
-					{chosenName && chosenName !== primaryName && chosenName !== agentId && (
-						<span className="text-[11px] text-ink-faint truncate">
-							"{chosenName}"
+				{isAgent ? (
+					<Link
+						to="/agents/$agentId"
+						params={{ agentId: nodeId }}
+						className="flex items-baseline gap-1.5 truncate"
+						onClick={(e) => e.stopPropagation()}
+					>
+						<span className="font-plex text-sm font-semibold text-ink hover:text-accent transition-colors truncate">
+							{primaryName}
 						</span>
-					)}
-				</Link>
+						{chosenName && chosenName !== primaryName && chosenName !== nodeId && (
+							<span className="text-[11px] text-ink-faint truncate">
+								"{chosenName}"
+							</span>
+						)}
+					</Link>
+				) : (
+					<div className="flex items-baseline gap-1.5 truncate">
+						<span className="font-plex text-sm font-semibold text-ink truncate">
+							{primaryName}
+						</span>
+					</div>
+				)}
 
 				{/* Role */}
 				{configRole && (
@@ -249,76 +271,45 @@ function AgentNode({ data, selected }: NodeProps) {
 					</p>
 				)}
 
-				{/* Bio */}
-				{bio && (
+				{/* Bio (agents only) */}
+				{isAgent && bio && (
 					<p className="mt-2 text-[11px] leading-relaxed text-ink-faint line-clamp-3">
 						{bio}
 					</p>
 				)}
 
-				{/* Stats */}
-				<div className="mt-2 flex items-center gap-3 border-t border-app-line/40 pt-2 text-[10px] text-ink-faint">
-					<span>
-						<span className="font-medium text-ink-dull">{channelCount}</span> channels
-					</span>
-					<span>
-						<span className="font-medium text-ink-dull">
-							{memoryCount >= 1000 ? `${(memoryCount / 1000).toFixed(1)}k` : memoryCount}
-						</span> memories
-					</span>
-				</div>
+				{/* Stats (agents only) */}
+				{isAgent && (
+					<div className="mt-2 flex items-center gap-3 border-t border-app-line/40 pt-2 text-[10px] text-ink-faint">
+						<span>
+							<span className="font-medium text-ink-dull">{channelCount}</span> channels
+						</span>
+						<span>
+							<span className="font-medium text-ink-dull">
+								{memoryCount >= 1000 ? `${(memoryCount / 1000).toFixed(1)}k` : memoryCount}
+							</span> memories
+						</span>
+					</div>
+				)}
 			</div>
 
-			{/* Handles on all four sides for relationship-based routing */}
-			<Handle
-				type="source"
-				id="top"
-				position={Position.Top}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.top ? "!bg-amber-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="source"
-				id="bottom"
-				position={Position.Bottom}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.bottom ? "!bg-green-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="source"
-				id="right"
-				position={Position.Right}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.right ? "!bg-indigo-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="source"
-				id="left"
-				position={Position.Left}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.left ? "!bg-indigo-400" : "!bg-app-line"}`}
-			/>
-			{/* Target handles (same positions, different type) */}
-			<Handle
-				type="target"
-				id="top"
-				position={Position.Top}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.top ? "!bg-amber-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="target"
-				id="bottom"
-				position={Position.Bottom}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.bottom ? "!bg-green-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="target"
-				id="right"
-				position={Position.Right}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.right ? "!bg-indigo-400" : "!bg-app-line"}`}
-			/>
-			<Handle
-				type="target"
-				id="left"
-				position={Position.Left}
-				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.left ? "!bg-indigo-400" : "!bg-app-line"}`}
-			/>
+			{/* Handles on all four sides */}
+			<Handle type="source" id="top" position={Position.Top}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.top ? "!bg-amber-400" : "!bg-app-line"}`} />
+			<Handle type="source" id="bottom" position={Position.Bottom}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.bottom ? "!bg-green-400" : "!bg-app-line"}`} />
+			<Handle type="source" id="right" position={Position.Right}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.right ? "!bg-indigo-400" : "!bg-app-line"}`} />
+			<Handle type="source" id="left" position={Position.Left}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.left ? "!bg-indigo-400" : "!bg-app-line"}`} />
+			<Handle type="target" id="top" position={Position.Top}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.top ? "!bg-amber-400" : "!bg-app-line"}`} />
+			<Handle type="target" id="bottom" position={Position.Bottom}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.bottom ? "!bg-green-400" : "!bg-app-line"}`} />
+			<Handle type="target" id="right" position={Position.Right}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.right ? "!bg-indigo-400" : "!bg-app-line"}`} />
+			<Handle type="target" id="left" position={Position.Left}
+				className={`!h-2.5 !w-2.5 !border-2 !border-app-darkBox ${connected.left ? "!bg-indigo-400" : "!bg-app-line"}`} />
 		</div>
 	);
 }
@@ -443,7 +434,8 @@ function inferRelationshipFromHandle(
 }
 
 const nodeTypes: NodeTypes = {
-	agent: AgentNode,
+	agent: ProfileNode,
+	human: ProfileNode,
 	group: GroupNode,
 };
 
@@ -542,6 +534,85 @@ function EdgeConfigPanel({
 			<div className="flex gap-2">
 				<Button
 					onClick={() => onUpdate(direction, relationship)}
+					size="sm"
+					className="flex-1 bg-accent/15 text-tiny text-accent hover:bg-accent/25"
+				>
+					Save
+				</Button>
+				<Button
+					onClick={onDelete}
+					size="sm"
+					variant="destructive"
+					className="text-tiny"
+				>
+					Delete
+				</Button>
+			</div>
+		</motion.div>
+	);
+}
+
+// -- Human Config Panel --
+
+interface HumanConfigPanelProps {
+	human: { id: string; display_name?: string; role?: string };
+	onUpdate: (displayName: string, role: string) => void;
+	onDelete: () => void;
+	onClose: () => void;
+}
+
+function HumanConfigPanel({
+	human,
+	onUpdate,
+	onDelete,
+	onClose,
+}: HumanConfigPanelProps) {
+	const [displayName, setDisplayName] = useState(human.display_name ?? "");
+	const [role, setRole] = useState(human.role ?? "");
+
+	return (
+		<motion.div
+			initial={{ opacity: 0, y: 8 }}
+			animate={{ opacity: 1, y: 0 }}
+			exit={{ opacity: 0, y: 8 }}
+			transition={{ duration: 0.15 }}
+			className="absolute right-4 top-4 z-20 w-64 rounded-lg border border-app-line/50 bg-app-darkBox/95 p-4 shadow-xl backdrop-blur-sm"
+		>
+			<div className="mb-3 flex items-center justify-between">
+				<span className="text-sm font-medium text-ink">Human Settings</span>
+				<button
+					onClick={onClose}
+					className="text-ink-faint hover:text-ink transition-colors text-sm"
+				>
+					Close
+				</button>
+			</div>
+
+			<div className="mb-2 text-tiny text-ink-faint">{human.id}</div>
+
+			<div className="mb-3">
+				<label className="mb-1 block text-tiny font-medium text-ink-dull">Display Name</label>
+				<input
+					value={displayName}
+					onChange={(e) => setDisplayName(e.target.value)}
+					className="w-full rounded bg-app-input px-2.5 py-1.5 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50"
+					placeholder={human.id}
+				/>
+			</div>
+
+			<div className="mb-4">
+				<label className="mb-1 block text-tiny font-medium text-ink-dull">Role</label>
+				<input
+					value={role}
+					onChange={(e) => setRole(e.target.value)}
+					className="w-full rounded bg-app-input px-2.5 py-1.5 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50"
+					placeholder="e.g. CEO, Lead Developer"
+				/>
+			</div>
+
+			<div className="flex gap-2">
+				<Button
+					onClick={() => onUpdate(displayName, role)}
 					size="sm"
 					className="flex-1 bg-accent/15 text-tiny text-accent hover:bg-accent/25"
 				>
@@ -674,6 +745,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const queryClient = useQueryClient();
 	const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
 	const [selectedGroup, setSelectedGroup] = useState<TopologyGroup | null>(null);
+	const [selectedHuman, setSelectedHuman] = useState<{ id: string; display_name?: string; role?: string } | null>(null);
 
 	const { data, isLoading, error } = useQuery({
 		queryKey: ["topology"],
@@ -812,6 +884,33 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 		},
 	});
 
+	const createHuman = useMutation({
+		mutationFn: (id: string) => api.createHuman({ id }),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["topology"] });
+		},
+	});
+
+	const updateHuman = useMutation({
+		mutationFn: (params: { id: string; displayName?: string; role?: string }) =>
+			api.updateHuman(params.id, {
+				display_name: params.displayName,
+				role: params.role,
+			}),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["topology"] });
+			setSelectedHuman(null);
+		},
+	});
+
+	const deleteHuman = useMutation({
+		mutationFn: (id: string) => api.deleteHuman(id),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["topology"] });
+			setSelectedHuman(null);
+		},
+	});
+
 	// Handle new connection (drag from handle to handle)
 	const onConnect = useCallback(
 		(connection: Connection) => {
@@ -855,17 +954,28 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 				if (group) {
 					setSelectedGroup(group);
 					setSelectedEdge(null);
+					setSelectedHuman(null);
+				}
+			} else if (node.type === "human") {
+				const humans = data?.humans ?? [];
+				const human = humans.find((h) => h.id === node.id);
+				if (human) {
+					setSelectedHuman(human);
+					setSelectedEdge(null);
+					setSelectedGroup(null);
 				}
 			} else {
 				setSelectedGroup(null);
+				setSelectedHuman(null);
 			}
 		},
-		[groups],
+		[groups, data],
 	);
 
 	const onPaneClick = useCallback(() => {
 		setSelectedEdge(null);
 		setSelectedGroup(null);
+		setSelectedHuman(null);
 	}, []);
 
 	// Handle node drops into/out of groups via position change
@@ -1045,12 +1155,23 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 						<span className="text-tiny text-ink-faint">Side → Peer</span>
 					</div>
 				</div>
-				<button
-					onClick={handleCreateGroup}
-					className="mt-2 w-full rounded bg-app-box px-2 py-1.5 text-tiny text-ink-faint hover:text-ink transition-colors text-left"
-				>
-					+ New Group
-				</button>
+				<div className="mt-2 flex flex-col gap-1">
+					<button
+						onClick={handleCreateGroup}
+						className="w-full rounded bg-app-box px-2 py-1.5 text-tiny text-ink-faint hover:text-ink transition-colors text-left"
+					>
+						+ New Group
+					</button>
+					<button
+						onClick={() => {
+							const id = `human-${(data?.humans?.length ?? 0) + 1}`;
+							createHuman.mutate(id);
+						}}
+						className="w-full rounded bg-app-box px-2 py-1.5 text-tiny text-ink-faint hover:text-ink transition-colors text-left"
+					>
+						+ New Human
+					</button>
+				</div>
 			</div>
 
 			{/* Edge config panel */}
@@ -1094,6 +1215,25 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 						}
 						onDelete={() => deleteGroup.mutate(selectedGroup.name)}
 						onClose={() => setSelectedGroup(null)}
+					/>
+				)}
+			</AnimatePresence>
+
+			{/* Human config panel */}
+			<AnimatePresence>
+				{selectedHuman && (
+					<HumanConfigPanel
+						key={selectedHuman.id}
+						human={selectedHuman}
+						onUpdate={(displayName, role) =>
+							updateHuman.mutate({
+								id: selectedHuman.id,
+								displayName: displayName || undefined,
+								role: role || undefined,
+							})
+						}
+						onDelete={() => deleteHuman.mutate(selectedHuman.id)}
+						onClose={() => setSelectedHuman(null)}
 					/>
 				)}
 			</AnimatePresence>
@@ -1196,7 +1336,8 @@ function buildGraph(
 				parentId: `group:${group.name}`,
 				extent: "parent" as const,
 				data: {
-					agentId,
+					nodeId: agentId,
+					nodeKind: "agent",
 					configDisplayName: topoAgent?.display_name ?? null,
 					configRole: topoAgent?.role ?? null,
 					chosenName: profile?.display_name ?? null,
@@ -1240,7 +1381,8 @@ function buildGraph(
 							y: centerY + radius * Math.sin(angle),
 						},
 			data: {
-				agentId: agent.id,
+				nodeId: agent.id,
+				nodeKind: "agent",
 				configDisplayName: agent.display_name ?? null,
 				configRole: agent.role ?? null,
 				chosenName: profile?.display_name ?? null,
@@ -1249,6 +1391,28 @@ function buildGraph(
 				isOnline,
 				channelCount: summary?.channel_count ?? 0,
 				memoryCount: summary?.memory_total ?? 0,
+				connectedHandles: { top: false, bottom: false, left: false, right: false },
+			},
+		});
+	});
+
+	// Add human nodes
+	const humans = data.humans ?? [];
+	const humanStartX = ungroupedAgents.length > 0
+		? centerX + radius + NODE_WIDTH + 80
+		: ungroupedStartX;
+
+	humans.forEach((human, index) => {
+		allNodes.push({
+			id: human.id,
+			type: "human",
+			position: { x: humanStartX, y: index * 220 },
+			data: {
+				nodeId: human.id,
+				nodeKind: "human",
+				configDisplayName: human.display_name ?? null,
+				configRole: human.role ?? null,
+				avatarSeed: human.id,
 				connectedHandles: { top: false, bottom: false, left: false, right: false },
 			},
 		});
@@ -1285,7 +1449,7 @@ function buildGraph(
 
 	// Patch connectedHandles onto agent nodes
 	for (const node of allNodes) {
-		if (node.type === "agent") {
+		if (node.type === "agent" || node.type === "human") {
 			const aid = node.id;
 			node.data = {
 				...node.data,

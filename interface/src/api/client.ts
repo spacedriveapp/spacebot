@@ -981,10 +981,28 @@ export interface TopologyGroup {
 	color?: string;
 }
 
+export interface TopologyHuman {
+	id: string;
+	display_name?: string;
+	role?: string;
+}
+
 export interface TopologyResponse {
 	agents: TopologyAgent[];
+	humans: TopologyHuman[];
 	links: TopologyLink[];
 	groups: TopologyGroup[];
+}
+
+export interface CreateHumanRequest {
+	id: string;
+	display_name?: string;
+	role?: string;
+}
+
+export interface UpdateHumanRequest {
+	display_name?: string;
+	role?: string;
 }
 
 export interface CreateGroupRequest {
@@ -1511,6 +1529,43 @@ export const api = {
 	deleteGroup: async (name: string): Promise<void> => {
 		const response = await fetch(
 			`${API_BASE}/groups/${encodeURIComponent(name)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+	},
+
+	// Humans API
+	humans: () => fetchJson<{ humans: TopologyHuman[] }>("/humans"),
+	createHuman: async (request: CreateHumanRequest): Promise<{ human: TopologyHuman }> => {
+		const response = await fetch(`${API_BASE}/humans`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	updateHuman: async (id: string, request: UpdateHumanRequest): Promise<{ human: TopologyHuman }> => {
+		const response = await fetch(
+			`${API_BASE}/humans/${encodeURIComponent(id)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(request),
+			},
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	deleteHuman: async (id: string): Promise<void> => {
+		const response = await fetch(
+			`${API_BASE}/humans/${encodeURIComponent(id)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) {

@@ -171,6 +171,11 @@ pub async fn start_http_server(
             "/groups/{name}",
             put(links::update_group).delete(links::delete_group),
         )
+        .route("/humans", get(links::list_humans).post(links::create_human))
+        .route(
+            "/humans/{id}",
+            put(links::update_human).delete(links::delete_human),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
