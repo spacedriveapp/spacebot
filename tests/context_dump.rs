@@ -80,6 +80,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        learning_store: None,
     };
 
     Ok((deps, config))
@@ -125,7 +126,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let identity_context = rc.identity.load().render();
     let memory_bulletin = rc.memory_bulletin.load();
     let skills = rc.skills.load();
-    let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+    let skills_prompt = skills.render_channel_prompt(&prompt_engine).unwrap_or_default();
 
     let browser_enabled = rc.browser_config.load().enabled;
     let web_search_enabled = rc.brave_search_key.load().is_some();
