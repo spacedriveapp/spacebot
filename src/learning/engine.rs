@@ -756,7 +756,7 @@ async fn handle_event(
             state.learning_state.phase = state.phase_state.current();
 
             let watcher_actions = state.control_plane.evaluate(&state.learning_state);
-            for _action in &watcher_actions {
+            for action in &watcher_actions {
                 state.learning_state.watcher_firing_count += 1;
                 state.escape_protocol.update_metrics(
                     state.learning_state.watcher_firing_count,
@@ -764,6 +764,11 @@ async fn handle_event(
                     state.learning_state.steps_without_new_evidence,
                     0.0,
                 );
+                if action.severity == super::WatcherSeverity::Block {
+                    deps.runtime_config
+                        .control_plane_block
+                        .store(Arc::new(Some(action.message.clone())));
+                }
             }
         }
 
@@ -824,6 +829,10 @@ async fn handle_event(
                             None,
                         )
                         .await;
+                    // Signal the SpacebotHook to block the next tool call.
+                    deps.runtime_config
+                        .control_plane_block
+                        .store(Arc::new(Some(action.message.clone())));
                 }
             }
 

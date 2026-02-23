@@ -52,7 +52,8 @@ impl Branch {
             ProcessType::Branch,
             Some(channel_id.clone()),
             deps.event_tx.clone(),
-        );
+        )
+        .with_runtime_config(deps.runtime_config.clone());
 
         Self {
             id,

@@ -85,7 +85,8 @@ impl Worker {
             ProcessType::Worker,
             channel_id.clone(),
             deps.event_tx.clone(),
-        );
+        )
+        .with_runtime_config(deps.runtime_config.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
 
         Self {
@@ -126,7 +127,8 @@ impl Worker {
             ProcessType::Worker,
             channel_id.clone(),
             deps.event_tx.clone(),
-        );
+        )
+        .with_runtime_config(deps.runtime_config.clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
 

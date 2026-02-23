@@ -3204,6 +3204,10 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Control plane block message. When non-empty, the SpacebotHook should
+    /// skip tool calls and surface this message. Cleared after the block is
+    /// consumed. Set by the learning engine's control plane watcher evaluation.
+    pub control_plane_block: ArcSwap<Option<String>>,
 }
 
 impl RuntimeConfig {
@@ -3252,6 +3256,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            control_plane_block: ArcSwap::from_pointee(None),
         }
     }
 

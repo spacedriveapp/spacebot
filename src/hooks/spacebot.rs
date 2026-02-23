@@ -5,6 +5,8 @@ use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{CompletionModel, CompletionResponse, Message};
 use tokio::sync::broadcast;
 
+use std::sync::Arc;
+
 /// Hook for observing agent behavior and sending events.
 #[derive(Clone)]
 pub struct SpacebotHook {
@@ -14,6 +16,7 @@ pub struct SpacebotHook {
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
     trace_id: Option<String>,
+    runtime_config: Option<Arc<crate::config::RuntimeConfig>>,
 }
 
 impl SpacebotHook {
@@ -32,12 +35,19 @@ impl SpacebotHook {
             channel_id,
             event_tx,
             trace_id: None,
+            runtime_config: None,
         }
     }
 
     /// Set the trace ID for correlating events back to the originating user message.
     pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
         self.trace_id = trace_id;
+        self
+    }
+
+    /// Attach runtime config for control plane enforcement.
+    pub fn with_runtime_config(mut self, config: Arc<crate::config::RuntimeConfig>) -> Self {
+        self.runtime_config = Some(config);
         self
     }
 
@@ -194,6 +204,23 @@ where
         internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
+        // Control Plane enforcement: check for active block from learning engine.
+        if let Some(ref config) = self.runtime_config {
+            let block = config.control_plane_block.load();
+            if let Some(message) = block.as_ref() {
+                tracing::warn!(
+                    process_id = %self.process_id,
+                    tool_name = %tool_name,
+                    "control plane blocking tool call: {message}"
+                );
+                // Clear the block after consuming it (one-shot).
+                config.control_plane_block.store(Arc::new(None));
+                return ToolCallHookAction::Skip {
+                    reason: format!("Control Plane blocked: {message}"),
+                };
+            }
+        }
+
         // Scan tool arguments for secrets before execution
         if let Some(leak) = self.scan_for_leaks(args) {
             tracing::error!(

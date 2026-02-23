@@ -171,7 +171,8 @@ impl Channel {
             ProcessType::Channel,
             Some(id.clone()),
             deps.event_tx.clone(),
-        );
+        )
+        .with_runtime_config(deps.runtime_config.clone());
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
