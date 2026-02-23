@@ -2,14 +2,16 @@
 
 You have access to the following skills. Skills contain specialized instructions for specific tasks. When a user's request matches a skill, spawn a worker to handle it and include the skill name in the task description so the worker knows which skill to follow.
 
-To use a skill, spawn a worker with a task like: "Use the [skill-name] skill to [task]. Read the skill instructions at [path] first."
+The worker will automatically receive the skill's instructions in its system prompt — do not include file paths in the task description.
+
+To use a skill, spawn a worker and set the `skill` parameter to the skill name. This is what injects the skill instructions into the worker. Example:
+`spawn_worker(skill="generate_music", task="Generate a 30-second downtempo track, no lyrics.")`
 
 <available_skills>
 {%- for skill in skills %}
   <skill>
     <name>{{ skill.name }}</name>
     <description>{{ skill.description }}</description>
-    <location>{{ skill.location }}</location>
   </skill>
 {%- endfor %}
 </available_skills>
