@@ -335,6 +335,53 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
             if let Err(error) = calculator.record_all_metrics().await {
                 tracing::warn!(%error, "failed to record learning metrics");
             }
+
+            // Sync observatory vault if enabled
+            let learning_config = (**deps.runtime_config.learning.load()).clone();
+            if learning_config.observatory.enabled && learning_config.observatory.auto_sync {
+                match crate::learning::observatory::sync_observatory(
+                    learning_store,
+                    &learning_config.observatory,
+                ).await {
+                    Ok(report) => {
+                        if report.files_written > 0 {
+                            tracing::debug!(
+                                files = report.files_written,
+                                duration_ms = report.duration_ms,
+                                "observatory sync completed"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "observatory sync failed");
+                    }
+                }
+            }
+
+            // Run learning maintenance (distillation pruning, evidence cleanup)
+            {
+                use crate::learning::distillation;
+                match distillation::prune_low_performers(learning_store).await {
+                    Ok(pruned) if pruned > 0 => {
+                        tracing::info!(pruned, "distillation pruning completed");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "distillation pruning failed");
+                    }
+                }
+
+                let evidence_store = crate::learning::evidence::EvidenceStore::new(learning_store.clone());
+                match evidence_store.cleanup_expired(&[]).await {
+                    Ok(cleaned) if cleaned > 0 => {
+                        tracing::info!(cleaned, "evidence cleanup completed");
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(%error, "evidence cleanup failed");
+                    }
+                }
+            }
         }
     }
 }
