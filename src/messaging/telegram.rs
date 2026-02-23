@@ -914,6 +914,10 @@ static BOLD_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("hardcoded regex"));
 static BOLD_UNDERSCORE_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"__(.+?)__").expect("hardcoded regex"));
+static BOLD_ITALIC_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*\*(.+?)\*\*\*").expect("hardcoded regex"));
+static BOLD_ITALIC_UNDERSCORE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"___(.+?)___").expect("hardcoded regex"));
 static ITALIC_PATTERN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\*(.+?)\*").expect("hardcoded regex"));
 static ITALIC_UNDERSCORE_PATTERN: LazyLock<Regex> =
@@ -1066,7 +1070,9 @@ fn format_inline(line: &str) -> String {
 /// Bold (`**`) is processed before italic (`*`) so double-star patterns
 /// are consumed first and single stars only match true italic spans.
 fn format_markdown_spans(text: &str) -> String {
-    let text = BOLD_PATTERN.replace_all(text, "<b>$1</b>");
+    let text = BOLD_ITALIC_PATTERN.replace_all(text, "<b><i>$1</i></b>");
+    let text = BOLD_ITALIC_UNDERSCORE_PATTERN.replace_all(&text, "<b><i>$1</i></b>");
+    let text = BOLD_PATTERN.replace_all(&text, "<b>$1</b>");
     let text = BOLD_UNDERSCORE_PATTERN.replace_all(&text, "<b>$1</b>");
     let text = ITALIC_PATTERN.replace_all(&text, "<i>$1</i>");
     let text = ITALIC_UNDERSCORE_PATTERN.replace_all(&text, "<i>$1</i>");

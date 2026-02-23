@@ -282,10 +282,10 @@ impl Channel {
                 _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() => {
                     let now = tokio::time::Instant::now();
                     // Check coalesce deadline
-                    if self.coalesce_deadline.is_some_and(|d| d <= now) {
-                        if let Err(error) = self.flush_coalesce_buffer().await {
-                            tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on deadline");
-                        }
+                    if self.coalesce_deadline.is_some_and(|d| d <= now)
+                        && let Err(error) = self.flush_coalesce_buffer().await
+                    {
+                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on deadline");
                     }
                     // Check retrigger deadline
                     if self.retrigger_deadline.is_some_and(|d| d <= now) {

@@ -175,12 +175,12 @@ impl Tool for MemorySaveTool {
             )));
         }
 
-        if let Some(importance) = args.importance {
-            if !(0.0..=1.0).contains(&importance) {
-                return Err(MemorySaveError(format!(
-                    "importance must be between 0.0 and 1.0 (got {importance})"
-                )));
-            }
+        if let Some(importance) = args.importance
+            && !(0.0..=1.0).contains(&importance)
+        {
+            return Err(MemorySaveError(format!(
+                "importance must be between 0.0 and 1.0 (got {importance})"
+            )));
         }
 
         // Parse memory type

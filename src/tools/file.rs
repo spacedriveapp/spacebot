@@ -58,14 +58,14 @@ impl FileTool {
             if let Ok(relative) = canonical.strip_prefix(&workspace_canonical) {
                 for component in relative.components() {
                     check.push(component);
-                    if let Ok(metadata) = std::fs::symlink_metadata(&check) {
-                        if metadata.file_type().is_symlink() {
-                            return Err(FileError(
-                                "ACCESS DENIED: Symlinks are not allowed within the workspace \
-                                 for security reasons. Use direct paths instead."
-                                    .to_string(),
-                            ));
-                        }
+                    if let Ok(metadata) = std::fs::symlink_metadata(&check)
+                        && metadata.file_type().is_symlink()
+                    {
+                        return Err(FileError(
+                            "ACCESS DENIED: Symlinks are not allowed within the workspace \
+                             for security reasons. Use direct paths instead."
+                                .to_string(),
+                        ));
                     }
                 }
             }

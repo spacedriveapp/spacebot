@@ -1764,9 +1764,7 @@ fn resolve_cron_timezone(
                 .and_then(|value| normalize_timezone(&value))
         });
 
-    let Some(timezone) = timezone else {
-        return None;
-    };
+    let timezone = timezone?;
 
     if timezone.parse::<Tz>().is_err() {
         tracing::warn!(

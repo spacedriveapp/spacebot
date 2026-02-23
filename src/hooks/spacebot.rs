@@ -90,10 +90,10 @@ impl SpacebotHook {
 
         // Percent-encoded secrets (e.g. sk%2Dant%2D...)
         let url_decoded = urlencoding::decode(content).unwrap_or(std::borrow::Cow::Borrowed(""));
-        if url_decoded != content {
-            if let Some(matched) = Self::match_patterns(&url_decoded) {
-                return Some(format!("url-encoded: {matched}"));
-            }
+        if url_decoded != content
+            && let Some(matched) = Self::match_patterns(&url_decoded)
+        {
+            return Some(format!("url-encoded: {matched}"));
         }
 
         // Base64-wrapped secrets. Minimum 24 chars avoids false positives on
@@ -103,21 +103,17 @@ impl SpacebotHook {
         for segment in BASE64_SEGMENT.find_iter(content) {
             if let Ok(decoded_bytes) =
                 base64::engine::general_purpose::STANDARD.decode(segment.as_str())
+                && let Ok(decoded) = std::str::from_utf8(&decoded_bytes)
+                && let Some(matched) = Self::match_patterns(decoded)
             {
-                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
-                    if let Some(matched) = Self::match_patterns(decoded) {
-                        return Some(format!("base64-encoded: {matched}"));
-                    }
-                }
+                return Some(format!("base64-encoded: {matched}"));
             }
             if let Ok(decoded_bytes) =
                 base64::engine::general_purpose::URL_SAFE.decode(segment.as_str())
+                && let Ok(decoded) = std::str::from_utf8(&decoded_bytes)
+                && let Some(matched) = Self::match_patterns(decoded)
             {
-                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
-                    if let Some(matched) = Self::match_patterns(decoded) {
-                        return Some(format!("base64-encoded: {matched}"));
-                    }
-                }
+                return Some(format!("base64-encoded: {matched}"));
             }
         }
 
@@ -127,12 +123,11 @@ impl SpacebotHook {
             LazyLock::new(|| Regex::new(r"(?i)(?:0x)?([0-9a-f]{40,})").expect("hardcoded regex"));
         for caps in HEX_SEGMENT.captures_iter(content) {
             let hex_str = caps.get(1).map_or("", |m| m.as_str());
-            if let Ok(decoded_bytes) = hex::decode(hex_str) {
-                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
-                    if let Some(matched) = Self::match_patterns(decoded) {
-                        return Some(format!("hex-encoded: {matched}"));
-                    }
-                }
+            if let Ok(decoded_bytes) = hex::decode(hex_str)
+                && let Ok(decoded) = std::str::from_utf8(&decoded_bytes)
+                && let Some(matched) = Self::match_patterns(decoded)
+            {
+                return Some(format!("hex-encoded: {matched}"));
             }
         }
 

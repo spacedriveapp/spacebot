@@ -519,26 +519,6 @@ fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::hour_in_active_window;
-
-    #[test]
-    fn test_hour_in_active_window_non_wrapping() {
-        assert!(hour_in_active_window(9, 9, 17));
-        assert!(hour_in_active_window(16, 9, 17));
-        assert!(!hour_in_active_window(8, 9, 17));
-        assert!(!hour_in_active_window(17, 9, 17));
-    }
-
-    #[test]
-    fn test_hour_in_active_window_midnight_wrapping() {
-        assert!(hour_in_active_window(22, 22, 6));
-        assert!(hour_in_active_window(3, 22, 6));
-        assert!(!hour_in_active_window(12, 22, 6));
-    }
-}
-
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
 async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
@@ -669,4 +649,24 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hour_in_active_window;
+
+    #[test]
+    fn test_hour_in_active_window_non_wrapping() {
+        assert!(hour_in_active_window(9, 9, 17));
+        assert!(hour_in_active_window(16, 9, 17));
+        assert!(!hour_in_active_window(8, 9, 17));
+        assert!(!hour_in_active_window(17, 9, 17));
+    }
+
+    #[test]
+    fn test_hour_in_active_window_midnight_wrapping() {
+        assert!(hour_in_active_window(22, 22, 6));
+        assert!(hour_in_active_window(3, 22, 6));
+        assert!(!hour_in_active_window(12, 22, 6));
+    }
 }
