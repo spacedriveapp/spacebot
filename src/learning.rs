@@ -5,7 +5,16 @@
 //! writing to a dedicated `learning.db` per agent.
 
 mod config;
+pub(crate) mod contradiction;
+pub(crate) mod distillation;
 mod engine;
+pub(crate) mod feedback;
+pub(crate) mod meta;
+pub(crate) mod outcome;
+pub(crate) mod patches;
+pub(crate) mod ralph;
+pub(crate) mod retriever;
+pub(crate) mod signals;
 mod store;
 mod types;
 

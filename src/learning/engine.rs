@@ -1,6 +1,17 @@
 //! LearningEngine: async event loop coordinator for the learning system.
+//!
+//! Subscribes to the `ProcessEvent` broadcast channel and routes events through
+//! Layer 1 (outcome tracking, step envelopes, distillation) and Layer 2
+//! (cognitive signals, Meta-Ralph, insights, contradiction detection,
+//! auto-promotion). All processing is fail-open: errors are logged and
+//! swallowed to avoid disrupting the hot path.
 
 use super::config::LearningConfig;
+use super::feedback::FeedbackTracker;
+use super::outcome::EpisodeTracker;
+use super::patches::ErrorCounter;
+use super::ralph;
+use super::retriever::DistillationCache;
 use super::store::LearningStore;
 use crate::{AgentDeps, ProcessEvent};
 
@@ -8,13 +19,17 @@ use tokio::sync::broadcast;
 
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+// ---------------------------------------------------------------------------
+// Public entry point
+// ---------------------------------------------------------------------------
 
 /// Spawn the learning engine as a background task.
 ///
 /// Follows the `spawn_bulletin_loop` / `spawn_association_loop` pattern from
 /// the cortex. The engine subscribes to the process event bus, filters for
-/// owner-only traces, and logs events to learning.db.
+/// owner-only traces, and routes events through the full learning pipeline.
 pub fn spawn_learning_loop(
     deps: AgentDeps,
     learning_store: Arc<LearningStore>,
@@ -26,17 +41,64 @@ pub fn spawn_learning_loop(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Engine state
+// ---------------------------------------------------------------------------
+
+/// All mutable state for the learning engine, kept together so the event loop
+/// can pass a single reference around.
+struct EngineState {
+    episode_tracker: EpisodeTracker,
+    feedback_tracker: FeedbackTracker,
+    error_counter: ErrorCounter,
+    distillation_cache: DistillationCache,
+    ralph_hashes: HashSet<String>,
+    policy_patches: Vec<super::patches::PolicyPatch>,
+    non_owner_traces: HashSet<String>,
+    last_batch_run: Instant,
+    last_stale_cleanup: Instant,
+    last_promotion_check: Instant,
+}
+
+impl EngineState {
+    fn new(ralph_hashes: HashSet<String>, policy_patches: Vec<super::patches::PolicyPatch>) -> Self {
+        let now = Instant::now();
+        Self {
+            episode_tracker: EpisodeTracker::new(),
+            feedback_tracker: FeedbackTracker::new(300), // 5-min TTL
+            error_counter: ErrorCounter::new(),
+            distillation_cache: DistillationCache::new(),
+            ralph_hashes,
+            policy_patches,
+            non_owner_traces: HashSet::new(),
+            last_batch_run: now,
+            last_stale_cleanup: now,
+            last_promotion_check: now,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main loop
+// ---------------------------------------------------------------------------
+
 async fn run_learning_loop(
     deps: &AgentDeps,
     store: &Arc<LearningStore>,
 ) -> anyhow::Result<()> {
     let mut event_rx = deps.event_tx.subscribe();
 
-    // Trace IDs from non-owner user messages. Downstream events carrying these
-    // trace IDs are also skipped, preventing learning from non-owner interactions.
-    let mut non_owner_traces: HashSet<String> = HashSet::new();
-
     tracing::info!(agent_id = %deps.agent_id, "learning engine started");
+
+    // One-time init: ensure default policy patches exist.
+    if let Err(error) = super::patches::ensure_defaults(store).await {
+        tracing::warn!(%error, "failed to ensure default policy patches");
+    }
+
+    // Load initial state.
+    let ralph_hashes = ralph::load_existing_hashes(store).await.unwrap_or_default();
+    let policy_patches = super::patches::load_enabled(store).await.unwrap_or_default();
+    let mut state = EngineState::new(ralph_hashes, policy_patches);
 
     loop {
         let config = load_config(deps);
@@ -47,11 +109,9 @@ async fn run_learning_loop(
 
         let tick_interval = Duration::from_secs(config.tick_interval_secs);
         let mut heartbeat = tokio::time::interval(tick_interval);
-        // Don't pile up missed ticks if event processing takes a while.
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
         loop {
-            // Re-check config each outer iteration; break inner loop on disable.
             let config = load_config(deps);
             if !config.enabled {
                 break;
@@ -59,21 +119,15 @@ async fn run_learning_loop(
 
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    if let Err(error) = store
-                        .set_state("learning_heartbeat", chrono::Utc::now().to_rfc3339())
-                        .await
-                    {
-                        tracing::warn!(%error, "failed to update learning heartbeat");
-                    }
+                    run_tick(deps, store, &mut state, &config).await;
                 }
                 event = event_rx.recv() => {
                     match event {
                         Ok(process_event) => {
-                            if !should_process_event(&config, &mut non_owner_traces, &process_event) {
+                            if !should_process_event(&config, &mut state.non_owner_traces, &process_event) {
                                 continue;
                             }
-                            // Fail-open: log and continue on any error.
-                            if let Err(error) = handle_event(store, &process_event).await {
+                            if let Err(error) = handle_event(deps, store, &mut state, &config, &process_event).await {
                                 tracing::warn!(%error, "learning engine event handling failed");
                             }
                         }
@@ -91,28 +145,522 @@ async fn run_learning_loop(
     }
 }
 
-/// Load the current learning config snapshot from RuntimeConfig.
+// ---------------------------------------------------------------------------
+// Tick handlers (timers)
+// ---------------------------------------------------------------------------
+
+/// Periodic work: heartbeat, stale cleanup, batch distillation, promotion.
+async fn run_tick(
+    deps: &AgentDeps,
+    store: &Arc<LearningStore>,
+    state: &mut EngineState,
+    config: &LearningConfig,
+) {
+    // Heartbeat
+    if let Err(error) = store
+        .set_state("learning_heartbeat", chrono::Utc::now().to_rfc3339())
+        .await
+    {
+        tracing::warn!(%error, "failed to update learning heartbeat");
+    }
+
+    // Purge expired feedback
+    state.feedback_tracker.purge_expired();
+
+    // Stale episode cleanup (every stale_episode_timeout_secs / 2)
+    let stale_interval = Duration::from_secs(config.stale_episode_timeout_secs / 2);
+    if state.last_stale_cleanup.elapsed() >= stale_interval {
+        if let Err(error) = state
+            .episode_tracker
+            .cleanup_stale(store, config.stale_episode_timeout_secs)
+            .await
+        {
+            tracing::warn!(%error, "stale episode cleanup failed");
+        }
+        state.last_stale_cleanup = Instant::now();
+    }
+
+    // Batch distillation extraction
+    let batch_interval = Duration::from_secs(config.batch_interval_secs);
+    if state.last_batch_run.elapsed() >= batch_interval {
+        run_batch_distillation(store, config).await;
+        state.last_batch_run = Instant::now();
+    }
+
+    // Auto-promotion check
+    let promotion_interval = Duration::from_secs(config.promotion_interval_secs);
+    if state.last_promotion_check.elapsed() >= promotion_interval {
+        run_promotion_check(deps, store, config).await;
+        state.last_promotion_check = Instant::now();
+    }
+}
+
+/// Extract distillations from recently completed episodes.
+async fn run_batch_distillation(store: &Arc<LearningStore>, config: &LearningConfig) {
+    let episode_ids =
+        match EpisodeTracker::completed_episode_ids(store, config.distillation_batch_size).await {
+            Ok(ids) => ids,
+            Err(error) => {
+                tracing::warn!(%error, "failed to fetch completed episodes for distillation");
+                return;
+            }
+        };
+
+    for episode_id in &episode_ids {
+        match super::distillation::extract_from_episode(store, episode_id).await {
+            Ok(distillations) => {
+                tracing::debug!(
+                    episode_id,
+                    count = distillations.len(),
+                    "extracted distillations"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(%error, episode_id, "distillation extraction failed");
+            }
+        }
+    }
+}
+
+/// Check for insights eligible for promotion to the memory graph, and demote
+/// any that have fallen below the reliability threshold.
+async fn run_promotion_check(deps: &AgentDeps, store: &Arc<LearningStore>, config: &LearningConfig) {
+    let completed_episodes =
+        EpisodeTracker::completed_episode_count(store).await.unwrap_or(0);
+    let cold_factor =
+        super::meta::cold_start_factor(completed_episodes, config.cold_start_episodes);
+
+    // Promote
+    match super::meta::load_promotable(store, cold_factor).await {
+        Ok(insights) => {
+            for insight in &insights {
+                if let Err(error) = promote_insight(deps, store, insight).await {
+                    tracing::warn!(%error, insight_id = %insight.id, "insight promotion failed");
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to load promotable insights");
+        }
+    }
+
+    // Demote
+    match super::meta::load_demotable(store).await {
+        Ok(insights) => {
+            for insight in &insights {
+                if let Err(error) = demote_insight(deps, store, insight).await {
+                    tracing::warn!(%error, insight_id = %insight.id, "insight demotion failed");
+                }
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to load demotable insights");
+        }
+    }
+}
+
+async fn promote_insight(
+    deps: &AgentDeps,
+    store: &LearningStore,
+    insight: &super::meta::Insight,
+) -> anyhow::Result<()> {
+    use crate::memory::types::{Memory, MemoryType};
+
+    let mapping = super::meta::promotion_mapping(
+        insight.source_type.as_deref(),
+        &insight.category,
+    );
+
+    let memory_type = match mapping.memory_type {
+        "Observation" => MemoryType::Observation,
+        "Decision" => MemoryType::Decision,
+        "Preference" => MemoryType::Preference,
+        _ => MemoryType::Observation,
+    };
+
+    let memory = Memory::new(insight.content.clone(), memory_type)
+        .with_importance(mapping.importance as f32)
+        .with_source("learning_engine".to_owned());
+
+    let memory_store = deps.memory_search.store();
+    memory_store.save(&memory).await?;
+
+    // Embed in vector store for similarity search.
+    match deps.memory_search.embedding_model_arc().embed_one(&memory.content).await {
+        Ok(embedding) => {
+            if let Err(error) = deps
+                .memory_search
+                .embedding_table()
+                .store(&memory.id, &memory.content, &embedding)
+                .await
+            {
+                tracing::warn!(%error, memory_id = %memory.id, "embedding store failed during promotion");
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, memory_id = %memory.id, "embedding generation failed during promotion");
+        }
+    }
+
+    super::meta::mark_promoted(store, &insight.id, &memory.id).await?;
+
+    store.log_event(
+        "insight_promoted",
+        &format!(
+            "insight {} → memory {} ({})",
+            insight.id, memory.id, mapping.memory_type
+        ),
+        None,
+    ).await?;
+
+    tracing::info!(
+        insight_id = %insight.id,
+        memory_id = %memory.id,
+        memory_type = mapping.memory_type,
+        "promoted insight to memory graph"
+    );
+    Ok(())
+}
+
+async fn demote_insight(
+    deps: &AgentDeps,
+    store: &LearningStore,
+    insight: &super::meta::Insight,
+) -> anyhow::Result<()> {
+    if let Some(memory_id) = &insight.promoted_memory_id {
+        let memory_store = deps.memory_search.store();
+        memory_store.forget(memory_id).await?;
+
+        super::meta::mark_demoted(store, &insight.id).await?;
+
+        store.log_event(
+            "insight_demoted",
+            &format!("insight {} demoted, memory {} removed", insight.id, memory_id),
+            None,
+        ).await?;
+
+        tracing::info!(
+            insight_id = %insight.id,
+            memory_id = %memory_id,
+            "demoted insight, removed from memory graph"
+        );
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Event handler
+// ---------------------------------------------------------------------------
+
+/// Route a process event through the full learning pipeline.
+///
+/// Order: audit log → Layer 1 (episodes/steps) → Layer 2 (signals/insights).
+async fn handle_event(
+    deps: &AgentDeps,
+    store: &Arc<LearningStore>,
+    state: &mut EngineState,
+    config: &LearningConfig,
+    event: &ProcessEvent,
+) -> anyhow::Result<()> {
+    // Always log to audit trail (M1 behavior).
+    let (event_type, summary) = summarize_event(event);
+    let details = serde_json::to_value(event).ok();
+    store.log_event(&event_type, &summary, details.as_ref()).await?;
+
+    // --- Layer 1: Outcome Tracking ---
+    match event {
+        ProcessEvent::WorkerStarted {
+            worker_id,
+            task,
+            channel_id,
+            trace_id,
+            ..
+        } => {
+            let worker_id_str = worker_id.to_string();
+            state
+                .episode_tracker
+                .on_worker_started(
+                    store,
+                    &deps.agent_id,
+                    &worker_id_str,
+                    task,
+                    channel_id.as_deref(),
+                    trace_id.as_deref(),
+                    &worker_id_str,
+                )
+                .await?;
+        }
+        ProcessEvent::WorkerComplete {
+            worker_id,
+            success,
+            duration_secs,
+            ..
+        } => {
+            let worker_id_str = worker_id.to_string();
+
+            // Update error counter for policy patches.
+            if *success {
+                state.error_counter.record_success(&worker_id_str);
+            } else {
+                state.error_counter.record_error(&worker_id_str);
+            }
+
+            if let Some(_episode_id) = state
+                .episode_tracker
+                .on_worker_complete(store, &worker_id_str, *success, *duration_secs)
+                .await?
+            {
+                // Resolve any pending feedback for this worker.
+                state
+                    .feedback_tracker
+                    .resolve_outcome(store, &worker_id_str, *success)
+                    .await?;
+            }
+
+            // Check policy patches.
+            let actions = super::patches::evaluate_patches(
+                &state.policy_patches,
+                &state.error_counter,
+                &worker_id_str,
+                None,
+                None,
+            );
+            for action in &actions {
+                tracing::info!(
+                    patch_id = %action.patch_id,
+                    action_type = %action.action_type,
+                    "policy patch triggered"
+                );
+                store.log_event(
+                    "policy_patch_fired",
+                    &format!("{}: {}", action.action_type, action.action_config),
+                    None,
+                ).await?;
+            }
+        }
+        ProcessEvent::BranchStarted {
+            branch_id,
+            description,
+            channel_id,
+            trace_id,
+            ..
+        } => {
+            let branch_id_str = branch_id.to_string();
+            state
+                .episode_tracker
+                .on_branch_started(
+                    store,
+                    &deps.agent_id,
+                    &branch_id_str,
+                    description,
+                    channel_id,
+                    trace_id.as_deref(),
+                )
+                .await?;
+        }
+        ProcessEvent::BranchResult { branch_id, .. } => {
+            let branch_id_str = branch_id.to_string();
+            state
+                .episode_tracker
+                .on_branch_result(store, &branch_id_str)
+                .await?;
+        }
+        ProcessEvent::ToolStarted {
+            process_id,
+            call_id,
+            tool_name,
+            args_summary,
+            trace_id,
+            ..
+        } => {
+            let process_id_str = process_id.to_string();
+            state
+                .episode_tracker
+                .on_tool_started(
+                    store,
+                    &process_id_str,
+                    call_id,
+                    tool_name,
+                    args_summary.as_ref(),
+                    trace_id.as_deref(),
+                )
+                .await?;
+        }
+        ProcessEvent::ToolCompleted {
+            process_id,
+            call_id,
+            tool_name,
+            result,
+            ..
+        } => {
+            let process_id_str = process_id.to_string();
+            // Infer success from result text (ToolCompleted doesn't have a success bool).
+            let success = !result.starts_with("Error") && !result.starts_with("error");
+            state
+                .episode_tracker
+                .on_tool_completed(store, &process_id_str, call_id, tool_name, success)
+                .await?;
+
+            // Resolve implicit feedback for this call.
+            state
+                .feedback_tracker
+                .resolve_outcome(store, call_id, success)
+                .await?;
+        }
+
+        // --- Layer 2: Cognitive Signals ---
+        ProcessEvent::UserMessage {
+            content, ..
+        } => {
+            if let Some(signal) = super::signals::analyze_message(content) {
+                // Run through Meta-Ralph quality gate.
+                if let Some(candidate) = &signal.extracted_candidate {
+                    let result = ralph::evaluate(candidate, &state.ralph_hashes);
+                    let verdict_str = result.verdict.to_string();
+
+                    // Save the ralph verdict.
+                    if let Err(error) =
+                        ralph::save_verdict(store, candidate, &result, Some("cognitive_signal")).await
+                    {
+                        tracing::warn!(%error, "failed to save ralph verdict");
+                    }
+                    state.ralph_hashes.insert(result.input_hash.clone());
+
+                    // Save cognitive signal.
+                    if let Err(error) =
+                        super::signals::save_signal(store, &signal, Some(&verdict_str)).await
+                    {
+                        tracing::warn!(%error, "failed to save cognitive signal");
+                    }
+
+                    // If quality or needs_work, create an insight.
+                    if result.verdict == ralph::RalphVerdict::Quality
+                        || result.verdict == ralph::RalphVerdict::NeedsWork
+                    {
+                        let mut text = candidate.clone();
+
+                        // One auto-refinement attempt for NeedsWork.
+                        if result.verdict == ralph::RalphVerdict::NeedsWork {
+                            if let Some(refined) = ralph::attempt_refinement(&text) {
+                                text = refined;
+                            }
+                        }
+
+                        let category = category_from_signal(&signal);
+                        let insight = super::meta::Insight {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            category: category.clone(),
+                            content: text.clone(),
+                            reliability: 0.5,
+                            confidence: 0.3,
+                            validation_count: 0,
+                            contradiction_count: 0,
+                            quality_score: Some(result.total_score),
+                            advisory_readiness: 0.0,
+                            source_type: Some("cognitive_signal".into()),
+                            source_id: Some(signal.id.clone()),
+                            promoted: false,
+                            promoted_memory_id: None,
+                        };
+
+                        if let Err(error) = super::meta::save_insight(store, &insight).await {
+                            tracing::warn!(%error, "failed to save insight from cognitive signal");
+                        } else {
+                            // Check for contradictions.
+                            let category_str = category.to_string();
+                            match super::contradiction::find_contradictions_for_insight(
+                                store,
+                                &insight.id,
+                                &text,
+                                &category_str,
+                            )
+                            .await
+                            {
+                                Ok(contradictions) => {
+                                    for contradiction in &contradictions {
+                                        if let Err(error) =
+                                            super::contradiction::save_contradiction(
+                                                store,
+                                                contradiction,
+                                            )
+                                            .await
+                                        {
+                                            tracing::warn!(%error, "failed to save contradiction");
+                                        }
+
+                                        // Update contradiction counts.
+                                        if contradiction.contradiction_type
+                                            == super::contradiction::ContradictionType::Temporal
+                                        {
+                                            let _ = super::meta::increment_contradiction(
+                                                store,
+                                                &contradiction.insight_b_id,
+                                            )
+                                            .await;
+                                        }
+                                    }
+                                }
+                                Err(error) => {
+                                    tracing::warn!(%error, "contradiction detection failed");
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // No extracted candidate, still save the signal.
+                    if let Err(error) =
+                        super::signals::save_signal(store, &signal, None).await
+                    {
+                        tracing::warn!(%error, "failed to save cognitive signal");
+                    }
+                }
+            }
+        }
+
+        // Remaining events: already logged to audit trail above.
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Map cognitive signal patterns to insight categories.
+fn category_from_signal(signal: &super::signals::CognitiveSignal) -> super::meta::InsightCategory {
+    use super::signals::CognitivePattern;
+
+    for pattern in &signal.detected_patterns {
+        match pattern {
+            CognitivePattern::Preference => return super::meta::InsightCategory::UserModel,
+            CognitivePattern::Decision => return super::meta::InsightCategory::Reasoning,
+            CognitivePattern::Correction => return super::meta::InsightCategory::SelfAwareness,
+            CognitivePattern::Reasoning => return super::meta::InsightCategory::Reasoning,
+            CognitivePattern::Remember => return super::meta::InsightCategory::Context,
+        }
+    }
+
+    // Fall back to domain detection.
+    if signal.detected_domains.contains(&"coding".to_owned()) {
+        return super::meta::InsightCategory::DomainExpertise;
+    }
+    if signal.detected_domains.contains(&"communication".to_owned()) {
+        return super::meta::InsightCategory::Communication;
+    }
+
+    super::meta::InsightCategory::Context
+}
+
+// ---------------------------------------------------------------------------
+// Config
+// ---------------------------------------------------------------------------
+
 fn load_config(deps: &AgentDeps) -> LearningConfig {
     (**deps.runtime_config.learning.load()).clone()
 }
 
-/// Route a process event to the learning_events audit log.
-///
-/// Milestone 1 just logs events. Later milestones route to Layer 1 (episodes),
-/// Layer 2 (patterns), Layer 4 (predictions), etc.
-async fn handle_event(
-    store: &Arc<LearningStore>,
-    event: &ProcessEvent,
-) -> anyhow::Result<()> {
-    let (event_type, summary) = summarize_event(event);
-    let details = serde_json::to_value(event).ok();
-    store
-        .log_event(&event_type, &summary, details.as_ref())
-        .await?;
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Event summarization (audit log)
+// ---------------------------------------------------------------------------
 
-/// Produce a short (event_type, summary) pair for the audit log.
 fn summarize_event(event: &ProcessEvent) -> (String, String) {
     match event {
         ProcessEvent::UserMessage {
@@ -132,7 +680,9 @@ fn summarize_event(event: &ProcessEvent) -> (String, String) {
             "user_reaction".into(),
             format!("{reaction} from {platform}:{sender_id}"),
         ),
-        ProcessEvent::WorkerStarted { task, worker_id, .. } => (
+        ProcessEvent::WorkerStarted {
+            task, worker_id, ..
+        } => (
             "worker_started".into(),
             format!("worker {} started: {}", worker_id, truncate(task, 120)),
         ),
@@ -162,37 +712,44 @@ fn summarize_event(event: &ProcessEvent) -> (String, String) {
             ..
         } => (
             "branch_started".into(),
-            format!("branch {} started: {}", branch_id, truncate(description, 120)),
+            format!(
+                "branch {} started: {}",
+                branch_id,
+                truncate(description, 120)
+            ),
         ),
-        ProcessEvent::BranchResult { branch_id, .. } => (
-            "branch_result".into(),
-            format!("branch {} completed", branch_id),
-        ),
+        ProcessEvent::BranchResult { branch_id, .. } => {
+            ("branch_result".into(), format!("branch {} completed", branch_id))
+        }
         ProcessEvent::ToolStarted {
             tool_name, call_id, ..
-        } => (
-            "tool_started".into(),
-            format!("{}[{}]", tool_name, call_id),
-        ),
+        } => ("tool_started".into(), format!("{}[{}]", tool_name, call_id)),
         ProcessEvent::ToolCompleted {
             tool_name, call_id, ..
         } => (
             "tool_completed".into(),
             format!("{}[{}]", tool_name, call_id),
         ),
-        ProcessEvent::MemorySaved { memory_id, .. } => (
-            "memory_saved".into(),
-            format!("memory {memory_id}"),
-        ),
+        ProcessEvent::MemorySaved { memory_id, .. } => {
+            ("memory_saved".into(), format!("memory {memory_id}"))
+        }
         ProcessEvent::CompactionTriggered {
             channel_id,
             threshold_reached,
             ..
         } => (
             "compaction_triggered".into(),
-            format!("channel {} at {:.0}%", channel_id, threshold_reached * 100.0),
+            format!(
+                "channel {} at {:.0}%",
+                channel_id,
+                threshold_reached * 100.0
+            ),
         ),
-        ProcessEvent::StatusUpdate { process_id, status, .. } => (
+        ProcessEvent::StatusUpdate {
+            process_id,
+            status,
+            ..
+        } => (
             "status_update".into(),
             format!("{}: {}", process_id, truncate(status, 120)),
         ),
@@ -207,18 +764,15 @@ fn summarize_event(event: &ProcessEvent) -> (String, String) {
     }
 }
 
-/// Owner-only filtering: skip events from non-owner user messages and all
-/// downstream events (workers, branches, tools) spawned from those messages.
-///
-/// Keyed on `trace_id`: when a `UserMessage` from a non-owner is seen, its
-/// trace_id is recorded. Any subsequent event carrying that trace_id is also
-/// skipped. Events without a trace_id (system/timer events) are always processed.
+// ---------------------------------------------------------------------------
+// Owner-only filtering
+// ---------------------------------------------------------------------------
+
 fn should_process_event(
     config: &LearningConfig,
     non_owner_traces: &mut HashSet<String>,
     event: &ProcessEvent,
 ) -> bool {
-    // If no owner filter is configured, process everything.
     if config.owner_user_ids.is_empty() {
         return true;
     }
@@ -250,19 +804,16 @@ fn should_process_event(
             }
             is_owner
         }
-        // Any downstream event that carries a trace_id inherits the filter decision.
         _ => {
             if let Some(trace_id) = extract_trace_id(event) {
                 !non_owner_traces.contains(trace_id)
             } else {
-                // No trace_id means system/global event — always process.
                 true
             }
         }
     }
 }
 
-/// Extract trace_id from any ProcessEvent variant that carries one.
 fn extract_trace_id(event: &ProcessEvent) -> Option<&str> {
     match event {
         ProcessEvent::WorkerStarted { trace_id, .. }
@@ -278,7 +829,10 @@ fn extract_trace_id(event: &ProcessEvent) -> Option<&str> {
     }
 }
 
-/// Truncate a string to at most `max` bytes on a char boundary.
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn truncate(value: &str, max: usize) -> &str {
     if value.len() <= max {
         value

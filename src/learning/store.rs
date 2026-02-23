@@ -45,7 +45,13 @@ impl LearningStore {
     /// because learning.db is a separate database file from the main migrations dir.
     async fn run_migrations(pool: &SqlitePool) -> Result<(), LearningError> {
         sqlx::raw_sql(SCHEMA_V1).execute(pool).await?;
+        sqlx::raw_sql(SCHEMA_V2).execute(pool).await?;
         Ok(())
+    }
+
+    /// Expose pool for sub-modules that need direct query access.
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Write a key-value pair to the learning_state table (upsert).
@@ -197,5 +203,137 @@ CREATE TABLE IF NOT EXISTS learning_state (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+/// Milestone 2 schema additions: outcome predictor, distillations, insights,
+/// Meta-Ralph verdicts, cognitive signals, implicit feedback, policy patches,
+/// contradictions.
+const SCHEMA_V2: &str = r#"
+-- Outcome Predictor (Beta prior smoothing)
+CREATE TABLE IF NOT EXISTS outcome_predictions (
+    key TEXT PRIMARY KEY,
+    success_count REAL NOT NULL DEFAULT 3.0,
+    failure_count REAL NOT NULL DEFAULT 1.0,
+    last_updated TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Distillations (5 types: policy/playbook/sharp_edge/heuristic/anti_pattern)
+CREATE TABLE IF NOT EXISTS distillations (
+    id TEXT PRIMARY KEY,
+    distillation_type TEXT NOT NULL,
+    statement TEXT NOT NULL,
+    confidence REAL NOT NULL,
+    triggers TEXT NOT NULL DEFAULT '[]',
+    anti_triggers TEXT NOT NULL DEFAULT '[]',
+    domains TEXT NOT NULL DEFAULT '[]',
+    times_retrieved INTEGER DEFAULT 0,
+    times_used INTEGER DEFAULT 0,
+    times_helped INTEGER DEFAULT 0,
+    validation_count INTEGER DEFAULT 0,
+    contradiction_count INTEGER DEFAULT 0,
+    source_episode_id TEXT,
+    revalidate_by TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_distillations_type ON distillations(distillation_type);
+CREATE INDEX IF NOT EXISTS idx_distillations_confidence ON distillations(confidence);
+
+-- Implicit feedback (advice → outcome linkage)
+CREATE TABLE IF NOT EXISTS implicit_feedback (
+    id TEXT PRIMARY KEY,
+    advice_text TEXT NOT NULL,
+    source_id TEXT,
+    tool_name TEXT,
+    episode_id TEXT,
+    outcome TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_implicit_feedback_source ON implicit_feedback(source_id);
+
+-- Policy patches (distillation → enforcement)
+CREATE TABLE IF NOT EXISTS policy_patches (
+    id TEXT PRIMARY KEY,
+    source_distillation_id TEXT NOT NULL,
+    trigger_type TEXT NOT NULL,
+    trigger_config TEXT NOT NULL,
+    action_type TEXT NOT NULL,
+    action_config TEXT NOT NULL,
+    enabled INTEGER DEFAULT 1,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Cognitive signals (user message analysis)
+CREATE TABLE IF NOT EXISTS cognitive_signals (
+    id TEXT PRIMARY KEY,
+    message_content TEXT NOT NULL,
+    detected_domains TEXT NOT NULL,
+    detected_patterns TEXT NOT NULL,
+    extracted_candidate TEXT,
+    ralph_verdict TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Meta-learning insights (8 categories)
+CREATE TABLE IF NOT EXISTS insights (
+    id TEXT PRIMARY KEY,
+    category TEXT NOT NULL,
+    content TEXT NOT NULL,
+    reliability REAL NOT NULL DEFAULT 0.5,
+    confidence REAL NOT NULL DEFAULT 0.3,
+    validation_count INTEGER DEFAULT 0,
+    contradiction_count INTEGER DEFAULT 0,
+    quality_score REAL,
+    advisory_readiness REAL DEFAULT 0.0,
+    source_type TEXT,
+    source_id TEXT,
+    promoted INTEGER DEFAULT 0,
+    promoted_memory_id TEXT,
+    last_validated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_insights_category ON insights(category);
+CREATE INDEX IF NOT EXISTS idx_insights_reliability ON insights(reliability);
+CREATE INDEX IF NOT EXISTS idx_insights_promoted ON insights(promoted);
+
+-- Meta-Ralph quality verdicts
+CREATE TABLE IF NOT EXISTS ralph_verdicts (
+    id TEXT PRIMARY KEY,
+    input_text TEXT NOT NULL,
+    input_hash TEXT NOT NULL,
+    verdict TEXT NOT NULL,
+    scores TEXT NOT NULL,
+    total_score REAL NOT NULL,
+    refinement_attempted INTEGER DEFAULT 0,
+    source_type TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_ralph_hash ON ralph_verdicts(input_hash);
+CREATE INDEX IF NOT EXISTS idx_ralph_verdict ON ralph_verdicts(verdict);
+
+-- Outcome records (insight retrieval → task outcome linkage)
+CREATE TABLE IF NOT EXISTS outcome_records (
+    id TEXT PRIMARY KEY,
+    insight_id TEXT NOT NULL,
+    trace_id TEXT NOT NULL,
+    outcome TEXT,
+    episode_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_outcome_trace ON outcome_records(trace_id);
+
+-- Contradictions between insights
+CREATE TABLE IF NOT EXISTS contradictions (
+    id TEXT PRIMARY KEY,
+    insight_a_id TEXT NOT NULL,
+    insight_b_id TEXT NOT NULL,
+    contradiction_type TEXT NOT NULL,
+    resolution TEXT,
+    similarity_score REAL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;

@@ -24,6 +24,14 @@ pub struct LearningConfig {
     pub cold_start_episodes: u64,
     /// Seconds after which an episode with no updates is considered stale.
     pub stale_episode_timeout_secs: u64,
+    /// Tool names considered high-stakes (get richer step data).
+    pub high_stakes_tools: Vec<String>,
+    /// File operations considered high-stakes.
+    pub high_stakes_file_operations: Vec<String>,
+    /// Maximum distillation batch size per tick.
+    pub distillation_batch_size: usize,
+    /// Seconds between promotion checks.
+    pub promotion_interval_secs: u64,
 }
 
 impl Default for LearningConfig {
@@ -36,6 +44,10 @@ impl Default for LearningConfig {
             owner_user_ids: Vec::new(),
             cold_start_episodes: 50,
             stale_episode_timeout_secs: 1800,
+            high_stakes_tools: vec!["shell".into(), "exec".into()],
+            high_stakes_file_operations: vec!["write".into()],
+            distillation_batch_size: 3,
+            promotion_interval_secs: 3600,
         }
     }
 }

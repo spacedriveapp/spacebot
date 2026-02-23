@@ -1521,6 +1521,10 @@ struct TomlLearningConfig {
     owner_user_ids: Option<Vec<String>>,
     cold_start_episodes: Option<u64>,
     stale_episode_timeout_secs: Option<u64>,
+    high_stakes_tools: Option<Vec<String>>,
+    high_stakes_file_operations: Option<Vec<String>>,
+    distillation_batch_size: Option<usize>,
+    promotion_interval_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -2686,6 +2690,18 @@ impl Config {
                         stale_episode_timeout_secs: l
                             .stale_episode_timeout_secs
                             .unwrap_or(base.stale_episode_timeout_secs),
+                        high_stakes_tools: l
+                            .high_stakes_tools
+                            .unwrap_or_else(|| base.high_stakes_tools.clone()),
+                        high_stakes_file_operations: l
+                            .high_stakes_file_operations
+                            .unwrap_or_else(|| base.high_stakes_file_operations.clone()),
+                        distillation_batch_size: l
+                            .distillation_batch_size
+                            .unwrap_or(base.distillation_batch_size),
+                        promotion_interval_secs: l
+                            .promotion_interval_secs
+                            .unwrap_or(base.promotion_interval_secs),
                     }
                 })
                 .unwrap_or_else(|| base_defaults.learning.clone()),
@@ -2886,6 +2902,18 @@ impl Config {
                             stale_episode_timeout_secs: l
                                 .stale_episode_timeout_secs
                                 .unwrap_or(base.stale_episode_timeout_secs),
+                            high_stakes_tools: l
+                                .high_stakes_tools
+                                .unwrap_or_else(|| base.high_stakes_tools.clone()),
+                            high_stakes_file_operations: l
+                                .high_stakes_file_operations
+                                .unwrap_or_else(|| base.high_stakes_file_operations.clone()),
+                            distillation_batch_size: l
+                                .distillation_batch_size
+                                .unwrap_or(base.distillation_batch_size),
+                            promotion_interval_secs: l
+                                .promotion_interval_secs
+                                .unwrap_or(base.promotion_interval_secs),
                         }
                     }),
                     browser: a.browser.map(|b| BrowserConfig {
