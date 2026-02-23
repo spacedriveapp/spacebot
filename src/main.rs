@@ -1610,9 +1610,25 @@ async fn initialize_agents(
             match spacebot::learning::LearningStore::connect(&agent.config.learning_db_path()).await
             {
                 Ok(learning_store) => {
+                    let tuneables =
+                        match spacebot::learning::TuneableStore::new(
+                            learning_store.clone(),
+                        )
+                        .await
+                        {
+                            Ok(store) => Arc::new(store),
+                            Err(error) => {
+                                tracing::error!(
+                                    agent_id = %agent_id, %error,
+                                    "failed to init tuneable store, learning engine disabled"
+                                );
+                                continue;
+                            }
+                        };
                     let handle = spacebot::learning::spawn_learning_loop(
                         agent.deps.clone(),
                         learning_store,
+                        tuneables,
                     );
                     cortex_handles.push(handle);
                     tracing::info!(agent_id = %agent_id, "learning engine started");

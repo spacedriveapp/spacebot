@@ -4,6 +4,7 @@
 //! episodes for self-improvement. Runs as an async loop alongside the cortex,
 //! writing to a dedicated `learning.db` per agent.
 
+// -- Milestone 1: Foundation --
 mod config;
 pub(crate) mod contradiction;
 pub(crate) mod distillation;
@@ -18,9 +19,31 @@ pub(crate) mod signals;
 mod store;
 mod types;
 
+// -- Milestone 3: Advisory Gating (Layer 3) --
+pub(crate) mod cooldowns;
+pub(crate) mod gate;
+pub(crate) mod packets;
+pub(crate) mod prefetch;
+pub(crate) mod quarantine;
+pub(crate) mod synthesis;
+pub(crate) mod tuner;
+
+// -- Milestone 3: Cross-Cutting --
+pub(crate) mod control;
+pub(crate) mod escape;
+pub(crate) mod evidence;
+pub(crate) mod importance;
+pub(crate) mod phase;
+pub(crate) mod truth;
+pub(crate) mod tuneables;
+
+// -- Milestone 3: Domain Chips (Layer 4) --
+pub(crate) mod chips;
+
 pub use config::LearningConfig;
 pub use engine::spawn_learning_loop;
 pub use store::LearningStore;
+pub use tuneables::TuneableStore;
 pub use types::*;
 
 use thiserror::Error;

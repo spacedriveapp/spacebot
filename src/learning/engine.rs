@@ -33,9 +33,10 @@ use std::time::{Duration, Instant};
 pub fn spawn_learning_loop(
     deps: AgentDeps,
     learning_store: Arc<LearningStore>,
+    tuneables: Arc<super::tuneables::TuneableStore>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_learning_loop(&deps, &learning_store).await {
+        if let Err(error) = run_learning_loop(&deps, &learning_store, tuneables).await {
             tracing::error!(%error, "learning loop exited with error");
         }
     })
@@ -48,6 +49,7 @@ pub fn spawn_learning_loop(
 /// All mutable state for the learning engine, kept together so the event loop
 /// can pass a single reference around.
 struct EngineState {
+    // M1: outcome tracking
     episode_tracker: EpisodeTracker,
     feedback_tracker: FeedbackTracker,
     error_counter: ErrorCounter,
@@ -58,10 +60,30 @@ struct EngineState {
     last_batch_run: Instant,
     last_stale_cleanup: Instant,
     last_promotion_check: Instant,
+    // M3: subsystems
+    phase_state: super::phase::PhaseState,
+    control_plane: super::control::ControlPlane,
+    learning_state: super::control::LearningState,
+    evidence_store: super::evidence::EvidenceStore,
+    escape_protocol: super::escape::EscapeProtocol,
+    cooldown_manager: super::cooldowns::CooldownManager,
+    chip_runtime: super::chips::runtime::ChipRuntime,
+    tuneables: Arc<super::tuneables::TuneableStore>,
+    packet_store: super::packets::PacketStore,
+    quarantine: super::quarantine::QuarantineStore,
+    truth_ledger: super::truth::TruthLedger,
+    last_evidence_cleanup: Instant,
+    last_truth_stale_check: Instant,
+    last_tuner_run: Instant,
 }
 
 impl EngineState {
-    fn new(ralph_hashes: HashSet<String>, policy_patches: Vec<super::patches::PolicyPatch>) -> Self {
+    fn new(
+        ralph_hashes: HashSet<String>,
+        policy_patches: Vec<super::patches::PolicyPatch>,
+        store: Arc<LearningStore>,
+        tuneables: Arc<super::tuneables::TuneableStore>,
+    ) -> Self {
         let now = Instant::now();
         Self {
             episode_tracker: EpisodeTracker::new(),
@@ -74,6 +96,20 @@ impl EngineState {
             last_batch_run: now,
             last_stale_cleanup: now,
             last_promotion_check: now,
+            phase_state: super::phase::PhaseState::new(),
+            control_plane: super::control::ControlPlane::new(),
+            learning_state: super::control::LearningState::default(),
+            evidence_store: super::evidence::EvidenceStore::new(store.clone()),
+            escape_protocol: super::escape::EscapeProtocol::new(),
+            cooldown_manager: super::cooldowns::CooldownManager::new(),
+            chip_runtime: super::chips::runtime::ChipRuntime::new(store.clone()),
+            tuneables,
+            packet_store: super::packets::PacketStore::new(store.clone()),
+            quarantine: super::quarantine::QuarantineStore::new(store.clone()),
+            truth_ledger: super::truth::TruthLedger::new(store),
+            last_evidence_cleanup: now,
+            last_truth_stale_check: now,
+            last_tuner_run: now,
         }
     }
 }
@@ -85,6 +121,7 @@ impl EngineState {
 async fn run_learning_loop(
     deps: &AgentDeps,
     store: &Arc<LearningStore>,
+    tuneables: Arc<super::tuneables::TuneableStore>,
 ) -> anyhow::Result<()> {
     let mut event_rx = deps.event_tx.subscribe();
 
@@ -98,7 +135,24 @@ async fn run_learning_loop(
     // Load initial state.
     let ralph_hashes = ralph::load_existing_hashes(store).await.unwrap_or_default();
     let policy_patches = super::patches::load_enabled(store).await.unwrap_or_default();
-    let mut state = EngineState::new(ralph_hashes, policy_patches);
+    let mut state = EngineState::new(ralph_hashes, policy_patches, store.clone(), tuneables);
+
+    // Load domain chips from the chips/ directory. Fail-open: missing or
+    // partially-broken chip directories are non-fatal.
+    let chips_dir = std::path::Path::new("chips");
+    if chips_dir.exists() {
+        match state.chip_runtime.load_chips_from_dir(chips_dir) {
+            Ok(count) => tracing::info!(count, "loaded domain chips"),
+            Err(error) => tracing::warn!(%error, "failed to load chips directory"),
+        }
+    } else {
+        tracing::debug!("chips/ directory not found, skipping chip loading");
+    }
+
+    // Populate tuneable defaults (no-op if values are already set).
+    if let Err(error) = state.tuneables.populate_defaults().await {
+        tracing::warn!(%error, "failed to populate tuneable defaults");
+    }
 
     loop {
         let config = load_config(deps);
@@ -192,6 +246,49 @@ async fn run_tick(
     if state.last_promotion_check.elapsed() >= promotion_interval {
         run_promotion_check(deps, store, config).await;
         state.last_promotion_check = Instant::now();
+    }
+
+    // Evidence cleanup (hourly): remove expired records, skipping active episodes.
+    if state.last_evidence_cleanup.elapsed() >= Duration::from_secs(3600) {
+        let active_ids = state.episode_tracker.active_episode_ids();
+        let active_refs: Vec<&str> = active_ids.iter().map(|s| s.as_str()).collect();
+        if let Err(error) = state.evidence_store.cleanup_expired(&active_refs).await {
+            tracing::warn!(%error, "evidence cleanup failed");
+        }
+        state.last_evidence_cleanup = Instant::now();
+    }
+
+    // Truth stale check (daily): find claims not validated in 30 days and mark them.
+    if state.last_truth_stale_check.elapsed() >= Duration::from_secs(86_400) {
+        match state.truth_ledger.check_stale(30).await {
+            Ok(stale_ids) => {
+                for stale_id in &stale_ids {
+                    if let Err(error) = state.truth_ledger.mark_stale(stale_id).await {
+                        tracing::warn!(%error, stale_id, "failed to mark truth entry stale");
+                    }
+                }
+                if !stale_ids.is_empty() {
+                    tracing::debug!(count = stale_ids.len(), "marked stale truth entries");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, "truth stale check failed");
+            }
+        }
+        state.last_truth_stale_check = Instant::now();
+    }
+
+    // Tuneables refresh (on tuner_interval_secs): reload cached values from DB.
+    let tuner_interval_secs = state
+        .tuneables
+        .get_i64("tuner_interval_secs")
+        .await
+        .unwrap_or(3600) as u64;
+    if state.last_tuner_run.elapsed() >= Duration::from_secs(tuner_interval_secs) {
+        if let Err(error) = state.tuneables.refresh().await {
+            tracing::warn!(%error, "tuneables refresh failed");
+        }
+        state.last_tuner_run = Instant::now();
     }
 }
 
@@ -621,6 +718,174 @@ async fn handle_event(
         _ => {}
     }
 
+    // --- Layer 3: Phase Tracking, Evidence Capture, Control Plane ---
+    //
+    // All processing below is fail-open: errors are logged and execution
+    // continues. M1/M2 logic above is intentionally left untouched.
+    match event {
+        ProcessEvent::ToolStarted {
+            tool_name,
+            args_summary,
+            ..
+        } => {
+            let args_str: Option<String> = args_summary.as_ref().map(|v| v.to_string());
+            let task_text = state.learning_state.original_task.clone();
+
+            state.phase_state.detect_phase(
+                tool_name,
+                args_str.as_deref(),
+                task_text.as_deref(),
+                false,
+                false,
+                0,
+            );
+
+            let evidence_type = super::evidence::EvidenceStore::classify_evidence(
+                tool_name,
+                args_str.as_deref(),
+                false,
+            );
+            if let Err(error) = state
+                .evidence_store
+                .store_evidence(&evidence_type, "", None, Some(tool_name))
+                .await
+            {
+                tracing::warn!(%error, "evidence capture failed for ToolStarted");
+            }
+
+            state.learning_state.phase = state.phase_state.current();
+
+            let watcher_actions = state.control_plane.evaluate(&state.learning_state);
+            for _action in &watcher_actions {
+                state.learning_state.watcher_firing_count += 1;
+                state.escape_protocol.update_metrics(
+                    state.learning_state.watcher_firing_count,
+                    0.5,
+                    state.learning_state.steps_without_new_evidence,
+                    0.0,
+                );
+            }
+        }
+
+        ProcessEvent::ToolCompleted {
+            tool_name,
+            args_summary,
+            result,
+            ..
+        } => {
+            let success = !result.starts_with("Error") && !result.starts_with("error");
+            let is_failure = !success;
+            let args_str: Option<String> = args_summary.as_ref().map(|v| v.to_string());
+            let task_text = state.learning_state.original_task.clone();
+
+            state.phase_state.detect_phase(
+                tool_name,
+                args_str.as_deref(),
+                task_text.as_deref(),
+                is_failure,
+                false,
+                0,
+            );
+
+            let evidence_type = super::evidence::EvidenceStore::classify_evidence(
+                tool_name,
+                args_str.as_deref(),
+                is_failure,
+            );
+            if let Err(error) = state
+                .evidence_store
+                .store_evidence(&evidence_type, result, None, Some(tool_name))
+                .await
+            {
+                tracing::warn!(%error, "evidence capture failed");
+            }
+
+            state.learning_state.phase = state.phase_state.current();
+
+            let watcher_actions = state.control_plane.evaluate(&state.learning_state);
+            for action in &watcher_actions {
+                state.learning_state.watcher_firing_count += 1;
+                state.escape_protocol.update_metrics(
+                    state.learning_state.watcher_firing_count,
+                    0.5,
+                    state.learning_state.steps_without_new_evidence,
+                    0.0,
+                );
+                if action.severity == super::WatcherSeverity::Block {
+                    state
+                        .quarantine
+                        .log_quarantine(
+                            action.watcher_name,
+                            "watcher",
+                            super::quarantine::QuarantineStage::Suppression,
+                            &action.message,
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                }
+            }
+
+            // Track file edits for the diff-thrash watcher.
+            if tool_name == "file" {
+                if let Some(args) = args_summary {
+                    if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                        *state
+                            .learning_state
+                            .file_edit_counts
+                            .entry(path.to_owned())
+                            .or_insert(0) += 1;
+                    }
+                }
+            }
+
+            // Track consecutive errors and update phase failure counter.
+            if !success {
+                state.learning_state.consecutive_same_errors += 1;
+                state.phase_state.record_failure();
+            } else {
+                state.learning_state.consecutive_same_errors = 0;
+                state.phase_state.clear_failures();
+                if tool_name.contains("test") {
+                    state.learning_state.has_validation = true;
+                }
+            }
+
+            // Track file reads so the cooldown manager can suppress
+            // redundant read-before-write advisories.
+            if tool_name == "file" {
+                if let Some(args) = args_summary {
+                    if args.get("operation").and_then(|v| v.as_str()) == Some("read") {
+                        if let Some(path) = args.get("path").and_then(|v| v.as_str()) {
+                            state.cooldown_manager.record_file_read(path);
+                        }
+                    }
+                }
+            }
+
+            // Route to domain chip runtime.
+            let domain = detect_domain_from_tool(tool_name);
+            let matched_chip_ids: Vec<String> = state
+                .chip_runtime
+                .route_event("tool_event", domain.as_deref())
+                .iter()
+                .map(|chip| chip.id.clone())
+                .collect();
+            for chip_id in matched_chip_ids {
+                if let Err(error) = state
+                    .chip_runtime
+                    .record_observation(&chip_id, tool_name, "tool_event", result, None)
+                    .await
+                {
+                    tracing::warn!(%error, chip_id, "chip observation recording failed");
+                }
+            }
+        }
+
+        _ => {}
+    }
+
     Ok(())
 }
 
@@ -832,6 +1097,18 @@ fn extract_trace_id(event: &ProcessEvent) -> Option<&str> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Map a tool name to a domain label for chip routing.
+///
+/// Returns `None` for tools that don't map cleanly to a single domain,
+/// allowing chips that have no domain constraint to match unconditionally.
+fn detect_domain_from_tool(tool_name: &str) -> Option<String> {
+    match tool_name {
+        "shell" | "exec" | "file" => Some("coding".into()),
+        "web_search" | "browser" => Some("research".into()),
+        _ => None,
+    }
+}
 
 fn truncate(value: &str, max: usize) -> &str {
     if value.len() <= max {

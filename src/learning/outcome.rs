@@ -340,6 +340,15 @@ impl EpisodeTracker {
         Ok(count)
     }
 
+    /// Return the IDs of all episodes currently tracked as active.
+    ///
+    /// Used by the evidence store to exempt in-progress episodes from expiry
+    /// cleanup, ensuring evidence collected during an active episode is not
+    /// deleted before distillation can run.
+    pub fn active_episode_ids(&self) -> Vec<String> {
+        self.active.keys().cloned().collect()
+    }
+
     /// List episode IDs that completed but haven't been processed for distillation.
     pub async fn completed_episode_ids(
         store: &LearningStore,
