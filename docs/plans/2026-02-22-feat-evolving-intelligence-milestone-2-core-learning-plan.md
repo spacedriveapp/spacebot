@@ -4,6 +4,7 @@ type: feat
 date: 2026-02-22
 milestone: 2 of 4
 depends_on: milestone-1-foundation
+status: completed
 brainstorm: docs/brainstorms/2026-02-22-evolving-intelligence-system-brainstorm.md
 research: docs/research/spark-parity.md
 ---
@@ -497,41 +498,41 @@ Promote validated insights to the memory graph as existing MemoryTypes.
 
 ### Functional Requirements
 
-- [ ] Episodes created on WorkerStarted, completed on WorkerComplete
-- [ ] Step envelopes created from ToolStarted/ToolCompleted using `call_id` (and `args_summary` when available)
-- [ ] High-stakes tools get richer step data (configurable tool list)
-- [ ] Outcome Predictor tracks success/failure rates with Beta prior
-- [ ] Prediction fallback chain works (exact → coarser → prior)
-- [ ] Distillation extraction runs on batch timer (not blocking hot path)
-- [ ] 5 distillation types classified and stored
-- [ ] Distillation quality gate rejects tautologies, short statements, generic advice
-- [ ] Duplicate distillations merged by word overlap > 0.5
-- [ ] Structural retrieval returns distillations in type priority order
-- [ ] Trigger matching, domain matching, keyword overlap all work
-- [ ] Distillation cache refreshes on timer
-- [ ] Implicit outcome tracking links advice to outcomes within 5-min TTL
-- [ ] Policy patches stored and checked against events
-- [ ] Default policy patches created on first run
-- [ ] Cognitive signals extracted from user messages (10 domains, 5 patterns)
-- [ ] 8 insight categories with category-specific decay
-- [ ] Meta-Ralph primitive filter rejects operational noise
-- [ ] Meta-Ralph duplicate detection via semantic hashing
-- [ ] Meta-Ralph 6-dimension scoring produces verdicts
-- [ ] NEEDS_WORK insights get one auto-refinement attempt
-- [ ] Contradiction detection finds opposing insights (12 opposition pairs)
-- [ ] 4 contradiction types classified with appropriate resolution
-- [ ] Auto-promotion runs hourly and at session end
-- [ ] Promoted insights appear in memory graph as correct MemoryTypes
-- [ ] Demotion removes memories for insights that fell below threshold
-- [ ] Stale episodes cleaned up after timeout
-- [ ] All learning processing is async and fail-open
-- [ ] `cargo clippy` and `cargo test` pass
+- [x] Episodes created on WorkerStarted, completed on WorkerComplete
+- [x] Step envelopes created from ToolStarted/ToolCompleted using `call_id` (and `args_summary` when available)
+- [x] High-stakes tools get richer step data (configurable tool list)
+- [x] Outcome Predictor tracks success/failure rates with Beta prior
+- [x] Prediction fallback chain works (exact → coarser → prior)
+- [x] Distillation extraction runs on batch timer (not blocking hot path)
+- [x] 5 distillation types classified and stored
+- [x] Distillation quality gate rejects tautologies, short statements, generic advice
+- [x] Duplicate distillations merged by word overlap > 0.5
+- [x] Structural retrieval returns distillations in type priority order
+- [x] Trigger matching, domain matching, keyword overlap all work
+- [x] Distillation cache refreshes on timer
+- [x] Implicit outcome tracking links advice to outcomes within 5-min TTL
+- [x] Policy patches stored and checked against events
+- [x] Default policy patches created on first run
+- [x] Cognitive signals extracted from user messages (10 domains, 5 patterns)
+- [x] 8 insight categories with category-specific decay
+- [x] Meta-Ralph primitive filter rejects operational noise
+- [x] Meta-Ralph duplicate detection via semantic hashing
+- [x] Meta-Ralph 6-dimension scoring produces verdicts
+- [x] NEEDS_WORK insights get one auto-refinement attempt
+- [x] Contradiction detection finds opposing insights (12 opposition pairs)
+- [x] 4 contradiction types classified with appropriate resolution
+- [x] Auto-promotion runs hourly and at session end
+- [x] Promoted insights appear in memory graph as correct MemoryTypes
+- [x] Demotion removes memories for insights that fell below threshold
+- [x] Stale episodes cleaned up after timeout
+- [x] All learning processing is async and fail-open
+- [x] `cargo clippy` and `cargo test` pass
 
 ### Quality Gates
 
-- [ ] Outcome Predictor accuracy improves over 20+ episodes (can verify with test data)
-- [ ] Meta-Ralph pass rate is between 20-60% (not too permissive, not too strict)
-- [ ] Contradiction detection has zero false positives on test data (conservative matching)
+- [x] Outcome Predictor accuracy improves over 20+ episodes (can verify with test data)
+- [x] Meta-Ralph pass rate is between 20-60% (not too permissive, not too strict)
+- [x] Contradiction detection has zero false positives on test data (conservative matching)
 
 ## Technical Considerations
 
