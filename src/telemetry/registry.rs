@@ -112,7 +112,9 @@ impl Metrics {
                 "spacebot_llm_request_duration_seconds",
                 "LLM request duration in seconds",
             )
-            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0]),
+            .buckets(vec![
+                0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 15.0, 30.0, 60.0, 120.0,
+            ]),
             &["agent_id", "model", "tier"],
         )
         .expect("hardcoded metric descriptor");
@@ -167,16 +169,15 @@ impl Metrics {
                 "spacebot_worker_duration_seconds",
                 "Worker lifetime duration in seconds",
             )
-            .buckets(vec![1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0]),
+            .buckets(vec![
+                1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+            ]),
             &["agent_id", "worker_type"],
         )
         .expect("hardcoded metric descriptor");
 
         let process_errors_total = IntCounterVec::new(
-            Opts::new(
-                "spacebot_process_errors_total",
-                "Process errors by type",
-            ),
+            Opts::new("spacebot_process_errors_total", "Process errors by type"),
             &["agent_id", "process_type", "error_type"],
         )
         .expect("hardcoded metric descriptor");

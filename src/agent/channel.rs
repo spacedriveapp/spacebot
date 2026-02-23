@@ -391,7 +391,10 @@ impl Channel {
 
         if messages.len() == 1 {
             // Single message - process normally
-            let message = messages.into_iter().next().ok_or_else(|| anyhow::anyhow!("empty iterator after length check"))?;
+            let message = messages
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("empty iterator after length check"))?;
             self.handle_message(message).await
         } else {
             // Multiple messages - batch them
@@ -462,10 +465,11 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&first.source, server_name, channel_name)?,
-            );
+            self.conversation_context = Some(prompt_engine.render_conversation_context(
+                &first.source,
+                server_name,
+                channel_name,
+            )?);
         }
 
         // Persist each message to conversation log (individual audit trail)
@@ -605,8 +609,11 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let worker_capabilities =
-            prompt_engine.render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -712,10 +719,11 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&message.source, server_name, channel_name)?,
-            );
+            self.conversation_context = Some(prompt_engine.render_conversation_context(
+                &message.source,
+                server_name,
+                channel_name,
+            )?);
         }
 
         let system_prompt = self.build_system_prompt().await?;
@@ -802,8 +810,11 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -814,17 +825,16 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
-            .render_channel_prompt(
-                empty_to_none(identity_context),
-                empty_to_none(memory_bulletin.to_string()),
-                empty_to_none(skills_prompt),
-                worker_capabilities,
-                self.conversation_context.clone(),
-                empty_to_none(status_text),
-                None, // coalesce_hint - only set for batched messages
-                available_channels,
-            )
+        prompt_engine.render_channel_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(skills_prompt),
+            worker_capabilities,
+            self.conversation_context.clone(),
+            empty_to_none(status_text),
+            None, // coalesce_hint - only set for batched messages
+            available_channels,
+        )
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -1147,8 +1157,10 @@ impl Channel {
                 for (key, value) in retrigger_metadata {
                     self.pending_retrigger_metadata.insert(key, value);
                 }
-                self.retrigger_deadline =
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS));
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
             }
         }
 

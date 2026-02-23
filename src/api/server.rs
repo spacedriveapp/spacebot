@@ -15,8 +15,8 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use rust_embed::Embed;
-use tower_http::cors::CorsLayer;
 use serde_json::json;
+use tower_http::cors::CorsLayer;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -45,11 +45,7 @@ pub async fn start_http_server(
             axum::http::Method::DELETE,
             axum::http::Method::OPTIONS,
         ])
-        .allow_headers([
-            header::CONTENT_TYPE,
-            header::AUTHORIZATION,
-            header::ACCEPT,
-        ]);
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT]);
 
     let api_routes = Router::new()
         .route("/health", get(system::health))

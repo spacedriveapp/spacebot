@@ -98,9 +98,8 @@ impl SpacebotHook {
 
         // Base64-wrapped secrets. Minimum 24 chars avoids false positives on
         // short alphanumeric strings while catching any encoded API key.
-        static BASE64_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("hardcoded regex")
-        });
+        static BASE64_SEGMENT: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("hardcoded regex"));
         for segment in BASE64_SEGMENT.find_iter(content) {
             if let Ok(decoded_bytes) =
                 base64::engine::general_purpose::STANDARD.decode(segment.as_str())
@@ -124,9 +123,8 @@ impl SpacebotHook {
 
         // Hex-encoded secrets. Minimum 40 hex chars (20 bytes) to reduce
         // false positives while catching any hex-wrapped API key.
-        static HEX_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
-            Regex::new(r"(?i)(?:0x)?([0-9a-f]{40,})").expect("hardcoded regex")
-        });
+        static HEX_SEGMENT: LazyLock<Regex> =
+            LazyLock::new(|| Regex::new(r"(?i)(?:0x)?([0-9a-f]{40,})").expect("hardcoded regex"));
         for caps in HEX_SEGMENT.captures_iter(content) {
             let hex_str = caps.get(1).map_or("", |m| m.as_str());
             if let Ok(decoded_bytes) = hex::decode(hex_str) {

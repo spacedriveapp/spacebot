@@ -341,16 +341,31 @@ impl CompletionModel for SpacebotModel {
                 if usage.input_tokens > 0 || usage.output_tokens > 0 {
                     metrics
                         .llm_tokens_total
-                        .with_label_values(&[agent_label, &self.full_model_name, tier_label, "input"])
+                        .with_label_values(&[
+                            agent_label,
+                            &self.full_model_name,
+                            tier_label,
+                            "input",
+                        ])
                         .inc_by(usage.input_tokens);
                     metrics
                         .llm_tokens_total
-                        .with_label_values(&[agent_label, &self.full_model_name, tier_label, "output"])
+                        .with_label_values(&[
+                            agent_label,
+                            &self.full_model_name,
+                            tier_label,
+                            "output",
+                        ])
                         .inc_by(usage.output_tokens);
                     if usage.cached_input_tokens > 0 {
                         metrics
                             .llm_tokens_total
-                            .with_label_values(&[agent_label, &self.full_model_name, tier_label, "cached_input"])
+                            .with_label_values(&[
+                                agent_label,
+                                &self.full_model_name,
+                                tier_label,
+                                "cached_input",
+                            ])
                             .inc_by(usage.cached_input_tokens);
                     }
 

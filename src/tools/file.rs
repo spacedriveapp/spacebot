@@ -204,7 +204,10 @@ impl Tool for FileTool {
                 // the dedicated identity API to keep update flow consistent.
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
-                if PROTECTED_FILES.iter().any(|f| file_name.eq_ignore_ascii_case(f)) {
+                if PROTECTED_FILES
+                    .iter()
+                    .any(|f| file_name.eq_ignore_ascii_case(f))
+                {
                     return Err(FileError(
                         "ACCESS DENIED: Identity files are protected and cannot be modified \
                          through file operations. Use the identity management API instead."

@@ -16,7 +16,7 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Serialize, Deserialize)]
 struct TwitchTokenFile {

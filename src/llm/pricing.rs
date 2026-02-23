@@ -41,13 +41,11 @@ fn lookup_pricing(model_name: &str) -> ModelPricing {
             output: per_m(15.0),
             cached_input: per_m(0.30),
         },
-        m if m.starts_with("claude-3-5-haiku") || m.starts_with("claude-haiku-4") => {
-            ModelPricing {
-                input: per_m(0.80),
-                output: per_m(4.0),
-                cached_input: per_m(0.08),
-            }
-        }
+        m if m.starts_with("claude-3-5-haiku") || m.starts_with("claude-haiku-4") => ModelPricing {
+            input: per_m(0.80),
+            output: per_m(4.0),
+            cached_input: per_m(0.08),
+        },
 
         m if m.starts_with("claude-3-opus") => ModelPricing {
             input: per_m(15.0),
