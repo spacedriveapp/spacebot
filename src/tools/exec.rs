@@ -81,7 +81,10 @@ pub struct ExecArgs {
     #[serde(default)]
     pub env: Vec<EnvVar>,
     /// Timeout in seconds (default: 60).
-    #[serde(default = "default_timeout")]
+    #[serde(
+        default = "default_timeout",
+        deserialize_with = "crate::tools::deserialize_string_or_u64"
+    )]
     pub timeout_seconds: u64,
 }
 
@@ -206,6 +209,37 @@ impl Tool for ExecTool {
                         exit_code: -1,
                     });
                 }
+            }
+        }
+
+        // Block env vars that enable library injection or alter runtime
+        // loading behavior — these allow arbitrary code execution.
+        const DANGEROUS_ENV_VARS: &[&str] = &[
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "PYTHONPATH",
+            "PYTHONSTARTUP",
+            "NODE_OPTIONS",
+            "RUBYOPT",
+            "PERL5OPT",
+            "PERL5LIB",
+            "BASH_ENV",
+            "ENV",
+        ];
+        for env_var in &args.env {
+            if DANGEROUS_ENV_VARS
+                .iter()
+                .any(|blocked| env_var.key.eq_ignore_ascii_case(blocked))
+            {
+                return Err(ExecError {
+                    message: format!(
+                        "Cannot set {}: this environment variable enables code injection.",
+                        env_var.key
+                    ),
+                    exit_code: -1,
+                });
             }
         }
 

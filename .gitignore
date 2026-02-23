@@ -9,3 +9,13 @@ interface/dist/
 .idea
 list/
 agents/
+
+# Claude Code - Fichiers propriétaires (auto-généré)
+.claude/
+CLAUDE.md
+.claude-context
+.claude-memory
+.claude-decisions
+docs/phases/
+docs/specs/
+PROJECT-STATUS.md

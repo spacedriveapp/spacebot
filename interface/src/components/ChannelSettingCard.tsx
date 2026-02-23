@@ -209,6 +209,9 @@ export function ChannelSettingCard({
 			request.platform_credentials = {
 				twitch_username: credentialInputs.twitch_username.trim(),
 				twitch_oauth_token: credentialInputs.twitch_oauth_token.trim(),
+				twitch_client_id: credentialInputs.twitch_client_id?.trim(),
+				twitch_client_secret: credentialInputs.twitch_client_secret?.trim(),
+				twitch_refresh_token: credentialInputs.twitch_refresh_token?.trim(),
 			};
 		}
 		saveCreds.mutate(request);
@@ -611,28 +614,91 @@ function CredentialsSection({
 							}
 						/>
 					</div>
-					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">
-							OAuth Token
-						</label>
-						<Input
-							type="password"
-							size="lg"
-							value={credentialInputs.twitch_oauth_token ?? ""}
-							onChange={(e) =>
-								setCredentialInputs({
-									...credentialInputs,
-									twitch_oauth_token: e.target.value,
-								})
-							}
-							placeholder={
-								configured ? "Enter new token to update" : "oauth:abc123..."
-							}
-							onKeyDown={(e) => {
-								if (e.key === "Enter") onSave();
-							}}
-						/>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Client ID
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.twitch_client_id ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										twitch_client_id: e.target.value,
+									})
+								}
+								placeholder={
+									configured ? "Enter new client id to update" : "your-app-client-id"
+								}
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								Client Secret
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.twitch_client_secret ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										twitch_client_secret: e.target.value,
+									})
+								}
+								placeholder={
+									configured ? "Enter new client secret to update" : "your-app-client-secret"
+								}
+							/>
+						</div>
 					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								OAuth Access Token
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.twitch_oauth_token ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										twitch_oauth_token: e.target.value,
+									})
+								}
+								placeholder={
+									configured ? "Enter new token to update" : "abcd1234..."
+								}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") onSave();
+								}}
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								OAuth Refresh Token
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.twitch_refresh_token ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										twitch_refresh_token: e.target.value,
+									})
+								}
+								placeholder={
+									configured ? "Enter new refresh token to update" : "refresh-token-from-twitch"
+								}
+							/>
+						</div>
+					</div>
+					<p className="mt-1 text-xs text-ink-faint">
+						Use tokens from your Twitch application with chat:read and chat:write scopes enabled. Tokens are stored in your Spacebot instance and refreshed automatically while running.
+					</p>
 					<p className="mt-1.5 text-xs text-ink-faint">
 						Need help?{" "}
 						<a href="https://docs.spacebot.sh/twitch-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">

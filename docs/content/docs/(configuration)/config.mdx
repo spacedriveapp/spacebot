@@ -59,6 +59,7 @@ max_turns = 5                  # max LLM turns per channel message
 context_window = 128000        # context window size in tokens
 history_backfill_count = 50    # messages to fetch from platform on new channel
 worker_log_mode = "errors_only" # "errors_only", "all_separate", or "all_combined"
+cron_timezone = "UTC"          # optional default timezone for cron active hours
 
 # Model routing per process type.
 [defaults.routing]
@@ -105,6 +106,7 @@ screenshot_dir = "/path/to/screenshots" # optional, defaults to data_dir/screens
 id = "main"
 default = true
 workspace = "/custom/workspace/path"   # optional, defaults to ~/.spacebot/agents/{id}/workspace
+cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone override
 
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
@@ -180,7 +182,7 @@ This creates a single "main" agent with default settings.
 For any setting, the resolution chain is:
 
 ```
-agent-level override  >  [defaults] section  >  hardcoded default
+agent-level override  >  [defaults] section  >  env var fallback (if supported)  >  hardcoded default
 ```
 
 An agent with no overrides inherits everything from `[defaults]`. An agent with partial overrides gets those values from its own config and everything else from defaults. See [Agents](/docs/agents) for how agent config merging works.
@@ -394,6 +396,7 @@ At least one provider (legacy key or custom provider) must be configured.
 | `context_window` | integer | 128000 | Context window size in tokens |
 | `history_backfill_count` | integer | 50 | Messages to fetch from platform on new channel |
 | `worker_log_mode` | string | `"errors_only"` | Worker log persistence: `"errors_only"`, `"all_separate"`, or `"all_combined"` |
+| `cron_timezone` | string | None | Default timezone for cron active-hours evaluation (IANA name like `UTC` or `America/New_York`) |
 
 ### `[defaults.routing]`
 
@@ -481,6 +484,7 @@ Thresholds are fractions of `context_window`.
 | `id` | string | **required** | Agent identifier |
 | `default` | bool | false | Whether this is the default agent |
 | `workspace` | string | `~/.spacebot/agents/{id}/workspace` | Custom workspace path |
+| `cron_timezone` | string | inherits | Per-agent timezone override for cron active-hours evaluation |
 | `max_concurrent_branches` | integer | inherits | Override instance default |
 | `max_turns` | integer | inherits | Override instance default |
 | `context_window` | integer | inherits | Override instance default |
@@ -498,6 +502,15 @@ Agent-specific routing is set via `[agents.routing]` with the same keys as `[def
 | `active_start_hour` | integer | None | Start of active hours window (24h format) |
 | `active_end_hour` | integer | None | End of active hours window |
 | `enabled` | bool | true | Whether this cron job is active |
+
+Cron timezone precedence is:
+
+1. `agents.cron_timezone`
+2. `defaults.cron_timezone`
+3. `SPACEBOT_CRON_TIMEZONE`
+4. server local timezone
+
+If a configured timezone is invalid, Spacebot logs a warning and falls back to server local time.
 
 ### `[messaging.discord]`
 

@@ -26,6 +26,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   zhipu: "Z.ai (GLM)",
   ollama: "Ollama",
   "opencode-zen": "OpenCode Zen",
+  minimax: "MiniMax",
+  "minimax-cn": "MiniMax CN",
 };
 
 function formatContextWindow(tokens: number | null): string {
@@ -137,6 +139,8 @@ export function ModelSelect({
     "fireworks",
     "zhipu",
     "opencode-zen",
+    "minimax",
+    "minimax-cn",
   ];
   const sortedProviders = Object.keys(grouped).sort(
     (a, b) =>

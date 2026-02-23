@@ -89,6 +89,7 @@ struct CronJobWithStats {
 #[derive(Serialize)]
 pub(super) struct CronListResponse {
     jobs: Vec<CronJobWithStats>,
+    timezone: String,
 }
 
 #[derive(Serialize)]
@@ -108,7 +109,11 @@ pub(super) async fn list_cron_jobs(
     Query(query): Query<CronQuery>,
 ) -> Result<Json<CronListResponse>, StatusCode> {
     let stores = state.cron_stores.load();
+    let schedulers = state.cron_schedulers.load();
     let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let scheduler = schedulers
+        .get(&query.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
 
     let configs = store.load_all_unfiltered().await.map_err(|error| {
         tracing::warn!(%error, agent_id = %query.agent_id, "failed to load cron jobs");
@@ -137,7 +142,10 @@ pub(super) async fn list_cron_jobs(
         });
     }
 
-    Ok(Json(CronListResponse { jobs }))
+    Ok(Json(CronListResponse {
+        jobs,
+        timezone: scheduler.cron_timezone_label(),
+    }))
 }
 
 /// Get execution history for cron jobs.

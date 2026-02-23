@@ -408,11 +408,13 @@ fn get_agent_table_mut(
 fn get_or_create_subtable<'a>(
     agent: &'a mut toml_edit::Table,
     key: &str,
-) -> &'a mut toml_edit::Table {
+) -> Result<&'a mut toml_edit::Table, StatusCode> {
     if !agent.contains_key(key) {
         agent[key] = toml_edit::Item::Table(toml_edit::Table::new());
     }
-    agent[key].as_table_mut().expect("just created as table")
+    agent[key]
+        .as_table_mut()
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
 }
 
 fn update_routing_table(
@@ -421,7 +423,7 @@ fn update_routing_table(
     routing: &RoutingUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "routing");
+    let table = get_or_create_subtable(agent, "routing")?;
     if let Some(ref v) = routing.channel {
         table["channel"] = toml_edit::value(v.as_str());
     }
@@ -479,7 +481,7 @@ fn update_compaction_table(
     compaction: &CompactionUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "compaction");
+    let table = get_or_create_subtable(agent, "compaction")?;
     if let Some(v) = compaction.background_threshold {
         table["background_threshold"] = toml_edit::value(v as f64);
     }
@@ -498,7 +500,7 @@ fn update_cortex_table(
     cortex: &CortexUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "cortex");
+    let table = get_or_create_subtable(agent, "cortex")?;
     if let Some(v) = cortex.tick_interval_secs {
         table["tick_interval_secs"] = toml_edit::value(v as i64);
     }
@@ -529,7 +531,7 @@ fn update_coalesce_table(
     coalesce: &CoalesceUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "coalesce");
+    let table = get_or_create_subtable(agent, "coalesce")?;
     if let Some(v) = coalesce.enabled {
         table["enabled"] = toml_edit::value(v);
     }
@@ -554,7 +556,7 @@ fn update_memory_persistence_table(
     memory_persistence: &MemoryPersistenceUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "memory_persistence");
+    let table = get_or_create_subtable(agent, "memory_persistence")?;
     if let Some(v) = memory_persistence.enabled {
         table["enabled"] = toml_edit::value(v);
     }
@@ -570,7 +572,7 @@ fn update_browser_table(
     browser: &BrowserUpdate,
 ) -> Result<(), StatusCode> {
     let agent = get_agent_table_mut(doc, agent_idx)?;
-    let table = get_or_create_subtable(agent, "browser");
+    let table = get_or_create_subtable(agent, "browser")?;
     if let Some(v) = browser.enabled {
         table["enabled"] = toml_edit::value(v);
     }

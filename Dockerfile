@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1.6
 # ---- Builder stage ----
 # Compiles the React frontend and the Rust binary with the frontend embedded.
 FROM rust:bookworm AS builder
@@ -22,20 +21,15 @@ WORKDIR /build
 # 1. Fetch and cache Rust dependencies.
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
+RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && cargo build --release \
     && rm -rf src
 
 # 2. Build the frontend.
 COPY interface/package.json interface/
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    cd interface && bun install
+RUN cd interface && bun install
 COPY interface/ interface/
-RUN --mount=type=cache,target=/root/.bun/install/cache \
-    cd interface && bun run build
+RUN cd interface && bun run build
 
 # 3. Copy source and compile the real binary.
 #    build.rs runs the frontend build (already done above, node_modules present).
@@ -45,10 +39,7 @@ COPY build.rs ./
 COPY prompts/ prompts/
 COPY migrations/ migrations/
 COPY src/ src/
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/usr/local/cargo/git \
-    --mount=type=cache,target=/build/target \
-    SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
+RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
 
@@ -70,8 +61,6 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 ENV SPACEBOT_DIR=/data
 ENV SPACEBOT_DEPLOYMENT=docker
 EXPOSE 19898 18789
-
-VOLUME /data
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:19898/api/health || exit 1

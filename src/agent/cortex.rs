@@ -456,21 +456,32 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     // Phase 2: LLM synthesis of raw sections into a cohesive bulletin
     let cortex_config = **deps.runtime_config.cortex.load();
     let prompt_engine = deps.runtime_config.prompts.load();
-    let bulletin_prompt = prompt_engine
-        .render_static("cortex_bulletin")
-        .expect("failed to render cortex bulletin prompt");
+    let bulletin_prompt = match prompt_engine.render_static("cortex_bulletin") {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::error!(%error, "failed to render cortex bulletin prompt");
+            return false;
+        }
+    };
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
-    let model =
-        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
 
     // No tools needed — the LLM just synthesizes the pre-gathered data
     let agent = AgentBuilder::new(model).preamble(&bulletin_prompt).build();
 
-    let synthesis_prompt = prompt_engine
+    let synthesis_prompt = match prompt_engine
         .render_system_cortex_synthesis(cortex_config.bulletin_max_words, &raw_sections)
-        .expect("failed to render cortex synthesis prompt");
+    {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::error!(%error, "failed to render cortex synthesis prompt");
+            return false;
+        }
+    };
 
     match agent.prompt(&synthesis_prompt).await {
         Ok(bulletin) => {
@@ -617,8 +628,9 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
-    let model =
-        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
 
     let agent = AgentBuilder::new(model).preamble(&profile_prompt).build();
 

@@ -88,6 +88,51 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::{broadcast, mpsc};
 
+/// Deserialize a `u64` that may arrive as either a JSON number or a JSON string.
+///
+/// LLMs sometimes send `"timeout_seconds": "400"` instead of `"timeout_seconds": 400`.
+/// This helper accepts both forms so the tool call doesn't fail on a type mismatch.
+pub fn deserialize_string_or_u64<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct StringOrU64;
+
+    impl<'de> de::Visitor<'de> for StringOrU64 {
+        type Value = u64;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a u64 or a string containing a u64")
+        }
+
+        fn visit_u64<E: de::Error>(self, value: u64) -> Result<u64, E> {
+            Ok(value)
+        }
+
+        fn visit_i64<E: de::Error>(self, value: i64) -> Result<u64, E> {
+            u64::try_from(value).map_err(|_| E::custom(format!("negative value: {value}")))
+        }
+
+        fn visit_f64<E: de::Error>(self, value: f64) -> Result<u64, E> {
+            if value >= 0.0 && value <= u64::MAX as f64 && value.fract() == 0.0 {
+                Ok(value as u64)
+            } else {
+                Err(E::custom(format!("invalid timeout value: {value}")))
+            }
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> Result<u64, E> {
+            value
+                .parse::<u64>()
+                .map_err(|_| E::custom(format!("cannot parse \"{value}\" as a positive integer")))
+        }
+    }
+
+    deserializer.deserialize_any(StringOrU64)
+}
+
 /// Maximum byte length for tool output strings (stdout, stderr, file content).
 /// ~50KB keeps a single tool result under ~12,500 tokens (at ~4 chars/token).
 pub const MAX_TOOL_OUTPUT_BYTES: usize = 50_000;
@@ -295,4 +340,50 @@ pub fn create_cortex_chat_tool_server(
     }
 
     server.run()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shell_args_parses_timeout_as_integer() {
+        let args: shell::ShellArgs =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": 120}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 120);
+    }
+
+    #[test]
+    fn shell_args_parses_timeout_as_string() {
+        let args: shell::ShellArgs =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": "400"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 400);
+    }
+
+    #[test]
+    fn shell_args_uses_default_when_timeout_missing() {
+        let args: shell::ShellArgs = serde_json::from_str(r#"{"command": "ls"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 60);
+    }
+
+    #[test]
+    fn shell_args_rejects_non_numeric_string() {
+        let result: Result<shell::ShellArgs, _> =
+            serde_json::from_str(r#"{"command": "ls", "timeout_seconds": "abc"}"#);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn exec_args_parses_timeout_as_string() {
+        let args: exec::ExecArgs =
+            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": "300"}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 300);
+    }
+
+    #[test]
+    fn exec_args_parses_timeout_as_integer() {
+        let args: exec::ExecArgs =
+            serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
+        assert_eq!(args.timeout_seconds, 90);
+    }
 }

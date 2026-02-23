@@ -46,6 +46,8 @@ pub struct SpacebotModel {
     provider: String,
     full_model_name: String,
     routing: Option<RoutingConfig>,
+    agent_id: Option<String>,
+    process_type: Option<String>,
 }
 
 impl SpacebotModel {
@@ -62,6 +64,17 @@ impl SpacebotModel {
     /// Attach routing config for fallback behavior.
     pub fn with_routing(mut self, routing: RoutingConfig) -> Self {
         self.routing = Some(routing);
+        self
+    }
+
+    /// Attach agent context for per-agent metric labels.
+    pub fn with_context(
+        mut self,
+        agent_id: impl Into<String>,
+        process_type: impl Into<String>,
+    ) -> Self {
+        self.agent_id = Some(agent_id.into());
+        self.process_type = Some(process_type.into());
         self
     }
 
@@ -204,6 +217,8 @@ impl CompletionModel for SpacebotModel {
             provider,
             full_model_name,
             routing: None,
+            agent_id: None,
+            process_type: None,
         }
     }
 
@@ -309,18 +324,86 @@ impl CompletionModel for SpacebotModel {
         #[cfg(feature = "metrics")]
         {
             let elapsed = start.elapsed().as_secs_f64();
+            let agent_label = self.agent_id.as_deref().unwrap_or("unknown");
+            let tier_label = self.process_type.as_deref().unwrap_or("unknown");
             let metrics = crate::telemetry::Metrics::global();
-            // TODO: agent_id and tier are "unknown" because SpacebotModel doesn't
-            // carry process context. Thread agent_id/ProcessType through to get
-            // per-agent, per-tier breakdowns.
             metrics
                 .llm_requests_total
-                .with_label_values(&["unknown", &self.full_model_name, "unknown"])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label])
                 .inc();
             metrics
                 .llm_request_duration_seconds
-                .with_label_values(&["unknown", &self.full_model_name, "unknown"])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label])
                 .observe(elapsed);
+
+            if let Ok(ref response) = result {
+                let usage = &response.usage;
+                if usage.input_tokens > 0 || usage.output_tokens > 0 {
+                    metrics
+                        .llm_tokens_total
+                        .with_label_values(&[
+                            agent_label,
+                            &self.full_model_name,
+                            tier_label,
+                            "input",
+                        ])
+                        .inc_by(usage.input_tokens);
+                    metrics
+                        .llm_tokens_total
+                        .with_label_values(&[
+                            agent_label,
+                            &self.full_model_name,
+                            tier_label,
+                            "output",
+                        ])
+                        .inc_by(usage.output_tokens);
+                    if usage.cached_input_tokens > 0 {
+                        metrics
+                            .llm_tokens_total
+                            .with_label_values(&[
+                                agent_label,
+                                &self.full_model_name,
+                                tier_label,
+                                "cached_input",
+                            ])
+                            .inc_by(usage.cached_input_tokens);
+                    }
+
+                    let cost = crate::llm::pricing::estimate_cost(
+                        &self.full_model_name,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cached_input_tokens,
+                    );
+                    if cost > 0.0 {
+                        metrics
+                            .llm_estimated_cost_dollars
+                            .with_label_values(&[agent_label, &self.full_model_name, tier_label])
+                            .inc_by(cost);
+                    }
+                }
+            }
+
+            if let Err(ref error) = result {
+                let error_type = match error {
+                    rig::completion::CompletionError::ProviderError(msg) => {
+                        if msg.contains("rate") || msg.contains("429") {
+                            "rate_limit"
+                        } else if msg.contains("timeout") {
+                            "timeout"
+                        } else if msg.contains("context") || msg.contains("too long") {
+                            "context_overflow"
+                        } else {
+                            "provider_error"
+                        }
+                    }
+                    _ => "other",
+                };
+                metrics
+                    .process_errors_total
+                    .with_label_values(&[agent_label, tier_label, error_type])
+                    .inc();
+            }
         }
 
         result
@@ -352,6 +435,7 @@ impl SpacebotModel {
         let anthropic_request = crate::llm::anthropic::build_anthropic_request(
             self.llm_manager.http_client(),
             api_key,
+            &provider_config.base_url,
             &self.model_name,
             &request,
             effort,
@@ -769,23 +853,6 @@ impl SpacebotModel {
 }
 // --- Helpers ---
 
-#[allow(dead_code)]
-fn normalize_ollama_base_url(configured: Option<String>) -> String {
-    let mut base_url = configured
-        .unwrap_or_else(|| "http://localhost:11434".to_string())
-        .trim()
-        .trim_end_matches('/')
-        .to_string();
-
-    if base_url.ends_with("/api") {
-        base_url.truncate(base_url.len() - "/api".len());
-    } else if base_url.ends_with("/v1") {
-        base_url.truncate(base_url.len() - "/v1".len());
-    }
-
-    base_url
-}
-
 /// Reverse-map Claude Code canonical tool names back to the original names
 /// from the request's tool definitions.
 fn reverse_map_tool_names(
@@ -1169,15 +1236,21 @@ fn parse_anthropic_response(
         }
     }
 
-    let choice = OneOrMany::many(assistant_content).map_err(|_| {
+    let choice = OneOrMany::many(assistant_content).unwrap_or_else(|_| {
+        // Anthropic returns an empty content array when stop_reason is end_turn
+        // and the model has nothing further to say (e.g. after a side-effect-only
+        // tool call like react/skip). Treat this as a clean empty response rather
+        // than an error so the agentic loop terminates gracefully.
+        let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
         tracing::debug!(
-            stop_reason = body["stop_reason"].as_str().unwrap_or("unknown"),
+            stop_reason,
             content_blocks = content_blocks.len(),
-            raw_content = %body["content"],
-            "empty assistant_content after parsing Anthropic response"
+            "empty assistant_content from Anthropic — returning synthetic empty text"
         );
-        CompletionError::ResponseError("empty response from Anthropic".into())
-    })?;
+        OneOrMany::one(AssistantContent::Text(Text {
+            text: String::new(),
+        }))
+    });
 
     let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);

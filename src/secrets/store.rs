@@ -1,7 +1,7 @@
 //! Encrypted credentials storage (AES-256-GCM, redb).
 
 use crate::error::SecretsError;
-use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
+use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::Aead};
 use rand::RngCore;
 use redb::{Database, ReadableTable, TableDefinition};
 use sha2::{Digest, Sha256};

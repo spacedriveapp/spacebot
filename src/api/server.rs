@@ -7,15 +7,16 @@ use super::{
 };
 
 use axum::Json;
+
 use axum::Router;
-use axum::extract::{Request, State};
+use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use rust_embed::Embed;
 use serde_json::json;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -36,9 +37,15 @@ pub async fn start_http_server(
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        .allow_methods([
+            axum::http::Method::GET,
+            axum::http::Method::POST,
+            axum::http::Method::PUT,
+            axum::http::Method::DELETE,
+            axum::http::Method::OPTIONS,
+        ])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT]);
 
     let api_routes = Router::new()
         .route("/health", get(system::health))
@@ -148,6 +155,7 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,
@@ -157,6 +165,7 @@ pub async fn start_http_server(
         .nest("/api", api_routes)
         .fallback(static_handler)
         .layer(cors)
+        .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MiB
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(bind).await?;
