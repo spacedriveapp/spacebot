@@ -2895,6 +2895,25 @@ impl Config {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        // Deduplicate agents by ID — keep the last definition (latest wins).
+        // This prevents crash loops when config.toml has duplicate [[agents]]
+        // entries (e.g. from multiple create_agent API calls).
+        {
+            let mut seen = std::collections::HashSet::new();
+            let before = agents.len();
+            // Reverse-dedup: iterate from the end so the last definition wins,
+            // then reverse back to preserve original order.
+            agents.reverse();
+            agents.retain(|a| seen.insert(a.id.clone()));
+            agents.reverse();
+            if agents.len() < before {
+                tracing::warn!(
+                    duplicates_removed = before - agents.len(),
+                    "removed duplicate agent entries from config"
+                );
+            }
+        }
+
         if agents.is_empty() {
             agents.push(AgentConfig {
                 id: "main".into(),

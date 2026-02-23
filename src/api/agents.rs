@@ -271,6 +271,20 @@ pub(super) async fn create_agent(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    // Check if agent already exists in the TOML file itself (belt-and-suspenders
+    // check — prevents duplicate [[agents]] entries even if runtime state is stale).
+    if let Some(agents_array) = doc.get("agents").and_then(|a| a.as_array_of_tables()) {
+        let already_in_toml = agents_array
+            .iter()
+            .any(|t| t.get("id").and_then(|v| v.as_str()) == Some(&agent_id));
+        if already_in_toml {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' already exists in config.toml")
+            })));
+        }
+    }
+
     if doc.get("agents").is_none() {
         doc["agents"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
     }
