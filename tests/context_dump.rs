@@ -321,6 +321,7 @@ async fn dump_worker_context() {
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
         vec![],
+        deps.runtime_config.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -470,6 +471,7 @@ async fn dump_all_contexts() {
         std::path::PathBuf::from("/tmp"),
         std::path::PathBuf::from("/tmp"),
         vec![],
+        deps.runtime_config.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

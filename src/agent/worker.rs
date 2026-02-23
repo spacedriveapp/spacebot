@@ -204,6 +204,7 @@ impl Worker {
             self.deps.runtime_config.workspace_dir.clone(),
             self.deps.runtime_config.instance_dir.clone(),
             mcp_tools,
+            self.deps.runtime_config.clone(),
         );
 
         let routing = self.deps.runtime_config.routing.load();

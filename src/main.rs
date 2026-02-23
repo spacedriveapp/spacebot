@@ -587,6 +587,15 @@ fn load_config(
     }
 }
 
+fn has_provider_credentials(
+    llm_config: &spacebot::config::LlmConfig,
+    instance_dir: &std::path::Path,
+) -> bool {
+    llm_config.has_any_key()
+        || spacebot::auth::credentials_path(instance_dir).exists()
+        || spacebot::openai_auth::credentials_path(instance_dir).exists()
+}
+
 async fn run(
     config: spacebot::config::Config,
     foreground: bool,
@@ -654,8 +663,7 @@ async fn run(
     };
 
     // Check if we have provider configuration (API keys or OAuth credentials)
-    let has_providers =
-        config.llm.has_any_key() || spacebot::auth::credentials_path(&config.instance_dir).exists();
+    let has_providers = has_provider_credentials(&config.llm, &config.instance_dir);
 
     if !has_providers {
         tracing::info!("No LLM providers configured. Starting in setup mode.");
@@ -715,6 +723,7 @@ async fn run(
     // Set the config path on the API state for config.toml writes
     let config_path = config.instance_dir.join("config.toml");
     api_state.set_config_path(config_path.clone()).await;
+    api_state.set_instance_dir(config.instance_dir.clone());
     api_state.set_llm_manager(llm_manager.clone()).await;
     api_state.set_embedding_model(embedding_model.clone()).await;
     api_state.set_prompt_engine(prompt_engine.clone()).await;
@@ -1050,9 +1059,16 @@ async fn run(
                 };
 
                 match new_config {
-                    Ok(new_config) if new_config.llm.has_any_key() => {
+                    Ok(new_config)
+                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
+                    {
                         // Rebuild LlmManager with the new keys
-                        match spacebot::llm::LlmManager::new(new_config.llm.clone()).await {
+                        match spacebot::llm::LlmManager::with_instance_dir(
+                            new_config.llm.clone(),
+                            new_config.instance_dir.clone(),
+                        )
+                        .await
+                        {
                             Ok(new_llm) => {
                                 let new_llm_manager = Arc::new(new_llm);
                                 let mut new_watcher_agents = Vec::new();

@@ -15,6 +15,7 @@ pub mod llm;
 pub mod mcp;
 pub mod memory;
 pub mod messaging;
+pub mod openai_auth;
 pub mod opencode;
 pub mod prompts;
 pub mod secrets;

@@ -1,5 +1,14 @@
-## Skill Instructions
+## Available Skills
 
-You are executing the **{{ skill_name }}** skill. Follow these instructions:
+You have access to the following skills. Before starting your task, scan the list and call `read_skill` for any skill that is relevant — you may read more than one.
 
-{{ skill_content }}
+Skills marked as **suggested** were recommended by the channel for this specific task. Read those first, then decide if any others apply.
+
+<available_skills>
+{%- for skill in skills %}
+  <skill{% if skill.suggested %} suggested="true"{% endif %}>
+    <name>{{ skill.name }}</name>
+    <description>{{ skill.description }}</description>
+  </skill>
+{%- endfor %}
+</available_skills>

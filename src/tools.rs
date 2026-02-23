@@ -33,6 +33,7 @@ pub mod memory_delete;
 pub mod memory_recall;
 pub mod memory_save;
 pub mod react;
+pub mod read_skill;
 pub mod reply;
 pub mod route;
 pub mod send_file;
@@ -66,6 +67,7 @@ pub use memory_save::{
     AssociationInput, MemorySaveArgs, MemorySaveError, MemorySaveOutput, MemorySaveTool,
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
+pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
 pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
@@ -79,7 +81,7 @@ pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, Spa
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 
 use crate::agent::channel::ChannelState;
-use crate::config::BrowserConfig;
+use crate::config::{BrowserConfig, RuntimeConfig};
 use crate::memory::MemorySearch;
 use crate::{AgentId, ChannelId, OutboundResponse, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
@@ -272,6 +274,7 @@ pub fn create_worker_tool_server(
     workspace: PathBuf,
     instance_dir: PathBuf,
     mcp_tools: Vec<McpToolAdapter>,
+    runtime_config: Arc<RuntimeConfig>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(instance_dir.clone(), workspace.clone()))
@@ -279,7 +282,8 @@ pub fn create_worker_tool_server(
         .tool(ExecTool::new(instance_dir, workspace))
         .tool(SetStatusTool::new(
             agent_id, worker_id, channel_id, event_tx,
-        ));
+        ))
+        .tool(ReadSkillTool::new(runtime_config));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));

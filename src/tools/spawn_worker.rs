@@ -35,10 +35,11 @@ pub struct SpawnWorkerArgs {
     /// Whether this is an interactive worker (accepts follow-up messages).
     #[serde(default)]
     pub interactive: bool,
-    /// Optional skill name to load into the worker's context. The worker will
-    /// receive the full skill instructions in its system prompt.
+    /// Optional list of skill names to suggest to the worker. The worker sees
+    /// all available skills and can read any of them via read_skill, but
+    /// suggested skills are flagged as recommended for this task.
     #[serde(default)]
-    pub skill: Option<String>,
+    pub suggested_skills: Vec<String>,
     /// Worker type: "builtin" (default) runs a Rig agent loop with shell/file/exec
     /// tools. "opencode" spawns an OpenCode subprocess with full coding agent
     /// capabilities. Use "opencode" for complex coding tasks that benefit from
@@ -106,9 +107,10 @@ impl Tool for SpawnWorkerTool {
                 "default": false,
                 "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns."
             },
-            "skill": {
-                "type": "string",
-                "description": "Name of a skill to load into the worker. The worker receives the full skill instructions in its system prompt. Only use skill names from <available_skills>."
+            "suggested_skills": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Skill names from <available_skills> that are likely relevant to this task. The worker sees all skills and decides what to read, but suggested skills are flagged as recommended."
             }
         });
 
@@ -158,7 +160,11 @@ impl Tool for SpawnWorkerTool {
                 &self.state,
                 &args.task,
                 args.interactive,
-                args.skill.as_deref(),
+                &args
+                    .suggested_skills
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?

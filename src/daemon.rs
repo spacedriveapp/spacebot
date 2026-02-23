@@ -141,7 +141,8 @@ pub fn init_background_tracing(
             let formatted = format!("{value:?}");
             const MAX_MESSAGE_CHARS: usize = 280;
             if formatted.len() > MAX_MESSAGE_CHARS {
-                write!(writer, "{}={}", field_name, &formatted[..MAX_MESSAGE_CHARS])?;
+                let boundary = formatted.floor_char_boundary(MAX_MESSAGE_CHARS);
+                write!(writer, "{}={}", field_name, &formatted[..boundary])?;
                 write!(writer, "...")
             } else {
                 write!(writer, "{}={formatted}", field_name)
@@ -201,7 +202,8 @@ pub fn init_foreground_tracing(
             let formatted = format!("{value:?}");
             const MAX_MESSAGE_CHARS: usize = 280;
             if formatted.len() > MAX_MESSAGE_CHARS {
-                write!(writer, "{}={}", field_name, &formatted[..MAX_MESSAGE_CHARS])?;
+                let boundary = formatted.floor_char_boundary(MAX_MESSAGE_CHARS);
+                write!(writer, "{}={}", field_name, &formatted[..boundary])?;
                 write!(writer, "...")
             } else {
                 write!(writer, "{}={formatted}", field_name)

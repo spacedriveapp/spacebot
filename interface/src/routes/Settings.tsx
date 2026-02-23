@@ -179,16 +179,16 @@ const PROVIDERS = [
 	{
 		id: "minimax",
 		name: "MiniMax",
-		description: "MiniMax M1 (Anthropic message format)",
-		placeholder: "eyJ...",
+		description: "MiniMax (Anthropic message format)",
+		placeholder: "sk-...",
 		envVar: "MINIMAX_API_KEY",
-		defaultModel: "minimax/MiniMax-M1-80k",
+		defaultModel: "minimax/MiniMax-M2.5",
 	},
 	{
 		id: "minimax-cn",
 		name: "MiniMax CN",
-		description: "MiniMax M2.5 (Anthropic message format)",
-		placeholder: "eyJ...",
+		description: "MiniMax China (Anthropic message format)",
+		placeholder: "sk-...",
 		envVar: "MINIMAX_CN_API_KEY",
 		defaultModel: "minimax-cn/MiniMax-M2.5",
 	},
@@ -209,6 +209,8 @@ const PROVIDERS = [
 		defaultModel: "ollama/llama3.2",
 	},
 ] as const;
+
+const CHATGPT_OAUTH_DEFAULT_MODEL = "openai-chatgpt/gpt-5.3-codex";
 
 export function Settings() {
 	const queryClient = useQueryClient();
@@ -235,6 +237,11 @@ export function Settings() {
 		success: boolean;
 		message: string;
 		sample?: string | null;
+	} | null>(null);
+	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
+	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
+		text: string;
+		type: "success" | "error";
 	} | null>(null);
 	const [message, setMessage] = useState<{
 		text: string;
@@ -286,6 +293,9 @@ export function Settings() {
 	const testModelMutation = useMutation({
 		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
 			api.testProviderModel(provider, apiKey, model),
+	});
+	const startOpenAiBrowserOAuthMutation = useMutation({
+		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
 	});
 
 	const removeMutation = useMutation({
@@ -345,6 +355,79 @@ export function Settings() {
 			apiKey: keyInput.trim(),
 			model: modelInput.trim(),
 		});
+	};
+
+	const monitorOpenAiBrowserOAuth = async (stateToken: string, popup: Window | null) => {
+		setIsPollingOpenAiBrowserOAuth(true);
+		setOpenAiBrowserOAuthMessage(null);
+		try {
+			for (let attempt = 0; attempt < 180; attempt += 1) {
+				const status = await api.openAiOAuthBrowserStatus(stateToken);
+				if (status.done) {
+					if (status.success) {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "ChatGPT OAuth configured.",
+							type: "success",
+						});
+						queryClient.invalidateQueries({queryKey: ["providers"]});
+						setTimeout(() => {
+							queryClient.invalidateQueries({queryKey: ["agents"]});
+							queryClient.invalidateQueries({queryKey: ["overview"]});
+						}, 3000);
+					} else {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "Browser sign-in failed.",
+							type: "error",
+						});
+					}
+					return;
+				}
+				await new Promise((resolve) => setTimeout(resolve, 2000));
+			}
+			setOpenAiBrowserOAuthMessage({
+				text: "Browser sign-in timed out. Please try again.",
+				type: "error",
+			});
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to verify browser sign-in: ${error.message}`,
+				type: "error",
+			});
+		} finally {
+			setIsPollingOpenAiBrowserOAuth(false);
+			if (popup && !popup.closed) {
+				popup.close();
+			}
+		}
+	};
+
+	const handleStartChatGptOAuth = async () => {
+		setOpenAiBrowserOAuthMessage(null);
+		try {
+			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
+				model: CHATGPT_OAUTH_DEFAULT_MODEL,
+			});
+			if (!result.success || !result.authorization_url || !result.state) {
+				setOpenAiBrowserOAuthMessage({
+					text: result.message || "Failed to start browser sign-in",
+					type: "error",
+				});
+				return;
+			}
+
+			const popup = window.open(
+				result.authorization_url,
+				"spacebot-openai-oauth",
+				"popup=true,width=560,height=780,noopener,noreferrer",
+			);
+			setOpenAiBrowserOAuthMessage({
+				text: "Complete sign-in in the browser window. Waiting for callback...",
+				type: "success",
+			});
+			void monitorOpenAiBrowserOAuth(result.state, popup);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({text: `Failed: ${error.message}`, type: "error"});
+		}
 	};
 
 	const handleClose = () => {
@@ -419,24 +502,36 @@ export function Settings() {
 							) : (
 								<div className="flex flex-col gap-3">
 									{PROVIDERS.map((provider) => (
-										<ProviderCard
-											key={provider.id}
-											provider={provider.id}
-											name={provider.name}
-											description={provider.description}
-											configured={isConfigured(provider.id)}
-											defaultModel={provider.defaultModel}
-											onEdit={() => {
-												setEditingProvider(provider.id);
-												setKeyInput("");
-												setModelInput(provider.defaultModel ?? "");
-												setTestedSignature(null);
-												setTestResult(null);
-												setMessage(null);
-											}}
-											onRemove={() => removeMutation.mutate(provider.id)}
-											removing={removeMutation.isPending}
-										/>
+										[
+											<ProviderCard
+												key={provider.id}
+												provider={provider.id}
+												name={provider.name}
+												description={provider.description}
+												configured={isConfigured(provider.id)}
+												defaultModel={provider.defaultModel}
+												onEdit={() => {
+													setEditingProvider(provider.id);
+													setKeyInput("");
+													setModelInput(provider.defaultModel ?? "");
+													setTestedSignature(null);
+													setTestResult(null);
+													setMessage(null);
+												}}
+												onRemove={() => removeMutation.mutate(provider.id)}
+												removing={removeMutation.isPending}
+											/>,
+											provider.id === "openai" ? (
+												<ChatGptOAuthCard
+													key="openai-chatgpt"
+													configured={isConfigured("openai-chatgpt")}
+													defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
+													isPolling={isPollingOpenAiBrowserOAuth}
+													message={openAiBrowserOAuthMessage}
+													onSignIn={handleStartChatGptOAuth}
+												/>
+											) : null,
+										]
 									))}
 								</div>
 							)}
@@ -483,6 +578,8 @@ export function Settings() {
 						<DialogDescription>
 							{editingProvider === "ollama"
 								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
+								: editingProvider === "openai"
+									? "Enter an OpenAI API key. The model below will be applied to routing."
 								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
@@ -1470,8 +1567,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">{name}</span>
 						{configured && (
-							<span className="text-tiny text-green-400">
-								● Configured
+							<span className="inline-flex items-center">
+								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+								<span className="sr-only">Configured</span>
 							</span>
 						)}
 					</div>
@@ -1489,6 +1587,57 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 							Remove
 						</Button>
 					)}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+interface ChatGptOAuthCardProps {
+	configured: boolean;
+	defaultModel: string;
+	isPolling: boolean;
+	message: { text: string; type: "success" | "error" } | null;
+	onSignIn: () => void;
+}
+
+function ChatGptOAuthCard({ configured, defaultModel, isPolling, message, onSignIn }: ChatGptOAuthCardProps) {
+	return (
+		<div className="rounded-lg border border-app-line bg-app-box p-4">
+			<div className="flex items-center gap-3">
+				<ProviderIcon provider="openai-chatgpt" size={32} />
+				<div className="flex-1">
+					<div className="flex items-center gap-2">
+						<span className="text-sm font-medium text-ink">ChatGPT Plus (OAuth)</span>
+						{configured && (
+							<span className="inline-flex items-center">
+								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+								<span className="sr-only">Configured</span>
+							</span>
+						)}
+					</div>
+					<p className="mt-0.5 text-sm text-ink-dull">
+						Sign in with your ChatGPT Plus account in the browser.
+					</p>
+					<p className="mt-1 text-tiny text-ink-faint">
+						Default model: <span className="text-ink-dull">{defaultModel}</span>
+					</p>
+					{message && (
+						<p className={`mt-1 text-tiny ${message.type === "success" ? "text-green-400" : "text-red-400"}`}>
+							{message.text}
+						</p>
+					)}
+				</div>
+				<div className="flex gap-2">
+					<Button
+						onClick={onSignIn}
+						disabled={isPolling}
+						loading={isPolling}
+						variant="outline"
+						size="sm"
+					>
+						Sign in with ChatGPT Plus
+					</Button>
 				</div>
 			</div>
 		</div>
