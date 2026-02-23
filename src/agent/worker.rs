@@ -1,5 +1,7 @@
 //! Worker: Independent task execution process.
 
+use std::sync::Arc;
+
 use crate::agent::compactor::estimate_history_tokens;
 use crate::config::BrowserConfig;
 use crate::error::Result;
@@ -193,6 +195,9 @@ impl Worker {
         let mcp_tools = self.deps.mcp_manager.get_tools().await;
 
         // Create per-worker ToolServer with task tools
+        let routing = self.deps.runtime_config.routing.load();
+        let voice_model = routing.voice.clone();
+
         let worker_tool_server = crate::tools::create_worker_tool_server(
             self.deps.agent_id.clone(),
             self.id,
@@ -206,9 +211,10 @@ impl Worker {
             self.deps.sandbox.clone(),
             mcp_tools,
             self.deps.runtime_config.clone(),
+            voice_model,
+            Arc::clone(&self.deps.llm_manager),
+            self.deps.llm_manager.http_client().clone(),
         );
-
-        let routing = self.deps.runtime_config.routing.load();
         let model_name = routing.resolve(ProcessType::Worker, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")

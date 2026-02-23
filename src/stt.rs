@@ -1,11 +1,191 @@
-//! Local Whisper speech-to-text via whisper-rs.
+//! Speech-to-text transcription.
 //!
-//! Only compiled when the `stt-whisper` feature is enabled.
-//! Exposed as a single async `transcribe` function that lazily loads and caches
-//! the model context for the lifetime of the process.
+//! Provides a unified `transcribe_bytes` function that dispatches to either:
+//! - The local Whisper backend (`whisper-local://<spec>`) when the `stt-whisper`
+//!   feature is enabled.
+//! - An OpenAI-compatible HTTP provider (anything else) via `input_audio`.
+
+use crate::llm::manager::LlmManager;
+use crate::config::ApiType;
 
 #[cfg(feature = "stt-whisper")]
 pub use local::transcribe;
+
+/// Unified error type for all STT backends.
+#[derive(Debug, thiserror::Error)]
+pub enum SttError {
+    #[error("no voice model configured in routing.voice")]
+    NotConfigured,
+    #[error("local Whisper STT is not available in this build")]
+    WhisperNotBuilt,
+    #[error("whisper error: {0}")]
+    #[cfg(feature = "stt-whisper")]
+    Whisper(#[from] local::WhisperError),
+    #[error("provider '{0}' is not configured")]
+    ProviderNotConfigured(String),
+    #[error("provider '{0}' does not support audio transcription on this endpoint")]
+    ProviderUnsupported(String),
+    #[error("invalid voice model spec '{0}': {1}")]
+    InvalidModel(String, String),
+    #[error("transcription request failed: {0}")]
+    Http(String),
+    #[error("transcription returned empty result")]
+    EmptyResult,
+}
+
+/// Transcribe raw audio bytes using the configured voice model.
+///
+/// `voice_model` is the full value from `routing.voice`, e.g.:
+/// - `"whisper-local://small"` — local Whisper
+/// - `"openai/whisper-1"` — OpenAI-compatible HTTP provider
+///
+/// `mime_type` is used to set the audio format hint for HTTP providers.
+pub async fn transcribe_bytes(
+    voice_model: &str,
+    audio: &[u8],
+    mime_type: &str,
+    llm_manager: &LlmManager,
+    http: &reqwest::Client,
+) -> Result<String, SttError> {
+    let voice_model = voice_model.trim();
+    if voice_model.is_empty() {
+        return Err(SttError::NotConfigured);
+    }
+
+    // Local Whisper backend.
+    if let Some(model_spec) = voice_model.strip_prefix("whisper-local://") {
+        #[cfg(feature = "stt-whisper")]
+        {
+            return local::transcribe(model_spec, audio)
+                .await
+                .map_err(SttError::Whisper);
+        }
+        #[cfg(not(feature = "stt-whisper"))]
+        {
+            let _ = (model_spec, audio);
+            return Err(SttError::WhisperNotBuilt);
+        }
+    }
+
+    // HTTP provider path.
+    let (provider_id, model_name) = llm_manager
+        .resolve_model(voice_model)
+        .map_err(|e| SttError::InvalidModel(voice_model.to_string(), e.to_string()))?;
+
+    let provider = llm_manager
+        .get_provider(&provider_id)
+        .map_err(|_| SttError::ProviderNotConfigured(provider_id.clone()))?;
+
+    if provider.api_type == ApiType::Anthropic {
+        return Err(SttError::ProviderUnsupported(provider_id));
+    }
+
+    let format = audio_format_for_mime(mime_type);
+    use base64::Engine as _;
+    let base64_audio = base64::engine::general_purpose::STANDARD.encode(audio);
+
+    let endpoint = format!(
+        "{}/v1/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Transcribe this audio verbatim. Return only the transcription text."
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": base64_audio,
+                        "format": format,
+                    }
+                }
+            ]
+        }],
+        "temperature": 0
+    });
+
+    let response = http
+        .post(&endpoint)
+        .header("authorization", format!("Bearer {}", provider.api_key))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| SttError::Http(e.to_string()))?;
+
+    let status = response.status();
+    let response_body = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|e| SttError::Http(e.to_string()))?;
+
+    if !status.is_success() {
+        let message = response_body["error"]["message"]
+            .as_str()
+            .unwrap_or("unknown error");
+        return Err(SttError::Http(format!("{status}: {message}")));
+    }
+
+    let transcript = extract_transcript_text(&response_body);
+    if transcript.is_empty() {
+        return Err(SttError::EmptyResult);
+    }
+
+    Ok(transcript)
+}
+
+/// Infer the audio format string from a MIME type.
+pub fn audio_format_for_mime(mime_type: &str) -> &'static str {
+    let mime = mime_type.to_lowercase();
+    if mime.contains("mpeg") || mime.contains("mp3") {
+        return "mp3";
+    }
+    if mime.contains("wav") {
+        return "wav";
+    }
+    if mime.contains("flac") {
+        return "flac";
+    }
+    if mime.contains("aac") {
+        return "aac";
+    }
+    if mime.contains("ogg") {
+        return "ogg";
+    }
+    if mime.contains("mp4") || mime.contains("m4a") {
+        return "m4a";
+    }
+    "ogg"
+}
+
+/// Extract the transcript text from an OpenAI-compatible chat completion response.
+fn extract_transcript_text(body: &serde_json::Value) -> String {
+    if let Some(text) = body["choices"][0]["message"]["content"].as_str() {
+        return text.trim().to_string();
+    }
+
+    let Some(parts) = body["choices"][0]["message"]["content"].as_array() else {
+        return String::new();
+    };
+
+    parts
+        .iter()
+        .filter_map(|part| {
+            if part["type"].as_str() == Some("text") {
+                part["text"].as_str().map(str::trim)
+            } else {
+                None
+            }
+        })
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
 
 #[cfg(feature = "stt-whisper")]
 mod local {
