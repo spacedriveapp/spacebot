@@ -1,0 +1,29 @@
+id: coding
+name: Coding Intelligence
+triggers:
+  - event: tool_event
+    domain: coding
+  - event: worker_complete
+    pattern: "(?i)(compile|build|test|lint)"
+observations:
+  - field_name: tool_effectiveness
+    field_type: float
+    description: Success rate of coding tools
+  - field_name: error_pattern
+    field_type: string
+    description: Recurring error patterns observed
+  - field_name: language_insight
+    field_type: string
+    description: Language-specific patterns and idioms
+success_criteria:
+  - Reduced tool errors over time
+  - Faster task completion in coding contexts
+human_benefit: Helps the agent write better code by learning from past coding patterns and errors
+harm_avoidance:
+  - Never suggest code that bypasses security controls
+  - Never learn patterns that could introduce vulnerabilities
+risk_level: low
+evolution:
+  auto_deprecate: true
+  min_observations: 20
+  min_confidence: 0.6

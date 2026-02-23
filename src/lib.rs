@@ -218,6 +218,8 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
+    /// Learning store for the evolving intelligence system (None if disabled).
+    pub learning_store: Option<Arc<learning::LearningStore>>,
 }
 
 impl AgentDeps {

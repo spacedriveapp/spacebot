@@ -1321,6 +1321,7 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            learning_store: None,
         };
 
         let agent = spacebot::Agent {
@@ -1604,12 +1605,15 @@ async fn initialize_agents(
     }
 
     // Start learning engine loops for each agent
-    for (agent_id, agent) in agents.iter() {
+    for (agent_id, agent) in agents.iter_mut() {
         let learning_config = (**agent.deps.runtime_config.learning.load()).clone();
         if learning_config.enabled {
             match spacebot::learning::LearningStore::connect(&agent.config.learning_db_path()).await
             {
                 Ok(learning_store) => {
+                    // Store on AgentDeps so cortex bulletin can query learning.db.
+                    agent.deps.learning_store = Some(learning_store.clone());
+
                     let tuneables =
                         match spacebot::learning::TuneableStore::new(
                             learning_store.clone(),

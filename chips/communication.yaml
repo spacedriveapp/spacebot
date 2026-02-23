@@ -1,0 +1,32 @@
+id: communication
+name: Communication Intelligence
+triggers:
+  - event: user_message
+  - event: message_sent
+  - event: tool_event
+    domain: reply
+observations:
+  - field_name: style_effectiveness
+    field_type: float
+    description: Inferred effectiveness of the response style based on follow-up engagement signals (0.0–1.0)
+  - field_name: response_length
+    field_type: integer
+    description: Character count of the outbound message, used to detect verbosity patterns per platform
+  - field_name: platform_patterns
+    field_type: string
+    description: Platform-specific norms observed (e.g. Telegram prefers short replies, Discord tolerates longer threads)
+success_criteria:
+  - Fewer clarifying questions needed from users over time
+  - Response length stays appropriate to the platform and query complexity
+  - Tone and register adapt correctly to conversation context
+human_benefit: Helps the agent communicate more naturally and effectively by learning per-platform style preferences and what response shapes resonate with each user
+harm_avoidance:
+  - Never store raw message content as an observation — only derived style signals
+  - Never use communication patterns to manipulate or mislead users
+  - Never infer sensitive user attributes (mood, health, politics) from message style
+  - Never apply learned style preferences from one user to another without explicit consent
+risk_level: medium
+evolution:
+  auto_deprecate: true
+  min_observations: 30
+  min_confidence: 0.65

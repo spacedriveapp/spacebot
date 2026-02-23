@@ -434,6 +434,7 @@ pub(super) async fn create_agent(
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
         },
+        learning_store: None,
     };
 
     let event_rx = event_tx.subscribe();

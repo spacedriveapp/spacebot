@@ -1,0 +1,31 @@
+id: personal
+name: Personal Preference Intelligence
+triggers:
+  - event: user_message
+  - event: user_reaction
+observations:
+  - field_name: preference_signal
+    field_type: string
+    description: Explicit or strongly implied preference extracted from user input (e.g. "prefer bullet lists", "don't use jargon")
+  - field_name: correction_pattern
+    field_type: string
+    description: Pattern observed when the user corrects or redirects the agent's behaviour (e.g. tone, format, scope)
+  - field_name: style_preference
+    field_type: string
+    description: Inferred output style the user responds well to (e.g. concise prose, step-by-step, code-first explanations)
+success_criteria:
+  - Fewer explicit corrections from the user over time
+  - Agent adapts to stated preferences within the same session and retains them across sessions
+  - Responses feel personalised without requiring the user to repeat themselves
+human_benefit: Helps the agent remember how each user likes to communicate and what they care about, reducing friction and making interactions feel more natural over time
+harm_avoidance:
+  - Never share a user's preferences, corrections, or style signals with any other user or external system
+  - Never use preference data to manipulate the user's decisions or exploit known weaknesses
+  - Never infer or store sensitive personal attributes (mental health, beliefs, relationships) from preference signals
+  - Never override an explicit user instruction in favour of a learned preference
+  - Suppress personalisation entirely if the user requests a fresh or neutral interaction
+risk_level: medium
+evolution:
+  auto_deprecate: false
+  min_observations: 10
+  min_confidence: 0.7

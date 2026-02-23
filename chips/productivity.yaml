@@ -1,0 +1,28 @@
+id: productivity
+name: Productivity Intelligence
+triggers:
+  - event: worker_complete
+observations:
+  - field_name: completion_time
+    field_type: integer
+    description: Wall-clock seconds from worker spawn to completion, used to track task duration trends
+  - field_name: task_patterns
+    field_type: string
+    description: Recurring task shapes observed across completions (e.g. multi-step build, iterative edit-test cycle)
+  - field_name: time_of_day
+    field_type: integer
+    description: Hour of day (0–23, UTC) when the task completed, used to identify high-throughput windows
+success_criteria:
+  - Average task completion time decreases for recurring task types
+  - Repeated multi-step sequences are recognised and streamlined
+  - Worker retries and failures decrease over time as patterns improve
+human_benefit: Helps the agent complete tasks faster by learning which approaches work well for different task shapes and when the user tends to be most active
+harm_avoidance:
+  - Never infer user work schedule or location from time-of-day data
+  - Never use productivity patterns to pressure the user into faster responses
+  - Never surface timing observations in contexts where they could be used for surveillance
+risk_level: low
+evolution:
+  auto_deprecate: true
+  min_observations: 25
+  min_confidence: 0.6

@@ -417,6 +417,102 @@ async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
     output
 }
 
+/// Gather learning insights from learning.db for inclusion in the bulletin.
+///
+/// Queries advisory packets, emerging insights, and distillation risk flags.
+/// Returns an empty string if the learning store is unavailable. All queries
+/// are fail-open: individual failures produce a warning log and skip the section.
+async fn gather_learning_sections(deps: &AgentDeps) -> String {
+    let Some(store) = &deps.learning_store else {
+        return String::new();
+    };
+
+    let pool = store.pool();
+    let mut output = String::new();
+    let mut has_content = false;
+
+    // Active advisories (NOTE+ with reasonable effectiveness)
+    match sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT authority_level, advice_text, score FROM advisory_packets \
+         WHERE authority_level IN ('BLOCK','WARNING','NOTE') AND effectiveness_score > 0.3 \
+         ORDER BY score DESC LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) if !rows.is_empty() => {
+            output.push_str("**Active Advisories:**\n");
+            for (level, text, score) in &rows {
+                let first_line = text.lines().next().unwrap_or(text);
+                output.push_str(&format!("- [{}] {} (score: {:.2})\n", level, first_line, score));
+            }
+            output.push('\n');
+            has_content = true;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to query advisory packets for bulletin");
+        }
+        _ => {}
+    }
+
+    // Emerging insights (high readiness but not yet promoted)
+    match sqlx::query_as::<_, (String, f64)>(
+        "SELECT content, advisory_readiness FROM insights \
+         WHERE promoted = 0 AND advisory_readiness > 0.5 \
+         ORDER BY advisory_readiness DESC LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) if !rows.is_empty() => {
+            output.push_str("**Emerging Insights:**\n");
+            for (content, readiness) in &rows {
+                let first_line = content.lines().next().unwrap_or(content);
+                output.push_str(&format!("- {} (readiness: {:.2})\n", first_line, readiness));
+            }
+            output.push('\n');
+            has_content = true;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to query insights for bulletin");
+        }
+        _ => {}
+    }
+
+    // Risk flags (high-confidence distillations)
+    match sqlx::query_as::<_, (String, String, f64)>(
+        "SELECT distillation_type, statement, confidence FROM distillations \
+         WHERE confidence > 0.7 \
+         ORDER BY confidence DESC LIMIT 2",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(rows) if !rows.is_empty() => {
+            output.push_str("**Risk Flags:**\n");
+            for (dtype, statement, confidence) in &rows {
+                let first_line = statement.lines().next().unwrap_or(statement);
+                output.push_str(&format!(
+                    "- [{}] {} (confidence: {:.2})\n",
+                    dtype, first_line, confidence
+                ));
+            }
+            output.push('\n');
+            has_content = true;
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to query distillations for bulletin");
+        }
+        _ => {}
+    }
+
+    if has_content {
+        format!("### Learning Insights\n\n{}", output)
+    } else {
+        String::new()
+    }
+}
+
 /// Generate a memory bulletin and store it in RuntimeConfig.
 ///
 /// Programmatically queries the memory store across multiple dimensions
@@ -432,7 +528,14 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     let started = Instant::now();
 
     // Phase 1: Programmatically gather raw memory sections (no LLM needed)
-    let raw_sections = gather_bulletin_sections(deps).await;
+    let mut raw_sections = gather_bulletin_sections(deps).await;
+
+    // Phase 1b: Append learning insights if available
+    let learning_section = gather_learning_sections(deps).await;
+    if !learning_section.is_empty() {
+        raw_sections.push_str(&learning_section);
+    }
+
     let section_count = raw_sections.matches("### ").count();
 
     if raw_sections.is_empty() {

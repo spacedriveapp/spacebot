@@ -1,0 +1,38 @@
+id: research
+name: Research Intelligence
+triggers:
+  - event: tool_event
+    domain: web_search
+  - event: tool_event
+    domain: browser
+  - event: tool_event
+    domain: file
+  - event: tool_event
+    pattern: "(?i)(shell|exec)"
+    domain: search
+  - event: worker_complete
+    pattern: "(?i)(research|investigate|look.?up|find|rg|grep)"
+observations:
+  - field_name: source_quality
+    field_type: float
+    description: Estimated reliability of information sources consulted (0.0–1.0)
+  - field_name: search_strategy
+    field_type: string
+    description: Approach used to locate information (e.g. broad-then-narrow, exact-term, domain-filtered)
+  - field_name: query_effectiveness
+    field_type: float
+    description: Ratio of useful results to total queries issued for a given research task (0.0–1.0)
+success_criteria:
+  - Fewer redundant or low-yield queries over time
+  - Higher-quality sources prioritised in subsequent searches
+  - Research tasks completed with fewer total tool calls
+human_benefit: Helps the agent find accurate information faster by learning which search strategies and sources produce reliable results
+harm_avoidance:
+  - Never treat a single source as authoritative without corroboration
+  - Never persist or surface personally identifiable information found during web searches
+  - Never use learned source preferences to suppress contradictory evidence
+risk_level: low
+evolution:
+  auto_deprecate: true
+  min_observations: 15
+  min_confidence: 0.55
