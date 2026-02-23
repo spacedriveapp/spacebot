@@ -1036,14 +1036,20 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                             // OpenAI expects arguments as a JSON string
                             let args_string = serde_json::to_string(&tc.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
-                            tool_calls.push(serde_json::json!({
+                            let mut tool_call_json = serde_json::json!({
                                 "id": tc.id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.function.name,
                                     "arguments": args_string,
                                 }
-                            }));
+                            });
+                            // Gemini 2.5+ thinking models require thought_signature
+                            // to be echoed back in the conversation history.
+                            if let Some(ref sig) = tc.signature {
+                                tool_call_json["thought_signature"] = serde_json::json!(sig);
+                            }
+                            tool_calls.push(tool_call_json);
                         }
                         _ => {}
                     }
@@ -1232,7 +1238,12 @@ fn truncate_body(body: &str) -> &str {
 
 // --- Response parsing ---
 
-fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> ToolCall {
+fn make_tool_call(
+    id: String,
+    name: String,
+    arguments: serde_json::Value,
+    signature: Option<String>,
+) -> ToolCall {
     ToolCall {
         id,
         call_id: None,
@@ -1240,7 +1251,7 @@ fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> Too
             name: name.trim().to_string(),
             arguments,
         },
-        signature: None,
+        signature,
         additional_params: None,
     }
 }
@@ -1265,7 +1276,7 @@ fn parse_anthropic_response(
                 let name = block["name"].as_str().unwrap_or("").to_string();
                 let arguments = block["input"].clone();
                 assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                    id, name, arguments,
+                    id, name, arguments, None,
                 )));
             }
             Some("thinking") => {
@@ -1353,8 +1364,13 @@ fn parse_openai_response(
                 .and_then(|raw| serde_json::from_str(raw).ok())
                 .or_else(|| arguments_field.as_object().map(|_| arguments_field.clone()))
                 .unwrap_or(serde_json::json!({}));
+            // Gemini 2.5+ thinking models return a thought_signature that must
+            // be echoed back on subsequent turns, otherwise the API rejects with 400.
+            let signature = tc["thought_signature"]
+                .as_str()
+                .map(|s| s.to_string());
             assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                id, name, arguments,
+                id, name, arguments, signature,
             )));
         }
     }
@@ -1424,7 +1440,7 @@ fn parse_openai_responses_response(
                     .unwrap_or(serde_json::json!({}));
 
                 assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                    call_id, name, arguments,
+                    call_id, name, arguments, None,
                 )));
             }
             _ => {}
