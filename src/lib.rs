@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod hooks;
 pub mod identity;
+pub mod learning;
 pub mod llm;
 pub mod mcp;
 pub mod memory;

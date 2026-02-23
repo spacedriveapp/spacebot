@@ -1603,6 +1603,27 @@ async fn initialize_agents(
         tracing::info!(agent_id = %agent_id, "cortex association loop started");
     }
 
+    // Start learning engine loops for each agent
+    for (agent_id, agent) in agents.iter() {
+        let learning_config = (**agent.deps.runtime_config.learning.load()).clone();
+        if learning_config.enabled {
+            match spacebot::learning::LearningStore::connect(&agent.config.learning_db_path()).await
+            {
+                Ok(learning_store) => {
+                    let handle = spacebot::learning::spawn_learning_loop(
+                        agent.deps.clone(),
+                        learning_store,
+                    );
+                    cortex_handles.push(handle);
+                    tracing::info!(agent_id = %agent_id, "learning engine started");
+                }
+                Err(error) => {
+                    tracing::error!(agent_id = %agent_id, %error, "failed to connect learning.db, learning engine disabled");
+                }
+            }
+        }
+    }
+
     // Create cortex chat sessions for each agent
     {
         let mut sessions = std::collections::HashMap::new();

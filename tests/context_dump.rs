@@ -190,6 +190,7 @@ async fn dump_channel_context() {
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
         reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
+        current_trace_id: Arc::new(tokio::sync::RwLock::new(None)),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -401,6 +402,7 @@ async fn dump_all_contexts() {
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
         reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
+        current_trace_id: Arc::new(tokio::sync::RwLock::new(None)),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();

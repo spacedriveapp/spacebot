@@ -24,6 +24,9 @@ pub enum Error {
     Agent(Box<AgentError>),
 
     #[error(transparent)]
+    Learning(Box<crate::learning::LearningError>),
+
+    #[error(transparent)]
     Secrets(Box<SecretsError>),
 
     #[error(transparent)]
@@ -62,6 +65,11 @@ impl From<MemoryError> for Error {
 impl From<AgentError> for Error {
     fn from(e: AgentError) -> Self {
         Error::Agent(Box::new(e))
+    }
+}
+impl From<crate::learning::LearningError> for Error {
+    fn from(e: crate::learning::LearningError) -> Self {
+        Error::Learning(Box::new(e))
     }
 }
 impl From<SecretsError> for Error {

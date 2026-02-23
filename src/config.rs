@@ -255,6 +255,7 @@ pub struct DefaultsConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub learning: crate::learning::LearningConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
@@ -539,6 +540,7 @@ pub struct AgentConfig {
     pub coalesce: Option<CoalesceConfig>,
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
+    pub learning: Option<crate::learning::LearningConfig>,
     pub browser: Option<BrowserConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
@@ -584,6 +586,7 @@ pub struct ResolvedAgentConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub learning: crate::learning::LearningConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
@@ -607,6 +610,7 @@ impl Default for DefaultsConfig {
             coalesce: CoalesceConfig::default(),
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
+            learning: crate::learning::LearningConfig::default(),
             browser: BrowserConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
@@ -652,6 +656,7 @@ impl AgentConfig {
             coalesce: self.coalesce.unwrap_or(defaults.coalesce),
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
+            learning: self.learning.clone().unwrap_or_else(|| defaults.learning.clone()),
             browser: self
                 .browser
                 .clone()
@@ -681,6 +686,9 @@ impl ResolvedAgentConfig {
     }
     pub fn redb_path(&self) -> PathBuf {
         self.data_dir.join("config.redb")
+    }
+    pub fn learning_db_path(&self) -> PathBuf {
+        self.data_dir.join("learning.db")
     }
     pub fn history_backfill_count(&self) -> usize {
         self.history_backfill_count
@@ -1431,6 +1439,7 @@ struct TomlDefaultsConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    learning: Option<TomlLearningConfig>,
     browser: Option<TomlBrowserConfig>,
     #[serde(default)]
     mcp: Vec<TomlMcpServerConfig>,
@@ -1504,6 +1513,17 @@ struct TomlCortexConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlLearningConfig {
+    enabled: Option<bool>,
+    tick_interval_secs: Option<u64>,
+    batch_interval_secs: Option<u64>,
+    advisory_budget_ms: Option<u64>,
+    owner_user_ids: Option<Vec<String>>,
+    cold_start_episodes: Option<u64>,
+    stale_episode_timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -1566,6 +1586,7 @@ struct TomlAgentConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    learning: Option<TomlLearningConfig>,
     browser: Option<TomlBrowserConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
@@ -2174,6 +2195,7 @@ impl Config {
             coalesce: None,
             ingestion: None,
             cortex: None,
+            learning: None,
             browser: None,
             mcp: None,
             brave_search_key: None,
@@ -2639,6 +2661,34 @@ impl Config {
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
                 })
                 .unwrap_or(base_defaults.cortex),
+            learning: toml
+                .defaults
+                .learning
+                .map(|l| {
+                    let base = &base_defaults.learning;
+                    crate::learning::LearningConfig {
+                        enabled: l.enabled.unwrap_or(base.enabled),
+                        tick_interval_secs: l
+                            .tick_interval_secs
+                            .unwrap_or(base.tick_interval_secs),
+                        batch_interval_secs: l
+                            .batch_interval_secs
+                            .unwrap_or(base.batch_interval_secs),
+                        advisory_budget_ms: l
+                            .advisory_budget_ms
+                            .unwrap_or(base.advisory_budget_ms),
+                        owner_user_ids: l
+                            .owner_user_ids
+                            .unwrap_or_else(|| base.owner_user_ids.clone()),
+                        cold_start_episodes: l
+                            .cold_start_episodes
+                            .unwrap_or(base.cold_start_episodes),
+                        stale_episode_timeout_secs: l
+                            .stale_episode_timeout_secs
+                            .unwrap_or(base.stale_episode_timeout_secs),
+                    }
+                })
+                .unwrap_or_else(|| base_defaults.learning.clone()),
             browser: toml
                 .defaults
                 .browser
@@ -2814,6 +2864,30 @@ impl Config {
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
                     }),
+                    learning: a.learning.map(|l| {
+                        let base = &defaults.learning;
+                        crate::learning::LearningConfig {
+                            enabled: l.enabled.unwrap_or(base.enabled),
+                            tick_interval_secs: l
+                                .tick_interval_secs
+                                .unwrap_or(base.tick_interval_secs),
+                            batch_interval_secs: l
+                                .batch_interval_secs
+                                .unwrap_or(base.batch_interval_secs),
+                            advisory_budget_ms: l
+                                .advisory_budget_ms
+                                .unwrap_or(base.advisory_budget_ms),
+                            owner_user_ids: l
+                                .owner_user_ids
+                                .unwrap_or_else(|| base.owner_user_ids.clone()),
+                            cold_start_episodes: l
+                                .cold_start_episodes
+                                .unwrap_or(base.cold_start_episodes),
+                            stale_episode_timeout_secs: l
+                                .stale_episode_timeout_secs
+                                .unwrap_or(base.stale_episode_timeout_secs),
+                        }
+                    }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -2860,6 +2934,7 @@ impl Config {
                 coalesce: None,
                 ingestion: None,
                 cortex: None,
+            learning: None,
                 browser: None,
                 mcp: None,
                 brave_search_key: None,
@@ -3085,6 +3160,7 @@ pub struct RuntimeConfig {
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cron_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
+    pub learning: ArcSwap<crate::learning::LearningConfig>,
     /// Cached memory bulletin generated by the cortex. Injected into every
     /// channel's system prompt. Empty string until the first cortex run.
     pub memory_bulletin: ArcSwap<String>,
@@ -3138,6 +3214,7 @@ impl RuntimeConfig {
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
+            learning: ArcSwap::from_pointee(agent_config.learning.clone()),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -3209,6 +3286,7 @@ impl RuntimeConfig {
             .store(Arc::new(resolved.brave_search_key));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
+        self.learning.store(Arc::new(resolved.learning));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
