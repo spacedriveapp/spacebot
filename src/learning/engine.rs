@@ -628,14 +628,14 @@ async fn handle_event(
 fn category_from_signal(signal: &super::signals::CognitiveSignal) -> super::meta::InsightCategory {
     use super::signals::CognitivePattern;
 
-    for pattern in &signal.detected_patterns {
-        match pattern {
-            CognitivePattern::Preference => return super::meta::InsightCategory::UserModel,
-            CognitivePattern::Decision => return super::meta::InsightCategory::Reasoning,
-            CognitivePattern::Correction => return super::meta::InsightCategory::SelfAwareness,
-            CognitivePattern::Reasoning => return super::meta::InsightCategory::Reasoning,
-            CognitivePattern::Remember => return super::meta::InsightCategory::Context,
-        }
+    if let Some(pattern) = signal.detected_patterns.first() {
+        return match pattern {
+            CognitivePattern::Preference => super::meta::InsightCategory::UserModel,
+            CognitivePattern::Decision => super::meta::InsightCategory::Reasoning,
+            CognitivePattern::Correction => super::meta::InsightCategory::SelfAwareness,
+            CognitivePattern::Reasoning => super::meta::InsightCategory::Reasoning,
+            CognitivePattern::Remember => super::meta::InsightCategory::Context,
+        };
     }
 
     // Fall back to domain detection.

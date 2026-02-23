@@ -46,6 +46,7 @@ impl LearningStore {
     async fn run_migrations(pool: &SqlitePool) -> Result<(), LearningError> {
         sqlx::raw_sql(SCHEMA_V1).execute(pool).await?;
         sqlx::raw_sql(SCHEMA_V2).execute(pool).await?;
+        sqlx::raw_sql(SCHEMA_V3).execute(pool).await?;
         Ok(())
     }
 
@@ -335,5 +336,154 @@ CREATE TABLE IF NOT EXISTS contradictions (
     resolution TEXT,
     similarity_score REAL,
     created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+"#;
+
+/// Milestone 3 schema additions: advisory gating, domain chips, control plane,
+/// evidence store, truth ledger, tuneables, advisory packets, quarantine,
+/// prefetch queue, chip tables.
+const SCHEMA_V3: &str = r#"
+-- Runtime tuneables (hot-reloadable key-value configuration)
+CREATE TABLE IF NOT EXISTS tuneables (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    description TEXT,
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Advisory packets (gated advice with lifecycle tracking)
+CREATE TABLE IF NOT EXISTS advisory_packets (
+    id TEXT PRIMARY KEY,
+    intent_family TEXT,
+    tool_name TEXT,
+    phase TEXT,
+    context_key TEXT,
+    advice_text TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    authority_level TEXT NOT NULL,
+    score REAL NOT NULL,
+    usage_count INTEGER DEFAULT 0,
+    emit_count INTEGER DEFAULT 0,
+    deliver_count INTEGER DEFAULT 0,
+    helpful_count INTEGER DEFAULT 0,
+    unhelpful_count INTEGER DEFAULT 0,
+    noisy_count INTEGER DEFAULT 0,
+    effectiveness_score REAL DEFAULT 0.5,
+    last_surfaced_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_packets_lookup ON advisory_packets(intent_family, tool_name, phase);
+CREATE INDEX IF NOT EXISTS idx_packets_effectiveness ON advisory_packets(effectiveness_score);
+
+-- Advisory quarantine (audit trail for dropped/suppressed advisories)
+CREATE TABLE IF NOT EXISTS advisory_quarantine (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    quality_score REAL,
+    readiness_score REAL,
+    metadata TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_quarantine_stage ON advisory_quarantine(stage, created_at);
+
+-- Prefetch queue (pre-generate advisory packets during idle time)
+CREATE TABLE IF NOT EXISTS prefetch_queue (
+    id TEXT PRIMARY KEY,
+    intent_family TEXT NOT NULL,
+    tool_name TEXT NOT NULL,
+    tool_operation TEXT,
+    phase TEXT,
+    priority REAL NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Tuneables snapshots (auto-tuner rollback history)
+CREATE TABLE IF NOT EXISTS tuneables_snapshots (
+    id TEXT PRIMARY KEY,
+    snapshot TEXT NOT NULL,
+    reason TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- Evidence store (tool outputs, diffs, test results, error traces)
+CREATE TABLE IF NOT EXISTS evidence (
+    id TEXT PRIMARY KEY,
+    evidence_type TEXT NOT NULL,
+    content TEXT NOT NULL,
+    episode_id TEXT,
+    tool_name TEXT,
+    retention_hours INTEGER NOT NULL,
+    compressed INTEGER DEFAULT 0,
+    expires_at TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_evidence_episode ON evidence(episode_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_expires ON evidence(expires_at);
+
+-- Truth ledger (claim lifecycle tracking)
+CREATE TABLE IF NOT EXISTS truth_ledger (
+    id TEXT PRIMARY KEY,
+    claim TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'claim',
+    evidence_level TEXT NOT NULL DEFAULT 'none',
+    reference_count INTEGER DEFAULT 0,
+    source_insight_id TEXT,
+    last_validated_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_truth_status ON truth_ledger(status, evidence_level);
+
+-- Domain chip observations (per-chip namespaced storage)
+CREATE TABLE IF NOT EXISTS chip_observations (
+    id TEXT PRIMARY KEY,
+    chip_id TEXT NOT NULL,
+    field_name TEXT NOT NULL,
+    field_type TEXT NOT NULL,
+    value TEXT NOT NULL,
+    episode_id TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chip_obs ON chip_observations(chip_id, created_at);
+
+-- Domain chip insights (scored and tiered)
+CREATE TABLE IF NOT EXISTS chip_insights (
+    id TEXT PRIMARY KEY,
+    chip_id TEXT NOT NULL,
+    content TEXT NOT NULL,
+    scores TEXT NOT NULL,
+    total_score REAL NOT NULL,
+    promotion_tier TEXT,
+    merged INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_chip_insights ON chip_insights(chip_id, total_score);
+
+-- Domain chip predictions
+CREATE TABLE IF NOT EXISTS chip_predictions (
+    id TEXT PRIMARY KEY,
+    chip_id TEXT NOT NULL,
+    prediction TEXT NOT NULL,
+    outcome TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    resolved_at TEXT
+);
+
+-- Domain chip state (per-chip lifecycle tracking)
+CREATE TABLE IF NOT EXISTS chip_state (
+    chip_id TEXT PRIMARY KEY,
+    observation_count INTEGER DEFAULT 0,
+    success_rate REAL DEFAULT 0.5,
+    status TEXT NOT NULL DEFAULT 'active',
+    confidence REAL DEFAULT 0.5,
+    last_triggered_at TEXT,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 "#;
