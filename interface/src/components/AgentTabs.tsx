@@ -18,7 +18,7 @@ export function AgentTabs({ agentId }: { agentId: string }) {
 	const matchRoute = useMatchRoute();
 
 	return (
-		<div className="relative flex h-12 items-stretch border-b border-app-line bg-app-darkBox/30 px-6">
+		<div className="relative flex h-12 items-stretch overflow-x-auto no-scrollbar border-b border-app-line bg-app-darkBox/30 px-6">
 			{tabs.map((tab) => {
 				const isActive = matchRoute({
 					to: tab.to,

@@ -36,7 +36,7 @@ function RootLayout() {
 				collapsed={sidebarCollapsed}
 				onToggle={() => setSidebarCollapsed(!sidebarCollapsed)}
 			/>
-			<div className="flex flex-1 flex-col overflow-hidden">
+			<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
 				<ConnectionBanner state={connectionState} hasData={hasData} />
 				<UpdateBanner />
 				<SetupBanner />
