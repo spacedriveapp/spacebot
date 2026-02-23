@@ -1867,30 +1867,87 @@ async fn download_attachments(
     parts
 }
 
+/// Download raw bytes from an attachment URL, including auth if present.
+///
+/// When `auth_header` is set (Slack), uses a no-redirect client and manually
+/// follows redirects so the `Authorization` header isn't silently stripped on
+/// cross-origin redirects. For public URLs (Discord/Telegram), uses a plain GET.
+async fn download_attachment_bytes(
+    http: &reqwest::Client,
+    attachment: &crate::Attachment,
+) -> std::result::Result<Vec<u8>, String> {
+    if attachment.auth_header.is_some() {
+        download_attachment_bytes_with_auth(attachment).await
+    } else {
+        let response = http
+            .get(&attachment.url)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !response.status().is_success() {
+            return Err(format!("HTTP {}", response.status()));
+        }
+        response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Slack-specific download: manually follows redirects to preserve the auth header.
+async fn download_attachment_bytes_with_auth(
+    attachment: &crate::Attachment,
+) -> std::result::Result<Vec<u8>, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| format!("failed to build HTTP client: {e}"))?;
+
+    let auth = attachment.auth_header.as_deref().unwrap_or_default();
+    let mut url = attachment.url.clone();
+
+    for _ in 0..5 {
+        let response = client
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        let status = response.status();
+
+        if status.is_redirection() {
+            if let Some(location) = response.headers().get(reqwest::header::LOCATION) {
+                url = location.to_str().unwrap_or_default().to_string();
+                continue;
+            }
+            return Err(format!("redirect without Location header ({})", status));
+        }
+
+        if !status.is_success() {
+            return Err(format!("HTTP {}", status));
+        }
+
+        return response
+            .bytes()
+            .await
+            .map(|b| b.to_vec())
+            .map_err(|e| e.to_string());
+    }
+
+    Err("too many redirects".into())
+}
+
 /// Download an image attachment and encode it as base64 for the LLM.
 async fn download_image_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let mut request = http.get(&attachment.url);
-    if let Some(ref auth) = attachment.auth_header {
-        request = request.header(reqwest::header::AUTHORIZATION, auth);
-    }
-    let response = match request.send().await {
-        Ok(r) => r,
-        Err(error) => {
-            tracing::warn!(%error, filename = %attachment.filename, "failed to download image");
-            return UserContent::text(format!(
-                "[Failed to download image: {}]",
-                attachment.filename
-            ));
-        }
-    };
-
-    let bytes = match response.bytes().await {
+    let bytes = match download_attachment_bytes(http, attachment).await {
         Ok(b) => b,
         Err(error) => {
-            tracing::warn!(%error, filename = %attachment.filename, "failed to read image bytes");
+            tracing::warn!(%error, filename = %attachment.filename, "failed to download image");
             return UserContent::text(format!(
                 "[Failed to download image: {}]",
                 attachment.filename
@@ -1918,25 +1975,10 @@ async fn transcribe_audio_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let mut request = http.get(&attachment.url);
-    if let Some(ref auth) = attachment.auth_header {
-        request = request.header(reqwest::header::AUTHORIZATION, auth);
-    }
-    let response = match request.send().await {
-        Ok(r) => r,
-        Err(error) => {
-            tracing::warn!(%error, filename = %attachment.filename, "failed to download audio");
-            return UserContent::text(format!(
-                "[Failed to download audio: {}]",
-                attachment.filename
-            ));
-        }
-    };
-
-    let bytes = match response.bytes().await {
+    let bytes = match download_attachment_bytes(http, attachment).await {
         Ok(b) => b,
         Err(error) => {
-            tracing::warn!(%error, filename = %attachment.filename, "failed to read audio bytes");
+            tracing::warn!(%error, filename = %attachment.filename, "failed to download audio");
             return UserContent::text(format!(
                 "[Failed to download audio: {}]",
                 attachment.filename
@@ -2018,7 +2060,7 @@ async fn transcribe_audio_attachment(
         "temperature": 0
     });
 
-    let response = match http
+    let response = match deps.llm_manager.http_client()
         .post(&endpoint)
         .header("authorization", format!("Bearer {}", provider.api_key))
         .header("content-type", "application/json")
@@ -2146,12 +2188,8 @@ async fn download_text_attachment(
     http: &reqwest::Client,
     attachment: &crate::Attachment,
 ) -> UserContent {
-    let mut request = http.get(&attachment.url);
-    if let Some(ref auth) = attachment.auth_header {
-        request = request.header(reqwest::header::AUTHORIZATION, auth);
-    }
-    let response = match request.send().await {
-        Ok(r) => r,
+    let bytes = match download_attachment_bytes(http, attachment).await {
+        Ok(b) => b,
         Err(error) => {
             tracing::warn!(%error, filename = %attachment.filename, "failed to download text file");
             return UserContent::text(format!(
@@ -2161,13 +2199,7 @@ async fn download_text_attachment(
         }
     };
 
-    let content = match response.text().await {
-        Ok(c) => c,
-        Err(error) => {
-            tracing::warn!(%error, filename = %attachment.filename, "failed to read text file");
-            return UserContent::text(format!("[Failed to read file: {}]", attachment.filename));
-        }
-    };
+    let content = String::from_utf8_lossy(&bytes).into_owned();
 
     // Truncate very large files to avoid blowing up context
     let truncated = if content.len() > 50_000 {
