@@ -132,7 +132,7 @@ pub(super) async fn get_distillations(
             query
                 .distillation_type
                 .as_deref()
-                .map_or(true, |t| dtype == t)
+                .is_none_or(|t| dtype == t)
         })
         .map(|row| DistillationResponse {
             id: row.get("id"),
@@ -451,7 +451,7 @@ pub(super) async fn get_insights(
             query
                 .category
                 .as_deref()
-                .map_or(true, |c| category == c)
+                .is_none_or(|c| category == c)
         })
         .map(|row| InsightResponse {
             id: row.get("id"),
@@ -802,7 +802,7 @@ pub(super) async fn get_metrics_history(
         return agent_not_found!();
     };
 
-    let days = query.days.max(1).min(365);
+    let days = query.days.clamp(1, 365);
     let cutoff = format!("-{days} days");
 
     let rows = if let Some(metric_name) = query.metric.as_deref() {
@@ -985,11 +985,11 @@ pub(super) async fn get_evidence(
             let type_ok = query
                 .evidence_type
                 .as_deref()
-                .map_or(true, |t| etype == t);
+                .is_none_or(|t| etype == t);
             let episode_ok = query
                 .episode_id
                 .as_deref()
-                .map_or(true, |e| epid.as_deref() == Some(e));
+                .is_none_or(|e| epid.as_deref() == Some(e));
             type_ok && episode_ok
         })
         .map(|row| EvidenceResponse {
@@ -1069,11 +1069,11 @@ pub(super) async fn get_truth(
         .filter(|row| {
             let status: String = row.get("status");
             let evidence_level: String = row.get("evidence_level");
-            let status_ok = query.status.as_deref().map_or(true, |s| status == s);
+            let status_ok = query.status.as_deref().is_none_or(|s| status == s);
             let evidence_ok = query
                 .evidence_level
                 .as_deref()
-                .map_or(true, |e| evidence_level == e);
+                .is_none_or(|e| evidence_level == e);
             status_ok && evidence_ok
         })
         .map(|row| TruthResponse {

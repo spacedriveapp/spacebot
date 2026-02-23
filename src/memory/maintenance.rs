@@ -65,16 +65,14 @@ pub fn resolve_decay_rate(
     source: Option<&str>,
 ) -> f32 {
     // 1. Learning-category tag in source field.
-    if let Some(source) = source {
-        if let Some(category) = source
+    if let Some(source) = source
+        && let Some(category) = source
             .split(':')
             .nth(1)
             .filter(|_| source.starts_with("learning:"))
-        {
-            if let Some(&rate) = config.category_decay_rates.get(category) {
-                return rate;
-            }
-        }
+        && let Some(&rate) = config.category_decay_rates.get(category)
+    {
+        return rate;
     }
 
     // 2. MemoryType mapping.
