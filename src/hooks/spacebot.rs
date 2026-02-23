@@ -13,6 +13,7 @@ pub struct SpacebotHook {
     process_type: ProcessType,
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
+    trace_id: Option<String>,
 }
 
 impl SpacebotHook {
@@ -30,7 +31,14 @@ impl SpacebotHook {
             process_type,
             channel_id,
             event_tx,
+            trace_id: None,
         }
+    }
+
+    /// Set the trace ID for correlating events back to the originating user message.
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.trace_id = trace_id;
+        self
     }
 
     /// Send a status update event.
@@ -183,7 +191,7 @@ where
         &self,
         tool_name: &str,
         _tool_call_id: Option<String>,
-        _internal_call_id: &str,
+        internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
         // Scan tool arguments for secrets before execution
@@ -199,12 +207,18 @@ where
             };
         }
 
+        // Build a sanitized args summary for learning (capped at 4KB, no raw file contents).
+        let args_summary = sanitize_args_summary(tool_name, args);
+
         // Send event without blocking
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
             tool_name: tool_name.to_string(),
+            call_id: internal_call_id.to_string(),
+            trace_id: self.trace_id.clone(),
+            args_summary,
         };
         let _ = self.event_tx.send(event);
 
@@ -216,7 +230,7 @@ where
 
         #[cfg(feature = "metrics")]
         if let Ok(mut timers) = TOOL_CALL_TIMERS.lock() {
-            timers.insert(_internal_call_id.to_string(), std::time::Instant::now());
+            timers.insert(internal_call_id.to_string(), std::time::Instant::now());
         }
 
         ToolCallHookAction::Continue
@@ -226,8 +240,8 @@ where
         &self,
         tool_name: &str,
         _tool_call_id: Option<String>,
-        _internal_call_id: &str,
-        _args: &str,
+        internal_call_id: &str,
+        args: &str,
         result: &str,
     ) -> HookAction {
         // Scan for potential leaks in tool output and terminate if found.
@@ -247,6 +261,9 @@ where
             };
         }
 
+        // Duplicate args_summary for robustness if ToolStarted was missed due to lag.
+        let args_summary = sanitize_args_summary(tool_name, args);
+
         // Cap the result stored in the broadcast event to avoid blowing up
         // event subscribers with multi-MB tool results.
         let capped_result =
@@ -256,6 +273,9 @@ where
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
             tool_name: tool_name.to_string(),
+            call_id: internal_call_id.to_string(),
+            trace_id: self.trace_id.clone(),
+            args_summary,
             result: capped_result,
         };
         let _ = self.event_tx.send(event);
@@ -277,7 +297,7 @@ where
             if let Some(start) = TOOL_CALL_TIMERS
                 .lock()
                 .ok()
-                .and_then(|mut timers| timers.remove(_internal_call_id))
+                .and_then(|mut timers| timers.remove(internal_call_id))
             {
                 metrics
                     .tool_call_duration_seconds
@@ -295,5 +315,49 @@ where
         }
 
         HookAction::Continue
+    }
+}
+
+/// Max size for args_summary JSON payloads in tool events.
+const MAX_ARGS_SUMMARY_BYTES: usize = 4096;
+
+/// Redacted field names that should never appear in args_summary.
+const REDACTED_FIELDS: &[&str] = &["content", "data", "file_content", "body"];
+
+/// Build a sanitized, size-capped JSON summary of tool arguments for learning.
+///
+/// Strips large content fields (file writes, raw bodies) and caps total size
+/// so events stay lightweight. Returns None if args can't be parsed as JSON.
+fn sanitize_args_summary(tool_name: &str, args: &str) -> Option<serde_json::Value> {
+    let mut parsed: serde_json::Value = serde_json::from_str(args).ok()?;
+
+    // For tools that write files, redact raw content to avoid persisting secrets
+    // or bloating the event stream.
+    if matches!(tool_name, "file" | "file_write" | "shell" | "exec") {
+        if let Some(object) = parsed.as_object_mut() {
+            for field in REDACTED_FIELDS {
+                if let Some(value) = object.get(*field) {
+                    if value.is_string() {
+                        let length = value.as_str().map_or(0, |s| s.len());
+                        object.insert(
+                            (*field).to_string(),
+                            serde_json::Value::String(format!("[{length} bytes redacted]")),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    // Cap total serialized size
+    let serialized = serde_json::to_string(&parsed).ok()?;
+    if serialized.len() > MAX_ARGS_SUMMARY_BYTES {
+        Some(serde_json::json!({
+            "_truncated": true,
+            "_tool": tool_name,
+            "_size": serialized.len(),
+        }))
+    } else {
+        Some(parsed)
     }
 }

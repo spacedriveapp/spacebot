@@ -207,6 +207,26 @@ pub fn create_branch_tool_server(
         .run()
 }
 
+/// Create a per-branch ToolServer with memory tools and event context for MemorySaved emissions.
+pub fn create_branch_tool_server_with_events(
+    memory_search: Arc<MemorySearch>,
+    conversation_logger: crate::conversation::history::ConversationLogger,
+    channel_store: crate::conversation::ChannelStore,
+    agent_id: AgentId,
+    event_tx: broadcast::Sender<ProcessEvent>,
+    channel_id: Option<ChannelId>,
+) -> ToolServerHandle {
+    ToolServer::new()
+        .tool(
+            MemorySaveTool::new(memory_search.clone())
+                .with_event_context(agent_id, event_tx, channel_id),
+        )
+        .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .run()
+}
+
 /// Create a per-worker ToolServer with task-appropriate tools.
 ///
 /// Each worker gets its own isolated ToolServer. The `set_status` tool is bound to

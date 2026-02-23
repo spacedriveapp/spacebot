@@ -71,6 +71,13 @@ impl Compactor {
                 "compaction triggered"
             );
 
+            // Emit CompactionTriggered for learning/cortex.
+            let _ = self.deps.event_tx.send(crate::ProcessEvent::CompactionTriggered {
+                agent_id: self.deps.agent_id.clone(),
+                channel_id: self.channel_id.clone(),
+                threshold_reached: usage,
+            });
+
             match action {
                 CompactionAction::EmergencyTruncate => {
                     // Emergency is synchronous — fast, no LLM

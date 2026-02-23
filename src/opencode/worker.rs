@@ -536,6 +536,7 @@ impl OpenCodeWorker {
             worker_id: self.id,
             channel_id: self.channel_id.clone(),
             status: status.to_string(),
+            trace_id: None,
         });
     }
 }

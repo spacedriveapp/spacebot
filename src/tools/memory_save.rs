@@ -17,12 +17,33 @@ const MAX_MEMORY_CONTENT_BYTES: usize = 50_000;
 #[derive(Debug, Clone)]
 pub struct MemorySaveTool {
     memory_search: Arc<MemorySearch>,
+    agent_id: Option<crate::AgentId>,
+    event_tx: Option<tokio::sync::broadcast::Sender<crate::ProcessEvent>>,
+    channel_id: Option<crate::ChannelId>,
 }
 
 impl MemorySaveTool {
     /// Create a new memory save tool.
     pub fn new(memory_search: Arc<MemorySearch>) -> Self {
-        Self { memory_search }
+        Self {
+            memory_search,
+            agent_id: None,
+            event_tx: None,
+            channel_id: None,
+        }
+    }
+
+    /// Set agent context for emitting MemorySaved events.
+    pub fn with_event_context(
+        mut self,
+        agent_id: crate::AgentId,
+        event_tx: tokio::sync::broadcast::Sender<crate::ProcessEvent>,
+        channel_id: Option<crate::ChannelId>,
+    ) -> Self {
+        self.agent_id = Some(agent_id);
+        self.event_tx = Some(event_tx);
+        self.channel_id = channel_id;
+        self
     }
 }
 
@@ -298,6 +319,15 @@ impl Tool for MemorySaveTool {
                 .memory_updates_total
                 .with_label_values(&["unknown", "save"])
                 .inc();
+        }
+
+        // Emit MemorySaved event for learning/cortex if event context is set.
+        if let (Some(agent_id), Some(event_tx)) = (&self.agent_id, &self.event_tx) {
+            let _ = event_tx.send(crate::ProcessEvent::MemorySaved {
+                agent_id: agent_id.clone(),
+                memory_id: memory.id.clone(),
+                channel_id: self.channel_id.clone(),
+            });
         }
 
         Ok(MemorySaveOutput {

@@ -57,6 +57,9 @@ pub struct ChannelState {
     pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
+    /// Trace ID of the current user message being processed. Set on each inbound
+    /// message, propagated to branches/workers spawned during that turn.
+    pub current_trace_id: Arc<RwLock<Option<String>>>,
 }
 
 impl ChannelState {
@@ -196,6 +199,7 @@ impl Channel {
             channel_store,
             screenshot_dir,
             logs_dir,
+            current_trace_id: Arc::new(RwLock::new(None)),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -669,6 +673,33 @@ impl Channel {
         } else {
             Vec::new()
         };
+
+        // Generate a trace_id for this user message so all downstream work
+        // (branches, workers, tool calls) can be correlated back to it.
+        let trace_id = if message.source != "system" {
+            let id = uuid::Uuid::new_v4().to_string();
+            *self.state.current_trace_id.write().await = Some(id.clone());
+
+            // Emit UserMessage event for learning/observability.
+            let _ = self.deps.event_tx.send(ProcessEvent::UserMessage {
+                agent_id: self.deps.agent_id.clone(),
+                channel_id: self.id.clone(),
+                conversation_id: message.conversation_id.clone(),
+                message_id: message.id.clone(),
+                content: raw_text.clone(),
+                sender_id: message.sender_id.clone(),
+                platform: message.source.clone(),
+                trace_id: id.clone(),
+            });
+
+            Some(id)
+        } else {
+            // System re-triggers inherit the current trace_id (if any)
+            self.state.current_trace_id.read().await.clone()
+        };
+
+        // Set trace_id on the hook so tool events carry it
+        self.hook = self.hook.clone().with_trace_id(trace_id);
 
         // Persist user messages (skip system re-triggers)
         if message.source != "system" {
@@ -1327,13 +1358,17 @@ async fn spawn_branch(
         h.clone()
     };
 
-    let tool_server = crate::tools::create_branch_tool_server(
+    let tool_server = crate::tools::create_branch_tool_server_with_events(
         state.deps.memory_search.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
+        state.deps.agent_id.clone(),
+        state.deps.event_tx.clone(),
+        Some(state.channel_id.clone()),
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
 
+    let trace_id = state.current_trace_id.read().await.clone();
     let branch = Branch::new(
         state.channel_id.clone(),
         description,
@@ -1342,7 +1377,8 @@ async fn spawn_branch(
         history,
         tool_server,
         branch_max_turns,
-    );
+    )
+    .with_trace_id(trace_id);
 
     let branch_id = branch.id;
     let prompt = prompt.to_owned();
@@ -1387,6 +1423,7 @@ async fn spawn_branch(
             channel_id: state.channel_id.clone(),
             description: status_label.to_string(),
             reply_to_message_id: *state.reply_target_message_id.read().await,
+            trace_id: state.current_trace_id.read().await.clone(),
         })
         .ok();
 
@@ -1504,6 +1541,7 @@ pub async fn spawn_worker_from_state(
             worker_id,
             channel_id: Some(state.channel_id.clone()),
             task: task.clone(),
+            trace_id: state.current_trace_id.read().await.clone(),
         })
         .ok();
 
@@ -1602,6 +1640,7 @@ pub async fn spawn_opencode_worker_from_state(
             worker_id,
             channel_id: Some(state.channel_id.clone()),
             task: opencode_task,
+            trace_id: state.current_trace_id.read().await.clone(),
         })
         .ok();
 
@@ -1626,8 +1665,23 @@ where
     F: std::future::Future<Output = std::result::Result<String, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
 {
+    spawn_worker_task_with_trace(worker_id, event_tx, agent_id, channel_id, None, future)
+}
+
+/// Like `spawn_worker_task` but with an explicit trace_id for learning correlation.
+fn spawn_worker_task_with_trace<F, E>(
+    worker_id: WorkerId,
+    event_tx: broadcast::Sender<ProcessEvent>,
+    agent_id: crate::AgentId,
+    channel_id: Option<ChannelId>,
+    trace_id: Option<String>,
+    future: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = std::result::Result<String, E>> + Send + 'static,
+    E: std::fmt::Display + Send + 'static,
+{
     tokio::spawn(async move {
-        #[cfg(feature = "metrics")]
         let worker_start = std::time::Instant::now();
 
         #[cfg(feature = "metrics")]
@@ -1636,13 +1690,16 @@ where
             .with_label_values(&[&*agent_id])
             .inc();
 
-        let (result_text, notify) = match future.await {
-            Ok(text) => (text, true),
+        let (result_text, notify, success) = match future.await {
+            Ok(text) => (text, true, true),
             Err(error) => {
                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                (format!("Worker failed: {error}"), true)
+                (format!("Worker failed: {error}"), true, false)
             }
         };
+
+        let duration_secs = worker_start.elapsed().as_secs_f64();
+
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -1653,7 +1710,7 @@ where
             metrics
                 .worker_duration_seconds
                 .with_label_values(&[&*agent_id, "builtin"])
-                .observe(worker_start.elapsed().as_secs_f64());
+                .observe(duration_secs);
         }
 
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
@@ -1662,6 +1719,9 @@ where
             channel_id,
             result: result_text,
             notify,
+            success,
+            duration_secs,
+            trace_id,
         });
     })
 }

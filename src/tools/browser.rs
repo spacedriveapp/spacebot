@@ -6,6 +6,7 @@
 
 
 use crate::config::BrowserConfig;
+use reqwest::Url;
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::ScreenshotParams;
@@ -17,7 +18,6 @@ use chromiumoxide_cdp::cdp::browser_protocol::input::{
 };
 use chromiumoxide_cdp::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt as _;
-use reqwest::Url;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;

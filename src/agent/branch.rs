@@ -29,6 +29,8 @@ pub struct Branch {
     pub tool_server: ToolServerHandle,
     /// Maximum LLM turns before the branch is forced to conclude.
     pub max_turns: usize,
+    /// Trace ID from the originating user message (if any).
+    pub trace_id: Option<String>,
 }
 
 impl Branch {
@@ -62,7 +64,15 @@ impl Branch {
             history,
             tool_server,
             max_turns,
+            trace_id: None,
         }
+    }
+
+    /// Set the trace ID for correlating this branch's events to the originating user message.
+    pub fn with_trace_id(mut self, trace_id: Option<String>) -> Self {
+        self.hook = self.hook.with_trace_id(trace_id.clone());
+        self.trace_id = trace_id;
+        self
     }
 
     /// Run the branch's LLM agent loop and return a conclusion.
@@ -158,6 +168,7 @@ impl Branch {
             branch_id: self.id,
             channel_id: self.channel_id.clone(),
             conclusion: conclusion.clone(),
+            trace_id: self.trace_id.clone(),
         });
 
         tracing::info!(branch_id = %self.id, "branch completed");

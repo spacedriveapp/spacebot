@@ -96,6 +96,7 @@ impl Tool for SetStatusTool {
             worker_id: self.worker_id,
             channel_id: self.channel_id.clone(),
             status: status.clone(),
+            trace_id: None,
         };
 
         let _ = self.event_tx.send(event);
@@ -120,6 +121,7 @@ pub fn set_status(
         worker_id,
         channel_id: None,
         status: status.into(),
+        trace_id: None,
     };
 
     let _ = event_tx.send(event);
