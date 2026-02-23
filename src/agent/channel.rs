@@ -1204,7 +1204,7 @@ impl Channel {
             "firing debounced retrigger"
         );
 
-        let retrigger_message = match self
+        let retrigger_message = self
             .deps
             .runtime_config
             .prompts
