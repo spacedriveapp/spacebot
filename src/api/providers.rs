@@ -3,9 +3,9 @@ use super::state::ApiState;
 use anyhow::Context as _;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::StatusCode;
-use axum::routing::get;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::Html;
+use reqwest::Url;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use serde::{Deserialize, Serialize};
@@ -14,14 +14,10 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::RwLock;
 
 const OPENAI_BROWSER_OAUTH_SESSION_TTL_SECS: i64 = 15 * 60;
-const OPENAI_BROWSER_OAUTH_CALLBACK_BIND: &str = "127.0.0.1:1455";
-const OPENAI_BROWSER_OAUTH_REDIRECT_URI: &str = "http://localhost:1455/auth/callback";
+const OPENAI_BROWSER_OAUTH_REDIRECT_PATH: &str = "/providers/openai/oauth/browser/callback";
 
 static OPENAI_BROWSER_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, BrowserOAuthSession>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
-static OPENAI_BROWSER_OAUTH_CALLBACK_SERVER: LazyLock<
-    RwLock<Option<BrowserOAuthCallbackServer>>,
-> = LazyLock::new(|| RwLock::new(None));
 
 #[derive(Clone, Debug)]
 struct BrowserOAuthSession {
@@ -37,10 +33,6 @@ enum BrowserOAuthSessionStatus {
     Pending,
     Completed(String),
     Failed(String),
-}
-
-struct BrowserOAuthCallbackServer {
-    join_handle: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Serialize)]
@@ -367,43 +359,64 @@ async fn prune_expired_browser_oauth_sessions() {
     sessions.retain(|_, session| session.created_at >= cutoff);
 }
 
-async fn ensure_openai_browser_oauth_callback_server(state: Arc<ApiState>) -> anyhow::Result<()> {
-    let mut callback_server = OPENAI_BROWSER_OAUTH_CALLBACK_SERVER.write().await;
-    if let Some(existing) = callback_server.as_ref() {
-        if existing.join_handle.is_finished() {
-            *callback_server = None;
-        } else {
-            return Ok(());
+fn resolve_browser_oauth_redirect_uri(headers: &HeaderMap) -> Option<String> {
+    if let Some(origin) = header_value(headers, axum::http::header::ORIGIN.as_str()) {
+        if let Ok(origin_url) = Url::parse(origin) {
+            let origin = origin_url.origin().ascii_serialization();
+            if origin != "null" {
+                return Some(format!("{origin}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"));
+            }
         }
     }
 
-    let listener = tokio::net::TcpListener::bind(OPENAI_BROWSER_OAUTH_CALLBACK_BIND)
-        .await
-        .with_context(|| {
-            format!(
-                "failed to bind local OAuth callback listener on {}",
-                OPENAI_BROWSER_OAUTH_CALLBACK_BIND
-            )
-        })?;
+    if let (Some(proto), Some(host)) = (
+        header_value(headers, "x-forwarded-proto"),
+        header_value(headers, "x-forwarded-host"),
+    ) {
+        let proto = first_header_value(proto);
+        let host = normalize_host(first_header_value(host));
+        return Some(format!(
+            "{proto}://{host}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"
+        ));
+    }
 
-    let app = axum::Router::new()
-        .route("/auth/callback", get(openai_browser_oauth_callback))
-        .with_state(state);
+    if let Some(host) = header_value(headers, "host") {
+        let host = normalize_host(host);
+        let scheme = if is_local_host(&host) { "http" } else { "https" };
+        return Some(format!(
+            "{scheme}://{host}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"
+        ));
+    }
 
-    let bind = OPENAI_BROWSER_OAUTH_CALLBACK_BIND.to_string();
-    let join_handle = tokio::spawn(async move {
-        tracing::info!(bind = %bind, "OpenAI browser OAuth callback listener started");
-        if let Err(error) = axum::serve(listener, app).await {
-            tracing::error!(
-                %error,
-                bind = %bind,
-                "OpenAI browser OAuth callback listener stopped"
-            );
-        }
-    });
+    None
+}
 
-    *callback_server = Some(BrowserOAuthCallbackServer { join_handle });
-    Ok(())
+fn header_value(headers: &HeaderMap, name: impl AsRef<str>) -> Option<&str> {
+    headers.get(name.as_ref()).and_then(|value| value.to_str().ok())
+}
+
+fn first_header_value(value: &str) -> &str {
+    value.split(',').next().map(str::trim).unwrap_or(value)
+}
+
+fn normalize_host(host: &str) -> String {
+    let host = host.trim();
+    let colon_count = host.matches(':').count();
+    if colon_count > 1 && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
+}
+
+fn is_local_host(host: &str) -> bool {
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .split(':')
+        .next()
+        .unwrap_or(host);
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn browser_oauth_success_html() -> String {
@@ -598,7 +611,7 @@ pub(super) async fn get_providers(
 }
 
 pub(super) async fn start_openai_browser_oauth(
-    State(state): State<Arc<ApiState>>,
+    headers: HeaderMap,
     Json(request): Json<OpenAiOAuthBrowserStartRequest>,
 ) -> Result<Json<OpenAiOAuthBrowserStartResponse>, StatusCode> {
     if request.model.trim().is_empty() {
@@ -621,28 +634,25 @@ pub(super) async fn start_openai_browser_oauth(
         }));
     };
 
-    if let Err(error) = ensure_openai_browser_oauth_callback_server(state.clone()).await {
+    let Some(redirect_uri) = resolve_browser_oauth_redirect_uri(&headers) else {
         return Ok(Json(OpenAiOAuthBrowserStartResponse {
             success: false,
-            message: format!(
-                "Failed to start local OAuth callback listener on {}: {}",
-                OPENAI_BROWSER_OAUTH_CALLBACK_BIND, error
-            ),
+            message: "Unable to determine OAuth callback URL. Check your Host/Origin headers."
+                .to_string(),
             authorization_url: None,
             state: None,
         }));
-    }
+    };
 
     prune_expired_browser_oauth_sessions().await;
-    let browser_authorization =
-        crate::openai_auth::start_browser_authorization(OPENAI_BROWSER_OAUTH_REDIRECT_URI);
+    let browser_authorization = crate::openai_auth::start_browser_authorization(&redirect_uri);
     let state_key = browser_authorization.state.clone();
 
     OPENAI_BROWSER_OAUTH_SESSIONS.write().await.insert(
         state_key.clone(),
         BrowserOAuthSession {
             pkce_verifier: browser_authorization.pkce_verifier,
-            redirect_uri: OPENAI_BROWSER_OAUTH_REDIRECT_URI.to_string(),
+            redirect_uri,
             model: chatgpt_model,
             created_at: chrono::Utc::now().timestamp(),
             status: BrowserOAuthSessionStatus::Pending,
