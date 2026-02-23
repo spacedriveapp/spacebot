@@ -89,7 +89,7 @@ impl ShellTool {
             }
         }
 
-        // Block access to secret environment variables
+        // Block access to secret environment variables via any expansion syntax
         for var in SECRET_ENV_VARS {
             if command.contains(&format!("${var}"))
                 || command.contains(&format!("${{{var}}}"))
@@ -99,6 +99,19 @@ impl ShellTool {
                     message: "Cannot access secret environment variables.".to_string(),
                     exit_code: -1,
                 });
+            }
+            // Block unbraced $VAR at word boundaries (covers `echo $SECRET` patterns)
+            let dollar_var = format!("${var}");
+            if let Some(pos) = command.find(&dollar_var) {
+                let after = pos + dollar_var.len();
+                let next_char = command[after..].chars().next();
+                // $VAR is a match if followed by non-alphanumeric/underscore or end-of-string
+                if next_char.is_none() || (!next_char.unwrap().is_alphanumeric() && next_char.unwrap() != '_') {
+                    return Err(ShellError {
+                        message: "Cannot access secret environment variables.".to_string(),
+                        exit_code: -1,
+                    });
+                }
             }
         }
 
@@ -128,6 +141,25 @@ impl ShellTool {
             }
         }
 
+        // Block shell builtins that dump all variables
+        for dump_cmd in ["set", "declare -p", "export -p", "compgen -e", "compgen -v"] {
+            let trimmed = command.trim();
+            if trimmed == dump_cmd
+                || trimmed.starts_with(&format!("{dump_cmd} "))
+                || trimmed.starts_with(&format!("{dump_cmd}|"))
+                || trimmed.starts_with(&format!("{dump_cmd}>"))
+                || trimmed.contains(&format!("| {dump_cmd}"))
+                || trimmed.contains(&format!("; {dump_cmd}"))
+                || trimmed.contains(&format!("&& {dump_cmd}"))
+            {
+                return Err(ShellError {
+                    message: "Cannot dump environment variables — they may contain secrets."
+                        .to_string(),
+                    exit_code: -1,
+                });
+            }
+        }
+
         // Block subshell/command substitution that could bypass string-level checks.
         // Backtick and $() let an attacker compose a blocked command dynamically.
         if command.contains('`')
@@ -149,6 +181,17 @@ impl ShellTool {
                 message: "eval and exec are not allowed.".to_string(),
                 exit_code: -1,
             });
+        }
+
+        // Block interpreter one-liners that can bypass shell-level restrictions
+        for interpreter in ["python3 -c", "python -c", "perl -e", "ruby -e", "node -e", "node --eval"] {
+            if command.contains(interpreter) {
+                return Err(ShellError {
+                    message: "Inline interpreter execution is not permitted — use script files instead."
+                        .to_string(),
+                    exit_code: -1,
+                });
+            }
         }
 
         // Block /proc entries and /dev paths that expose environment or fd contents

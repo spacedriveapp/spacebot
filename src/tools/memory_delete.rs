@@ -109,6 +109,12 @@ impl Tool for MemoryDeleteTool {
             .unwrap_or_default();
 
         if was_forgotten {
+            #[cfg(feature = "metrics")]
+            crate::telemetry::Metrics::global()
+                .memory_updates_total
+                .with_label_values(&["unknown", "forget"])
+                .inc();
+
             tracing::info!(
                 memory_id = %args.memory_id,
                 memory_type = %memory.memory_type,

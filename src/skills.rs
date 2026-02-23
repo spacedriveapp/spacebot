@@ -115,9 +115,9 @@ impl SkillSet {
     ///
     /// The channel sees skill names and descriptions but is instructed to
     /// delegate actual skill execution to workers.
-    pub fn render_channel_prompt(&self, prompt_engine: &crate::prompts::PromptEngine) -> String {
+    pub fn render_channel_prompt(&self, prompt_engine: &crate::prompts::PromptEngine) -> crate::error::Result<String> {
         if self.skills.is_empty() {
-            return String::new();
+            return Ok(String::new());
         }
 
         let mut sorted_skills: Vec<&Skill> = self.skills.values().collect();
@@ -132,9 +132,7 @@ impl SkillSet {
             })
             .collect();
 
-        prompt_engine
-            .render_skills_channel(skill_infos)
-            .expect("failed to render skills channel prompt")
+        prompt_engine.render_skills_channel(skill_infos)
     }
 
     /// Render the skills section for injection into a worker system prompt.
@@ -148,11 +146,13 @@ impl SkillSet {
     ) -> Option<String> {
         let skill = self.get(skill_name)?;
 
-        Some(
-            prompt_engine
-                .render_skills_worker(&skill.name, &skill.content)
-                .expect("failed to render skills worker prompt"),
-        )
+        match prompt_engine.render_skills_worker(&skill.name, &skill.content) {
+            Ok(rendered) => Some(rendered),
+            Err(error) => {
+                tracing::error!(%error, skill = %skill_name, "failed to render worker skill prompt");
+                None
+            }
+        }
     }
 
     /// Remove a skill by name.
@@ -435,7 +435,7 @@ mod tests {
     fn test_skill_set_channel_prompt_empty() {
         let set = SkillSet::default();
         let engine = crate::prompts::PromptEngine::new("en").unwrap();
-        assert!(set.render_channel_prompt(&engine).is_empty());
+        assert!(set.render_channel_prompt(&engine).unwrap().is_empty());
     }
 
     #[test]
@@ -454,7 +454,7 @@ mod tests {
         );
 
         let engine = crate::prompts::PromptEngine::new("en").unwrap();
-        let prompt = set.render_channel_prompt(&engine);
+        let prompt = set.render_channel_prompt(&engine).unwrap();
         assert!(prompt.contains("<available_skills>"));
         assert!(prompt.contains("<name>weather</name>"));
         assert!(prompt.contains("<description>Get weather forecasts</description>"));

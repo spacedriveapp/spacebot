@@ -64,6 +64,12 @@ pub(super) struct PlatformCredentials {
     twitch_username: Option<String>,
     #[serde(default)]
     twitch_oauth_token: Option<String>,
+    #[serde(default)]
+    twitch_client_id: Option<String>,
+    #[serde(default)]
+    twitch_client_secret: Option<String>,
+    #[serde(default)]
+    twitch_refresh_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -251,6 +257,9 @@ pub(super) async fn create_binding(
         }
         if let Some(username) = &credentials.twitch_username {
             let oauth_token = credentials.twitch_oauth_token.as_deref().unwrap_or("");
+            let client_id = credentials.twitch_client_id.as_deref().unwrap_or("");
+            let client_secret = credentials.twitch_client_secret.as_deref().unwrap_or("");
+            let refresh_token = credentials.twitch_refresh_token.as_deref().unwrap_or("");
             if !username.is_empty() && !oauth_token.is_empty() {
                 if doc.get("messaging").is_none() {
                     doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
@@ -267,6 +276,15 @@ pub(super) async fn create_binding(
                 twitch["enabled"] = toml_edit::value(true);
                 twitch["username"] = toml_edit::value(username.as_str());
                 twitch["oauth_token"] = toml_edit::value(oauth_token);
+                if !client_id.is_empty() {
+                    twitch["client_id"] = toml_edit::value(client_id);
+                }
+                if !client_secret.is_empty() {
+                    twitch["client_secret"] = toml_edit::value(client_secret);
+                }
+                if !refresh_token.is_empty() {
+                    twitch["refresh_token"] = toml_edit::value(refresh_token);
+                }
                 new_twitch_creds = Some((username.clone(), oauth_token.to_string()));
             }
         }
@@ -359,12 +377,16 @@ pub(super) async fn create_binding(
                         Some(existing) => existing.clone(),
                         None => {
                             drop(perms_guard);
+                            let Some(discord_config) = new_config
+                                .messaging
+                                .discord
+                                .as_ref()
+                            else {
+                                tracing::error!("discord config missing despite token being provided");
+                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                            };
                             let perms = crate::config::DiscordPermissions::from_config(
-                                new_config
-                                    .messaging
-                                    .discord
-                                    .as_ref()
-                                    .expect("discord config exists when token is provided"),
+                                discord_config,
                                 &new_config.bindings,
                             );
                             let arc_swap =
@@ -387,12 +409,16 @@ pub(super) async fn create_binding(
                         Some(existing) => existing.clone(),
                         None => {
                             drop(perms_guard);
+                            let Some(slack_config) = new_config
+                                .messaging
+                                .slack
+                                .as_ref()
+                            else {
+                                tracing::error!("slack config missing despite tokens being provided");
+                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                            };
                             let perms = crate::config::SlackPermissions::from_config(
-                                new_config
-                                    .messaging
-                                    .slack
-                                    .as_ref()
-                                    .expect("slack config exists when tokens are provided"),
+                                slack_config,
                                 &new_config.bindings,
                             );
                             let arc_swap =
@@ -427,12 +453,16 @@ pub(super) async fn create_binding(
 
             if let Some(token) = new_telegram_token {
                 let telegram_perms = {
+                    let Some(telegram_config) = new_config
+                        .messaging
+                        .telegram
+                        .as_ref()
+                    else {
+                        tracing::error!("telegram config missing despite token being provided");
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    };
                     let perms = crate::config::TelegramPermissions::from_config(
-                        new_config
-                            .messaging
-                            .telegram
-                            .as_ref()
-                            .expect("telegram config exists when token is provided"),
+                        telegram_config,
                         &new_config.bindings,
                     );
                     std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
@@ -445,11 +475,14 @@ pub(super) async fn create_binding(
             }
 
             if let Some((username, oauth_token)) = new_twitch_creds {
-                let twitch_config = new_config
+                let Some(twitch_config) = new_config
                     .messaging
                     .twitch
                     .as_ref()
-                    .expect("twitch config exists when credentials are provided");
+                else {
+                    tracing::error!("twitch config missing despite credentials being provided");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                };
                 let twitch_perms = {
                     let perms = crate::config::TwitchPermissions::from_config(
                         twitch_config,
@@ -457,9 +490,15 @@ pub(super) async fn create_binding(
                     );
                     std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
                 };
+                let instance_dir = state.instance_dir.load();
+                let token_path = instance_dir.join("twitch_token.json");
                 let adapter = crate::messaging::twitch::TwitchAdapter::new(
                     &username,
                     &oauth_token,
+                    twitch_config.client_id.clone(),
+                    twitch_config.client_secret.clone(),
+                    twitch_config.refresh_token.clone(),
+                    Some(token_path),
                     twitch_config.channels.clone(),
                     twitch_config.trigger_prefix.clone(),
                     twitch_perms,

@@ -1,6 +1,6 @@
 [package]
 name = "spacebot"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 default-run = "spacebot"
 
@@ -33,6 +33,7 @@ fastembed = "4"
 
 # Encoding
 base64 = "0.22"
+hex = "0.4"
 
 # Logging and tracing
 tracing = "0.1"
@@ -64,6 +65,7 @@ uuid = { version = "1.15", features = ["v4", "serde"] }
 
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 
 # Regular expressions (for leak detection)
 regex = "1.11"
@@ -99,7 +101,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring"] }
 teloxide = { version = "0.17", default-features = false, features = ["rustls"] }
 
 # Twitch
-twitch-irc = { version = "5.0", default-features = false, features = ["transport-tcp-rustls-webpki-roots"] }
+twitch-irc = { version = "5.0", default-features = false, features = ["transport-tcp-rustls-webpki-roots", "refreshing-token-rustls-webpki-roots"] }
 
 # Stream utilities
 tokio-stream = "0.1"

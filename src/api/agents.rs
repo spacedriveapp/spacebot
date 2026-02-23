@@ -296,6 +296,7 @@ pub(super) async fn create_agent(
         browser: None,
         mcp: None,
         brave_search_key: None,
+        cron_timezone: None,
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);

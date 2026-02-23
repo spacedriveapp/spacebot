@@ -400,9 +400,15 @@ pub(super) async fn toggle_platform(
                             &new_config.bindings,
                         );
                         let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                        let instance_dir = state.instance_dir.load();
+                        let token_path = instance_dir.join("twitch_token.json");
                         let adapter = crate::messaging::twitch::TwitchAdapter::new(
                             &twitch_config.username,
                             &twitch_config.oauth_token,
+                            twitch_config.client_id.clone(),
+                            twitch_config.client_secret.clone(),
+                            twitch_config.refresh_token.clone(),
+                            Some(token_path),
                             twitch_config.channels.clone(),
                             twitch_config.trigger_prefix.clone(),
                             arc_swap,

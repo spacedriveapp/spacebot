@@ -391,7 +391,7 @@ impl Channel {
 
         if messages.len() == 1 {
             // Single message - process normally
-            let message = messages.into_iter().next().unwrap();
+            let message = messages.into_iter().next().ok_or_else(|| anyhow::anyhow!("empty iterator after length check"))?;
             self.handle_message(message).await
         } else {
             // Multiple messages - batch them
@@ -464,8 +464,7 @@ impl Channel {
                 });
             self.conversation_context = Some(
                 prompt_engine
-                    .render_conversation_context(&first.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
+                    .render_conversation_context(&first.source, server_name, channel_name)?,
             );
         }
 
@@ -557,7 +556,7 @@ impl Channel {
         // Build system prompt with coalesce hint
         let system_prompt = self
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
-            .await;
+            .await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -594,21 +593,20 @@ impl Channel {
         message_count: usize,
         elapsed_secs: f64,
         unique_senders: usize,
-    ) -> String {
+    ) -> Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
         let identity_context = rc.identity.load().render();
         let memory_bulletin = rc.memory_bulletin.load();
         let skills = rc.skills.load();
-        let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+        let skills_prompt = skills.render_channel_prompt(&prompt_engine)?;
 
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+        let worker_capabilities =
+            prompt_engine.render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -625,18 +623,16 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
-            .render_channel_prompt(
-                empty_to_none(identity_context),
-                empty_to_none(memory_bulletin.to_string()),
-                empty_to_none(skills_prompt),
-                worker_capabilities,
-                self.conversation_context.clone(),
-                empty_to_none(status_text),
-                coalesce_hint,
-                available_channels,
-            )
-            .expect("failed to render channel prompt")
+        prompt_engine.render_channel_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(skills_prompt),
+            worker_capabilities,
+            self.conversation_context.clone(),
+            empty_to_none(status_text),
+            coalesce_hint,
+            available_channels,
+        )
     }
 
     /// Handle an incoming message by running the channel's LLM agent loop.
@@ -718,12 +714,11 @@ impl Channel {
                 });
             self.conversation_context = Some(
                 prompt_engine
-                    .render_conversation_context(&message.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
+                    .render_conversation_context(&message.source, server_name, channel_name)?,
             );
         }
 
-        let system_prompt = self.build_system_prompt().await;
+        let system_prompt = self.build_system_prompt().await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -795,21 +790,20 @@ impl Channel {
     }
 
     /// Assemble the full system prompt using the PromptEngine.
-    async fn build_system_prompt(&self) -> String {
+    async fn build_system_prompt(&self) -> crate::error::Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
         let identity_context = rc.identity.load().render();
         let memory_bulletin = rc.memory_bulletin.load();
         let skills = rc.skills.load();
-        let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+        let skills_prompt = skills.render_channel_prompt(&prompt_engine)?;
 
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -831,7 +825,6 @@ impl Channel {
                 None, // coalesce_hint - only set for batched messages
                 available_channels,
             )
-            .expect("failed to render channel prompt")
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -872,6 +865,7 @@ impl Channel {
         let max_turns = **rc.max_turns.load();
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
+            .with_context(&*self.deps.agent_id, "channel")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -1067,6 +1061,12 @@ impl Channel {
                 let mut branches = self.state.active_branches.write().await;
                 branches.remove(branch_id);
 
+                #[cfg(feature = "metrics")]
+                crate::telemetry::Metrics::global()
+                    .active_branches
+                    .with_label_values(&[&*self.deps.agent_id])
+                    .dec();
+
                 // Memory persistence branches complete silently — no history
                 // injection, no re-trigger. The work (memory saves) already
                 // happened inside the branch via tool calls.
@@ -1177,13 +1177,19 @@ impl Channel {
             "firing debounced retrigger"
         );
 
-        let retrigger_message = self
+        let retrigger_message = match self
             .deps
             .runtime_config
             .prompts
             .load()
             .render_system_retrigger()
-            .expect("failed to render retrigger message");
+        {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(%error, "failed to render retrigger message");
+                return;
+            }
+        };
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1255,7 +1261,7 @@ pub async fn spawn_branch_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render branch prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
 
     spawn_branch(
         state,
@@ -1279,10 +1285,10 @@ async fn spawn_memory_persistence_branch(
     let prompt_engine = deps.runtime_config.prompts.load();
     let system_prompt = prompt_engine
         .render_static("memory_persistence")
-        .expect("failed to render memory_persistence prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let prompt = prompt_engine
         .render_system_memory_persistence()
-        .expect("failed to render memory persistence prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
 
     spawn_branch(
         state,
@@ -1366,6 +1372,12 @@ async fn spawn_branch(
         status.add_branch(branch_id, status_label);
     }
 
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .active_branches
+        .with_label_values(&[&*state.deps.agent_id])
+        .inc();
+
     state
         .deps
         .event_tx
@@ -1413,7 +1425,7 @@ pub async fn spawn_worker_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render worker prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
@@ -1616,6 +1628,9 @@ where
 {
     tokio::spawn(async move {
         #[cfg(feature = "metrics")]
+        let worker_start = std::time::Instant::now();
+
+        #[cfg(feature = "metrics")]
         crate::telemetry::Metrics::global()
             .active_workers
             .with_label_values(&[&*agent_id])
@@ -1629,10 +1644,17 @@ where
             }
         };
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .active_workers
-            .with_label_values(&[&*agent_id])
-            .dec();
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .active_workers
+                .with_label_values(&[&*agent_id])
+                .dec();
+            metrics
+                .worker_duration_seconds
+                .with_label_values(&[&*agent_id, "builtin"])
+                .observe(worker_start.elapsed().as_secs_f64());
+        }
 
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,

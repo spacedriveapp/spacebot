@@ -225,6 +225,16 @@ fn extra_models() -> Vec<ModelInfo> {
             reasoning: false,
             input_audio: false,
         },
+        // MiniMax CN
+        ModelInfo {
+            id: "minimax-cn/MiniMax-M2.5".into(),
+            name: "MiniMax M2.5".into(),
+            provider: "minimax-cn".into(),
+            context_window: Some(200000),
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
         // Moonshot AI (Kimi)
         ModelInfo {
             id: "moonshot/kimi-k2.5".into(),
@@ -405,6 +415,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("minimax_key", "MINIMAX_API_KEY") {
         providers.push("minimax");
+    }
+    if has_key("minimax_cn_key", "MINIMAX_CN_API_KEY") {
+        providers.push("minimax-cn");
     }
     if has_key("moonshot_key", "MOONSHOT_API_KEY") {
         providers.push("moonshot");

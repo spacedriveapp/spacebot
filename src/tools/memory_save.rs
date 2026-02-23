@@ -9,6 +9,10 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Maximum allowed memory content length (bytes). Prevents oversized memories
+/// from bloating the database and embedding index.
+const MAX_MEMORY_CONTENT_BYTES: usize = 50_000;
+
 /// Tool for saving memories to the store.
 #[derive(Debug, Clone)]
 pub struct MemorySaveTool {
@@ -160,6 +164,25 @@ impl Tool for MemorySaveTool {
     }
 
     async fn call(&self, args: Self::Args) -> std::result::Result<Self::Output, Self::Error> {
+        if args.content.is_empty() {
+            return Err(MemorySaveError("content must not be empty".into()));
+        }
+
+        if args.content.len() > MAX_MEMORY_CONTENT_BYTES {
+            return Err(MemorySaveError(format!(
+                "content exceeds maximum length of {MAX_MEMORY_CONTENT_BYTES} bytes (got {})",
+                args.content.len()
+            )));
+        }
+
+        if let Some(importance) = args.importance {
+            if !(0.0..=1.0).contains(&importance) {
+                return Err(MemorySaveError(format!(
+                    "importance must be between 0.0 and 1.0 (got {importance})"
+                )));
+            }
+        }
+
         // Parse memory type
         let memory_type = match args.memory_type.as_str() {
             "fact" => MemoryType::Fact,
@@ -206,6 +229,29 @@ impl Tool for MemorySaveTool {
                 _ => crate::memory::types::RelationType::RelatedTo,
             };
 
+            // Verify the target memory exists before creating a graph edge
+            // to prevent dangling associations from LLM hallucinated IDs.
+            match store.load(&assoc.target_id).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        target_id = %assoc.target_id,
+                        "skipping association to non-existent memory"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        memory_id = %memory.id,
+                        target_id = %assoc.target_id,
+                        %error,
+                        "failed to verify target memory for association"
+                    );
+                    continue;
+                }
+            }
+
             let association = Association::new(&memory.id, &assoc.target_id, relation_type)
                 .with_weight(assoc.weight);
 
@@ -245,9 +291,14 @@ impl Tool for MemorySaveTool {
         }
 
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .memory_writes_total
-            .inc();
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics.memory_writes_total.inc();
+            metrics
+                .memory_updates_total
+                .with_label_values(&["unknown", "save"])
+                .inc();
+        }
 
         Ok(MemorySaveOutput {
             memory_id: memory.id,

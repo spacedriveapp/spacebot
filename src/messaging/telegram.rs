@@ -6,16 +6,17 @@ use crate::{Attachment, InboundMessage, MessageContent, OutboundResponse, Status
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
-use teloxide::Bot;
+use regex::Regex;
 use teloxide::payloads::setters::*;
 use teloxide::requests::{Request, Requester};
 use teloxide::types::{
     ChatAction, ChatId, FileId, InputFile, InputPollOption, MediaKind, MessageId, MessageKind,
-    ReactionType, ReplyParameters, UpdateKind, UserId,
+    ParseMode, ReactionType, ReplyParameters, UpdateKind, UserId,
 };
+use teloxide::{ApiError, Bot, RequestError};
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Instant;
 use tokio::sync::{RwLock, mpsc};
 use tokio::task::JoinHandle;
@@ -46,6 +47,9 @@ struct ActiveStream {
 
 /// Telegram's per-message character limit.
 const MAX_MESSAGE_LENGTH: usize = 4096;
+
+/// Smaller source-chunk target for markdown that expands heavily when HTML-escaped.
+const FORMATTED_SPLIT_LENGTH: usize = MAX_MESSAGE_LENGTH / 2;
 
 /// Minimum interval between streaming edits to avoid rate limits.
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
@@ -285,25 +289,11 @@ impl Messaging for TelegramAdapter {
         match response {
             OutboundResponse::Text(text) => {
                 self.stop_typing(&message.conversation_id).await;
-
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    self.bot
-                        .send_message(chat_id, &chunk)
-                        .send()
-                        .await
-                        .context("failed to send telegram message")?;
-                }
+                send_formatted(&self.bot, chat_id, &text, None).await?;
             }
             OutboundResponse::RichMessage { text, poll, .. } => {
                 self.stop_typing(&message.conversation_id).await;
-
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    self.bot
-                        .send_message(chat_id, &chunk)
-                        .send()
-                        .await
-                        .context("failed to send telegram message")?;
-                }
+                send_formatted(&self.bot, chat_id, &text, None).await?;
 
                 if let Some(poll_data) = poll {
                     send_poll(&self.bot, chat_id, &poll_data).await?;
@@ -317,17 +307,7 @@ impl Messaging for TelegramAdapter {
 
                 // Telegram doesn't have named threads. Reply to the source message instead.
                 let reply_to = self.extract_message_id(message).ok();
-
-                for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    let mut request = self.bot.send_message(chat_id, &chunk);
-                    if let Some(reply_id) = reply_to {
-                        request = request.reply_parameters(ReplyParameters::new(reply_id));
-                    }
-                    request
-                        .send()
-                        .await
-                        .context("failed to send telegram thread reply")?;
-                }
+                send_formatted(&self.bot, chat_id, &text, reply_to).await?;
             }
             OutboundResponse::File {
                 filename,
@@ -337,15 +317,39 @@ impl Messaging for TelegramAdapter {
             } => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let input_file = InputFile::memory(data).file_name(filename);
-                let mut request = self.bot.send_document(chat_id, input_file);
-                if let Some(caption_text) = caption {
-                    request = request.caption(caption_text);
+                let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
+                let sent = if let Some(ref caption_text) = caption {
+                    let html_caption = markdown_to_telegram_html(caption_text);
+                    self.bot
+                        .send_document(chat_id, input_file)
+                        .caption(&html_caption)
+                        .parse_mode(ParseMode::Html)
+                        .send()
+                        .await
+                } else {
+                    self.bot.send_document(chat_id, input_file).send().await
+                };
+
+                if let Err(error) = sent {
+                    if should_retry_plain_caption(&error) {
+                        tracing::debug!(
+                            %error,
+                            "HTML caption parse failed, retrying telegram file with plain caption"
+                        );
+                        let fallback_file = InputFile::memory(data).file_name(filename);
+                        let mut request = self.bot.send_document(chat_id, fallback_file);
+                        if let Some(caption_text) = caption {
+                            request = request.caption(caption_text);
+                        }
+                        request
+                            .send()
+                            .await
+                            .context("failed to send telegram file")?;
+                    } else {
+                        return Err(error)
+                            .context("failed to send telegram file with HTML caption")?;
+                    }
                 }
-                request
-                    .send()
-                    .await
-                    .context("failed to send telegram file")?;
             }
             OutboundResponse::Reaction(emoji) => {
                 let message_id = self.extract_message_id(message)?;
@@ -391,7 +395,6 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::StreamChunk(text) => {
                 let mut active = self.active_messages.write().await;
                 if let Some(stream) = active.get_mut(&message.conversation_id) {
-                    // Rate-limit edits to avoid Telegram API throttling
                     if stream.last_edit.elapsed() < STREAM_EDIT_INTERVAL {
                         return Ok(());
                     }
@@ -403,13 +406,23 @@ impl Messaging for TelegramAdapter {
                         text
                     };
 
-                    if let Err(error) = self
+                    let html = markdown_to_telegram_html(&display_text);
+                    if let Err(html_error) = self
                         .bot
-                        .edit_message_text(stream.chat_id, stream.message_id, display_text)
+                        .edit_message_text(stream.chat_id, stream.message_id, &html)
+                        .parse_mode(ParseMode::Html)
                         .send()
                         .await
                     {
-                        tracing::debug!(%error, "failed to edit streaming message");
+                        tracing::debug!(%html_error, "HTML edit failed, retrying as plain text");
+                        if let Err(error) = self
+                            .bot
+                            .edit_message_text(stream.chat_id, stream.message_id, &display_text)
+                            .send()
+                            .await
+                        {
+                            tracing::debug!(%error, "failed to edit streaming message");
+                        }
                     }
                     stream.last_edit = Instant::now();
                 }
@@ -427,19 +440,11 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::RemoveReaction(_) => {} // no-op
             OutboundResponse::Ephemeral { text, .. } => {
                 // Telegram has no ephemeral messages — send as regular text
-                let chat_id = self.extract_chat_id(message)?;
-                self.bot
-                    .send_message(chat_id, text)
-                    .await
-                    .context("failed to send ephemeral fallback on telegram")?;
+                send_formatted(&self.bot, chat_id, &text, None).await?;
             }
             OutboundResponse::ScheduledMessage { text, .. } => {
                 // Telegram has no scheduled messages — send immediately
-                let chat_id = self.extract_chat_id(message)?;
-                self.bot
-                    .send_message(chat_id, text)
-                    .await
-                    .context("failed to send scheduled message fallback on telegram")?;
+                send_formatted(&self.bot, chat_id, &text, None).await?;
             }
         }
 
@@ -494,21 +499,9 @@ impl Messaging for TelegramAdapter {
         );
 
         if let OutboundResponse::Text(text) = response {
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                self.bot
-                    .send_message(chat_id, &chunk)
-                    .send()
-                    .await
-                    .context("failed to broadcast telegram message")?;
-            }
+            send_formatted(&self.bot, chat_id, &text, None).await?;
         } else if let OutboundResponse::RichMessage { text, poll, .. } = response {
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                self.bot
-                    .send_message(chat_id, &chunk)
-                    .send()
-                    .await
-                    .context("failed to broadcast telegram message")?;
-            }
+            send_formatted(&self.bot, chat_id, &text, None).await?;
 
             if let Some(poll_data) = poll {
                 send_poll(&self.bot, chat_id, &poll_data).await?;
@@ -908,4 +901,409 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Return true when Telegram rejected rich text entities and a plain-caption retry is safe.
+fn should_retry_plain_caption(error: &RequestError) -> bool {
+    matches!(error, RequestError::Api(ApiError::CantParseEntities(_)))
+}
+
+// -- Markdown-to-Telegram-HTML formatting --
+
+static BOLD_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*\*(.+?)\*\*").expect("hardcoded regex"));
+static BOLD_UNDERSCORE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"__(.+?)__").expect("hardcoded regex"));
+static ITALIC_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\*(.+?)\*").expect("hardcoded regex"));
+static ITALIC_UNDERSCORE_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"_(.+?)_").expect("hardcoded regex"));
+static STRIKETHROUGH_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"~~(.+?)~~").expect("hardcoded regex"));
+static LINK_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[([^\]]+)\]\(([^)]+)\)").expect("hardcoded regex"));
+
+/// Escape characters that have special meaning in Telegram's HTML parse mode.
+fn escape_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+/// Strip HTML tags and unescape entities, producing plain text for fallback.
+fn strip_html_tags(html: &str) -> String {
+    static TAG_PATTERN: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"<[^>]+>").expect("hardcoded regex"));
+    TAG_PATTERN
+        .replace_all(html, "")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+/// Convert markdown to Telegram-compatible HTML.
+///
+/// Handles fenced code blocks, inline code, bold, italic, strikethrough,
+/// links, headers (rendered as bold), and blockquotes.
+fn markdown_to_telegram_html(markdown: &str) -> String {
+    let mut result = String::with_capacity(markdown.len());
+    let mut in_code_block = false;
+    let mut code_language = String::new();
+    let mut code_lines: Vec<&str> = Vec::new();
+    let mut blockquote_lines: Vec<String> = Vec::new();
+
+    for line in markdown.lines() {
+        if let Some(rest) = line.strip_prefix("```") {
+            flush_blockquote(&mut result, &mut blockquote_lines);
+
+            if in_code_block {
+                let content = escape_html(&code_lines.join("\n"));
+                if code_language.is_empty() {
+                    result.push_str("<pre>");
+                    result.push_str(&content);
+                    result.push_str("</pre>\n");
+                } else {
+                    result.push_str("<pre><code class=\"language-");
+                    result.push_str(&code_language);
+                    result.push_str("\">");
+                    result.push_str(&content);
+                    result.push_str("</code></pre>\n");
+                }
+                in_code_block = false;
+                code_language.clear();
+                code_lines.clear();
+            } else {
+                in_code_block = true;
+                code_language = rest.trim().to_string();
+            }
+            continue;
+        }
+
+        if in_code_block {
+            code_lines.push(line);
+            continue;
+        }
+
+        if let Some(quote_text) = line.strip_prefix("> ") {
+            blockquote_lines.push(format_inline(quote_text));
+            continue;
+        } else if line == ">" {
+            blockquote_lines.push(String::new());
+            continue;
+        }
+
+        flush_blockquote(&mut result, &mut blockquote_lines);
+
+        if let Some(header_text) = line
+            .strip_prefix("### ")
+            .or_else(|| line.strip_prefix("## "))
+            .or_else(|| line.strip_prefix("# "))
+        {
+            result.push_str("<b>");
+            result.push_str(&format_inline(header_text));
+            result.push_str("</b>\n");
+            continue;
+        }
+
+        result.push_str(&format_inline(line));
+        result.push('\n');
+    }
+
+    if in_code_block {
+        result.push_str("<pre>");
+        result.push_str(&escape_html(&code_lines.join("\n")));
+        result.push_str("</pre>\n");
+    }
+
+    flush_blockquote(&mut result, &mut blockquote_lines);
+
+    while result.ends_with('\n') {
+        result.pop();
+    }
+
+    result
+}
+
+/// Append buffered blockquote lines to the result and clear the buffer.
+fn flush_blockquote(result: &mut String, lines: &mut Vec<String>) {
+    if lines.is_empty() {
+        return;
+    }
+    result.push_str("<blockquote>");
+    result.push_str(&lines.join("\n"));
+    result.push_str("</blockquote>\n");
+    lines.clear();
+}
+
+/// Convert inline markdown elements to HTML within a single line.
+///
+/// Splits on backticks to isolate inline code spans, then converts bold,
+/// italic, strikethrough and links in the remaining text. Content inside
+/// backticks is HTML-escaped but not processed for markdown.
+fn format_inline(line: &str) -> String {
+    let segments: Vec<&str> = line.split('`').collect();
+    let mut result = String::new();
+
+    for (index, segment) in segments.iter().enumerate() {
+        if index % 2 == 1 && index < segments.len() - 1 {
+            result.push_str("<code>");
+            result.push_str(&escape_html(segment));
+            result.push_str("</code>");
+        } else if index % 2 == 0 {
+            result.push_str(&format_markdown_spans(&escape_html(segment)));
+        } else {
+            // Unmatched trailing backtick — treat as literal
+            result.push('`');
+            result.push_str(&format_markdown_spans(&escape_html(segment)));
+        }
+    }
+
+    result
+}
+
+/// Replace markdown span markers with HTML tags in already-escaped text.
+///
+/// Bold (`**`) is processed before italic (`*`) so double-star patterns
+/// are consumed first and single stars only match true italic spans.
+fn format_markdown_spans(text: &str) -> String {
+    let text = BOLD_PATTERN.replace_all(text, "<b>$1</b>");
+    let text = BOLD_UNDERSCORE_PATTERN.replace_all(&text, "<b>$1</b>");
+    let text = ITALIC_PATTERN.replace_all(&text, "<i>$1</i>");
+    let text = ITALIC_UNDERSCORE_PATTERN.replace_all(&text, "<i>$1</i>");
+    let text = STRIKETHROUGH_PATTERN.replace_all(&text, "<s>$1</s>");
+    let text = LINK_PATTERN.replace_all(&text, r#"<a href="$2">$1</a>"#);
+    text.into_owned()
+}
+
+/// Send a plain text Telegram message for formatting fallback paths.
+async fn send_plain_text(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    reply_to: Option<MessageId>,
+) -> anyhow::Result<()> {
+    let mut request = bot.send_message(chat_id, text);
+    if let Some(reply_id) = reply_to {
+        request = request.reply_parameters(ReplyParameters::new(reply_id));
+    }
+    request
+        .send()
+        .await
+        .context("failed to send telegram message")?;
+    Ok(())
+}
+
+/// Send a message with Telegram HTML formatting, splitting at the message
+/// length limit. Falls back to plain text if the API rejects the HTML.
+async fn send_formatted(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    reply_to: Option<MessageId>,
+) -> anyhow::Result<()> {
+    let mut pending_chunks: VecDeque<String> =
+        VecDeque::from(split_message(text, MAX_MESSAGE_LENGTH));
+    while let Some(markdown_chunk) = pending_chunks.pop_front() {
+        let html_chunk = markdown_to_telegram_html(&markdown_chunk);
+
+        if html_chunk.len() > MAX_MESSAGE_LENGTH {
+            let smaller_chunks = split_message(&markdown_chunk, FORMATTED_SPLIT_LENGTH);
+            if smaller_chunks.len() > 1 {
+                for chunk in smaller_chunks.into_iter().rev() {
+                    pending_chunks.push_front(chunk);
+                }
+                continue;
+            }
+
+            let plain_chunk = strip_html_tags(&html_chunk);
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
+            continue;
+        }
+
+        let mut request = bot
+            .send_message(chat_id, &html_chunk)
+            .parse_mode(ParseMode::Html);
+        if let Some(reply_id) = reply_to {
+            request = request.reply_parameters(ReplyParameters::new(reply_id));
+        }
+        if let Err(error) = request.send().await {
+            tracing::debug!(%error, "HTML send failed, retrying as plain text");
+            let plain_chunk = strip_html_tags(&html_chunk);
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bold() {
+        assert_eq!(
+            markdown_to_telegram_html("**bold text**"),
+            "<b>bold text</b>"
+        );
+    }
+
+    #[test]
+    fn italic() {
+        assert_eq!(
+            markdown_to_telegram_html("*italic text*"),
+            "<i>italic text</i>"
+        );
+    }
+
+    #[test]
+    fn bold_with_underscores() {
+        assert_eq!(
+            markdown_to_telegram_html("__bold text__"),
+            "<b>bold text</b>"
+        );
+    }
+
+    #[test]
+    fn italic_with_underscores() {
+        assert_eq!(
+            markdown_to_telegram_html("_italic text_"),
+            "<i>italic text</i>"
+        );
+    }
+
+    #[test]
+    fn bold_and_italic_nested() {
+        assert_eq!(
+            markdown_to_telegram_html("***both***"),
+            "<b><i>both</i></b>"
+        );
+    }
+
+    #[test]
+    fn inline_code() {
+        assert_eq!(
+            markdown_to_telegram_html("use `println!` here"),
+            "use <code>println!</code> here"
+        );
+    }
+
+    #[test]
+    fn code_block_with_language() {
+        let input = "```rust\nfn main() {}\n```";
+        let expected = "<pre><code class=\"language-rust\">fn main() {}</code></pre>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn code_block_without_language() {
+        let input = "```\nhello world\n```";
+        let expected = "<pre>hello world</pre>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn code_block_escapes_html() {
+        let input = "```\n<script>alert(1)</script>\n```";
+        let expected = "<pre>&lt;script&gt;alert(1)&lt;/script&gt;</pre>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn link() {
+        assert_eq!(
+            markdown_to_telegram_html("[click](https://example.com)"),
+            r#"<a href="https://example.com">click</a>"#
+        );
+    }
+
+    #[test]
+    fn strikethrough() {
+        assert_eq!(markdown_to_telegram_html("~~deleted~~"), "<s>deleted</s>");
+    }
+
+    #[test]
+    fn headers_render_as_bold() {
+        assert_eq!(markdown_to_telegram_html("# Title"), "<b>Title</b>");
+        assert_eq!(markdown_to_telegram_html("## Sub"), "<b>Sub</b>");
+        assert_eq!(markdown_to_telegram_html("### Section"), "<b>Section</b>");
+    }
+
+    #[test]
+    fn blockquote() {
+        assert_eq!(
+            markdown_to_telegram_html("> quoted text"),
+            "<blockquote>quoted text</blockquote>"
+        );
+    }
+
+    #[test]
+    fn multiline_blockquote() {
+        let input = "> line one\n> line two";
+        let expected = "<blockquote>line one\nline two</blockquote>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn html_entities_escaped_in_text() {
+        assert_eq!(
+            markdown_to_telegram_html("x < y & a > b"),
+            "x &lt; y &amp; a &gt; b"
+        );
+    }
+
+    #[test]
+    fn inline_code_escapes_html() {
+        assert_eq!(
+            markdown_to_telegram_html("`<b>not bold</b>`"),
+            "<code>&lt;b&gt;not bold&lt;/b&gt;</code>"
+        );
+    }
+
+    #[test]
+    fn mixed_formatting() {
+        let input = "Hello **world**, this is *important* and `code`";
+        let expected = "Hello <b>world</b>, this is <i>important</i> and <code>code</code>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn plain_text_unchanged() {
+        assert_eq!(
+            markdown_to_telegram_html("just plain text"),
+            "just plain text"
+        );
+    }
+
+    #[test]
+    fn unclosed_code_block_handled() {
+        let input = "```python\nprint('hi')";
+        let expected = "<pre>print('hi')</pre>";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn strip_html_tags_and_unescape() {
+        assert_eq!(
+            strip_html_tags("<b>bold</b> &amp; <i>italic</i>"),
+            "bold & italic"
+        );
+    }
+
+    #[test]
+    fn list_items_pass_through() {
+        let input = "- item one\n- item two\n- item three";
+        let expected = "- item one\n- item two\n- item three";
+        assert_eq!(markdown_to_telegram_html(input), expected);
+    }
+
+    #[test]
+    fn retries_plain_caption_only_for_parse_entity_errors() {
+        let parse_error = RequestError::Api(ApiError::CantParseEntities(
+            "Bad Request: can't parse entities".into(),
+        ));
+        let non_parse_error = RequestError::Api(ApiError::BotBlocked);
+
+        assert!(should_retry_plain_caption(&parse_error));
+        assert!(!should_retry_plain_caption(&non_parse_error));
+    }
 }

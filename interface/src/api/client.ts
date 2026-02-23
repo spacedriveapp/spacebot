@@ -838,6 +838,9 @@ export interface CreateBindingRequest {
 		slack_app_token?: string;
 		twitch_username?: string;
 		twitch_oauth_token?: string;
+		twitch_client_id?: string;
+		twitch_client_secret?: string;
+		twitch_refresh_token?: string;
 	};
 }
 

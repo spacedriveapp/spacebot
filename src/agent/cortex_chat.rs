@@ -52,16 +52,16 @@ pub enum CortexChatEvent {
 /// Prompt hook that forwards tool events to an mpsc channel for SSE streaming.
 #[derive(Clone)]
 struct CortexChatHook {
-    event_tx: mpsc::UnboundedSender<CortexChatEvent>,
+    event_tx: mpsc::Sender<CortexChatEvent>,
 }
 
 impl CortexChatHook {
-    fn new(event_tx: mpsc::UnboundedSender<CortexChatEvent>) -> Self {
+    fn new(event_tx: mpsc::Sender<CortexChatEvent>) -> Self {
         Self { event_tx }
     }
 
-    fn send(&self, event: CortexChatEvent) {
-        let _ = self.event_tx.send(event);
+    async fn send(&self, event: CortexChatEvent) {
+        let _ = self.event_tx.send(event).await;
     }
 }
 
@@ -75,7 +75,7 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     ) -> ToolCallHookAction {
         self.send(CortexChatEvent::ToolStarted {
             tool: tool_name.to_string(),
-        });
+        }).await;
         ToolCallHookAction::Continue
     }
 
@@ -95,7 +95,7 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         self.send(CortexChatEvent::ToolCompleted {
             tool: tool_name.to_string(),
             result_preview: preview,
-        });
+        }).await;
         HookAction::Continue
     }
 
@@ -232,7 +232,7 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
-    ) -> Result<mpsc::UnboundedReceiver<CortexChatEvent>, anyhow::Error> {
+    ) -> Result<mpsc::Receiver<CortexChatEvent>, anyhow::Error> {
         let _guard = self.send_lock.lock().await;
 
         // Save the user message
@@ -241,7 +241,7 @@ impl CortexChatSession {
             .await?;
 
         // Build the system prompt
-        let system_prompt = self.build_system_prompt(channel_context_id).await;
+        let system_prompt = self.build_system_prompt(channel_context_id).await?;
 
         // Load chat history and convert to Rig messages
         let chat_messages = self.store.load_history(thread_id, 100).await?;
@@ -263,6 +263,7 @@ impl CortexChatSession {
         let routing = self.deps.runtime_config.routing.load();
         let model_name = routing.resolve(ProcessType::Branch, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
+            .with_context(&*self.deps.agent_id, "cortex")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -271,7 +272,7 @@ impl CortexChatSession {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (event_tx, event_rx) = mpsc::channel(256);
         let hook = CortexChatHook::new(event_tx.clone());
 
         // Clone what the spawned task needs
@@ -296,7 +297,7 @@ impl CortexChatSession {
                         .await;
                     let _ = event_tx.send(CortexChatEvent::Done {
                         full_text: response,
-                    });
+                    }).await;
                 }
                 Err(error) => {
                     let error_text = format!("Cortex chat error: {error}");
@@ -305,7 +306,7 @@ impl CortexChatSession {
                         .await;
                     let _ = event_tx.send(CortexChatEvent::Error {
                         message: error_text,
-                    });
+                    }).await;
                 }
             }
         });
@@ -313,7 +314,7 @@ impl CortexChatSession {
         Ok(event_rx)
     }
 
-    async fn build_system_prompt(&self, channel_context_id: Option<&str>) -> String {
+    async fn build_system_prompt(&self, channel_context_id: Option<&str>) -> crate::error::Result<String> {
         let runtime_config = &self.deps.runtime_config;
         let prompt_engine = runtime_config.prompts.load();
 
@@ -323,9 +324,8 @@ impl CortexChatSession {
         let browser_enabled = runtime_config.browser_config.load().enabled;
         let web_search_enabled = runtime_config.brave_search_key.load().is_some();
         let opencode_enabled = runtime_config.opencode.load().enabled;
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+        let worker_capabilities =
+            prompt_engine.render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
 
         // Load channel transcript if a channel context is active
         let channel_transcript = if let Some(channel_id) = channel_context_id {
@@ -336,14 +336,12 @@ impl CortexChatSession {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
-            .render_cortex_chat_prompt(
-                empty_to_none(identity_context),
-                empty_to_none(memory_bulletin.to_string()),
-                channel_transcript,
-                worker_capabilities,
-            )
-            .expect("failed to render cortex chat prompt")
+        prompt_engine.render_cortex_chat_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            channel_transcript,
+            worker_capabilities,
+        )
     }
 
     /// Load the last 50 messages from a channel as a formatted transcript.

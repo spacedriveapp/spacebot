@@ -43,35 +43,24 @@ impl SpacebotHook {
         let _ = self.event_tx.send(event);
     }
 
-    /// Scan content for potential secret leaks.
-    fn scan_for_leaks(&self, content: &str) -> Option<String> {
+    /// Check a string against the leak pattern set.
+    fn match_patterns(content: &str) -> Option<String> {
         use regex::Regex;
         use std::sync::LazyLock;
 
         static LEAK_PATTERNS: LazyLock<Vec<Regex>> = LazyLock::new(|| {
             vec![
-                // OpenAI keys
                 Regex::new(r"sk-[a-zA-Z0-9]{20,}").expect("hardcoded regex"),
-                // Anthropic keys
                 Regex::new(r"sk-ant-[a-zA-Z0-9_-]{20,}").expect("hardcoded regex"),
-                // OpenRouter keys
                 Regex::new(r"sk-or-[a-zA-Z0-9_-]{20,}").expect("hardcoded regex"),
-                // PEM private keys
                 Regex::new(r"-----BEGIN.*PRIVATE KEY-----").expect("hardcoded regex"),
-                // GitHub personal access tokens
                 Regex::new(r"ghp_[a-zA-Z0-9]{36}").expect("hardcoded regex"),
-                // Google API keys
                 Regex::new(r"AIza[0-9A-Za-z_-]{35}").expect("hardcoded regex"),
-                // Discord bot tokens (base64 user ID . timestamp . HMAC)
                 Regex::new(r"[MN][A-Za-z0-9]{23,}\.[A-Za-z0-9_-]{6}\.[A-Za-z0-9_-]{27,}")
                     .expect("hardcoded regex"),
-                // Slack bot tokens
                 Regex::new(r"xoxb-[0-9]{10,}-[0-9A-Za-z-]+").expect("hardcoded regex"),
-                // Slack app tokens
                 Regex::new(r"xapp-[0-9]-[A-Z0-9]+-[0-9]+-[a-f0-9]+").expect("hardcoded regex"),
-                // Telegram bot tokens
                 Regex::new(r"\d{8,}:[A-Za-z0-9_-]{35}").expect("hardcoded regex"),
-                // Brave Search API keys
                 Regex::new(r"BSA[a-zA-Z0-9]{20,}").expect("hardcoded regex"),
             ]
         });
@@ -79,6 +68,73 @@ impl SpacebotHook {
         for pattern in LEAK_PATTERNS.iter() {
             if let Some(matched) = pattern.find(content) {
                 return Some(matched.as_str().to_string());
+            }
+        }
+
+        None
+    }
+
+    /// Scan content for potential secret leaks, including encoded forms.
+    ///
+    /// Checks raw content first, then attempts URL-decoding, base64-decoding,
+    /// and hex-decoding to catch secrets that an LLM might encode to evade
+    /// plaintext pattern matching.
+    fn scan_for_leaks(&self, content: &str) -> Option<String> {
+        use base64::Engine;
+        use regex::Regex;
+        use std::sync::LazyLock;
+
+        if let Some(matched) = Self::match_patterns(content) {
+            return Some(matched);
+        }
+
+        // Percent-encoded secrets (e.g. sk%2Dant%2D...)
+        let url_decoded = urlencoding::decode(content).unwrap_or(std::borrow::Cow::Borrowed(""));
+        if url_decoded != content {
+            if let Some(matched) = Self::match_patterns(&url_decoded) {
+                return Some(format!("url-encoded: {matched}"));
+            }
+        }
+
+        // Base64-wrapped secrets. Minimum 24 chars avoids false positives on
+        // short alphanumeric strings while catching any encoded API key.
+        static BASE64_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"[A-Za-z0-9+/]{24,}={0,2}").expect("hardcoded regex")
+        });
+        for segment in BASE64_SEGMENT.find_iter(content) {
+            if let Ok(decoded_bytes) =
+                base64::engine::general_purpose::STANDARD.decode(segment.as_str())
+            {
+                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
+                    if let Some(matched) = Self::match_patterns(decoded) {
+                        return Some(format!("base64-encoded: {matched}"));
+                    }
+                }
+            }
+            if let Ok(decoded_bytes) =
+                base64::engine::general_purpose::URL_SAFE.decode(segment.as_str())
+            {
+                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
+                    if let Some(matched) = Self::match_patterns(decoded) {
+                        return Some(format!("base64-encoded: {matched}"));
+                    }
+                }
+            }
+        }
+
+        // Hex-encoded secrets. Minimum 40 hex chars (20 bytes) to reduce
+        // false positives while catching any hex-wrapped API key.
+        static HEX_SEGMENT: LazyLock<Regex> = LazyLock::new(|| {
+            Regex::new(r"(?i)(?:0x)?([0-9a-f]{40,})").expect("hardcoded regex")
+        });
+        for caps in HEX_SEGMENT.captures_iter(content) {
+            let hex_str = caps.get(1).map_or("", |m| m.as_str());
+            if let Ok(decoded_bytes) = hex::decode(hex_str) {
+                if let Ok(decoded) = std::str::from_utf8(&decoded_bytes) {
+                    if let Some(matched) = Self::match_patterns(decoded) {
+                        return Some(format!("hex-encoded: {matched}"));
+                    }
+                }
             }
         }
 
@@ -115,10 +171,6 @@ where
         _prompt: &Message,
         _response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        // Tool nudging: check if response has tool calls
-        // Note: Rig's CompletionResponse structure varies by model implementation
-        // We'll do basic observation here
-
         tracing::debug!(
             process_id = %self.process_id,
             "completion response received"

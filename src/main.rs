@@ -129,7 +129,7 @@ struct ActiveChannel {
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls crypto provider");
+        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
@@ -559,12 +559,15 @@ fn get_agent_config<'a>(
     config: &'a spacebot::config::Config,
     agent_id: Option<&str>,
 ) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
-    let agent_id = agent_id.unwrap_or_else(|| {
-        if config.agents.is_empty() {
-            panic!("no agents configured");
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => {
+            if config.agents.is_empty() {
+                anyhow::bail!("no agents configured");
+            }
+            &config.agents[0].id
         }
-        &config.agents[0].id
-    });
+    };
 
     config
         .agents
@@ -617,6 +620,18 @@ async fn run(
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
+
+    // Start metrics server if enabled (requires `metrics` cargo feature)
+    #[cfg(feature = "metrics")]
+    let _metrics_handle = if config.metrics.enabled {
+        Some(
+            spacebot::telemetry::start_metrics_server(&config.metrics, shutdown_rx.clone())
+                .await
+                .context("failed to start metrics server")?,
+        )
+    } else {
+        None
+    };
 
     let _http_handle = if config.api.enabled {
         // IPv6 addresses need brackets when combined with port: [::]:19898
@@ -1232,7 +1247,7 @@ async fn initialize_agents(
         );
 
         // Per-agent memory system
-        let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
+        let memory_store = spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
             .await
             .with_context(|| {
@@ -1373,9 +1388,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::discord::DiscordAdapter::new(
             &discord_config.token,
-            discord_permissions
-                .clone()
-                .expect("discord permissions initialized when discord is enabled"),
+            discord_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("discord permissions not initialized when discord is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1395,9 +1410,9 @@ async fn initialize_agents(
         match spacebot::messaging::slack::SlackAdapter::new(
             &slack_config.bot_token,
             &slack_config.app_token,
-            slack_permissions
-                .clone()
-                .expect("slack permissions initialized when slack is enabled"),
+            slack_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("slack permissions not initialized when slack is enabled")
+            })?,
             slack_config.commands.clone(),
         ) {
             Ok(adapter) => {
@@ -1421,9 +1436,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
             &telegram_config.token,
-            telegram_permissions
-                .clone()
-                .expect("telegram permissions initialized when telegram is enabled"),
+            telegram_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("telegram permissions not initialized when telegram is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1449,14 +1464,19 @@ async fn initialize_agents(
     if let Some(twitch_config) = &config.messaging.twitch
         && twitch_config.enabled
     {
+        let twitch_token_path = config.instance_dir.join("twitch_token.json");
         let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
             &twitch_config.username,
             &twitch_config.oauth_token,
+            twitch_config.client_id.clone(),
+            twitch_config.client_secret.clone(),
+            twitch_config.refresh_token.clone(),
+            Some(twitch_token_path),
             twitch_config.channels.clone(),
             twitch_config.trigger_prefix.clone(),
-            twitch_permissions
-                .clone()
-                .expect("twitch permissions initialized when twitch is enabled"),
+            twitch_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("twitch permissions not initialized when twitch is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }

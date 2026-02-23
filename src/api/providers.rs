@@ -26,6 +26,7 @@ pub(super) struct ProviderStatus {
     opencode_zen: bool,
     nvidia: bool,
     minimax: bool,
+    minimax_cn: bool,
     moonshot: bool,
     zai_coding_plan: bool,
 }
@@ -82,6 +83,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "opencode-zen" => Some("opencode_zen_key"),
         "nvidia" => Some("nvidia_key"),
         "minimax" => Some("minimax_key"),
+        "minimax-cn" => Some("minimax_cn_key"),
         "moonshot" => Some("moonshot_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
         _ => None,
@@ -181,6 +183,12 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             api_key: credential.to_string(),
             name: None,
         }),
+        "minimax-cn" => Some(ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: "https://api.minimaxi.com/anthropic".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
         "moonshot" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
             base_url: "https://api.moonshot.ai".to_string(),
@@ -217,6 +225,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
         nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
         minimax_key: (provider == "minimax").then(|| credential.to_string()),
+        minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
         providers,
@@ -244,6 +253,7 @@ pub(super) async fn get_providers(
         opencode_zen,
         nvidia,
         minimax,
+        minimax_cn,
         moonshot,
         zai_coding_plan,
     ) = if config_path.exists() {
@@ -284,6 +294,7 @@ pub(super) async fn get_providers(
             has_value("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
             has_value("nvidia_key", "NVIDIA_API_KEY"),
             has_value("minimax_key", "MINIMAX_API_KEY"),
+            has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
         )
@@ -304,6 +315,7 @@ pub(super) async fn get_providers(
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
             std::env::var("NVIDIA_API_KEY").is_ok(),
             std::env::var("MINIMAX_API_KEY").is_ok(),
+            std::env::var("MINIMAX_CN_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
         )
@@ -325,6 +337,7 @@ pub(super) async fn get_providers(
         opencode_zen,
         nvidia,
         minimax,
+        minimax_cn,
         moonshot,
         zai_coding_plan,
     };
@@ -343,6 +356,7 @@ pub(super) async fn get_providers(
         || providers.opencode_zen
         || providers.nvidia
         || providers.minimax
+        || providers.minimax_cn
         || providers.moonshot
         || providers.zai_coding_plan;
 

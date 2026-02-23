@@ -38,30 +38,64 @@ The metrics server runs as a separate tokio task alongside the main API server. 
 
 All metrics are prefixed with `spacebot_`.
 
-### Counters
+### LLM Metrics
 
-| Metric                         | Labels                    | Description                      |
-| ------------------------------ | ------------------------- | -------------------------------- |
-| `spacebot_llm_requests_total`  | agent_id, model, tier     | Total LLM completion requests    |
-| `spacebot_tool_calls_total`    | agent_id, tool_name       | Total tool calls executed        |
-| `spacebot_memory_reads_total`  |                           | Total memory recall operations   |
-| `spacebot_memory_writes_total` |                           | Total memory save operations     |
+| Metric                                  | Type      | Labels                              | Description                        |
+| --------------------------------------- | --------- | ----------------------------------- | ---------------------------------- |
+| `spacebot_llm_requests_total`           | Counter   | agent_id, model, tier               | Total LLM completion requests      |
+| `spacebot_llm_request_duration_seconds` | Histogram | agent_id, model, tier               | LLM request duration               |
+| `spacebot_llm_tokens_total`             | Counter   | agent_id, model, tier, direction    | Token counts (input/output/cached)  |
+| `spacebot_llm_estimated_cost_dollars`   | Counter   | agent_id, model, tier               | Estimated cost in USD              |
 
 The `tier` label corresponds to the process type making the request: `channel`, `branch`, `worker`, `compactor`, or `cortex`.
 
-### Histograms
+### Tool Metrics
 
-| Metric                                    | Labels                | Buckets (seconds)                          |
-| ----------------------------------------- | --------------------- | ------------------------------------------ |
-| `spacebot_llm_request_duration_seconds`   | agent_id, model, tier | 0.1, 0.25, 0.5, 1, 2.5, 5, 10            |
-| `spacebot_tool_call_duration_seconds`     |                       | 0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30 |
+| Metric                                    | Type      | Labels                | Description                         |
+| ----------------------------------------- | --------- | --------------------- | ----------------------------------- |
+| `spacebot_tool_calls_total`               | Counter   | agent_id, tool_name   | Total tool calls executed           |
+| `spacebot_tool_call_duration_seconds`     | Histogram |                       | Tool call execution duration        |
 
-### Gauges
+### Agent & Worker Metrics
 
-| Metric                         | Labels   | Description                     |
-| ------------------------------ | -------- | ------------------------------- |
-| `spacebot_active_workers`      | agent_id | Currently active workers        |
-| `spacebot_memory_entry_count`  | agent_id | Total memory entries per agent  |
+| Metric                                  | Type      | Labels                              | Description                        |
+| --------------------------------------- | --------- | ----------------------------------- | ---------------------------------- |
+| `spacebot_active_workers`               | Gauge     | agent_id                            | Currently active workers           |
+| `spacebot_active_branches`              | Gauge     | agent_id                            | Currently active branches          |
+| `spacebot_worker_duration_seconds`      | Histogram | agent_id, worker_type               | Worker lifetime duration           |
+| `spacebot_process_errors_total`         | Counter   | agent_id, process_type, error_type  | Process errors by type             |
+
+### Memory Metrics
+
+| Metric                                  | Type      | Labels                | Description                        |
+| --------------------------------------- | --------- | --------------------- | ---------------------------------- |
+| `spacebot_memory_reads_total`           | Counter   |                       | Total memory recall operations     |
+| `spacebot_memory_writes_total`          | Counter   |                       | Total memory save operations       |
+| `spacebot_memory_entry_count`           | Gauge     | agent_id              | Memory entries per agent           |
+| `spacebot_memory_updates_total`         | Counter   | agent_id, operation   | Memory mutations (save/delete/forget) |
+
+## Useful PromQL Queries
+
+**Total estimated spend by agent:**
+```promql
+sum(spacebot_llm_estimated_cost_dollars) by (agent_id)
+```
+
+**Hourly spend rate by model:**
+```promql
+sum(rate(spacebot_llm_estimated_cost_dollars[1h])) by (agent_id, model) * 3600
+```
+
+**Token throughput:**
+```promql
+sum(rate(spacebot_llm_tokens_total[5m])) by (direction)
+```
+
+**Active branches and workers:**
+```promql
+spacebot_active_branches
+spacebot_active_workers
+```
 
 ## Prometheus Scrape Config
 

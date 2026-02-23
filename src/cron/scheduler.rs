@@ -12,6 +12,7 @@ use crate::messaging::MessagingManager;
 use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
 use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
 use chrono::Timelike;
+use chrono_tz::Tz;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -75,6 +76,7 @@ pub struct CronContext {
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
 pub struct Scheduler {
@@ -96,6 +98,10 @@ impl Scheduler {
             timers: Arc::new(RwLock::new(HashMap::new())),
             context,
         }
+    }
+
+    pub fn cron_timezone_label(&self) -> String {
+        cron_timezone_label(&self.context)
     }
 
     /// Register and start a cron job from config.
@@ -211,16 +217,12 @@ impl Scheduler {
 
                 // Check active hours window
                 if let Some((start, end)) = job.active_hours {
-                    let current_hour = chrono::Local::now().hour() as u8;
-                    let in_window = if start <= end {
-                        current_hour >= start && current_hour < end
-                    } else {
-                        // Wraps midnight (e.g. 22:00 - 06:00)
-                        current_hour >= start || current_hour < end
-                    };
+                    let (current_hour, timezone) = current_hour_and_timezone(&context, &job_id);
+                    let in_window = hour_in_active_window(current_hour, start, end);
                     if !in_window {
                         tracing::debug!(
                             cron_id = %job_id,
+                            cron_timezone = %timezone,
                             current_hour,
                             start,
                             end,
@@ -469,6 +471,71 @@ impl Scheduler {
         }
 
         Ok(())
+    }
+}
+
+fn cron_timezone_label(context: &CronContext) -> String {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) if name.parse::<Tz>().is_ok() => name.to_string(),
+        _ => SYSTEM_TIMEZONE_LABEL.to_string(),
+    }
+}
+
+fn current_hour_and_timezone(context: &CronContext, cron_id: &str) -> (u8, String) {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) => match name.parse::<Tz>() {
+            Ok(timezone) => (
+                chrono::Utc::now().with_timezone(&timezone).hour() as u8,
+                name.into(),
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %context.deps.agent_id,
+                    cron_id,
+                    cron_timezone = %name,
+                    %error,
+                    "invalid cron timezone in runtime config, falling back to system timezone"
+                );
+                (
+                    chrono::Local::now().hour() as u8,
+                    SYSTEM_TIMEZONE_LABEL.into(),
+                )
+            }
+        },
+        None => (
+            chrono::Local::now().hour() as u8,
+            SYSTEM_TIMEZONE_LABEL.into(),
+        ),
+    }
+}
+
+fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool {
+    if start_hour <= end_hour {
+        current_hour >= start_hour && current_hour < end_hour
+    } else {
+        current_hour >= start_hour || current_hour < end_hour
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hour_in_active_window;
+
+    #[test]
+    fn test_hour_in_active_window_non_wrapping() {
+        assert!(hour_in_active_window(9, 9, 17));
+        assert!(hour_in_active_window(16, 9, 17));
+        assert!(!hour_in_active_window(8, 9, 17));
+        assert!(!hour_in_active_window(17, 9, 17));
+    }
+
+    #[test]
+    fn test_hour_in_active_window_midnight_wrapping() {
+        assert!(hour_in_active_window(22, 22, 6));
+        assert!(hour_in_active_window(3, 22, 6));
+        assert!(!hour_in_active_window(12, 22, 6));
     }
 }
 

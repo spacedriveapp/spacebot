@@ -6,20 +6,106 @@ use crate::{InboundMessage, MessageContent, OutboundResponse};
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
-use twitch_irc::login::StaticLoginCredentials;
+use async_trait::async_trait;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use twitch_irc::login::{RefreshingLoginCredentials, TokenStorage, UserAccessToken};
 use twitch_irc::message::ServerMessage;
 use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{mpsc, RwLock};
 
-type IrcClient = TwitchIRCClient<SecureTCPTransport, StaticLoginCredentials>;
+#[derive(Serialize, Deserialize)]
+struct TwitchTokenFile {
+    access_token: String,
+    refresh_token: String,
+    created_at: Option<DateTime<Utc>>,
+    expires_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug)]
+struct TwitchTokenStorage {
+    access_token: String,
+    refresh_token: String,
+    token_path: Option<PathBuf>,
+}
+
+#[async_trait]
+impl TokenStorage for TwitchTokenStorage {
+    type LoadError = String;
+    type UpdateError = String;
+
+    async fn load_token(&mut self) -> Result<UserAccessToken, Self::LoadError> {
+        let mut created_at = Utc::now();
+        let mut expires_at = None;
+
+        if let Some(path) = &self.token_path {
+            if let Ok(data) = std::fs::read_to_string(path) {
+                if let Ok(file) = serde_json::from_str::<TwitchTokenFile>(&data) {
+                    self.access_token = file.access_token;
+                    self.refresh_token = file.refresh_token;
+                    if let Some(stored_created) = file.created_at {
+                        created_at = stored_created;
+                    }
+                    expires_at = file.expires_at;
+                }
+            }
+            if !self.refresh_token.is_empty() && expires_at.is_none() {
+                expires_at = Some(created_at + chrono::Duration::hours(1));
+            }
+            let file = TwitchTokenFile {
+                access_token: self.access_token.clone(),
+                refresh_token: self.refresh_token.clone(),
+                created_at: Some(created_at),
+                expires_at,
+            };
+            if let Ok(data) = serde_json::to_string_pretty(&file) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+
+        Ok(UserAccessToken {
+            access_token: self.access_token.clone(),
+            refresh_token: self.refresh_token.clone(),
+            created_at,
+            expires_at,
+        })
+    }
+
+    async fn update_token(&mut self, token: &UserAccessToken) -> Result<(), Self::UpdateError> {
+        self.access_token = token.access_token.clone();
+        self.refresh_token = token.refresh_token.clone();
+
+        if let Some(path) = &self.token_path {
+            let file = TwitchTokenFile {
+                access_token: self.access_token.clone(),
+                refresh_token: self.refresh_token.clone(),
+                created_at: Some(token.created_at),
+                expires_at: token.expires_at,
+            };
+            if let Ok(data) = serde_json::to_string_pretty(&file) {
+                let _ = std::fs::write(path, data);
+            }
+        }
+
+        Ok(())
+    }
+}
+
+type TwitchCredentials = RefreshingLoginCredentials<TwitchTokenStorage>;
+type IrcClient = TwitchIRCClient<SecureTCPTransport, TwitchCredentials>;
 
 /// Twitch chat adapter state.
 pub struct TwitchAdapter {
     username: String,
     oauth_token: String,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
+    token_path: Option<PathBuf>,
     channels: Vec<String>,
     trigger_prefix: Option<String>,
     permissions: Arc<ArcSwap<TwitchPermissions>>,
@@ -34,6 +120,10 @@ impl TwitchAdapter {
     pub fn new(
         username: impl Into<String>,
         oauth_token: impl Into<String>,
+        client_id: Option<String>,
+        client_secret: Option<String>,
+        refresh_token: Option<String>,
+        token_path: Option<PathBuf>,
         channels: Vec<String>,
         trigger_prefix: Option<String>,
         permissions: Arc<ArcSwap<TwitchPermissions>>,
@@ -41,6 +131,10 @@ impl TwitchAdapter {
         Self {
             username: username.into(),
             oauth_token: oauth_token.into(),
+            client_id,
+            client_secret,
+            refresh_token,
+            token_path,
             channels,
             trigger_prefix,
             permissions,
@@ -68,11 +162,21 @@ impl Messaging for TwitchAdapter {
             .unwrap_or(&self.oauth_token)
             .to_string();
 
-        let credentials = StaticLoginCredentials::new(self.username.clone(), Some(token));
+        let storage = TwitchTokenStorage {
+            access_token: token,
+            refresh_token: self.refresh_token.clone().unwrap_or_default(),
+            token_path: self.token_path.clone(),
+        };
+        let credentials = TwitchCredentials::init_with_username(
+            Some(self.username.clone()),
+            self.client_id.clone().unwrap_or_default(),
+            self.client_secret.clone().unwrap_or_default(),
+            storage,
+        );
         let config = ClientConfig::new_simple(credentials);
 
         let (mut incoming, client) =
-            TwitchIRCClient::<SecureTCPTransport, StaticLoginCredentials>::new(config);
+            TwitchIRCClient::<SecureTCPTransport, TwitchCredentials>::new(config);
 
         // Join configured channels
         for channel in &self.channels {
