@@ -204,6 +204,33 @@ pub enum ProcessEvent {
         question_id: String,
         questions: Vec<opencode::QuestionInfo>,
     },
+    /// A new learning insight was created.
+    LearningInsightCreated {
+        agent_id: AgentId,
+        insight_id: String,
+        category: String,
+        content: String,
+    },
+    /// A learning episode completed.
+    LearningEpisodeCompleted {
+        agent_id: AgentId,
+        episode_id: String,
+        task: String,
+        outcome: Option<String>,
+    },
+    /// A new distillation was created.
+    LearningDistillationCreated {
+        agent_id: AgentId,
+        distillation_id: String,
+        distillation_type: String,
+        statement: String,
+    },
+    /// A learning metric was updated.
+    LearningMetricUpdated {
+        agent_id: AgentId,
+        metric_name: String,
+        metric_value: f64,
+    },
 }
 
 /// Shared dependency bundle for agent processes.

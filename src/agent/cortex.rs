@@ -295,6 +295,47 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
         generate_bulletin(deps, logger).await;
         generate_profile(deps, logger).await;
+
+        // Run memory maintenance on the cortex timer
+        {
+            use crate::memory::maintenance::{MaintenanceConfig, run_maintenance};
+            let config = MaintenanceConfig::default();
+            match run_maintenance(deps.memory_search.store(), &config).await {
+                Ok(report) => {
+                    if report.decayed > 0 || report.pruned > 0 || report.merged > 0 {
+                        tracing::info!(
+                            decayed = report.decayed,
+                            pruned = report.pruned,
+                            merged = report.merged,
+                            "memory maintenance completed"
+                        );
+                        logger.log(
+                            "maintenance_run",
+                            &format!(
+                                "Memory maintenance: {} decayed, {} pruned, {} merged",
+                                report.decayed, report.pruned, report.merged
+                            ),
+                            Some(serde_json::json!({
+                                "decayed": report.decayed,
+                                "pruned": report.pruned,
+                                "merged": report.merged,
+                            })),
+                        );
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "memory maintenance failed");
+                }
+            }
+        }
+
+        // Record learning metrics periodically
+        if let Some(ref learning_store) = deps.learning_store {
+            let calculator = crate::learning::MetricsCalculator::new(learning_store.clone());
+            if let Err(error) = calculator.record_all_metrics().await {
+                tracing::warn!(%error, "failed to record learning metrics");
+            }
+        }
     }
 }
 

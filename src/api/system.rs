@@ -92,6 +92,10 @@ pub(super) async fn events_sse(
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
                             ApiEvent::ToolStarted { .. } => "tool_started",
                             ApiEvent::ToolCompleted { .. } => "tool_completed",
+                            ApiEvent::LearningInsightCreated { .. } => "learning_insight_created",
+                            ApiEvent::LearningEpisodeCompleted { .. } => "learning_episode_completed",
+                            ApiEvent::LearningDistillationCreated { .. } => "learning_distillation_created",
+                            ApiEvent::LearningMetricUpdated { .. } => "learning_metric_updated",
                             ApiEvent::ConfigReloaded => "config_reloaded",
                         };
                         yield Ok(axum::response::sse::Event::default()

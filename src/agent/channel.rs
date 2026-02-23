@@ -669,6 +669,22 @@ impl Channel {
 
         let user_text = format_user_message(&raw_text, &message);
 
+        // Intercept /learned commands — respond directly without LLM
+        if let Some(command) = crate::learning::parse_learning_command(&raw_text) {
+            if let Some(ref learning_store) = self.deps.learning_store {
+                let platform = &message.source;
+                match crate::learning::handle_learning_command(command, learning_store, platform).await {
+                    Ok(response_text) => {
+                        let _ = self.response_tx.send(OutboundResponse::Text(response_text)).await;
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to handle /learned command, falling through to LLM");
+                    }
+                }
+            }
+        }
+
         let attachment_content = if !attachments.is_empty() {
             download_attachments(&self.deps, &attachments).await
         } else {

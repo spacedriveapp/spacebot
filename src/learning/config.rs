@@ -1,5 +1,6 @@
 //! Learning system configuration.
 
+use crate::learning::observatory::ObservatoryConfig;
 use serde::{Deserialize, Serialize};
 
 /// Configuration for the learning engine.
@@ -32,6 +33,8 @@ pub struct LearningConfig {
     pub distillation_batch_size: usize,
     /// Seconds between promotion checks.
     pub promotion_interval_secs: u64,
+    /// Observatory configuration.
+    pub observatory: ObservatoryConfig,
 }
 
 impl Default for LearningConfig {
@@ -48,6 +51,7 @@ impl Default for LearningConfig {
             high_stakes_file_operations: vec!["write".into()],
             distillation_batch_size: 3,
             promotion_interval_secs: 3600,
+            observatory: ObservatoryConfig::default(),
         }
     }
 }

@@ -2702,6 +2702,7 @@ impl Config {
                         promotion_interval_secs: l
                             .promotion_interval_secs
                             .unwrap_or(base.promotion_interval_secs),
+                        observatory: base.observatory.clone(),
                     }
                 })
                 .unwrap_or_else(|| base_defaults.learning.clone()),
@@ -2914,6 +2915,7 @@ impl Config {
                             promotion_interval_secs: l
                                 .promotion_interval_secs
                                 .unwrap_or(base.promotion_interval_secs),
+                            observatory: base.observatory.clone(),
                         }
                     }),
                     browser: a.browser.map(|b| BrowserConfig {

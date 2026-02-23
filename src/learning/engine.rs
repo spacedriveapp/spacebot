@@ -1035,6 +1035,22 @@ fn summarize_event(event: &ProcessEvent) -> (String, String) {
             "worker_question".into(),
             format!("worker {} question", worker_id),
         ),
+        ProcessEvent::LearningInsightCreated { insight_id, category, .. } => (
+            "learning_insight_created".into(),
+            format!("insight {insight_id} ({category})"),
+        ),
+        ProcessEvent::LearningEpisodeCompleted { episode_id, task, .. } => (
+            "learning_episode_completed".into(),
+            format!("episode {}: {}", episode_id, truncate(task, 120)),
+        ),
+        ProcessEvent::LearningDistillationCreated { distillation_id, distillation_type, .. } => (
+            "learning_distillation_created".into(),
+            format!("distillation {distillation_id} ({distillation_type})"),
+        ),
+        ProcessEvent::LearningMetricUpdated { metric_name, metric_value, .. } => (
+            "learning_metric_updated".into(),
+            format!("{metric_name} = {metric_value}"),
+        ),
     }
 }
 

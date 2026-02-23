@@ -172,6 +172,33 @@ pub enum ApiEvent {
         process_id: String,
         tool_name: String,
     },
+    /// A learning insight was created.
+    LearningInsightCreated {
+        agent_id: String,
+        insight_id: String,
+        category: String,
+        content: String,
+    },
+    /// A learning episode completed.
+    LearningEpisodeCompleted {
+        agent_id: String,
+        episode_id: String,
+        task: String,
+        outcome: Option<String>,
+    },
+    /// A learning distillation was created.
+    LearningDistillationCreated {
+        agent_id: String,
+        distillation_id: String,
+        distillation_type: String,
+        statement: String,
+    },
+    /// A learning metric was updated.
+    LearningMetricUpdated {
+        agent_id: String,
+        metric_name: String,
+        metric_value: f64,
+    },
     /// Configuration was reloaded (skills, identity, etc.).
     ConfigReloaded,
 }
@@ -366,6 +393,37 @@ impl ApiState {
                                         tool_name: tool_name.clone(),
                                     })
                                     .ok();
+                            }
+                            ProcessEvent::LearningInsightCreated { agent_id: _, insight_id, category, content } => {
+                                api_tx.send(ApiEvent::LearningInsightCreated {
+                                    agent_id: agent_id.clone(),
+                                    insight_id: insight_id.clone(),
+                                    category: category.clone(),
+                                    content: content.clone(),
+                                }).ok();
+                            }
+                            ProcessEvent::LearningEpisodeCompleted { agent_id: _, episode_id, task, outcome } => {
+                                api_tx.send(ApiEvent::LearningEpisodeCompleted {
+                                    agent_id: agent_id.clone(),
+                                    episode_id: episode_id.clone(),
+                                    task: task.clone(),
+                                    outcome: outcome.clone(),
+                                }).ok();
+                            }
+                            ProcessEvent::LearningDistillationCreated { agent_id: _, distillation_id, distillation_type, statement } => {
+                                api_tx.send(ApiEvent::LearningDistillationCreated {
+                                    agent_id: agent_id.clone(),
+                                    distillation_id: distillation_id.clone(),
+                                    distillation_type: distillation_type.clone(),
+                                    statement: statement.clone(),
+                                }).ok();
+                            }
+                            ProcessEvent::LearningMetricUpdated { agent_id: _, metric_name, metric_value } => {
+                                api_tx.send(ApiEvent::LearningMetricUpdated {
+                                    agent_id: agent_id.clone(),
+                                    metric_name: metric_name.clone(),
+                                    metric_value: *metric_value,
+                                }).ok();
                             }
                             _ => {}
                         }
