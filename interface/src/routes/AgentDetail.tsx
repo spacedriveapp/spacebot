@@ -242,9 +242,9 @@ function HeroSection({
 				</div>
 				<button
 					onClick={onDelete}
-					className="rounded-md px-3 py-1.5 text-sm text-ink-faint transition-colors hover:bg-red-500/10 hover:text-red-400"
+					className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-1.5 text-sm font-medium text-red-400 transition-colors hover:bg-red-500/20 hover:text-red-300"
 				>
-					Delete
+					Delete Agent
 				</button>
 			</div>
 
