@@ -667,9 +667,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "{provider_display_name} API error ({status}): {message}"
             )));
@@ -757,9 +755,7 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let message = extract_error_message(&response_body, &response_text);
             return Err(CompletionError::ProviderError(format!(
                 "{provider_display_name} API error ({status}): {message}"
             )));
@@ -769,6 +765,40 @@ impl SpacebotModel {
     }
 }
 // --- Helpers ---
+
+/// Extract the most useful error message from an API error response.
+///
+/// Different providers return errors in different formats:
+/// - OpenAI/Gemini: `{"error": {"message": "...", "code": ...}}`
+/// - Some providers: `{"error": "string message"}`
+/// - Others: `{"detail": "..."}`  or  `{"message": "..."}`
+///
+/// Falls back to the raw (truncated) response body if no known field is found.
+fn extract_error_message(body: &serde_json::Value, raw_text: &str) -> String {
+    // Standard OpenAI format: {"error": {"message": "..."}}
+    if let Some(msg) = body["error"]["message"].as_str() {
+        return msg.to_string();
+    }
+    // Error as a plain string: {"error": "..."}
+    if let Some(msg) = body["error"].as_str() {
+        return msg.to_string();
+    }
+    // Gemini/Google sometimes uses: {"error": {"status": "INVALID_ARGUMENT", ...}}
+    if let Some(status) = body["error"]["status"].as_str() {
+        let code = body["error"]["code"].as_i64().unwrap_or(0);
+        return format!("{status} (code {code})");
+    }
+    // FastAPI / generic: {"detail": "..."}
+    if let Some(msg) = body["detail"].as_str() {
+        return msg.to_string();
+    }
+    // Top-level message
+    if let Some(msg) = body["message"].as_str() {
+        return msg.to_string();
+    }
+    // Last resort: truncated raw body
+    truncate_body(raw_text).to_string()
+}
 
 #[allow(dead_code)]
 fn normalize_ollama_base_url(configured: Option<String>) -> String {
