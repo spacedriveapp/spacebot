@@ -377,12 +377,10 @@ pub(super) async fn create_binding(
                         Some(existing) => existing.clone(),
                         None => {
                             drop(perms_guard);
-                            let Some(discord_config) = new_config
-                                .messaging
-                                .discord
-                                .as_ref()
-                            else {
-                                tracing::error!("discord config missing despite token being provided");
+                            let Some(discord_config) = new_config.messaging.discord.as_ref() else {
+                                tracing::error!(
+                                    "discord config missing despite token being provided"
+                                );
                                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
                             };
                             let perms = crate::config::DiscordPermissions::from_config(
@@ -409,12 +407,10 @@ pub(super) async fn create_binding(
                         Some(existing) => existing.clone(),
                         None => {
                             drop(perms_guard);
-                            let Some(slack_config) = new_config
-                                .messaging
-                                .slack
-                                .as_ref()
-                            else {
-                                tracing::error!("slack config missing despite tokens being provided");
+                            let Some(slack_config) = new_config.messaging.slack.as_ref() else {
+                                tracing::error!(
+                                    "slack config missing despite tokens being provided"
+                                );
                                 return Err(StatusCode::INTERNAL_SERVER_ERROR);
                             };
                             let perms = crate::config::SlackPermissions::from_config(
@@ -453,11 +449,7 @@ pub(super) async fn create_binding(
 
             if let Some(token) = new_telegram_token {
                 let telegram_perms = {
-                    let Some(telegram_config) = new_config
-                        .messaging
-                        .telegram
-                        .as_ref()
-                    else {
+                    let Some(telegram_config) = new_config.messaging.telegram.as_ref() else {
                         tracing::error!("telegram config missing despite token being provided");
                         return Err(StatusCode::INTERNAL_SERVER_ERROR);
                     };
@@ -475,11 +467,7 @@ pub(super) async fn create_binding(
             }
 
             if let Some((username, oauth_token)) = new_twitch_creds {
-                let Some(twitch_config) = new_config
-                    .messaging
-                    .twitch
-                    .as_ref()
-                else {
+                let Some(twitch_config) = new_config.messaging.twitch.as_ref() else {
                     tracing::error!("twitch config missing despite credentials being provided");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 };

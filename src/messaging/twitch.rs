@@ -16,7 +16,7 @@ use twitch_irc::{ClientConfig, SecureTCPTransport, TwitchIRCClient};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 #[derive(Serialize, Deserialize)]
 struct TwitchTokenFile {
@@ -43,15 +43,15 @@ impl TokenStorage for TwitchTokenStorage {
         let mut expires_at = None;
 
         if let Some(path) = &self.token_path {
-            if let Ok(data) = std::fs::read_to_string(path) {
-                if let Ok(file) = serde_json::from_str::<TwitchTokenFile>(&data) {
-                    self.access_token = file.access_token;
-                    self.refresh_token = file.refresh_token;
-                    if let Some(stored_created) = file.created_at {
-                        created_at = stored_created;
-                    }
-                    expires_at = file.expires_at;
+            if let Ok(data) = std::fs::read_to_string(path)
+                && let Ok(file) = serde_json::from_str::<TwitchTokenFile>(&data)
+            {
+                self.access_token = file.access_token;
+                self.refresh_token = file.refresh_token;
+                if let Some(stored_created) = file.created_at {
+                    created_at = stored_created;
                 }
+                expires_at = file.expires_at;
             }
             if !self.refresh_token.is_empty() && expires_at.is_none() {
                 expires_at = Some(created_at + chrono::Duration::hours(1));
@@ -117,6 +117,7 @@ pub struct TwitchAdapter {
 const MAX_MESSAGE_LENGTH: usize = 500;
 
 impl TwitchAdapter {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         username: impl Into<String>,
         oauth_token: impl Into<String>,

@@ -75,7 +75,8 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     ) -> ToolCallHookAction {
         self.send(CortexChatEvent::ToolStarted {
             tool: tool_name.to_string(),
-        }).await;
+        })
+        .await;
         ToolCallHookAction::Continue
     }
 
@@ -95,7 +96,8 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         self.send(CortexChatEvent::ToolCompleted {
             tool: tool_name.to_string(),
             result_preview: preview,
-        }).await;
+        })
+        .await;
         HookAction::Continue
     }
 
@@ -295,18 +297,22 @@ impl CortexChatSession {
                     let _ = store
                         .save_message(&thread_id, "assistant", &response, channel_ref)
                         .await;
-                    let _ = event_tx.send(CortexChatEvent::Done {
-                        full_text: response,
-                    }).await;
+                    let _ = event_tx
+                        .send(CortexChatEvent::Done {
+                            full_text: response,
+                        })
+                        .await;
                 }
                 Err(error) => {
                     let error_text = format!("Cortex chat error: {error}");
                     let _ = store
                         .save_message(&thread_id, "assistant", &error_text, channel_ref)
                         .await;
-                    let _ = event_tx.send(CortexChatEvent::Error {
-                        message: error_text,
-                    }).await;
+                    let _ = event_tx
+                        .send(CortexChatEvent::Error {
+                            message: error_text,
+                        })
+                        .await;
                 }
             }
         });
@@ -314,7 +320,10 @@ impl CortexChatSession {
         Ok(event_rx)
     }
 
-    async fn build_system_prompt(&self, channel_context_id: Option<&str>) -> crate::error::Result<String> {
+    async fn build_system_prompt(
+        &self,
+        channel_context_id: Option<&str>,
+    ) -> crate::error::Result<String> {
         let runtime_config = &self.deps.runtime_config;
         let prompt_engine = runtime_config.prompts.load();
 
@@ -324,8 +333,11 @@ impl CortexChatSession {
         let browser_enabled = runtime_config.browser_config.load().enabled;
         let web_search_enabled = runtime_config.brave_search_key.load().is_some();
         let opencode_enabled = runtime_config.opencode.load().enabled;
-        let worker_capabilities =
-            prompt_engine.render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)?;
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         // Load channel transcript if a channel context is active
         let channel_transcript = if let Some(channel_id) = channel_context_id {
