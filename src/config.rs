@@ -500,6 +500,9 @@ pub struct CortexConfig {
     pub association_updates_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
+    /// When true, cortex auto-generates the display name. When false,
+    /// the display name equals the agent ID and cortex won't overwrite it.
+    pub auto_display_name: bool,
 }
 
 impl Default for CortexConfig {
@@ -516,6 +519,7 @@ impl Default for CortexConfig {
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
+            auto_display_name: true,
         }
     }
 }
@@ -1501,6 +1505,7 @@ struct TomlCortexConfig {
     association_similarity_threshold: Option<f32>,
     association_updates_threshold: Option<f32>,
     association_max_per_pass: Option<usize>,
+    auto_display_name: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -2637,6 +2642,9 @@ impl Config {
                     association_max_per_pass: c
                         .association_max_per_pass
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
+                    auto_display_name: c
+                        .auto_display_name
+                        .unwrap_or(base_defaults.cortex.auto_display_name),
                 })
                 .unwrap_or(base_defaults.cortex),
             browser: toml
@@ -2813,6 +2821,9 @@ impl Config {
                         association_max_per_pass: c
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
+                        auto_display_name: c
+                            .auto_display_name
+                            .unwrap_or(defaults.cortex.auto_display_name),
                     }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),

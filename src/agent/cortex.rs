@@ -584,8 +584,38 @@ struct ProfileLlmResponse {
 ///
 /// Uses the current memory bulletin and identity files as context, then asks
 /// an LLM to produce a display name, status line, and short bio.
+///
+/// When `auto_display_name` is disabled, the display name is set to the agent
+/// ID and cortex will not overwrite it.
 #[tracing::instrument(skip(deps, logger), fields(agent_id = %deps.agent_id))]
 async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
+    let cortex_config = **deps.runtime_config.cortex.load();
+
+    // If auto_display_name is disabled, ensure the profile exists with
+    // display_name = agent_id and only update status/bio fields.
+    if !cortex_config.auto_display_name {
+        let agent_id = &deps.agent_id;
+        let avatar_seed = agent_id.to_string();
+        if let Err(error) = sqlx::query(
+            "INSERT INTO agent_profile (agent_id, display_name, avatar_seed, generated_at, updated_at) \
+             VALUES (?, ?, ?, datetime('now'), datetime('now')) \
+             ON CONFLICT(agent_id) DO UPDATE SET \
+             display_name = COALESCE(agent_profile.display_name, excluded.display_name), \
+             avatar_seed = excluded.avatar_seed, \
+             updated_at = datetime('now')",
+        )
+        .bind(agent_id.as_ref())
+        .bind(agent_id.as_ref())
+        .bind(&avatar_seed)
+        .execute(&deps.sqlite_pool)
+        .await
+        {
+            tracing::warn!(%error, "failed to ensure agent profile with agent_id as display_name");
+        }
+        tracing::info!("auto_display_name disabled, skipping cortex profile generation");
+        return;
+    }
+
     tracing::info!("cortex generating agent profile");
     let started = Instant::now();
 
