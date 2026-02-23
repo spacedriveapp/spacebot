@@ -2,6 +2,7 @@
 title: "Evolving Intelligence System — Milestone 3: Intelligence (Layers 3 & 4 + Cross-Cutting)"
 type: feat
 date: 2026-02-22
+status: completed
 milestone: 3 of 4
 depends_on: milestone-2-core-learning
 brainstorm: docs/brainstorms/2026-02-22-evolving-intelligence-system-brainstorm.md
@@ -633,41 +634,41 @@ CREATE TABLE tuneables (
 
 ### Functional Requirements
 
-- [ ] Advisory scoring engine produces correct scores with base + modifiers
-- [ ] 5 advisory levels correctly assigned based on score thresholds
-- [ ] Agreement gating blocks WARNING without 2+ sources (except Policy distillations)
-- [ ] Phase detection identifies current phase from tool/task signals
-- [ ] Phase boost matrix applied correctly to advisory scores
-- [ ] Advisory packets stored with full lifecycle tracking
-- [ ] Packet effectiveness scores update from feedback
-- [ ] Cooldowns suppress repeat advice (per-tool, per-advice, per-category)
-- [ ] Obvious-from-context suppression works (`file(read)`→`file(write)`, phase-aware)
-- [ ] Quarantine audit trail logs all dropped advisories
-- [ ] Tier 1 programmatic synthesis produces action-first formatted advice
-- [ ] Tier 2 AI synthesis runs within advisory budget when available
-- [ ] Emission budget enforced (max 2 per event, 5-15% target rate)
-- [ ] Prefetch system generates packets during idle time
-- [ ] Auto-tuner runs on schedule, makes bounded adjustments, snapshots before changes
-- [ ] Bulletin section includes learning insights (advisory-gated)
-- [ ] 5 built-in domain chips loaded and triggered correctly
-- [ ] Chip 6-dimensional insight scoring produces correct scores and promotion tiers
-- [ ] Merger pipeline transforms chip insights for cognitive layer
-- [ ] Quality floors enforced in merger pipeline
-- [ ] Duplicate churn protection prevents excessive chip output
-- [ ] Chip schema validation rejects invalid definitions
-- [ ] Safety policy blocks harmful content patterns
-- [ ] Chip evolution tracks effectiveness and can deprecate underperformers
-- [ ] Provisional chip genesis suggests new chips from unmatched insights
-- [ ] Control Plane watchers fire correctly on detected conditions
-- [ ] Evidence Store captures and retains evidence by type
-- [ ] Evidence cleanup respects active episode references
-- [ ] Truth Ledger tracks claim lifecycle with correct transitions
-- [ ] Phase State Machine tracks transitions and history
-- [ ] Escape Protocol triggers on stuck detection and produces artifacts
-- [ ] Memory Gate scores importance and gates persistence
-- [ ] Runtime tuneables loaded, cached, and hot-reloadable
-- [ ] All systems fail-open with logging
-- [ ] `cargo clippy` and `cargo test` pass
+- [x] Advisory scoring engine produces correct scores with base + modifiers
+- [x] 5 advisory levels correctly assigned based on score thresholds
+- [x] Agreement gating blocks WARNING without 2+ sources (except Policy distillations)
+- [x] Phase detection identifies current phase from tool/task signals
+- [x] Phase boost matrix applied correctly to advisory scores
+- [x] Advisory packets stored with full lifecycle tracking
+- [x] Packet effectiveness scores update from feedback
+- [x] Cooldowns suppress repeat advice (per-tool, per-advice, per-category)
+- [x] Obvious-from-context suppression works (`file(read)`→`file(write)`, phase-aware)
+- [x] Quarantine audit trail logs all dropped advisories
+- [x] Tier 1 programmatic synthesis produces action-first formatted advice
+- [x] Tier 2 AI synthesis runs within advisory budget when available
+- [x] Emission budget enforced (max 2 per event, 5-15% target rate)
+- [x] Prefetch system generates packets during idle time
+- [x] Auto-tuner runs on schedule, makes bounded adjustments, snapshots before changes
+- [x] Bulletin section includes learning insights (advisory-gated)
+- [x] 5 built-in domain chips loaded and triggered correctly
+- [x] Chip 6-dimensional insight scoring produces correct scores and promotion tiers
+- [x] Merger pipeline transforms chip insights for cognitive layer
+- [x] Quality floors enforced in merger pipeline
+- [x] Duplicate churn protection prevents excessive chip output
+- [x] Chip schema validation rejects invalid definitions
+- [x] Safety policy blocks harmful content patterns
+- [x] Chip evolution tracks effectiveness and can deprecate underperformers
+- [x] Provisional chip genesis suggests new chips from unmatched insights
+- [x] Control Plane watchers fire correctly on detected conditions
+- [x] Evidence Store captures and retains evidence by type
+- [x] Evidence cleanup respects active episode references
+- [x] Truth Ledger tracks claim lifecycle with correct transitions
+- [x] Phase State Machine tracks transitions and history
+- [x] Escape Protocol triggers on stuck detection and produces artifacts
+- [x] Memory Gate scores importance and gates persistence
+- [x] Runtime tuneables loaded, cached, and hot-reloadable
+- [x] All systems fail-open with logging
+- [x] `cargo clippy` and `cargo test` pass
 
 ## Technical Considerations
 
