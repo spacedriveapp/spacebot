@@ -43,6 +43,7 @@ pub(super) struct CortexSection {
     bulletin_interval_secs: u64,
     bulletin_max_words: usize,
     bulletin_max_turns: usize,
+    auto_display_name: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -148,6 +149,7 @@ pub(super) struct CortexUpdate {
     bulletin_interval_secs: Option<u64>,
     bulletin_max_words: Option<usize>,
     bulletin_max_turns: Option<usize>,
+    auto_display_name: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -226,6 +228,7 @@ pub(super) async fn get_agent_config(
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
             bulletin_max_turns: cortex.bulletin_max_turns,
+            auto_display_name: cortex.auto_display_name,
         },
         coalesce: CoalesceSection {
             enabled: coalesce.enabled,
@@ -521,6 +524,9 @@ fn update_cortex_table(
     }
     if let Some(v) = cortex.bulletin_max_turns {
         table["bulletin_max_turns"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.auto_display_name {
+        table["auto_display_name"] = toml_edit::value(v);
     }
     Ok(())
 }
