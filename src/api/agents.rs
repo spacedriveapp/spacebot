@@ -234,6 +234,23 @@ pub(super) async fn create_agent(
                 "message": format!("Agent '{agent_id}' already exists")
             })));
         }
+        // Also check runtime state — an agent may still be running even if
+        // it was removed from config during a hot-reload (its RuntimeConfig
+        // and redb lock survive until the process restarts).
+        let runtime_configs = state.runtime_configs.load();
+        if runtime_configs.contains_key(&agent_id) {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' is still active in the runtime. Restart the server to fully remove it before re-creating.")
+            })));
+        }
+        let pools = state.agent_pools.load();
+        if pools.contains_key(&agent_id) {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' still has active database connections. Restart the server to fully remove it before re-creating.")
+            })));
+        }
     }
 
     let config_path = state.config_path.read().await.clone();
@@ -253,6 +270,20 @@ pub(super) async fn create_agent(
         tracing::warn!(%error, "failed to parse config.toml");
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
+
+    // Check if agent already exists in the TOML file itself (belt-and-suspenders
+    // check — prevents duplicate [[agents]] entries even if runtime state is stale).
+    if let Some(agents_array) = doc.get("agents").and_then(|a| a.as_array_of_tables()) {
+        let already_in_toml = agents_array
+            .iter()
+            .any(|t| t.get("id").and_then(|v| v.as_str()) == Some(&agent_id));
+        if already_in_toml {
+            return Ok(Json(serde_json::json!({
+                "success": false,
+                "message": format!("Agent '{agent_id}' already exists in config.toml")
+            })));
+        }
+    }
 
     if doc.get("agents").is_none() {
         doc["agents"] = toml_edit::Item::ArrayOfTables(toml_edit::ArrayOfTables::new());
@@ -325,7 +356,16 @@ pub(super) async fn create_agent(
     let settings_path = agent_config.data_dir.join("settings.redb");
     let settings_store = std::sync::Arc::new(
         crate::settings::SettingsStore::new(&settings_path).map_err(|error| {
-            tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
+            let err_str = error.to_string();
+            if err_str.contains("already open") || err_str.contains("acquire lock") {
+                tracing::error!(
+                    agent_id = %agent_id,
+                    path = %settings_path.display(),
+                    "settings.redb is locked by another process or existing agent runtime"
+                );
+            } else {
+                tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
+            }
             StatusCode::INTERNAL_SERVER_ERROR
         })?,
     );

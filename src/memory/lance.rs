@@ -361,12 +361,10 @@ impl EmbeddingTable {
 
     /// Validate that a memory ID is a well-formed UUID to prevent predicate injection.
     fn validate_memory_id(memory_id: &str) -> Result<()> {
-        if memory_id.len() != 36
-            || !memory_id
-                .chars()
-                .all(|c| c.is_ascii_hexdigit() || c == '-')
-        {
-            return Err(DbError::LanceDb(format!("invalid memory ID format: {}", memory_id)).into());
+        if memory_id.len() != 36 || !memory_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+            return Err(
+                DbError::LanceDb(format!("invalid memory ID format: {}", memory_id)).into(),
+            );
         }
         Ok(())
     }

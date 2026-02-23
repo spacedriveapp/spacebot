@@ -58,14 +58,14 @@ impl FileTool {
             if let Ok(relative) = canonical.strip_prefix(&workspace_canonical) {
                 for component in relative.components() {
                     check.push(component);
-                    if let Ok(metadata) = std::fs::symlink_metadata(&check) {
-                        if metadata.file_type().is_symlink() {
-                            return Err(FileError(
-                                "ACCESS DENIED: Symlinks are not allowed within the workspace \
+                    if let Ok(metadata) = std::fs::symlink_metadata(&check)
+                        && metadata.file_type().is_symlink()
+                    {
+                        return Err(FileError(
+                            "ACCESS DENIED: Symlinks are not allowed within the workspace \
                                  for security reasons. Use direct paths instead."
-                                    .to_string(),
-                            ));
-                        }
+                                .to_string(),
+                        ));
                     }
                 }
             }
@@ -204,7 +204,10 @@ impl Tool for FileTool {
                 // the dedicated identity API to keep update flow consistent.
                 let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
                 const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
-                if PROTECTED_FILES.iter().any(|f| file_name.eq_ignore_ascii_case(f)) {
+                if PROTECTED_FILES
+                    .iter()
+                    .any(|f| file_name.eq_ignore_ascii_case(f))
+                {
                     return Err(FileError(
                         "ACCESS DENIED: Identity files are protected and cannot be modified \
                          through file operations. Use the identity management API instead."

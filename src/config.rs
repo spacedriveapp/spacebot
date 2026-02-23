@@ -177,24 +177,66 @@ pub struct LlmConfig {
 impl std::fmt::Debug for LlmConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmConfig")
-            .field("anthropic_key", &self.anthropic_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openai_key", &self.openai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("openrouter_key", &self.openrouter_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "anthropic_key",
+                &self.anthropic_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openai_key",
+                &self.openai_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openrouter_key",
+                &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
-            .field("together_key", &self.together_key.as_ref().map(|_| "[REDACTED]"))
-            .field("fireworks_key", &self.fireworks_key.as_ref().map(|_| "[REDACTED]"))
-            .field("deepseek_key", &self.deepseek_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "together_key",
+                &self.together_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "fireworks_key",
+                &self.fireworks_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "deepseek_key",
+                &self.deepseek_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
-            .field("mistral_key", &self.mistral_key.as_ref().map(|_| "[REDACTED]"))
-            .field("gemini_key", &self.gemini_key.as_ref().map(|_| "[REDACTED]"))
-            .field("ollama_key", &self.ollama_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "mistral_key",
+                &self.mistral_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "gemini_key",
+                &self.gemini_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "ollama_key",
+                &self.ollama_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("ollama_base_url", &self.ollama_base_url)
-            .field("opencode_zen_key", &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"))
-            .field("nvidia_key", &self.nvidia_key.as_ref().map(|_| "[REDACTED]"))
-            .field("minimax_key", &self.minimax_key.as_ref().map(|_| "[REDACTED]"))
-            .field("moonshot_key", &self.moonshot_key.as_ref().map(|_| "[REDACTED]"))
-            .field("zai_coding_plan_key", &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "opencode_zen_key",
+                &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "nvidia_key",
+                &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "minimax_key",
+                &self.minimax_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "moonshot_key",
+                &self.moonshot_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "zai_coding_plan_key",
+                &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("providers", &self.providers)
             .finish()
     }
@@ -284,7 +326,10 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("cortex", &self.cortex)
             .field("browser", &self.browser)
             .field("mcp", &self.mcp)
-            .field("brave_search_key", &self.brave_search_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "brave_search_key",
+                &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -500,6 +545,9 @@ pub struct CortexConfig {
     pub association_updates_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
+    /// When true, cortex auto-generates the display name. When false,
+    /// the display name equals the agent ID and cortex won't overwrite it.
+    pub auto_display_name: bool,
 }
 
 impl Default for CortexConfig {
@@ -516,6 +564,7 @@ impl Default for CortexConfig {
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
+            auto_display_name: true,
         }
     }
 }
@@ -1501,6 +1550,7 @@ struct TomlCortexConfig {
     association_similarity_threshold: Option<f32>,
     association_updates_threshold: Option<f32>,
     association_max_per_pass: Option<usize>,
+    auto_display_name: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -1719,9 +1769,7 @@ fn resolve_cron_timezone(
                 .and_then(|value| normalize_timezone(&value))
         });
 
-    let Some(timezone) = timezone else {
-        return None;
-    };
+    let timezone = timezone?;
 
     if timezone.parse::<Tz>().is_err() {
         tracing::warn!(
@@ -2365,10 +2413,7 @@ impl Config {
                 .into_iter()
                 .map(|(provider_id, config)| {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "failed to resolve API key for provider '{}'",
-                            provider_id
-                        )
+                        anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
                     Ok((
                         provider_id.to_lowercase(),
@@ -2637,6 +2682,9 @@ impl Config {
                     association_max_per_pass: c
                         .association_max_per_pass
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
+                    auto_display_name: c
+                        .auto_display_name
+                        .unwrap_or(base_defaults.cortex.auto_display_name),
                 })
                 .unwrap_or(base_defaults.cortex),
             browser: toml
@@ -2813,6 +2861,9 @@ impl Config {
                         association_max_per_pass: c
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
+                        auto_display_name: c
+                            .auto_display_name
+                            .unwrap_or(defaults.cortex.auto_display_name),
                     }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
@@ -2843,6 +2894,25 @@ impl Config {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
+
+        // Deduplicate agents by ID — keep the last definition (latest wins).
+        // This prevents crash loops when config.toml has duplicate [[agents]]
+        // entries (e.g. from multiple create_agent API calls).
+        {
+            let mut seen = std::collections::HashSet::new();
+            let before = agents.len();
+            // Reverse-dedup: iterate from the end so the last definition wins,
+            // then reverse back to preserve original order.
+            agents.reverse();
+            agents.retain(|a| seen.insert(a.id.clone()));
+            agents.reverse();
+            if agents.len() < before {
+                tracing::warn!(
+                    duplicates_removed = before - agents.len(),
+                    "removed duplicate agent entries from config"
+                );
+            }
+        }
 
         if agents.is_empty() {
             agents.push(AgentConfig {

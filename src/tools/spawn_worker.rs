@@ -112,9 +112,8 @@ impl Tool for SpawnWorkerTool {
             }
         });
 
-        if opencode_enabled {
-            if let Some(obj) = properties.as_object_mut() {
-                obj.insert(
+        if opencode_enabled && let Some(obj) = properties.as_object_mut() {
+            obj.insert(
                     "worker_type".to_string(),
                     serde_json::json!({
                         "type": "string",
@@ -123,14 +122,13 @@ impl Tool for SpawnWorkerTool {
                         "description": "\"builtin\" (default) runs a Rig agent loop. \"opencode\" spawns a full OpenCode coding agent — use for complex multi-file coding tasks."
                     }),
                 );
-                obj.insert(
+            obj.insert(
                     "directory".to_string(),
                     serde_json::json!({
                         "type": "string",
                         "description": "Working directory for the worker. Required when worker_type is \"opencode\". The OpenCode agent operates in this directory."
                     }),
                 );
-            }
         }
 
         ToolDefinition {

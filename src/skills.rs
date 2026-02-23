@@ -115,7 +115,10 @@ impl SkillSet {
     ///
     /// The channel sees skill names and descriptions but is instructed to
     /// delegate actual skill execution to workers.
-    pub fn render_channel_prompt(&self, prompt_engine: &crate::prompts::PromptEngine) -> crate::error::Result<String> {
+    pub fn render_channel_prompt(
+        &self,
+        prompt_engine: &crate::prompts::PromptEngine,
+    ) -> crate::error::Result<String> {
         if self.skills.is_empty() {
             return Ok(String::new());
         }

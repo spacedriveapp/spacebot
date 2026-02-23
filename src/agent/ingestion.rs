@@ -298,11 +298,24 @@ async fn read_ingest_content(path: &Path) -> anyhow::Result<String> {
             .await
             .with_context(|| format!("failed to read pdf file: {}", path.display()))?;
 
-        let extracted =
-            tokio::task::spawn_blocking(move || pdf_extract::extract_text_from_mem(&bytes))
-                .await
-                .context("pdf extraction task failed")?
-                .with_context(|| format!("failed to extract text from pdf: {}", path.display()))?;
+        let extracted = tokio::task::spawn_blocking(move || {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                pdf_extract::extract_text_from_mem(&bytes)
+            })) {
+                Ok(result) => result.map_err(|e| anyhow::anyhow!(e)),
+                Err(panic) => {
+                    let msg = panic
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| panic.downcast_ref::<String>().map(|s| s.as_str()))
+                        .unwrap_or("unknown panic");
+                    Err(anyhow::anyhow!("pdf extraction panicked: {msg}"))
+                }
+            }
+        })
+        .await
+        .context("pdf extraction task failed")?
+        .with_context(|| format!("failed to extract text from pdf: {}", path.display()))?;
 
         return Ok(extracted);
     }

@@ -316,10 +316,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 cortex: worker.clone(),
                 voice: String::new(),
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
-                fallbacks: HashMap::from([
-                    (channel, vec![worker.clone()]),
-                    (worker, vec![lite]),
-                ]),
+                fallbacks: HashMap::from([(channel, vec![worker.clone()]), (worker, vec![lite])]),
                 rate_limit_cooldown_secs: 60,
                 ..RoutingConfig::default()
             }

@@ -40,7 +40,7 @@ export const SwitchField: React.FC<SwitchFieldProps> = ({
             </div>
             <Toggle
               {...props}
-              checked={field.value}
+              checked={field.value ?? false}
               onCheckedChange={field.onChange}
             />
           </label>

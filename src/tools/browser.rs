@@ -4,7 +4,6 @@
 //! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
 //! ref system for LLM-friendly element addressing.
 
-
 use crate::config::BrowserConfig;
 
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
@@ -60,23 +59,22 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
     }
 
     // If the host parses as an IP address, check against blocked ranges
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(BrowserError::new(format!(
-                "navigation to private/loopback address {ip} is blocked"
-            )));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(BrowserError::new(format!(
+            "navigation to private/loopback address {ip} is blocked"
+        )));
     }
 
     // IPv6 addresses in brackets (url crate strips them for host_str)
-    if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        if let Ok(ip) = stripped.parse::<IpAddr>() {
-            if is_blocked_ip(ip) {
-                return Err(BrowserError::new(format!(
-                    "navigation to private/loopback address {ip} is blocked"
-                )));
-            }
-        }
+    if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
+        && let Ok(ip) = stripped.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(BrowserError::new(format!(
+            "navigation to private/loopback address {ip} is blocked"
+        )));
     }
 
     Ok(())

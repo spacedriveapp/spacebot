@@ -640,6 +640,12 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 			case "cortex":
 				return (
 					<div className="grid gap-4">
+						<ConfigToggleField
+							label="Auto Display Name"
+							description="When enabled, cortex generates a creative display name. When disabled, the agent ID is used as display name."
+							value={localValues.auto_display_name as boolean}
+							onChange={(v) => handleChange("auto_display_name", v)}
+						/>
 						<NumberStepper
 							label="Tick Interval"
 							description="How often the cortex checks system state"
