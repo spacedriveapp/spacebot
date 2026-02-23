@@ -49,6 +49,7 @@ pub mod observatory;
 
 pub use commands::{LearningCommand, parse_learning_command, handle_learning_command};
 pub use config::LearningConfig;
+pub use observatory::ObservatoryConfig;
 pub use engine::spawn_learning_loop;
 pub use metrics::MetricsCalculator;
 pub use store::LearningStore;

@@ -49,6 +49,9 @@ enum Command {
     /// Manage authentication
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Manage the Obsidian Observatory vault
+    #[command(subcommand)]
+    Observatory(ObservatoryAction),
 }
 
 #[derive(Subcommand)]
@@ -115,6 +118,22 @@ enum SkillCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum ObservatoryAction {
+    /// Generate (or refresh) the Observatory vault from learning.db
+    Generate {
+        /// Agent ID (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+    /// Show Observatory configuration and status
+    Status {
+        /// Agent ID (defaults to first agent)
+        #[arg(short, long)]
+        agent: Option<String>,
+    },
+}
+
 /// Tracks an active conversation channel and its message sender.
 struct ActiveChannel {
     message_tx: mpsc::Sender<spacebot::InboundMessage>,
@@ -144,6 +163,7 @@ fn main() -> anyhow::Result<()> {
         Command::Status => cmd_status(),
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
         Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
+        Command::Observatory(action) => cmd_observatory(cli.config, action),
     }
 }
 
@@ -384,6 +404,87 @@ fn cmd_auth(config_path: Option<std::path::PathBuf>, auth_cmd: AuthCommand) -> a
                 let expires_min =
                     (new_creds.expires_at - chrono::Utc::now().timestamp_millis()) / 60_000;
                 eprintln!("Token refreshed (expires in {}m)", expires_min);
+                Ok(())
+            }
+        }
+    })
+}
+
+fn cmd_observatory(
+    config_path: Option<std::path::PathBuf>,
+    action: ObservatoryAction,
+) -> anyhow::Result<()> {
+    let config = load_config(&config_path)?;
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async {
+        match action {
+            ObservatoryAction::Generate { agent } => {
+                let agent_config = get_agent_config(&config, agent.as_deref())?;
+                let resolved = agent_config.resolve(&config.instance_dir, &config.defaults);
+                let db_path = resolved.learning_db_path();
+                let observatory_config = resolved.learning.observatory.clone();
+
+                println!("Connecting to learning.db at {}", db_path.display());
+
+                let store = spacebot::learning::LearningStore::connect(&db_path)
+                    .await
+                    .context("failed to connect to learning.db")?;
+
+                println!("Generating Observatory vault at {}", observatory_config.vault_dir.display());
+
+                if !observatory_config.enabled {
+                    println!("Observatory is disabled in config (enabled = false).");
+                    println!("Set [defaults.learning.observatory] enabled = true to generate.");
+                    return Ok(());
+                }
+
+                let report = spacebot::learning::observatory::sync_observatory(&store, &observatory_config)
+                    .await
+                    .context("observatory sync failed")?;
+
+                println!(
+                    "Done: {} file(s) written in {}ms",
+                    report.files_written, report.duration_ms
+                );
+                println!("Vault: {}", observatory_config.vault_dir.display());
+
+                Ok(())
+            }
+            ObservatoryAction::Status { agent } => {
+                let agent_config = get_agent_config(&config, agent.as_deref())?;
+                let resolved = agent_config.resolve(&config.instance_dir, &config.defaults);
+                let db_path = resolved.learning_db_path();
+                let observatory_config = &resolved.learning.observatory;
+
+                println!("Observatory status for agent: {}", resolved.id);
+                println!();
+                println!("  enabled:            {}", observatory_config.enabled);
+                println!("  auto_sync:          {}", observatory_config.auto_sync);
+                println!("  sync_cooldown_secs: {}", observatory_config.sync_cooldown_secs);
+                println!("  vault_dir:          {}", observatory_config.vault_dir.display());
+                println!("  generate_canvas:    {}", observatory_config.generate_canvas);
+                println!("  max_recent_items:   {}", observatory_config.max_recent_items);
+                println!("  explore_max_per_type: {}", observatory_config.explore_max_per_type);
+                println!();
+                println!("  learning.db: {}", db_path.display());
+
+                let db_exists = db_path.exists();
+                println!(
+                    "  learning.db exists: {}",
+                    if db_exists { "yes" } else { "no (not yet initialized)" }
+                );
+
+                let vault_exists = observatory_config.vault_dir.exists();
+                println!(
+                    "  vault exists:       {}",
+                    if vault_exists { "yes" } else { "no (run `observatory generate` to create)" }
+                );
+
                 Ok(())
             }
         }

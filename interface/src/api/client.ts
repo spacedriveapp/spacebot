@@ -943,6 +943,107 @@ export interface RawConfigUpdateResponse {
 	message: string;
 }
 
+// -- Learning Dashboard Types --
+
+export interface LearningDistillation {
+	id: string;
+	distillation_type: string;
+	statement: string;
+	confidence: number;
+	triggers: string;
+	anti_triggers: string;
+	domains: string;
+	times_retrieved: number;
+	times_used: number;
+	times_helped: number;
+	validation_count: number;
+	contradiction_count: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface LearningEpisode {
+	id: string;
+	agent_id: string;
+	trace_id: string | null;
+	task: string;
+	predicted_outcome: string | null;
+	predicted_confidence: number;
+	actual_outcome: string | null;
+	surprise_level: number | null;
+	started_at: string;
+	completed_at: string | null;
+	duration_secs: number | null;
+}
+
+export interface LearningStep {
+	id: string;
+	episode_id: string;
+	tool_name: string | null;
+	intent: string | null;
+	prediction: string | null;
+	result: string | null;
+	lesson: string | null;
+	created_at: string;
+}
+
+export interface LearningInsight {
+	id: string;
+	category: string;
+	content: string;
+	reliability: number;
+	confidence: number;
+	validation_count: number;
+	contradiction_count: number;
+	quality_score: number | null;
+	advisory_readiness: number;
+	promoted: boolean;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface LearningChip {
+	chip_id: string;
+	observation_count: number;
+	success_rate: number;
+	status: string;
+	confidence: number;
+	updated_at: string;
+}
+
+export interface LearningQuarantineEntry {
+	id: string;
+	source_id: string;
+	source_type: string;
+	stage: string;
+	reason: string;
+	human_reason: string;
+	created_at: string;
+}
+
+export interface LearningMetricPoint {
+	metric_name: string;
+	metric_value: number;
+	recorded_at: string;
+}
+
+export interface LearningContradiction {
+	id: string;
+	insight_a_id: string;
+	insight_b_id: string;
+	contradiction_type: string;
+	resolution: string | null;
+	similarity_score: number | null;
+	created_at: string;
+}
+
+export interface LearningTuneable {
+	key: string;
+	value: string;
+	description: string | null;
+	updated_at: string;
+}
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
@@ -1383,4 +1484,80 @@ export const api = {
 		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
 	eventsUrl: `${API_BASE}/events`,
+
+	// Learning Dashboard API
+	learningDistillations: (agentId: string, type?: string) => {
+		const params = new URLSearchParams({ agent_id: agentId });
+		if (type) params.set("distillation_type", type);
+		return fetchJson<{ distillations: LearningDistillation[] }>(`/learning/distillations?${params}`);
+	},
+	learningEpisodes: (agentId: string, limit = 50) =>
+		fetchJson<{ episodes: LearningEpisode[] }>(`/learning/episodes?agent_id=${encodeURIComponent(agentId)}&limit=${limit}`),
+	learningEpisodeSteps: (agentId: string, episodeId: string) =>
+		fetchJson<{ steps: LearningStep[] }>(`/learning/episodes/steps?agent_id=${encodeURIComponent(agentId)}&episode_id=${encodeURIComponent(episodeId)}`),
+	learningInsights: (agentId: string, category?: string) => {
+		const params = new URLSearchParams({ agent_id: agentId });
+		if (category) params.set("category", category);
+		return fetchJson<{ insights: LearningInsight[] }>(`/learning/insights?${params}`);
+	},
+	learningChips: (agentId: string) =>
+		fetchJson<{ chips: LearningChip[] }>(`/learning/chips?agent_id=${encodeURIComponent(agentId)}`),
+	learningQuarantine: (agentId: string, limit = 50) =>
+		fetchJson<{ entries: LearningQuarantineEntry[] }>(`/learning/quarantine?agent_id=${encodeURIComponent(agentId)}&limit=${limit}`),
+	learningMetrics: (agentId: string) =>
+		fetchJson<{ metrics: LearningMetricPoint[] }>(`/learning/metrics?agent_id=${encodeURIComponent(agentId)}`),
+	learningMetricsHistory: (agentId: string, metric?: string, days = 30) => {
+		const params = new URLSearchParams({ agent_id: agentId, days: String(days) });
+		if (metric) params.set("metric", metric);
+		return fetchJson<{ points: LearningMetricPoint[] }>(`/learning/metrics/history?${params}`);
+	},
+	learningContradictions: (agentId: string, limit = 50) =>
+		fetchJson<{ contradictions: LearningContradiction[] }>(`/learning/contradictions?agent_id=${encodeURIComponent(agentId)}&limit=${limit}`),
+	learningTuneables: (agentId: string) =>
+		fetchJson<{ tuneables: LearningTuneable[] }>(`/learning/tuneables?agent_id=${encodeURIComponent(agentId)}`),
+	dismissInsight: async (agentId: string, insightId: string) => {
+		const response = await fetch(`${API_BASE}/learning/insights/dismiss`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, insight_id: insightId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
+	correctInsight: async (agentId: string, insightId: string, content: string) => {
+		const response = await fetch(`${API_BASE}/learning/insights/correct`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, insight_id: insightId, content }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
+	promoteInsight: async (agentId: string, insightId: string) => {
+		const response = await fetch(`${API_BASE}/learning/insights/promote`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, insight_id: insightId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
+	dismissDistillation: async (agentId: string, distillationId: string) => {
+		const response = await fetch(`${API_BASE}/learning/distillations/dismiss`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, distillation_id: distillationId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
+	updateTuneable: async (agentId: string, key: string, value: string) => {
+		const response = await fetch(`${API_BASE}/learning/tuneables`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, key, value }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
 };
