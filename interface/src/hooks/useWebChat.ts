@@ -12,6 +12,10 @@ export interface WebChatMessage {
 	content: string;
 }
 
+export function getPortalChatSessionId(agentId: string) {
+	return `portal:chat:${agentId}`;
+}
+
 async function consumeSSE(
 	response: Response,
 	onEvent: (eventType: string, data: string) => void,
@@ -48,7 +52,7 @@ async function consumeSSE(
 }
 
 export function useWebChat(agentId: string) {
-	const sessionId = `portal:chat:${agentId}`;
+	const sessionId = getPortalChatSessionId(agentId);
 	const [messages, setMessages] = useState<WebChatMessage[]>([]);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);

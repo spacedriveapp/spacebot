@@ -282,10 +282,10 @@ impl Channel {
                 _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() => {
                     let now = tokio::time::Instant::now();
                     // Check coalesce deadline
-                    if self.coalesce_deadline.is_some_and(|d| d <= now) {
-                        if let Err(error) = self.flush_coalesce_buffer().await {
-                            tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on deadline");
-                        }
+                    if self.coalesce_deadline.is_some_and(|d| d <= now)
+                        && let Err(error) = self.flush_coalesce_buffer().await
+                    {
+                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on deadline");
                     }
                     // Check retrigger deadline
                     if self.retrigger_deadline.is_some_and(|d| d <= now) {
@@ -391,7 +391,10 @@ impl Channel {
 
         if messages.len() == 1 {
             // Single message - process normally
-            let message = messages.into_iter().next().unwrap();
+            let message = messages
+                .into_iter()
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("empty iterator after length check"))?;
             self.handle_message(message).await
         } else {
             // Multiple messages - batch them
@@ -462,11 +465,11 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&first.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
-            );
+            self.conversation_context = Some(prompt_engine.render_conversation_context(
+                &first.source,
+                server_name,
+                channel_name,
+            )?);
         }
 
         // Persist each message to conversation log (individual audit trail)
@@ -557,7 +560,7 @@ impl Channel {
         // Build system prompt with coalesce hint
         let system_prompt = self
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
-            .await;
+            .await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -594,21 +597,23 @@ impl Channel {
         message_count: usize,
         elapsed_secs: f64,
         unique_senders: usize,
-    ) -> String {
+    ) -> Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
         let identity_context = rc.identity.load().render();
         let memory_bulletin = rc.memory_bulletin.load();
         let skills = rc.skills.load();
-        let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+        let skills_prompt = skills.render_channel_prompt(&prompt_engine)?;
 
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -625,18 +630,16 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
-            .render_channel_prompt(
-                empty_to_none(identity_context),
-                empty_to_none(memory_bulletin.to_string()),
-                empty_to_none(skills_prompt),
-                worker_capabilities,
-                self.conversation_context.clone(),
-                empty_to_none(status_text),
-                coalesce_hint,
-                available_channels,
-            )
-            .expect("failed to render channel prompt")
+        prompt_engine.render_channel_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(skills_prompt),
+            worker_capabilities,
+            self.conversation_context.clone(),
+            empty_to_none(status_text),
+            coalesce_hint,
+            available_channels,
+        )
     }
 
     /// Handle an incoming message by running the channel's LLM agent loop.
@@ -716,14 +719,14 @@ impl Channel {
                         .get("telegram_chat_type")
                         .and_then(|v| v.as_str())
                 });
-            self.conversation_context = Some(
-                prompt_engine
-                    .render_conversation_context(&message.source, server_name, channel_name)
-                    .expect("failed to render conversation context"),
-            );
+            self.conversation_context = Some(prompt_engine.render_conversation_context(
+                &message.source,
+                server_name,
+                channel_name,
+            )?);
         }
 
-        let system_prompt = self.build_system_prompt().await;
+        let system_prompt = self.build_system_prompt().await?;
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -795,21 +798,23 @@ impl Channel {
     }
 
     /// Assemble the full system prompt using the PromptEngine.
-    async fn build_system_prompt(&self) -> String {
+    async fn build_system_prompt(&self) -> crate::error::Result<String> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
 
         let identity_context = rc.identity.load().render();
         let memory_bulletin = rc.memory_bulletin.load();
         let skills = rc.skills.load();
-        let skills_prompt = skills.render_channel_prompt(&prompt_engine);
+        let skills_prompt = skills.render_channel_prompt(&prompt_engine)?;
 
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
-        let worker_capabilities = prompt_engine
-            .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
-            .expect("failed to render worker capabilities");
+        let worker_capabilities = prompt_engine.render_worker_capabilities(
+            browser_enabled,
+            web_search_enabled,
+            opencode_enabled,
+        )?;
 
         let status_text = {
             let status = self.state.status_block.read().await;
@@ -820,18 +825,16 @@ impl Channel {
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
-        prompt_engine
-            .render_channel_prompt(
-                empty_to_none(identity_context),
-                empty_to_none(memory_bulletin.to_string()),
-                empty_to_none(skills_prompt),
-                worker_capabilities,
-                self.conversation_context.clone(),
-                empty_to_none(status_text),
-                None, // coalesce_hint - only set for batched messages
-                available_channels,
-            )
-            .expect("failed to render channel prompt")
+        prompt_engine.render_channel_prompt(
+            empty_to_none(identity_context),
+            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(skills_prompt),
+            worker_capabilities,
+            self.conversation_context.clone(),
+            empty_to_none(status_text),
+            None, // coalesce_hint - only set for batched messages
+            available_channels,
+        )
     }
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
@@ -872,6 +875,7 @@ impl Channel {
         let max_turns = **rc.max_turns.load();
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
+            .with_context(&*self.deps.agent_id, "channel")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -939,10 +943,11 @@ impl Channel {
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
     ///
-    /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed.
-    /// The LLM must explicitly call the `reply` tool to send a message; returning
-    /// plain text on a retrigger is treated as internal acknowledgment, not a
-    /// user-facing response.
+    /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed
+    /// unless the LLM called `skip` — in that case, any text the LLM produced
+    /// is sent as a fallback to ensure worker/branch results reach the user.
+    /// The LLM sometimes incorrectly skips on retrigger turns thinking the
+    /// result was "already processed" when the user hasn't seen it yet.
     async fn handle_agent_result(
         &self,
         result: std::result::Result<String, rig::completion::PromptError>,
@@ -955,7 +960,50 @@ impl Channel {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
                 let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
 
-                if skipped {
+                if skipped && is_retrigger {
+                    // The LLM skipped on a retrigger turn. This means a worker
+                    // or branch completed but the LLM decided not to relay the
+                    // result. If the LLM also produced text, send it as a
+                    // fallback since the user hasn't seen the result yet.
+                    let text = response.trim();
+                    if !text.is_empty() {
+                        tracing::info!(
+                            channel_id = %self.id,
+                            response_len = text.len(),
+                            "LLM skipped on retrigger but produced text, sending as fallback"
+                        );
+                        let extracted = extract_reply_from_tool_syntax(text);
+                        let source = self
+                            .conversation_id
+                            .as_deref()
+                            .and_then(|conversation_id| conversation_id.split(':').next())
+                            .unwrap_or("unknown");
+                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                            extracted.as_deref().unwrap_or(text),
+                            source,
+                        );
+                        if !final_text.is_empty() {
+                            if extracted.is_some() {
+                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
+                            }
+                            self.state
+                                .conversation_logger
+                                .log_bot_message(&self.state.channel_id, &final_text);
+                            if let Err(error) = self
+                                .response_tx
+                                .send(OutboundResponse::Text(final_text))
+                                .await
+                            {
+                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                            }
+                        }
+                    } else {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
+                        );
+                    }
+                } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
@@ -1067,6 +1115,12 @@ impl Channel {
                 let mut branches = self.state.active_branches.write().await;
                 branches.remove(branch_id);
 
+                #[cfg(feature = "metrics")]
+                crate::telemetry::Metrics::global()
+                    .active_branches
+                    .with_label_values(&[&*self.deps.agent_id])
+                    .dec();
+
                 // Memory persistence branches complete silently — no history
                 // injection, no re-trigger. The work (memory saves) already
                 // happened inside the branch via tool calls.
@@ -1147,8 +1201,10 @@ impl Channel {
                 for (key, value) in retrigger_metadata {
                     self.pending_retrigger_metadata.insert(key, value);
                 }
-                self.retrigger_deadline =
-                    Some(tokio::time::Instant::now() + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS));
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
             }
         }
 
@@ -1177,13 +1233,19 @@ impl Channel {
             "firing debounced retrigger"
         );
 
-        let retrigger_message = self
+        let retrigger_message = match self
             .deps
             .runtime_config
             .prompts
             .load()
             .render_system_retrigger()
-            .expect("failed to render retrigger message");
+        {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(%error, "failed to render retrigger message");
+                return;
+            }
+        };
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1255,7 +1317,7 @@ pub async fn spawn_branch_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render branch prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
 
     spawn_branch(
         state,
@@ -1263,6 +1325,7 @@ pub async fn spawn_branch_from_state(
         &description,
         &system_prompt,
         &description,
+        "branch",
     )
     .await
 }
@@ -1279,10 +1342,10 @@ async fn spawn_memory_persistence_branch(
     let prompt_engine = deps.runtime_config.prompts.load();
     let system_prompt = prompt_engine
         .render_static("memory_persistence")
-        .expect("failed to render memory_persistence prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let prompt = prompt_engine
         .render_system_memory_persistence()
-        .expect("failed to render memory persistence prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
 
     spawn_branch(
         state,
@@ -1290,8 +1353,47 @@ async fn spawn_memory_persistence_branch(
         &prompt,
         &system_prompt,
         "persisting memories...",
+        "memory_persistence_branch",
     )
     .await
+}
+
+fn ensure_dispatch_readiness(state: &ChannelState, dispatch_type: &'static str) {
+    let readiness = state.deps.runtime_config.work_readiness();
+    if readiness.ready {
+        return;
+    }
+
+    let reason = readiness
+        .reason
+        .map(|value| value.as_str())
+        .unwrap_or("unknown");
+    tracing::warn!(
+        agent_id = %state.deps.agent_id,
+        channel_id = %state.channel_id,
+        dispatch_type,
+        reason,
+        warmup_state = ?readiness.warmup_state,
+        embedding_ready = readiness.embedding_ready,
+        bulletin_age_secs = ?readiness.bulletin_age_secs,
+        stale_after_secs = readiness.stale_after_secs,
+        "dispatch requested before readiness contract was satisfied"
+    );
+
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .dispatch_while_cold_count
+        .with_label_values(&[&*state.deps.agent_id, dispatch_type, reason])
+        .inc();
+
+    let warmup_config = **state.deps.runtime_config.warmup.load();
+    let should_trigger = readiness.warmup_state != crate::config::WarmupState::Warming
+        && (readiness.reason != Some(crate::config::WorkReadinessReason::EmbeddingNotReady)
+            || warmup_config.eager_embedding_load);
+
+    if should_trigger {
+        crate::agent::cortex::trigger_forced_warmup(state.deps.clone(), dispatch_type);
+    }
 }
 
 /// Shared branch spawning logic.
@@ -1304,6 +1406,7 @@ async fn spawn_branch(
     prompt: &str,
     system_prompt: &str,
     status_label: &str,
+    dispatch_type: &'static str,
 ) -> std::result::Result<BranchId, AgentError> {
     let max_branches = **state.deps.runtime_config.max_concurrent_branches.load();
     {
@@ -1315,6 +1418,7 @@ async fn spawn_branch(
             });
         }
     }
+    ensure_dispatch_readiness(state, dispatch_type);
 
     let history = {
         let h = state.history.read().await;
@@ -1366,6 +1470,12 @@ async fn spawn_branch(
         status.add_branch(branch_id, status_label);
     }
 
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .active_branches
+        .with_label_values(&[&*state.deps.agent_id])
+        .inc();
+
     state
         .deps
         .event_tx
@@ -1401,9 +1511,10 @@ pub async fn spawn_worker_from_state(
     state: &ChannelState,
     task: impl Into<String>,
     interactive: bool,
-    skill_name: Option<&str>,
+    suggested_skills: &[&str],
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
+    ensure_dispatch_readiness(state, "worker");
     let task = task.into();
 
     let rc = &state.deps.runtime_config;
@@ -1413,21 +1524,23 @@ pub async fn spawn_worker_from_state(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
         )
-        .expect("failed to render worker prompt");
+        .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
 
-    // Build the worker system prompt, optionally prepending skill instructions
-    let system_prompt = if let Some(name) = skill_name {
-        if let Some(skill_prompt) = skills.render_worker_prompt(name, &prompt_engine) {
-            format!("{}\n\n{}", worker_system_prompt, skill_prompt)
-        } else {
-            tracing::warn!(skill = %name, "skill not found, spawning worker without skill context");
+    // Append skills listing to worker system prompt. Suggested skills are
+    // flagged so the worker knows the channel's intent, but it can read any
+    // skill it decides is relevant via the read_skill tool.
+    let system_prompt = match skills.render_worker_skills(suggested_skills, &prompt_engine) {
+        Ok(skills_prompt) if !skills_prompt.is_empty() => {
+            format!("{worker_system_prompt}\n\n{skills_prompt}")
+        }
+        Ok(_) => worker_system_prompt,
+        Err(error) => {
+            tracing::warn!(%error, "failed to render worker skills listing, spawning without skills context");
             worker_system_prompt
         }
-    } else {
-        worker_system_prompt
     };
 
     let worker = if interactive {
@@ -1512,6 +1625,7 @@ pub async fn spawn_opencode_worker_from_state(
     interactive: bool,
 ) -> std::result::Result<crate::WorkerId, AgentError> {
     check_worker_limit(state).await?;
+    ensure_dispatch_readiness(state, "opencode_worker");
     let task = task.into();
     let directory = std::path::PathBuf::from(directory);
 
@@ -1616,6 +1730,9 @@ where
 {
     tokio::spawn(async move {
         #[cfg(feature = "metrics")]
+        let worker_start = std::time::Instant::now();
+
+        #[cfg(feature = "metrics")]
         crate::telemetry::Metrics::global()
             .active_workers
             .with_label_values(&[&*agent_id])
@@ -1629,10 +1746,17 @@ where
             }
         };
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .active_workers
-            .with_label_values(&[&*agent_id])
-            .dec();
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .active_workers
+                .with_label_values(&[&*agent_id])
+                .dec();
+            metrics
+                .worker_duration_seconds
+                .with_label_values(&[&*agent_id, "builtin"])
+                .observe(worker_start.elapsed().as_secs_f64());
+        }
 
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,

@@ -1,15 +1,15 @@
-import {useState, useEffect, useRef} from "react";
-import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
-import {api, type GlobalSettingsResponse} from "@/api/client";
-import {Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle} from "@/ui";
-import {useSearch, useNavigate} from "@tanstack/react-router";
-import {ChannelSettingCard, DisabledChannelCard} from "@/components/ChannelSettingCard";
-import {ModelSelect} from "@/components/ModelSelect";
-import {ProviderIcon} from "@/lib/providerIcons";
-import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
-import {faSearch} from "@fortawesome/free-solid-svg-icons";
+import { useState, useEffect, useRef } from "react";
+import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { api, type GlobalSettingsResponse } from "@/api/client";
+import { Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
+import { useSearch, useNavigate } from "@tanstack/react-router";
+import { ChannelSettingCard, DisabledChannelCard } from "@/components/ChannelSettingCard";
+import { ModelSelect } from "@/components/ModelSelect";
+import { ProviderIcon } from "@/lib/providerIcons";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
-import {parse as parseToml} from "smol-toml";
+import { parse as parseToml } from "smol-toml";
 
 type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
 
@@ -179,10 +179,18 @@ const PROVIDERS = [
 	{
 		id: "minimax",
 		name: "MiniMax",
-		description: "MiniMax M1 (Anthropic message format)",
-		placeholder: "eyJ...",
+		description: "MiniMax (Anthropic message format)",
+		placeholder: "sk-...",
 		envVar: "MINIMAX_API_KEY",
-		defaultModel: "minimax/MiniMax-M1-80k",
+		defaultModel: "minimax/MiniMax-M2.5",
+	},
+	{
+		id: "minimax-cn",
+		name: "MiniMax CN",
+		description: "MiniMax China (Anthropic message format)",
+		placeholder: "sk-...",
+		envVar: "MINIMAX_CN_API_KEY",
+		defaultModel: "minimax-cn/MiniMax-M2.5",
 	},
 	{
 		id: "moonshot",
@@ -202,10 +210,12 @@ const PROVIDERS = [
 	},
 ] as const;
 
+const CHATGPT_OAUTH_DEFAULT_MODEL = "openai-chatgpt/gpt-5.3-codex";
+
 export function Settings() {
 	const queryClient = useQueryClient();
 	const navigate = useNavigate();
-	const search = useSearch({from: "/settings"}) as {tab?: string};
+	const search = useSearch({ from: "/settings" }) as { tab?: string };
 	const [activeSection, setActiveSection] = useState<SectionId>("providers");
 
 	// Sync activeSection with URL search param
@@ -217,7 +227,7 @@ export function Settings() {
 
 	const handleSectionChange = (section: SectionId) => {
 		setActiveSection(section);
-		navigate({to: "/settings", search: {tab: section}});
+		navigate({ to: "/settings", search: { tab: section } });
 	};
 	const [editingProvider, setEditingProvider] = useState<string | null>(null);
 	const [keyInput, setKeyInput] = useState("");
@@ -228,13 +238,24 @@ export function Settings() {
 		message: string;
 		sample?: string | null;
 	} | null>(null);
+	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
+	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
+	const [openAiOAuthDialogOpen, setOpenAiOAuthDialogOpen] = useState(false);
+	const [deviceCodeInfo, setDeviceCodeInfo] = useState<{
+		userCode: string;
+		verificationUrl: string;
+	} | null>(null);
+	const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
 	} | null>(null);
 
 	// Fetch providers data (only when on providers tab)
-	const {data, isLoading} = useQuery({
+	const { data, isLoading } = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
 		staleTime: 5_000,
@@ -242,7 +263,7 @@ export function Settings() {
 	});
 
 	// Fetch global settings (only when on api-keys, server, or worker-logs tabs)
-	const {data: globalSettings, isLoading: globalSettingsLoading} = useQuery({
+	const { data: globalSettings, isLoading: globalSettingsLoading } = useQuery({
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
@@ -250,7 +271,7 @@ export function Settings() {
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: ({provider, apiKey, model}: {provider: string; apiKey: string; model: string}) =>
+		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
 			api.updateProvider(provider, apiKey, model),
 		onSuccess: (result) => {
 			if (result.success) {
@@ -259,45 +280,51 @@ export function Settings() {
 				setModelInput("");
 				setTestedSignature(null);
 				setTestResult(null);
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["providers"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
 				// Agents will auto-start on the backend, refetch agent list after a short delay
 				setTimeout(() => {
-					queryClient.invalidateQueries({queryKey: ["agents"]});
-					queryClient.invalidateQueries({queryKey: ["overview"]});
+					queryClient.invalidateQueries({ queryKey: ["agents"] });
+					queryClient.invalidateQueries({ queryKey: ["overview"] });
 				}, 3000);
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const testModelMutation = useMutation({
-		mutationFn: ({provider, apiKey, model}: {provider: string; apiKey: string; model: string}) =>
+		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
 			api.testProviderModel(provider, apiKey, model),
+	});
+	const startOpenAiBrowserOAuthMutation = useMutation({
+		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
 	});
 
 	const removeMutation = useMutation({
 		mutationFn: (provider: string) => api.removeProvider(provider),
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["providers"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const editingProviderData = PROVIDERS.find((p) => p.id === editingProvider);
 
 	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${modelInput.trim()}`;
+
+	const oauthAutoStartRef = useRef(false);
+	const oauthAbortRef = useRef<AbortController | null>(null);
 
 	const handleTestModel = async (): Promise<boolean> => {
 		if (!editingProvider || !keyInput.trim() || !modelInput.trim()) return false;
@@ -309,7 +336,7 @@ export function Settings() {
 				apiKey: keyInput.trim(),
 				model: modelInput.trim(),
 			});
-			setTestResult({success: result.success, message: result.message, sample: result.sample});
+			setTestResult({ success: result.success, message: result.message, sample: result.sample });
 			if (result.success) {
 				setTestedSignature(currentSignature);
 				return true;
@@ -318,7 +345,7 @@ export function Settings() {
 				return false;
 			}
 		} catch (error: any) {
-			setTestResult({success: false, message: `Failed: ${error.message}`});
+			setTestResult({ success: false, message: `Failed: ${error.message}` });
 			setTestedSignature(null);
 			return false;
 		}
@@ -337,6 +364,148 @@ export function Settings() {
 			apiKey: keyInput.trim(),
 			model: modelInput.trim(),
 		});
+	};
+
+	const monitorOpenAiBrowserOAuth = async (stateToken: string, signal: AbortSignal) => {
+		setIsPollingOpenAiBrowserOAuth(true);
+		setOpenAiBrowserOAuthMessage(null);
+		try {
+			for (let attempt = 0; attempt < 360; attempt += 1) {
+				if (signal.aborted) return;
+				const status = await api.openAiOAuthBrowserStatus(stateToken);
+				if (signal.aborted) return;
+				if (status.done) {
+					setDeviceCodeInfo(null);
+					setDeviceCodeCopied(false);
+					if (status.success) {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "ChatGPT OAuth configured.",
+							type: "success",
+						});
+						queryClient.invalidateQueries({queryKey: ["providers"]});
+						setTimeout(() => {
+							queryClient.invalidateQueries({queryKey: ["agents"]});
+							queryClient.invalidateQueries({queryKey: ["overview"]});
+						}, 3000);
+					} else {
+						setOpenAiBrowserOAuthMessage({
+							text: status.message || "Sign-in failed.",
+							type: "error",
+						});
+					}
+					return;
+				}
+				await new Promise((resolve) => {
+					const onAbort = () => {
+						clearTimeout(timer);
+						resolve(undefined);
+					};
+					const timer = setTimeout(() => {
+						signal.removeEventListener("abort", onAbort);
+						resolve(undefined);
+					}, 2000);
+					signal.addEventListener("abort", onAbort, { once: true });
+				});
+			}
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage({
+				text: "Sign-in timed out. Please try again.",
+				type: "error",
+			});
+		} catch (error: any) {
+			if (signal.aborted) return;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to verify sign-in: ${error.message}`,
+				type: "error",
+			});
+		} finally {
+			setIsPollingOpenAiBrowserOAuth(false);
+		}
+	};
+
+	const handleStartChatGptOAuth = async () => {
+		setOpenAiBrowserOAuthMessage(null);
+		setDeviceCodeInfo(null);
+		setDeviceCodeCopied(false);
+		try {
+			const result = await startOpenAiBrowserOAuthMutation.mutateAsync({
+				model: CHATGPT_OAUTH_DEFAULT_MODEL,
+			});
+			if (!result.success || !result.user_code || !result.verification_url || !result.state) {
+				setOpenAiBrowserOAuthMessage({
+					text: result.message || "Failed to start device sign-in",
+					type: "error",
+				});
+				return;
+			}
+
+			oauthAbortRef.current?.abort();
+			const abort = new AbortController();
+			oauthAbortRef.current = abort;
+
+			setDeviceCodeInfo({
+				userCode: result.user_code,
+				verificationUrl: result.verification_url,
+			});
+			void monitorOpenAiBrowserOAuth(result.state, abort.signal);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({text: `Failed: ${error.message}`, type: "error"});
+		}
+	};
+
+	useEffect(() => {
+		if (!openAiOAuthDialogOpen) {
+			oauthAutoStartRef.current = false;
+			oauthAbortRef.current?.abort();
+			oauthAbortRef.current = null;
+			setDeviceCodeInfo(null);
+			setDeviceCodeCopied(false);
+			setOpenAiBrowserOAuthMessage(null);
+			setIsPollingOpenAiBrowserOAuth(false);
+			return;
+		}
+
+		if (oauthAutoStartRef.current) return;
+		oauthAutoStartRef.current = true;
+		void handleStartChatGptOAuth();
+	}, [openAiOAuthDialogOpen]);
+
+	const handleCopyDeviceCode = async () => {
+		if (!deviceCodeInfo) return;
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(deviceCodeInfo.userCode);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = deviceCodeInfo.userCode;
+				textarea.setAttribute("readonly", "");
+				textarea.style.position = "absolute";
+				textarea.style.left = "-9999px";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setDeviceCodeCopied(true);
+		} catch (error: any) {
+			setOpenAiBrowserOAuthMessage({
+				text: `Failed to copy code: ${error.message}`,
+				type: "error",
+			});
+		}
+	};
+
+	const handleOpenDeviceLogin = () => {
+		if (!deviceCodeInfo || !deviceCodeCopied) return;
+		window.open(
+			deviceCodeInfo.verificationUrl,
+			"spacebot-openai-device",
+			"popup=true,width=780,height=960,noopener,noreferrer",
+		);
 	};
 
 	const handleClose = () => {
@@ -384,71 +553,101 @@ export function Settings() {
 				</header>
 				<div className="flex-1 overflow-y-auto">
 					{activeSection === "providers" ? (
-					<div className="mx-auto max-w-2xl px-6 py-6">
-						{/* Section header */}
-						<div className="mb-6">
-							<h2 className="font-plex text-sm font-semibold text-ink">
-								LLM Providers
-							</h2>
-							<p className="mt-1 text-sm text-ink-dull">
-								Configure credentials/endpoints for LLM providers. At least one provider is
-								required for agents to function.
-							</p>
-						</div>
-
-						<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
-								When you add a provider, choose a model and run a completion test before saving.
-								 Saving applies that model to all five default routing roles and to your default agent.
-							</p>
-						</div>
-
-						{isLoading ? (
-							<div className="flex items-center gap-2 text-ink-dull">
-								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-								Loading providers...
+						<div className="mx-auto max-w-2xl px-6 py-6">
+							{/* Section header */}
+							<div className="mb-6">
+								<h2 className="font-plex text-sm font-semibold text-ink">
+									LLM Providers
+								</h2>
+								<p className="mt-1 text-sm text-ink-dull">
+									Configure credentials/endpoints for LLM providers. At least one provider is
+									required for agents to function.
+								</p>
 							</div>
-						) : (
-							<div className="flex flex-col gap-3">
-								{PROVIDERS.map((provider) => (
-									<ProviderCard
-										key={provider.id}
-										provider={provider.id}
-										name={provider.name}
-										description={provider.description}
-										configured={isConfigured(provider.id)}
-										defaultModel={provider.defaultModel}
-										onEdit={() => {
-									setEditingProvider(provider.id);
-									setKeyInput("");
-									setModelInput(provider.defaultModel ?? "");
-									setTestedSignature(null);
-									setTestResult(null);
-									setMessage(null);
-								}}
-										onRemove={() => removeMutation.mutate(provider.id)}
-										removing={removeMutation.isPending}
-									/>
-								))}
-							</div>
-						)}
 
-						{/* Info note */}
-						<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
-							<p className="text-sm text-ink-faint">
-								Provider values are written to{" "}
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
-									config.toml
-								</code>{" "}
-								in your instance directory. You can also set them via
-								environment variables (
-								<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
-									ANTHROPIC_API_KEY
-								</code>
-								, etc.).
-							</p>
+							<div className="mb-4 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+								<p className="text-sm text-ink-faint">
+									When you add a provider, choose a model and run a completion test before saving.
+									Saving applies that model to all five default routing roles and to your default agent.
+								</p>
+							</div>
+
+							{isLoading ? (
+								<div className="flex items-center gap-2 text-ink-dull">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Loading providers...
+								</div>
+							) : (
+								<div className="flex flex-col gap-3">
+									{PROVIDERS.map((provider) => (
+										[
+											<ProviderCard
+												key={provider.id}
+												provider={provider.id}
+												name={provider.name}
+												description={provider.description}
+												configured={isConfigured(provider.id)}
+												defaultModel={provider.defaultModel}
+												onEdit={() => {
+													setEditingProvider(provider.id);
+													setKeyInput("");
+													setModelInput(provider.defaultModel ?? "");
+													setTestedSignature(null);
+													setTestResult(null);
+													setMessage(null);
+												}}
+												onRemove={() => removeMutation.mutate(provider.id)}
+												removing={removeMutation.isPending}
+											/>,
+											provider.id === "openai" ? (
+												<ProviderCard
+													key="openai-chatgpt"
+													provider="openai-chatgpt"
+													name="ChatGPT Plus (OAuth)"
+													description="Sign in with your ChatGPT Plus account using a device code."
+													configured={isConfigured("openai-chatgpt")}
+													defaultModel={CHATGPT_OAUTH_DEFAULT_MODEL}
+													onEdit={() => setOpenAiOAuthDialogOpen(true)}
+													onRemove={() => removeMutation.mutate("openai-chatgpt")}
+													removing={removeMutation.isPending}
+													actionLabel="Sign in"
+													showRemove={isConfigured("openai-chatgpt")}
+												/>
+											) : null,
+										]
+									))}
+								</div>
+							)}
+
+							{/* Info note */}
+							<div className="mt-6 rounded-md border border-app-line bg-app-darkBox/20 px-4 py-3">
+								<p className="text-sm text-ink-faint">
+									Provider values are written to{" "}
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										config.toml
+									</code>{" "}
+									in your instance directory. You can also set them via
+									environment variables (
+									<code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">
+										ANTHROPIC_API_KEY
+									</code>
+									, etc.).
+								</p>
+							</div>
+
+							<ChatGptOAuthDialog
+								open={openAiOAuthDialogOpen}
+								onOpenChange={setOpenAiOAuthDialogOpen}
+								isRequesting={startOpenAiBrowserOAuthMutation.isPending}
+								isPolling={isPollingOpenAiBrowserOAuth}
+								message={openAiBrowserOAuthMessage}
+								deviceCodeInfo={deviceCodeInfo}
+								deviceCodeCopied={deviceCodeCopied}
+								onCopyDeviceCode={handleCopyDeviceCode}
+								onOpenDeviceLogin={handleOpenDeviceLogin}
+								onRestart={handleStartChatGptOAuth}
+							/>
 						</div>
-					</div>
 					) : activeSection === "channels" ? (
 						<ChannelsSection />
 					) : activeSection === "api-keys" ? (
@@ -475,6 +674,8 @@ export function Settings() {
 						<DialogDescription>
 							{editingProvider === "ollama"
 								? `Enter your ${editingProviderData?.name} base URL. It will be saved to your instance config.`
+								: editingProvider === "openai"
+									? "Enter an OpenAI API key. The model below will be applied to routing."
 								: `Enter your ${editingProviderData?.name} API key. It will be saved to your instance config.`}
 						</DialogDescription>
 					</DialogHeader>
@@ -517,11 +718,10 @@ export function Settings() {
 					</div>
 					{testResult && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${
-								testResult.success
+							className={`rounded-md border px-3 py-2 text-sm ${testResult.success
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
-							}`}
+								}`}
 						>
 							<div>{testResult.message}</div>
 							{testResult.success && testResult.sample ? (
@@ -531,11 +731,10 @@ export function Settings() {
 					)}
 					{message && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${
-								message.type === "success"
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
-							}`}
+								}`}
 						>
 							{message.text}
 						</div>
@@ -562,28 +761,28 @@ export function Settings() {
 function ChannelsSection() {
 	const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
 
-	const {data: messagingStatus, isLoading} = useQuery({
+	const { data: messagingStatus, isLoading } = useQuery({
 		queryKey: ["messaging-status"],
 		queryFn: api.messagingStatus,
 		staleTime: 5_000,
 	});
 
 	const PLATFORMS = [
-		{platform: "discord" as const, name: "Discord", description: "Discord bot integration"},
-		{platform: "slack" as const, name: "Slack", description: "Slack bot integration"},
-		{platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration"},
-		{platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration"},
-		{platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver"},
+		{ platform: "discord" as const, name: "Discord", description: "Discord bot integration" },
+		{ platform: "slack" as const, name: "Slack", description: "Slack bot integration" },
+		{ platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration" },
+		{ platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration" },
+		{ platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver" },
 	] as const;
 
 	const COMING_SOON = [
-		{platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound"},
-		{platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration"},
-		{platform: "matrix", name: "Matrix", description: "Decentralized chat protocol"},
-		{platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge"},
-		{platform: "irc", name: "IRC", description: "TLS socket connection"},
-		{platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration"},
-		{platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration"},
+		{ platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
+		{ platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration" },
+		{ platform: "matrix", name: "Matrix", description: "Decentralized chat protocol" },
+		{ platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge" },
+		{ platform: "irc", name: "IRC", description: "TLS socket connection" },
+		{ platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration" },
+		{ platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration" },
 	];
 
 	return (
@@ -602,7 +801,7 @@ function ChannelsSection() {
 				</div>
 			) : (
 				<div className="flex flex-col gap-3">
-					{PLATFORMS.map(({platform: p, name: n, description: d}) => (
+					{PLATFORMS.map(({ platform: p, name: n, description: d }) => (
 						<ChannelSettingCard
 							key={p}
 							platform={p}
@@ -613,7 +812,7 @@ function ChannelsSection() {
 							onToggle={() => setExpandedPlatform(expandedPlatform === p ? null : p)}
 						/>
 					))}
-					{COMING_SOON.map(({platform: p, name: n, description: d}) => (
+					{COMING_SOON.map(({ platform: p, name: n, description: d }) => (
 						<DisabledChannelCard key={p} platform={p} name={n} description={d} />
 					))}
 				</div>
@@ -629,7 +828,7 @@ interface GlobalSettingsSectionProps {
 	isLoading: boolean;
 }
 
-function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [editingBraveKey, setEditingBraveKey] = useState(false);
 	const [braveKeyInput, setBraveKeyInput] = useState("");
@@ -641,23 +840,23 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 			if (result.success) {
 				setEditingBraveKey(false);
 				setBraveKeyInput("");
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSaveBraveKey = () => {
-		updateMutation.mutate({brave_search_key: braveKeyInput.trim() || null});
+		updateMutation.mutate({ brave_search_key: braveKeyInput.trim() || null });
 	};
 
 	const handleRemoveBraveKey = () => {
-		updateMutation.mutate({brave_search_key: null});
+		updateMutation.mutate({ brave_search_key: null });
 	};
 
 	return (
@@ -720,11 +919,10 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -767,7 +965,7 @@ function ApiKeysSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	);
 }
 
-function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function ServerSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [apiEnabled, setApiEnabled] = useState(settings?.api_enabled ?? true);
 	const [apiPort, setApiPort] = useState(settings?.api_port.toString() ?? "19898");
@@ -787,21 +985,21 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success", requiresRestart: result.requires_restart});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success", requiresRestart: result.requires_restart });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
 		const port = parseInt(apiPort, 10);
 		if (isNaN(port) || port < 1024 || port > 65535) {
-			setMessage({text: "Port must be between 1024 and 65535", type: "error"});
+			setMessage({ text: "Port must be between 1024 and 65535", type: "error" });
 			return;
 		}
 
@@ -883,11 +1081,10 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 					{message.requiresRestart && (
@@ -901,7 +1098,7 @@ function ServerSection({settings, isLoading}: GlobalSettingsSectionProps) {
 	);
 }
 
-function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function WorkerLogsSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [logMode, setLogMode] = useState(settings?.worker_log_mode ?? "errors_only");
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
@@ -917,19 +1114,19 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
-		updateMutation.mutate({worker_log_mode: logMode});
+		updateMutation.mutate({ worker_log_mode: logMode });
 	};
 
 	const modes = [
@@ -970,11 +1167,10 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 						{modes.map((mode) => (
 							<div
 								key={mode.value}
-								className={`rounded-lg border p-4 cursor-pointer transition-colors ${
-									logMode === mode.value
+								className={`rounded-lg border p-4 cursor-pointer transition-colors ${logMode === mode.value
 										? "border-accent bg-accent/5"
 										: "border-app-line bg-app-box hover:border-app-line/80"
-								}`}
+									}`}
 								onClick={() => setLogMode(mode.value)}
 							>
 								<label className="flex items-start gap-3 cursor-pointer">
@@ -1002,11 +1198,10 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -1016,11 +1211,11 @@ function WorkerLogsSection({settings, isLoading}: GlobalSettingsSectionProps) {
 }
 
 const PERMISSION_OPTIONS = [
-	{value: "allow", label: "Allow", description: "Tool can run without restriction"},
-	{value: "deny", label: "Deny", description: "Tool is completely disabled"},
+	{ value: "allow", label: "Allow", description: "Tool can run without restriction" },
+	{ value: "deny", label: "Deny", description: "Tool is completely disabled" },
 ];
 
-function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
+function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.opencode?.enabled ?? false);
 	const [path, setPath] = useState(settings?.opencode?.path ?? "opencode");
@@ -1049,31 +1244,31 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 		mutationFn: api.updateGlobalSettings,
 		onSuccess: (result) => {
 			if (result.success) {
-				setMessage({text: result.message, type: "success"});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
 	const handleSave = () => {
 		const servers = parseInt(maxServers, 10);
 		if (isNaN(servers) || servers < 1) {
-			setMessage({text: "Max servers must be at least 1", type: "error"});
+			setMessage({ text: "Max servers must be at least 1", type: "error" });
 			return;
 		}
 		const timeout = parseInt(startupTimeout, 10);
 		if (isNaN(timeout) || timeout < 1) {
-			setMessage({text: "Startup timeout must be at least 1", type: "error"});
+			setMessage({ text: "Startup timeout must be at least 1", type: "error" });
 			return;
 		}
 		const retries = parseInt(maxRetries, 10);
 		if (isNaN(retries) || retries < 0) {
-			setMessage({text: "Max retries cannot be negative", type: "error"});
+			setMessage({ text: "Max retries cannot be negative", type: "error" });
 			return;
 		}
 
@@ -1195,10 +1390,10 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 								</p>
 								<div className="mt-3 flex flex-col gap-3">
 									{([
-										{label: "File Edit", value: editPerm, setter: setEditPerm},
-										{label: "Shell / Bash", value: bashPerm, setter: setBashPerm},
-										{label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm},
-									] as const).map(({label, value, setter}) => (
+										{ label: "File Edit", value: editPerm, setter: setEditPerm },
+										{ label: "Shell / Bash", value: bashPerm, setter: setBashPerm },
+										{ label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm },
+									] as const).map(({ label, value, setter }) => (
 										<div key={label} className="flex items-center justify-between">
 											<span className="text-sm text-ink">{label}</span>
 											<Select value={value} onValueChange={(v) => setter(v)}>
@@ -1228,11 +1423,10 @@ function OpenCodeSection({settings, isLoading}: GlobalSettingsSectionProps) {
 
 			{message && (
 				<div
-					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
-						message.type === "success"
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
 							? "border-green-500/20 bg-green-500/10 text-green-400"
 							: "border-red-500/20 bg-red-500/10 text-red-400"
-					}`}
+						}`}
 				>
 					{message.text}
 				</div>
@@ -1251,7 +1445,7 @@ function ConfigFileSection() {
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 	const [editorLoaded, setEditorLoaded] = useState(false);
 
-	const {data, isLoading} = useQuery({
+	const { data, isLoading } = useQuery({
 		queryKey: ["raw-config"],
 		queryFn: api.rawConfig,
 		staleTime: 5_000,
@@ -1262,19 +1456,19 @@ function ConfigFileSection() {
 		onSuccess: (result) => {
 			if (result.success) {
 				setOriginalContent(currentContent);
-				setMessage({text: result.message, type: "success"});
+				setMessage({ text: result.message, type: "success" });
 				setValidationError(null);
 				// Invalidate all config-related queries so other tabs pick up changes
-				queryClient.invalidateQueries({queryKey: ["providers"]});
-				queryClient.invalidateQueries({queryKey: ["global-settings"]});
-				queryClient.invalidateQueries({queryKey: ["agents"]});
-				queryClient.invalidateQueries({queryKey: ["overview"]});
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
+				queryClient.invalidateQueries({ queryKey: ["agents"] });
+				queryClient.invalidateQueries({ queryKey: ["overview"] });
 			} else {
-				setMessage({text: result.message, type: "error"});
+				setMessage({ text: result.message, type: "error" });
 			}
 		},
 		onError: (error) => {
-			setMessage({text: `Failed: ${error.message}`, type: "error"});
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
 	});
 
@@ -1391,7 +1585,7 @@ function ConfigFileSection() {
 		if (!viewRef.current) return;
 		const view = viewRef.current;
 		view.dispatch({
-			changes: {from: 0, to: view.state.doc.length, insert: originalContent},
+			changes: { from: 0, to: view.state.doc.length, insert: originalContent },
 		});
 		setCurrentContent(originalContent);
 		setValidationError(null);
@@ -1424,13 +1618,12 @@ function ConfigFileSection() {
 
 			{/* Validation / status bar */}
 			{(validationError || message) && (
-				<div className={`border-b px-6 py-2 text-sm ${
-					validationError
+				<div className={`border-b px-6 py-2 text-sm ${validationError
 						? "border-red-500/20 bg-red-500/5 text-red-400"
 						: message?.type === "success"
 							? "border-green-500/20 bg-green-500/5 text-green-400"
 							: "border-red-500/20 bg-red-500/5 text-red-400"
-				}`}>
+					}`}>
 					{validationError ? `Syntax error: ${validationError}` : message?.text}
 				</div>
 			)}
@@ -1459,9 +1652,24 @@ interface ProviderCardProps {
 	onEdit: () => void;
 	onRemove: () => void;
 	removing: boolean;
+	actionLabel?: string;
+	showRemove?: boolean;
 }
 
-function ProviderCard({ provider, name, description, configured, defaultModel, onEdit, onRemove, removing }: ProviderCardProps) {
+function ProviderCard({
+	provider,
+	name,
+	description,
+	configured,
+	defaultModel,
+	onEdit,
+	onRemove,
+	removing,
+	actionLabel,
+	showRemove,
+}: ProviderCardProps) {
+	const primaryLabel = actionLabel ?? (configured ? "Update" : "Add key");
+	const shouldShowRemove = showRemove ?? configured;
 	return (
 		<div className="rounded-lg border border-app-line bg-app-box p-4">
 			<div className="flex items-center gap-3">
@@ -1470,8 +1678,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">{name}</span>
 						{configured && (
-							<span className="text-tiny text-green-400">
-								● Configured
+							<span className="inline-flex items-center">
+								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+								<span className="sr-only">Configured</span>
 							</span>
 						)}
 					</div>
@@ -1482,9 +1691,9 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 				</div>
 				<div className="flex gap-2">
 					<Button onClick={onEdit} variant="outline" size="sm">
-						{configured ? "Update" : "Add key"}
+						{primaryLabel}
 					</Button>
-					{configured && (
+					{shouldShowRemove && (
 						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
 							Remove
 						</Button>
@@ -1492,5 +1701,162 @@ function ProviderCard({ provider, name, description, configured, defaultModel, o
 				</div>
 			</div>
 		</div>
+	);
+}
+
+interface ChatGptOAuthDialogProps {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	isRequesting: boolean;
+	isPolling: boolean;
+	message: { text: string; type: "success" | "error" } | null;
+	deviceCodeInfo: { userCode: string; verificationUrl: string } | null;
+	deviceCodeCopied: boolean;
+	onCopyDeviceCode: () => void;
+	onOpenDeviceLogin: () => void;
+	onRestart: () => void;
+}
+
+function ChatGptOAuthDialog({
+	open,
+	onOpenChange,
+	isRequesting,
+	isPolling,
+	message,
+	deviceCodeInfo,
+	deviceCodeCopied,
+	onCopyDeviceCode,
+	onOpenDeviceLogin,
+	onRestart,
+}: ChatGptOAuthDialogProps) {
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<ProviderIcon provider="openai-chatgpt" size={20} />
+						Sign in with ChatGPT Plus
+					</DialogTitle>
+					{!message && (
+						<DialogDescription>
+							Copy the device code below, then sign in to your OpenAI account to authorize access.
+						</DialogDescription>
+					)}
+				</DialogHeader>
+
+				<div className="space-y-4">
+					{message && !deviceCodeInfo ? (
+						/* Completed state — success or error with no active flow */
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+								? "border-green-500/20 bg-green-500/10 text-green-400"
+								: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					) : isRequesting && !deviceCodeInfo ? (
+						<div className="flex items-center gap-2 text-sm text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							Requesting device code...
+						</div>
+					) : deviceCodeInfo ? (
+						<div className="space-y-4">
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
+									<p className="text-sm text-ink-dull">Copy this device code</p>
+								</div>
+								<div className="mt-2.5 flex items-center gap-2 pl-7">
+									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
+										{deviceCodeInfo.userCode}
+									</code>
+									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
+										{deviceCodeCopied ? "Copied" : "Copy"}
+									</Button>
+								</div>
+							</div>
+
+							<div className={`rounded-md border border-app-line p-3 ${!deviceCodeCopied ? "opacity-50" : ""}`}>
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
+									<p className="text-sm text-ink-dull">Open OpenAI and paste the code</p>
+								</div>
+								<div className="mt-2.5 pl-7">
+									<Button
+										onClick={onOpenDeviceLogin}
+										disabled={!deviceCodeCopied}
+										size="sm"
+										variant="outline"
+									>
+										Open login page
+									</Button>
+								</div>
+							</div>
+
+							{isPolling && !message && (
+								<div className="flex items-center gap-2 text-sm text-ink-faint">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Waiting for sign-in confirmation...
+								</div>
+							)}
+
+							{message && (
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
+								</div>
+							)}
+						</div>
+					) : null}
+				</div>
+
+				<DialogFooter>
+					{message && !deviceCodeInfo ? (
+						/* Completed — show Done (or Retry for errors) */
+						message.type === "success" ? (
+							<Button onClick={() => onOpenChange(false)} size="sm">
+								Done
+							</Button>
+						) : (
+							<>
+								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+									Close
+								</Button>
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									size="sm"
+								>
+									Try again
+								</Button>
+							</>
+						)
+					) : (
+						<>
+							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+								Cancel
+							</Button>
+							{deviceCodeInfo && (
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									variant="outline"
+									size="sm"
+								>
+									Get new code
+								</Button>
+							)}
+						</>
+					)}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
 	);
 }

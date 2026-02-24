@@ -16,6 +16,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   openrouter: "OpenRouter",
   openai: "OpenAI",
+  "openai-chatgpt": "ChatGPT Plus (OAuth)",
   deepseek: "DeepSeek",
   xai: "xAI",
   mistral: "Mistral",
@@ -26,6 +27,8 @@ const PROVIDER_LABELS: Record<string, string> = {
   zhipu: "Z.ai (GLM)",
   ollama: "Ollama",
   "opencode-zen": "OpenCode Zen",
+  minimax: "MiniMax",
+  "minimax-cn": "MiniMax CN",
 };
 
 function formatContextWindow(tokens: number | null): string {
@@ -127,6 +130,7 @@ export function ModelSelect({
     "openrouter",
     "anthropic",
     "openai",
+    "openai-chatgpt",
     "ollama",
     "deepseek",
     "xai",
@@ -137,6 +141,8 @@ export function ModelSelect({
     "fireworks",
     "zhipu",
     "opencode-zen",
+    "minimax",
+    "minimax-cn",
   ];
   const sortedProviders = Object.keys(grouped).sort(
     (a, b) =>

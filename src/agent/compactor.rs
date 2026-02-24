@@ -108,9 +108,15 @@ impl Compactor {
         let channel_id = self.channel_id.clone();
         let deps = self.deps.clone();
         let prompt_engine = deps.runtime_config.prompts.load();
-        let compactor_prompt = prompt_engine
-            .render_static("compactor")
-            .expect("failed to render compactor prompt");
+        let compactor_prompt = match prompt_engine.render_static("compactor") {
+            Ok(p) => p,
+            Err(error) => {
+                tracing::error!(%error, "failed to render compactor prompt");
+                let mut flag = is_compacting.write().await;
+                *flag = false;
+                return;
+            }
+        };
 
         tokio::spawn(async move {
             let result = run_compaction(&deps, &compactor_prompt, &history, fraction).await;
@@ -155,9 +161,7 @@ impl Compactor {
 
         // Insert a marker at the beginning
         let prompt_engine = self.deps.runtime_config.prompts.load();
-        let marker = prompt_engine
-            .render_system_truncation(remove_count)
-            .expect("failed to render truncation message");
+        let marker = prompt_engine.render_system_truncation(remove_count)?;
         history.insert(0, Message::from(marker));
 
         tracing::warn!(
@@ -199,8 +203,9 @@ async fn run_compaction(
     // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Worker, None).to_string();
-    let model =
-        SpacebotModel::make(&deps.llm_manager, &model_name).with_routing((**routing).clone());
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "compactor")
+        .with_routing((**routing).clone());
 
     // Give the compaction worker memory_save so it can directly persist memories
     let tool_server: ToolServerHandle = ToolServer::new()

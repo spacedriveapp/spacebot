@@ -182,7 +182,8 @@ impl CronTool {
                 .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
         {
             return Err(CronError(
-                "'id' must be 1-50 characters, alphanumeric with hyphens and underscores only".into(),
+                "'id' must be 1-50 characters, alphanumeric with hyphens and underscores only"
+                    .into(),
             ));
         }
 
@@ -244,13 +245,24 @@ impl CronTool {
             .map_err(|error| CronError(format!("failed to register: {error}")))?;
 
         let interval_desc = format_interval(interval_secs);
+        let timezone = self.scheduler.cron_timezone_label();
         let mut message = if run_once {
             format!("Cron job '{id}' created. First run {interval_desc}; it then disables itself.")
         } else {
             format!("Cron job '{id}' created. Runs {interval_desc}.")
         };
         if let Some((start, end)) = active_hours {
-            message.push_str(&format!(" Active {start:02}:00-{end:02}:00."));
+            if timezone == "system" {
+                message.push_str(&format!(
+                    " Active {start:02}:00-{end:02}:00 in server local time."
+                ));
+            } else {
+                message.push_str(&format!(" Active {start:02}:00-{end:02}:00 in {timezone}."));
+            }
+        } else if timezone == "system" {
+            message.push_str(" Active-hours timezone: server local time.");
+        } else {
+            message.push_str(&format!(" Active-hours timezone: {timezone}."));
         }
 
         tracing::info!(cron_id = %id, %interval_secs, %delivery_target, "cron job created via tool");
@@ -284,9 +296,15 @@ impl CronTool {
             .collect();
 
         let count = entries.len();
+        let timezone = self.scheduler.cron_timezone_label();
+        let timezone_note = if timezone == "system" {
+            "active hours use server local time".to_string()
+        } else {
+            format!("active hours use {timezone}")
+        };
         Ok(CronOutput {
             success: true,
-            message: format!("{count} active cron job(s)."),
+            message: format!("{count} active cron job(s); {timezone_note}."),
             jobs: Some(entries),
         })
     }
@@ -296,6 +314,8 @@ impl CronTool {
             .delete_id
             .or(args.id)
             .ok_or_else(|| CronError("'delete_id' or 'id' is required for delete".into()))?;
+
+        self.scheduler.unregister(&id).await;
 
         self.store
             .delete(&id)

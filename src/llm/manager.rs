@@ -8,9 +8,10 @@
 //! `reload_config()` when config.toml changes, and all subsequent
 //! `get_api_key()` calls read the new values lock-free.
 
-use crate::auth::OAuthCredentials;
+use crate::auth::OAuthCredentials as AnthropicOAuthCredentials;
 use crate::config::{ApiType, LlmConfig, ProviderConfig};
 use crate::error::{LlmError, Result};
+use crate::openai_auth::OAuthCredentials as OpenAiOAuthCredentials;
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
@@ -28,8 +29,10 @@ pub struct LlmManager {
     rate_limited: Arc<RwLock<HashMap<String, Instant>>>,
     /// Instance directory for reading/writing OAuth credentials.
     instance_dir: Option<PathBuf>,
-    /// Cached OAuth credentials (refreshed lazily).
-    oauth_credentials: RwLock<Option<OAuthCredentials>>,
+    /// Cached Anthropic OAuth credentials (refreshed lazily).
+    anthropic_oauth_credentials: RwLock<Option<AnthropicOAuthCredentials>>,
+    /// Cached OpenAI OAuth credentials (refreshed lazily).
+    openai_oauth_credentials: RwLock<Option<OpenAiOAuthCredentials>>,
 }
 
 impl LlmManager {
@@ -45,15 +48,20 @@ impl LlmManager {
             http_client,
             rate_limited: Arc::new(RwLock::new(HashMap::new())),
             instance_dir: None,
-            oauth_credentials: RwLock::new(None),
+            anthropic_oauth_credentials: RwLock::new(None),
+            openai_oauth_credentials: RwLock::new(None),
         })
     }
 
     /// Set the instance directory and load any existing OAuth credentials.
     pub async fn set_instance_dir(&self, instance_dir: PathBuf) {
         if let Ok(Some(creds)) = crate::auth::load_credentials(&instance_dir) {
-            tracing::info!("loaded OAuth credentials from auth.json");
-            *self.oauth_credentials.write().await = Some(creds);
+            tracing::info!("loaded Anthropic OAuth credentials from auth.json");
+            *self.anthropic_oauth_credentials.write().await = Some(creds);
+        }
+        if let Ok(Some(creds)) = crate::openai_auth::load_credentials(&instance_dir) {
+            tracing::info!("loaded OpenAI OAuth credentials from openai_chatgpt_oauth.json");
+            *self.openai_oauth_credentials.write().await = Some(creds);
         }
         // Store instance_dir — we can't set it on &self since it's not behind RwLock,
         // but we only need it for save_credentials which we handle inline.
@@ -66,14 +74,26 @@ impl LlmManager {
             .build()
             .with_context(|| "failed to build HTTP client")?;
 
-        let oauth_credentials = match crate::auth::load_credentials(&instance_dir) {
+        let anthropic_oauth_credentials = match crate::auth::load_credentials(&instance_dir) {
             Ok(Some(creds)) => {
-                tracing::info!("loaded OAuth credentials from auth.json");
+                tracing::info!("loaded Anthropic OAuth credentials from auth.json");
                 Some(creds)
             }
             Ok(None) => None,
             Err(error) => {
-                tracing::warn!(%error, "failed to load OAuth credentials");
+                tracing::warn!(%error, "failed to load Anthropic OAuth credentials");
+                None
+            }
+        };
+
+        let openai_oauth_credentials = match crate::openai_auth::load_credentials(&instance_dir) {
+            Ok(Some(creds)) => {
+                tracing::info!("loaded OpenAI OAuth credentials from openai_chatgpt_oauth.json");
+                Some(creds)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load OpenAI OAuth credentials");
                 None
             }
         };
@@ -83,7 +103,8 @@ impl LlmManager {
             http_client,
             rate_limited: Arc::new(RwLock::new(HashMap::new())),
             instance_dir: Some(instance_dir),
-            oauth_credentials: RwLock::new(oauth_credentials),
+            anthropic_oauth_credentials: RwLock::new(anthropic_oauth_credentials),
+            openai_oauth_credentials: RwLock::new(openai_oauth_credentials),
         })
     }
 
@@ -110,7 +131,7 @@ impl LlmManager {
     /// returns the OAuth access token (refreshing if needed). Otherwise
     /// falls back to the static API key from config.
     pub async fn get_anthropic_token(&self) -> Result<Option<String>> {
-        let mut creds_guard = self.oauth_credentials.write().await;
+        let mut creds_guard = self.anthropic_oauth_credentials.write().await;
         let Some(creds) = creds_guard.as_ref() else {
             return Ok(None);
         };
@@ -120,22 +141,22 @@ impl LlmManager {
         }
 
         // Need to refresh
-        tracing::info!("OAuth access token expired, refreshing...");
+        tracing::info!("Anthropic OAuth access token expired, refreshing...");
         match creds.refresh().await {
             Ok(new_creds) => {
                 // Save to disk
                 if let Some(ref instance_dir) = self.instance_dir
                     && let Err(error) = crate::auth::save_credentials(instance_dir, &new_creds)
                 {
-                    tracing::warn!(%error, "failed to persist refreshed OAuth credentials");
+                    tracing::warn!(%error, "failed to persist refreshed Anthropic OAuth credentials");
                 }
                 let token = new_creds.access_token.clone();
                 *creds_guard = Some(new_creds);
-                tracing::info!("OAuth token refreshed successfully");
+                tracing::info!("Anthropic OAuth token refreshed successfully");
                 Ok(Some(token))
             }
             Err(error) => {
-                tracing::error!(%error, "OAuth token refresh failed");
+                tracing::error!(%error, "Anthropic OAuth token refresh failed");
                 // Return the expired token anyway — the API will reject it
                 // and the error message will be clearer than "no key"
                 Ok(Some(creds.access_token.clone()))
@@ -167,6 +188,83 @@ impl LlmManager {
             }),
             (None, None) => Err(LlmError::UnknownProvider("anthropic".to_string()).into()),
         }
+    }
+
+    /// Set OpenAI OAuth credentials in memory after successful auth.
+    pub async fn set_openai_oauth_credentials(&self, creds: OpenAiOAuthCredentials) {
+        *self.openai_oauth_credentials.write().await = Some(creds);
+    }
+
+    /// Clear OpenAI OAuth credentials from memory.
+    pub async fn clear_openai_oauth_credentials(&self) {
+        *self.openai_oauth_credentials.write().await = None;
+    }
+
+    /// Get OpenAI OAuth access token if available, refreshing when needed.
+    pub async fn get_openai_token(&self) -> Result<Option<String>> {
+        let mut creds_guard = self.openai_oauth_credentials.write().await;
+        let Some(creds) = creds_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        if !creds.is_expired() {
+            return Ok(Some(creds.access_token.clone()));
+        }
+
+        tracing::info!("OpenAI OAuth access token expired, refreshing...");
+        match creds.refresh().await {
+            Ok(new_creds) => {
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) =
+                        crate::openai_auth::save_credentials(instance_dir, &new_creds)
+                {
+                    tracing::warn!(%error, "failed to persist refreshed OpenAI OAuth credentials");
+                }
+                let token = new_creds.access_token.clone();
+                *creds_guard = Some(new_creds);
+                tracing::info!("OpenAI OAuth token refreshed successfully");
+                Ok(Some(token))
+            }
+            Err(error) => {
+                tracing::error!(%error, "OpenAI OAuth token refresh failed");
+                Ok(Some(creds.access_token.clone()))
+            }
+        }
+    }
+
+    /// Resolve the OpenAI provider config from static API-key configuration.
+    ///
+    /// OpenAI ChatGPT OAuth is intentionally handled via a separate internal
+    /// provider (`openai-chatgpt`) so a saved OAuth token cannot shadow a
+    /// configured `openai` API key.
+    pub async fn get_openai_provider(&self) -> Result<ProviderConfig> {
+        self.get_provider("openai")
+    }
+
+    /// Resolve the OpenAI ChatGPT OAuth provider config.
+    ///
+    /// This internal provider uses OAuth access tokens from ChatGPT Plus/Pro.
+    pub async fn get_openai_chatgpt_provider(&self) -> Result<ProviderConfig> {
+        let token = self.get_openai_token().await?;
+
+        match token {
+            Some(token) => Ok(ProviderConfig {
+                api_type: ApiType::OpenAiResponses,
+                base_url: "https://chatgpt.com/backend-api/codex".to_string(),
+                api_key: token,
+                name: None,
+            }),
+            None => Err(LlmError::UnknownProvider("openai-chatgpt".to_string()).into()),
+        }
+    }
+
+    /// Get OpenAI OAuth account id (for ChatGPT Plus/Pro account scoping headers).
+    pub async fn get_openai_account_id(&self) -> Option<String> {
+        self.openai_oauth_credentials
+            .read()
+            .await
+            .as_ref()
+            .and_then(|credentials| credentials.account_id.clone())
     }
 
     /// Get the appropriate API key for a provider.

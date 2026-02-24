@@ -1,18 +1,47 @@
 use super::state::ApiState;
+use crate::openai_auth::DeviceTokenPollResult;
 
+use anyhow::Context as _;
 use axum::Json;
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tokio::time::sleep;
+use uuid::Uuid;
+
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
+
+const OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS: i64 = 30 * 60;
+const OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
+const OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
+const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
+
+static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Clone, Debug)]
+struct DeviceOAuthSession {
+    expires_at: i64,
+    status: DeviceOAuthSessionStatus,
+}
+
+#[derive(Clone, Debug)]
+enum DeviceOAuthSessionStatus {
+    Pending,
+    Completed(String),
+    Failed(String),
+}
 
 #[derive(Serialize)]
 pub(super) struct ProviderStatus {
     anthropic: bool,
     openai: bool,
+    openai_chatgpt: bool,
     openrouter: bool,
     zhipu: bool,
     groq: bool,
@@ -26,6 +55,7 @@ pub(super) struct ProviderStatus {
     opencode_zen: bool,
     nvidia: bool,
     minimax: bool,
+    minimax_cn: bool,
     moonshot: bool,
     zai_coding_plan: bool,
 }
@@ -65,6 +95,33 @@ pub(super) struct ProviderModelTestResponse {
     sample: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct OpenAiOAuthBrowserStartRequest {
+    model: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct OpenAiOAuthBrowserStartResponse {
+    success: bool,
+    message: String,
+    user_code: Option<String>,
+    verification_url: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct OpenAiOAuthBrowserStatusRequest {
+    state: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct OpenAiOAuthBrowserStatusResponse {
+    found: bool,
+    done: bool,
+    success: bool,
+    message: Option<String>,
+}
+
 fn provider_toml_key(provider: &str) -> Option<&'static str> {
     match provider {
         "anthropic" => Some("anthropic_key"),
@@ -82,6 +139,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "opencode-zen" => Some("opencode_zen_key"),
         "nvidia" => Some("nvidia_key"),
         "minimax" => Some("minimax_key"),
+        "minimax-cn" => Some("minimax_cn_key"),
         "moonshot" => Some("moonshot_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
         _ => None,
@@ -90,6 +148,20 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
 
 fn model_matches_provider(provider: &str, model: &str) -> bool {
     crate::llm::routing::provider_from_model(model) == provider
+}
+
+fn normalize_openai_chatgpt_model(model: &str) -> Option<String> {
+    let trimmed = model.trim();
+    let (provider, model_name) = trimmed.split_once('/')?;
+    if model_name.is_empty() {
+        return None;
+    }
+
+    match provider {
+        "openai" => Some(format!("openai-chatgpt/{model_name}")),
+        "openai-chatgpt" => Some(trimmed.to_string()),
+        _ => None,
+    }
 }
 
 fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::LlmConfig {
@@ -181,6 +253,12 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             api_key: credential.to_string(),
             name: None,
         }),
+        "minimax-cn" => Some(ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: "https://api.minimaxi.com/anthropic".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+        }),
         "moonshot" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
             base_url: "https://api.moonshot.ai".to_string(),
@@ -217,20 +295,143 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
         nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
         minimax_key: (provider == "minimax").then(|| credential.to_string()),
+        minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
         providers,
     }
 }
 
+fn apply_model_routing(doc: &mut toml_edit::DocumentMut, model: &str) {
+    if doc.get("defaults").is_none() {
+        doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    if let Some(defaults) = doc.get_mut("defaults").and_then(|item| item.as_table_mut()) {
+        if defaults.get("routing").is_none() {
+            defaults["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(routing_table) = defaults
+            .get_mut("routing")
+            .and_then(|item| item.as_table_mut())
+        {
+            routing_table["channel"] = toml_edit::value(model);
+            routing_table["branch"] = toml_edit::value(model);
+            routing_table["worker"] = toml_edit::value(model);
+            routing_table["compactor"] = toml_edit::value(model);
+            routing_table["cortex"] = toml_edit::value(model);
+        }
+    }
+
+    if let Some(agents) = doc
+        .get_mut("agents")
+        .and_then(|agents_item| agents_item.as_array_of_tables_mut())
+        && let Some(default_agent) = agents.iter_mut().find(|agent| {
+            agent
+                .get("default")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false)
+        })
+    {
+        if default_agent.get("routing").is_none() {
+            default_agent["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        if let Some(routing_table) = default_agent
+            .get_mut("routing")
+            .and_then(|routing_item| routing_item.as_table_mut())
+        {
+            routing_table["channel"] = toml_edit::value(model);
+            routing_table["branch"] = toml_edit::value(model);
+            routing_table["worker"] = toml_edit::value(model);
+            routing_table["compactor"] = toml_edit::value(model);
+            routing_table["cortex"] = toml_edit::value(model);
+        }
+    }
+}
+
+impl DeviceOAuthSession {
+    fn is_expired(&self, now: i64) -> bool {
+        now >= self.expires_at
+    }
+}
+
+impl DeviceOAuthSessionStatus {
+    fn is_pending(&self) -> bool {
+        matches!(self, DeviceOAuthSessionStatus::Pending)
+    }
+}
+
+async fn prune_expired_device_oauth_sessions() {
+    let cutoff = chrono::Utc::now().timestamp() - OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS;
+    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
+    sessions.retain(|_, session| session.expires_at >= cutoff);
+}
+
+async fn is_device_oauth_session_pending(state_key: &str) -> bool {
+    let sessions = OPENAI_DEVICE_OAUTH_SESSIONS.read().await;
+    sessions
+        .get(state_key)
+        .is_some_and(|session| session.status.is_pending())
+}
+
+async fn update_device_oauth_status(state_key: &str, status: DeviceOAuthSessionStatus) {
+    if let Some(session) = OPENAI_DEVICE_OAUTH_SESSIONS
+        .write()
+        .await
+        .get_mut(state_key)
+    {
+        session.status = status;
+    }
+}
+
+async fn finalize_openai_oauth(
+    state: &Arc<ApiState>,
+    credentials: &crate::openai_auth::OAuthCredentials,
+    model: &str,
+) -> anyhow::Result<()> {
+    let instance_dir = (**state.instance_dir.load()).clone();
+    crate::openai_auth::save_credentials(&instance_dir, credentials)
+        .context("failed to save OpenAI OAuth credentials")?;
+
+    if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
+        llm_manager
+            .set_openai_oauth_credentials(credentials.clone())
+            .await;
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .context("failed to read config.toml")?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml_edit::DocumentMut = content.parse().context("failed to parse config.toml")?;
+    apply_model_routing(&mut doc, model);
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .context("failed to write config.toml")?;
+
+    state
+        .provider_setup_tx
+        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
+        .ok();
+
+    Ok(())
+}
+
 pub(super) async fn get_providers(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
+    let instance_dir = (**state.instance_dir.load()).clone();
+    let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
 
     let (
         anthropic,
         openai,
+        openai_chatgpt,
         openrouter,
         zhipu,
         groq,
@@ -244,6 +445,7 @@ pub(super) async fn get_providers(
         opencode_zen,
         nvidia,
         minimax,
+        minimax_cn,
         moonshot,
         zai_coding_plan,
     ) = if config_path.exists() {
@@ -270,6 +472,7 @@ pub(super) async fn get_providers(
         (
             has_value("anthropic_key", "ANTHROPIC_API_KEY"),
             has_value("openai_key", "OPENAI_API_KEY"),
+            openai_oauth_configured,
             has_value("openrouter_key", "OPENROUTER_API_KEY"),
             has_value("zhipu_key", "ZHIPU_API_KEY"),
             has_value("groq_key", "GROQ_API_KEY"),
@@ -284,6 +487,7 @@ pub(super) async fn get_providers(
             has_value("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
             has_value("nvidia_key", "NVIDIA_API_KEY"),
             has_value("minimax_key", "MINIMAX_API_KEY"),
+            has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
         )
@@ -291,6 +495,7 @@ pub(super) async fn get_providers(
         (
             std::env::var("ANTHROPIC_API_KEY").is_ok(),
             std::env::var("OPENAI_API_KEY").is_ok(),
+            openai_oauth_configured,
             std::env::var("OPENROUTER_API_KEY").is_ok(),
             std::env::var("ZHIPU_API_KEY").is_ok(),
             std::env::var("GROQ_API_KEY").is_ok(),
@@ -304,6 +509,7 @@ pub(super) async fn get_providers(
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
             std::env::var("NVIDIA_API_KEY").is_ok(),
             std::env::var("MINIMAX_API_KEY").is_ok(),
+            std::env::var("MINIMAX_CN_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
         )
@@ -312,6 +518,7 @@ pub(super) async fn get_providers(
     let providers = ProviderStatus {
         anthropic,
         openai,
+        openai_chatgpt,
         openrouter,
         zhipu,
         groq,
@@ -325,11 +532,13 @@ pub(super) async fn get_providers(
         opencode_zen,
         nvidia,
         minimax,
+        minimax_cn,
         moonshot,
         zai_coding_plan,
     };
     let has_any = providers.anthropic
         || providers.openai
+        || providers.openai_chatgpt
         || providers.openrouter
         || providers.zhipu
         || providers.groq
@@ -343,10 +552,249 @@ pub(super) async fn get_providers(
         || providers.opencode_zen
         || providers.nvidia
         || providers.minimax
+        || providers.minimax_cn
         || providers.moonshot
         || providers.zai_coding_plan;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
+}
+
+pub(super) async fn start_openai_browser_oauth(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<OpenAiOAuthBrowserStartRequest>,
+) -> Result<Json<OpenAiOAuthBrowserStartResponse>, StatusCode> {
+    if request.model.trim().is_empty() {
+        return Ok(Json(OpenAiOAuthBrowserStartResponse {
+            success: false,
+            message: "Model cannot be empty".to_string(),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    }
+    let Some(chatgpt_model) = normalize_openai_chatgpt_model(&request.model) else {
+        return Ok(Json(OpenAiOAuthBrowserStartResponse {
+            success: false,
+            message: format!(
+                "Model '{}' must use provider 'openai' or 'openai-chatgpt'.",
+                request.model
+            ),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    };
+
+    prune_expired_device_oauth_sessions().await;
+
+    let device_code = match crate::openai_auth::request_device_code().await {
+        Ok(device_code) => device_code,
+        Err(error) => {
+            return Ok(Json(OpenAiOAuthBrowserStartResponse {
+                success: false,
+                message: format!("Failed to start device authorization: {error}"),
+                user_code: None,
+                verification_url: None,
+                state: None,
+            }));
+        }
+    };
+
+    if device_code.device_auth_id.trim().is_empty() || device_code.user_code.trim().is_empty() {
+        return Ok(Json(OpenAiOAuthBrowserStartResponse {
+            success: false,
+            message: "Device authorization response was missing required fields.".to_string(),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let expires_in = device_code
+        .expires_in
+        .unwrap_or(OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS as u64);
+    let expires_at = now + expires_in as i64;
+    let poll_interval = device_code
+        .interval
+        .unwrap_or(OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS);
+    let verification_url = crate::openai_auth::device_verification_url(&device_code);
+    let state_key = Uuid::new_v4().to_string();
+
+    OPENAI_DEVICE_OAUTH_SESSIONS.write().await.insert(
+        state_key.clone(),
+        DeviceOAuthSession {
+            expires_at,
+            status: DeviceOAuthSessionStatus::Pending,
+        },
+    );
+
+    let state_clone = state.clone();
+    let state_key_clone = state_key.clone();
+    let device_auth_id = device_code.device_auth_id.clone();
+    let user_code = device_code.user_code.clone();
+    tokio::spawn(async move {
+        run_device_oauth_background(
+            state_clone,
+            state_key_clone,
+            device_auth_id,
+            user_code,
+            poll_interval,
+            expires_at,
+            chatgpt_model,
+        )
+        .await;
+    });
+
+    Ok(Json(OpenAiOAuthBrowserStartResponse {
+        success: true,
+        message: "Device authorization started".to_string(),
+        user_code: Some(device_code.user_code),
+        verification_url: Some(verification_url),
+        state: Some(state_key),
+    }))
+}
+
+async fn run_device_oauth_background(
+    state: Arc<ApiState>,
+    state_key: String,
+    device_auth_id: String,
+    user_code: String,
+    mut poll_interval_secs: u64,
+    expires_at: i64,
+    model: String,
+) {
+    poll_interval_secs = poll_interval_secs.max(1);
+
+    loop {
+        if !is_device_oauth_session_pending(&state_key).await {
+            return;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        if now >= expires_at {
+            update_device_oauth_status(
+                &state_key,
+                DeviceOAuthSessionStatus::Failed(
+                    "Sign-in expired. Please start again.".to_string(),
+                ),
+            )
+            .await;
+            return;
+        }
+
+        sleep(Duration::from_secs(poll_interval_secs)).await;
+
+        let poll_result = crate::openai_auth::poll_device_token(&device_auth_id, &user_code).await;
+        let grant = match poll_result {
+            Ok(DeviceTokenPollResult::Pending) => continue,
+            Ok(DeviceTokenPollResult::SlowDown) => {
+                poll_interval_secs = poll_interval_secs
+                    .saturating_add(OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS)
+                    .min(OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS);
+                continue;
+            }
+            Ok(DeviceTokenPollResult::Approved(grant)) => grant,
+            Err(error) => {
+                let message = format!("Device authorization polling failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth polling failed");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+                return;
+            }
+        };
+
+        let credentials = match crate::openai_auth::exchange_device_code(
+            &grant.authorization_code,
+            &grant.code_verifier,
+        )
+        .await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                let message = format!("Device code exchange failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth failed during token exchange");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+                return;
+            }
+        };
+
+        match finalize_openai_oauth(&state, &credentials, &model).await {
+            Ok(()) => {
+                update_device_oauth_status(
+                    &state_key,
+                    DeviceOAuthSessionStatus::Completed(format!(
+                        "OpenAI configured via device OAuth. Model '{}' applied to defaults and default agent routing.",
+                        model
+                    )),
+                )
+                .await;
+            }
+            Err(error) => {
+                let message =
+                    format!("Device OAuth sign-in completed but finalization failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth finalization failed");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+            }
+        }
+
+        return;
+    }
+}
+
+pub(super) async fn openai_browser_oauth_status(
+    Query(request): Query<OpenAiOAuthBrowserStatusRequest>,
+) -> Result<Json<OpenAiOAuthBrowserStatusResponse>, StatusCode> {
+    prune_expired_device_oauth_sessions().await;
+    if request.state.trim().is_empty() {
+        return Ok(Json(OpenAiOAuthBrowserStatusResponse {
+            found: false,
+            done: false,
+            success: false,
+            message: Some("Missing OAuth state".to_string()),
+        }));
+    }
+
+    let state_key = request.state.trim();
+    let now = chrono::Utc::now().timestamp();
+    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
+    let Some(session) = sessions.get_mut(state_key) else {
+        return Ok(Json(OpenAiOAuthBrowserStatusResponse {
+            found: false,
+            done: false,
+            success: false,
+            message: None,
+        }));
+    };
+
+    if session.status.is_pending() && session.is_expired(now) {
+        session.status =
+            DeviceOAuthSessionStatus::Failed("Sign-in expired. Please start again.".to_string());
+    }
+
+    let response = match &session.status {
+        DeviceOAuthSessionStatus::Pending => OpenAiOAuthBrowserStatusResponse {
+            found: true,
+            done: false,
+            success: false,
+            message: None,
+        },
+        DeviceOAuthSessionStatus::Completed(message) => OpenAiOAuthBrowserStatusResponse {
+            found: true,
+            done: true,
+            success: true,
+            message: Some(message.clone()),
+        },
+        DeviceOAuthSessionStatus::Failed(message) => OpenAiOAuthBrowserStatusResponse {
+            found: true,
+            done: true,
+            success: false,
+            message: Some(message.clone()),
+        },
+    };
+    Ok(Json(response))
 }
 
 pub(super) async fn update_provider(
@@ -403,47 +851,7 @@ pub(super) async fn update_provider(
     }
 
     doc["llm"][key_name] = toml_edit::value(request.api_key);
-
-    if doc.get("defaults").is_none() {
-        doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
-    }
-    if let Some(defaults) = doc.get_mut("defaults").and_then(|d| d.as_table_mut()) {
-        if defaults.get("routing").is_none() {
-            defaults["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        if let Some(routing_table) = defaults.get_mut("routing").and_then(|r| r.as_table_mut()) {
-            routing_table["channel"] = toml_edit::value(request.model.as_str());
-            routing_table["branch"] = toml_edit::value(request.model.as_str());
-            routing_table["worker"] = toml_edit::value(request.model.as_str());
-            routing_table["compactor"] = toml_edit::value(request.model.as_str());
-            routing_table["cortex"] = toml_edit::value(request.model.as_str());
-        }
-    }
-
-    if let Some(agents) = doc
-        .get_mut("agents")
-        .and_then(|agents_item| agents_item.as_array_of_tables_mut())
-        && let Some(default_agent) = agents.iter_mut().find(|agent| {
-            agent
-                .get("default")
-                .and_then(|value| value.as_bool())
-                .unwrap_or(false)
-        })
-    {
-        if default_agent.get("routing").is_none() {
-            default_agent["routing"] = toml_edit::Item::Table(toml_edit::Table::new());
-        }
-        if let Some(routing_table) = default_agent
-            .get_mut("routing")
-            .and_then(|routing_item| routing_item.as_table_mut())
-        {
-            routing_table["channel"] = toml_edit::value(request.model.as_str());
-            routing_table["branch"] = toml_edit::value(request.model.as_str());
-            routing_table["worker"] = toml_edit::value(request.model.as_str());
-            routing_table["compactor"] = toml_edit::value(request.model.as_str());
-            routing_table["cortex"] = toml_edit::value(request.model.as_str());
-        }
-    }
+    apply_model_routing(&mut doc, request.model.as_str());
 
     tokio::fs::write(&config_path, doc.to_string())
         .await
@@ -550,6 +958,25 @@ pub(super) async fn delete_provider(
     State(state): State<Arc<ApiState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
+    // OpenAI ChatGPT OAuth credentials are stored as a separate JSON file,
+    // not in the TOML config, so handle removal separately.
+    if provider == "openai-chatgpt" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::openai_auth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(mgr) = state.llm_manager.read().await.as_ref() {
+            mgr.clear_openai_oauth_credentials().await;
+        }
+        return Ok(Json(ProviderUpdateResponse {
+            success: true,
+            message: "ChatGPT Plus OAuth credentials removed".into(),
+        }));
+    }
+
     let Some(key_name) = provider_toml_key(&provider) else {
         return Ok(Json(ProviderUpdateResponse {
             success: false,

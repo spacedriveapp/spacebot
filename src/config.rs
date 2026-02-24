@@ -4,10 +4,13 @@ use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
-use serde::{Deserialize, Deserializer};
+use chrono_tz::Tz;
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+
+const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
 
 /// OpenTelemetry export configuration.
 ///
@@ -127,7 +130,7 @@ impl<'de> serde::Deserialize<'de> for ApiType {
 }
 
 /// Configuration for a single LLM provider.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ProviderConfig {
     pub api_type: ApiType,
     pub base_url: String,
@@ -135,8 +138,19 @@ pub struct ProviderConfig {
     pub name: Option<String>,
 }
 
+impl std::fmt::Debug for ProviderConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderConfig")
+            .field("api_type", &self.api_type)
+            .field("base_url", &self.base_url)
+            .field("api_key", &"[REDACTED]")
+            .field("name", &self.name)
+            .finish()
+    }
+}
+
 /// LLM provider credentials (instance-level).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
@@ -154,9 +168,78 @@ pub struct LlmConfig {
     pub opencode_zen_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
+    pub minimax_cn_key: Option<String>,
     pub moonshot_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
+}
+
+impl std::fmt::Debug for LlmConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LlmConfig")
+            .field(
+                "anthropic_key",
+                &self.anthropic_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openai_key",
+                &self.openai_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "openrouter_key",
+                &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
+            .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "together_key",
+                &self.together_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "fireworks_key",
+                &self.fireworks_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "deepseek_key",
+                &self.deepseek_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("xai_key", &self.xai_key.as_ref().map(|_| "[REDACTED]"))
+            .field(
+                "mistral_key",
+                &self.mistral_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "gemini_key",
+                &self.gemini_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "ollama_key",
+                &self.ollama_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("ollama_base_url", &self.ollama_base_url)
+            .field(
+                "opencode_zen_key",
+                &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "nvidia_key",
+                &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "minimax_key",
+                &self.minimax_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "moonshot_key",
+                &self.moonshot_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
+                "zai_coding_plan_key",
+                &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("providers", &self.providers)
+            .finish()
+    }
 }
 
 impl LlmConfig {
@@ -178,6 +261,7 @@ impl LlmConfig {
             || self.opencode_zen_key.is_some()
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
+            || self.minimax_cn_key.is_some()
             || self.moonshot_key.is_some()
             || self.zai_coding_plan_key.is_some()
             || !self.providers.is_empty()
@@ -189,16 +273,23 @@ const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
+const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
 
 const ZHIPU_PROVIDER_BASE_URL: &str = "https://api.z.ai/api/paas/v4";
 const ZAI_CODING_PLAN_BASE_URL: &str = "https://api.z.ai/api/coding/paas/v4";
+const DEEPSEEK_PROVIDER_BASE_URL: &str = "https://api.deepseek.com";
+const GROQ_PROVIDER_BASE_URL: &str = "https://api.groq.com/openai";
+const TOGETHER_PROVIDER_BASE_URL: &str = "https://api.together.xyz";
+const XAI_PROVIDER_BASE_URL: &str = "https://api.x.ai";
+const MISTRAL_PROVIDER_BASE_URL: &str = "https://api.mistral.ai";
 const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
+const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 
 /// Defaults inherited by all agents. Individual agents can override any field.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DefaultsConfig {
     pub routing: RoutingConfig,
     pub max_concurrent_branches: usize,
@@ -211,15 +302,47 @@ pub struct DefaultsConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
+    /// Default timezone used when evaluating cron active hours.
+    pub cron_timezone: Option<String>,
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
     /// Worker log mode: "errors_only", "all_separate", or "all_combined".
     pub worker_log_mode: crate::settings::WorkerLogMode,
+}
+
+impl std::fmt::Debug for DefaultsConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DefaultsConfig")
+            .field("routing", &self.routing)
+            .field("max_concurrent_branches", &self.max_concurrent_branches)
+            .field("max_concurrent_workers", &self.max_concurrent_workers)
+            .field("max_turns", &self.max_turns)
+            .field("branch_max_turns", &self.branch_max_turns)
+            .field("context_window", &self.context_window)
+            .field("compaction", &self.compaction)
+            .field("memory_persistence", &self.memory_persistence)
+            .field("coalesce", &self.coalesce)
+            .field("ingestion", &self.ingestion)
+            .field("cortex", &self.cortex)
+            .field("warmup", &self.warmup)
+            .field("browser", &self.browser)
+            .field("mcp", &self.mcp)
+            .field(
+                "brave_search_key",
+                &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field("history_backfill_count", &self.history_backfill_count)
+            .field("cron", &self.cron)
+            .field("opencode", &self.opencode)
+            .field("worker_log_mode", &self.worker_log_mode)
+            .finish()
+    }
 }
 
 /// MCP server configuration.
@@ -449,6 +572,132 @@ impl Default for CortexConfig {
     }
 }
 
+/// Warmup configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct WarmupConfig {
+    /// Enable background warmup passes.
+    pub enabled: bool,
+    /// Force-load the embedding model before first recall/write workloads.
+    pub eager_embedding_load: bool,
+    /// Interval in seconds between warmup refresh passes.
+    pub refresh_secs: u64,
+    /// Startup delay before the first warmup pass.
+    pub startup_delay_secs: u64,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            eager_embedding_load: true,
+            refresh_secs: 900,
+            startup_delay_secs: 5,
+        }
+    }
+}
+
+/// Current warmup lifecycle state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupState {
+    Cold,
+    Warming,
+    Warm,
+    Degraded,
+}
+
+/// Warmup runtime status snapshot for API and observability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupStatus {
+    pub state: WarmupState,
+    pub embedding_ready: bool,
+    pub last_refresh_unix_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub bulletin_age_secs: Option<u64>,
+}
+
+impl Default for WarmupStatus {
+    fn default() -> Self {
+        Self {
+            state: WarmupState::Cold,
+            embedding_ready: false,
+            last_refresh_unix_ms: None,
+            last_error: None,
+            bulletin_age_secs: None,
+        }
+    }
+}
+
+/// Why `ready_for_work` is currently false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkReadinessReason {
+    StateNotWarm,
+    EmbeddingNotReady,
+    BulletinMissing,
+    BulletinStale,
+}
+
+impl WorkReadinessReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StateNotWarm => "state_not_warm",
+            Self::EmbeddingNotReady => "embedding_not_ready",
+            Self::BulletinMissing => "bulletin_missing",
+            Self::BulletinStale => "bulletin_stale",
+        }
+    }
+}
+
+/// Derived readiness signal used to gate dispatch behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkReadiness {
+    pub ready: bool,
+    pub reason: Option<WorkReadinessReason>,
+    pub warmup_state: WarmupState,
+    pub embedding_ready: bool,
+    pub bulletin_age_secs: Option<u64>,
+    pub stale_after_secs: u64,
+}
+
+fn evaluate_work_readiness(
+    warmup_config: WarmupConfig,
+    status: WarmupStatus,
+    now_unix_ms: i64,
+) -> WorkReadiness {
+    let stale_after_secs = warmup_config.refresh_secs.max(1).saturating_mul(2).max(60);
+    let bulletin_age_secs = status
+        .last_refresh_unix_ms
+        .map(|refresh_ms| {
+            if now_unix_ms > refresh_ms {
+                ((now_unix_ms - refresh_ms) / 1000) as u64
+            } else {
+                0
+            }
+        })
+        .or(status.bulletin_age_secs);
+
+    let reason = if status.state != WarmupState::Warm {
+        Some(WorkReadinessReason::StateNotWarm)
+    } else if warmup_config.eager_embedding_load && !status.embedding_ready {
+        Some(WorkReadinessReason::EmbeddingNotReady)
+    } else if bulletin_age_secs.is_none() {
+        Some(WorkReadinessReason::BulletinMissing)
+    } else if bulletin_age_secs.is_some_and(|age| age > stale_after_secs) {
+        Some(WorkReadinessReason::BulletinStale)
+    } else {
+        None
+    };
+
+    WorkReadiness {
+        ready: reason.is_none(),
+        reason,
+        warmup_state: status.state,
+        embedding_ready: status.embedding_ready,
+        bulletin_age_secs,
+        stale_after_secs,
+    }
+}
+
 /// Per-agent configuration (raw, before resolution with defaults).
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -468,10 +717,13 @@ pub struct AgentConfig {
     pub coalesce: Option<CoalesceConfig>,
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
+    pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
+    /// Optional timezone override for cron active-hours evaluation.
+    pub cron_timezone: Option<String>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
 }
@@ -511,9 +763,11 @@ pub struct ResolvedAgentConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
+    pub cron_timezone: Option<String>,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
@@ -533,9 +787,11 @@ impl Default for DefaultsConfig {
             coalesce: CoalesceConfig::default(),
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
+            warmup: WarmupConfig::default(),
             browser: BrowserConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
+            cron_timezone: None,
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
@@ -577,6 +833,7 @@ impl AgentConfig {
             coalesce: self.coalesce.unwrap_or(defaults.coalesce),
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
+            warmup: self.warmup.unwrap_or(defaults.warmup),
             browser: self
                 .browser
                 .clone()
@@ -586,6 +843,11 @@ impl AgentConfig {
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
+            cron_timezone: resolve_cron_timezone(
+                &self.id,
+                self.cron_timezone.as_deref(),
+                defaults.cron_timezone.as_deref(),
+            ),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
         }
@@ -785,7 +1047,7 @@ pub struct MessagingConfig {
     pub twitch: Option<TwitchConfig>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct DiscordConfig {
     pub enabled: bool,
     pub token: String,
@@ -793,6 +1055,17 @@ pub struct DiscordConfig {
     pub dm_allowed_users: Vec<String>,
     /// Whether to process messages from other bots (self-messages are always ignored).
     pub allow_bot_messages: bool,
+}
+
+impl std::fmt::Debug for DiscordConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DiscordConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("allow_bot_messages", &self.allow_bot_messages)
+            .finish()
+    }
 }
 
 /// A single slash command definition for the Slack adapter.
@@ -809,7 +1082,7 @@ pub struct SlackCommandConfig {
     pub description: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct SlackConfig {
     pub enabled: bool,
     pub bot_token: String,
@@ -818,6 +1091,18 @@ pub struct SlackConfig {
     pub dm_allowed_users: Vec<String>,
     /// Slash command definitions. If empty, all slash commands are ignored.
     pub commands: Vec<SlackCommandConfig>,
+}
+
+impl std::fmt::Debug for SlackConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SlackConfig")
+            .field("enabled", &self.enabled)
+            .field("bot_token", &"[REDACTED]")
+            .field("app_token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("commands", &self.commands)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Discord permission filters.
@@ -877,7 +1162,15 @@ impl SlackPermissions {
             filter
         };
 
-        let dm_allowed_users = slack.dm_allowed_users.clone();
+        let mut dm_allowed_users = slack.dm_allowed_users.clone();
+
+        for binding in &slack_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
 
         Self {
             workspace_filter,
@@ -952,12 +1245,22 @@ impl DiscordPermissions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TelegramConfig {
     pub enabled: bool,
     pub token: String,
     /// User IDs allowed to DM the bot. If empty, DMs are ignored entirely.
     pub dm_allowed_users: Vec<String>,
+}
+
+impl std::fmt::Debug for TelegramConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TelegramConfig")
+            .field("enabled", &self.enabled)
+            .field("token", &"[REDACTED]")
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Telegram permission filters.
@@ -1014,15 +1317,30 @@ impl TelegramPermissions {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TwitchConfig {
     pub enabled: bool,
     pub username: String,
     pub oauth_token: String,
+    pub client_id: Option<String>,
+    pub client_secret: Option<String>,
+    pub refresh_token: Option<String>,
     /// Channels to join (without the # prefix).
     pub channels: Vec<String>,
     /// Optional prefix that triggers the bot (e.g. "!ask"). If empty, all messages are processed.
     pub trigger_prefix: Option<String>,
+}
+
+impl std::fmt::Debug for TwitchConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TwitchConfig")
+            .field("enabled", &self.enabled)
+            .field("username", &self.username)
+            .field("oauth_token", &"[REDACTED]")
+            .field("channels", &self.channels)
+            .field("trigger_prefix", &self.trigger_prefix)
+            .finish()
+    }
 }
 
 /// Hot-reloadable Twitch permission filters.
@@ -1201,6 +1519,7 @@ struct TomlLlmConfigFields {
     opencode_zen_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
+    minimax_cn_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     #[serde(default)]
@@ -1228,6 +1547,7 @@ struct TomlLlmConfig {
     opencode_zen_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
+    minimax_cn_key: Option<String>,
     moonshot_key: Option<String>,
     zai_coding_plan_key: Option<String>,
     providers: HashMap<String, TomlProviderConfig>,
@@ -1280,6 +1600,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             opencode_zen_key: fields.opencode_zen_key,
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
+            minimax_cn_key: fields.minimax_cn_key,
             moonshot_key: fields.moonshot_key,
             zai_coding_plan_key: fields.zai_coding_plan_key,
             providers: fields.providers,
@@ -1300,10 +1621,12 @@ struct TomlDefaultsConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     #[serde(default)]
     mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
+    cron_timezone: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
 }
@@ -1372,6 +1695,14 @@ struct TomlCortexConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlWarmupConfig {
+    enabled: Option<bool>,
+    eager_embedding_load: Option<bool>,
+    refresh_secs: Option<u64>,
+    startup_delay_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -1434,9 +1765,11 @@ struct TomlAgentConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
+    cron_timezone: Option<String>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
 }
@@ -1525,6 +1858,9 @@ struct TomlTwitchConfig {
     enabled: bool,
     username: Option<String>,
     oauth_token: Option<String>,
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
     #[serde(default)]
     channels: Vec<String>,
     trigger_prefix: Option<String>,
@@ -1559,6 +1895,42 @@ fn resolve_env_value(value: &str) -> Option<String> {
     } else {
         Some(value.to_string())
     }
+}
+
+fn normalize_timezone(value: &str) -> Option<String> {
+    let timezone = value.trim();
+    if timezone.is_empty() {
+        return None;
+    }
+    Some(timezone.to_string())
+}
+
+fn resolve_cron_timezone(
+    agent_id: &str,
+    agent_timezone: Option<&str>,
+    default_timezone: Option<&str>,
+) -> Option<String> {
+    let timezone = agent_timezone
+        .and_then(normalize_timezone)
+        .or_else(|| default_timezone.and_then(normalize_timezone))
+        .or_else(|| {
+            std::env::var(CRON_TIMEZONE_ENV_VAR)
+                .ok()
+                .and_then(|value| normalize_timezone(&value))
+        });
+
+    let timezone = timezone?;
+
+    if timezone.parse::<Tz>().is_err() {
+        tracing::warn!(
+            agent_id,
+            cron_timezone = %timezone,
+            "invalid cron timezone configured, falling back to system local timezone"
+        );
+        return None;
+    }
+
+    Some(timezone)
 }
 
 fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> {
@@ -1727,7 +2099,9 @@ impl Config {
         }
 
         // OAuth credentials count as configured
-        if crate::auth::credentials_path(&instance_dir).exists() {
+        if crate::auth::credentials_path(&instance_dir).exists()
+            || crate::openai_auth::credentials_path(&instance_dir).exists()
+        {
             return false;
         }
 
@@ -1803,7 +2177,9 @@ impl Config {
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
         let mut llm = LlmConfig {
-            anthropic_key: std::env::var("ANTHROPIC_API_KEY").ok(),
+            anthropic_key: std::env::var("ANTHROPIC_API_KEY")
+                .ok()
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
@@ -1819,6 +2195,7 @@ impl Config {
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
+            minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
             providers: HashMap::new(),
@@ -1826,11 +2203,13 @@ impl Config {
 
         // Populate providers from env vars (same as from_toml does)
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });
@@ -1902,6 +2281,17 @@ impl Config {
                 });
         }
 
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                });
+        }
+
         if let Some(moonshot_key) = llm.moonshot_key.clone() {
             llm.providers
                 .entry("moonshot".to_string())
@@ -1924,6 +2314,28 @@ impl Config {
                 });
         }
 
+        if let Some(fireworks_key) = llm.fireworks_key.clone() {
+            llm.providers
+                .entry("fireworks".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+                    api_key: fireworks_key,
+                    name: None,
+                });
+        }
+
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -1935,11 +2347,77 @@ impl Config {
                 });
         }
 
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: llm
+                        .ollama_base_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
+                    name: None,
+                });
+        }
+
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        // Env-only routing: check for env overrides on channel/worker models
+        // Env-only routing: check for env overrides on channel/worker models.
+        // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
         let mut routing = RoutingConfig::default();
+        if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
+            routing.channel = model.clone();
+            routing.branch = model.clone();
+            routing.worker = model.clone();
+            routing.compactor = model.clone();
+            routing.cortex = model;
+        }
         if let Ok(channel_model) = std::env::var("SPACEBOT_CHANNEL_MODEL") {
             routing.channel = channel_model;
         }
@@ -1965,9 +2443,11 @@ impl Config {
             coalesce: None,
             ingestion: None,
             cortex: None,
+            warmup: None,
             browser: None,
             mcp: None,
             brave_search_key: None,
+            cron_timezone: None,
             cron: Vec::new(),
         }];
 
@@ -2039,7 +2519,8 @@ impl Config {
                 .anthropic_key
                 .as_deref()
                 .and_then(resolve_env_value)
-                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok()),
+                .or_else(|| std::env::var("ANTHROPIC_API_KEY").ok())
+                .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: toml
                 .llm
                 .openai_key
@@ -2130,6 +2611,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("MINIMAX_API_KEY").ok()),
+            minimax_cn_key: toml
+                .llm
+                .minimax_cn_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("MINIMAX_CN_API_KEY").ok()),
             moonshot_key: toml
                 .llm
                 .moonshot_key
@@ -2147,26 +2634,30 @@ impl Config {
                 .providers
                 .into_iter()
                 .map(|(provider_id, config)| {
-                    (
+                    let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
+                        anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
+                    })?;
+                    Ok((
                         provider_id.to_lowercase(),
                         ProviderConfig {
                             api_type: config.api_type,
                             base_url: config.base_url,
-                            api_key: resolve_env_value(&config.api_key)
-                                .expect("Failed to resolve API key for provider"),
+                            api_key,
                             name: config.name,
                         },
-                    )
+                    ))
                 })
-                .collect(),
+                .collect::<anyhow::Result<_>>()?,
         };
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
+            let base_url = std::env::var("ANTHROPIC_BASE_URL")
+                .unwrap_or_else(|_| ANTHROPIC_PROVIDER_BASE_URL.to_string());
             llm.providers
                 .entry("anthropic".to_string())
                 .or_insert_with(|| ProviderConfig {
                     api_type: ApiType::Anthropic,
-                    base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+                    base_url,
                     api_key: anthropic_key,
                     name: None,
                 });
@@ -2238,6 +2729,17 @@ impl Config {
                 });
         }
 
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                });
+        }
+
         if let Some(moonshot_key) = llm.moonshot_key.clone() {
             llm.providers
                 .entry("moonshot".to_string())
@@ -2260,6 +2762,28 @@ impl Config {
                 });
         }
 
+        if let Some(fireworks_key) = llm.fireworks_key.clone() {
+            llm.providers
+                .entry("fireworks".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+                    api_key: fireworks_key,
+                    name: None,
+                });
+        }
+
+        if let Some(deepseek_key) = llm.deepseek_key.clone() {
+            llm.providers
+                .entry("deepseek".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+                    api_key: deepseek_key,
+                    name: None,
+                });
+        }
+
         if let Some(gemini_key) = llm.gemini_key.clone() {
             llm.providers
                 .entry("gemini".to_string())
@@ -2267,6 +2791,64 @@ impl Config {
                     api_type: ApiType::Gemini,
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
+                    name: None,
+                });
+        }
+
+        if let Some(groq_key) = llm.groq_key.clone() {
+            llm.providers
+                .entry("groq".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+                    api_key: groq_key,
+                    name: None,
+                });
+        }
+
+        if let Some(together_key) = llm.together_key.clone() {
+            llm.providers
+                .entry("together".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+                    api_key: together_key,
+                    name: None,
+                });
+        }
+
+        if let Some(xai_key) = llm.xai_key.clone() {
+            llm.providers
+                .entry("xai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: XAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: xai_key,
+                    name: None,
+                });
+        }
+
+        if let Some(mistral_key) = llm.mistral_key.clone() {
+            llm.providers
+                .entry("mistral".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+                    api_key: mistral_key,
+                    name: None,
+                });
+        }
+
+        if llm.ollama_base_url.is_some() || llm.ollama_key.is_some() {
+            llm.providers
+                .entry("ollama".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: llm
+                        .ollama_base_url
+                        .clone()
+                        .unwrap_or_else(|| "http://localhost:11434".to_string()),
+                    api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                 });
         }
@@ -2393,6 +2975,20 @@ impl Config {
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
                 })
                 .unwrap_or(base_defaults.cortex),
+            warmup: toml
+                .defaults
+                .warmup
+                .map(|w| WarmupConfig {
+                    enabled: w.enabled.unwrap_or(base_defaults.warmup.enabled),
+                    eager_embedding_load: w
+                        .eager_embedding_load
+                        .unwrap_or(base_defaults.warmup.eager_embedding_load),
+                    refresh_secs: w.refresh_secs.unwrap_or(base_defaults.warmup.refresh_secs),
+                    startup_delay_secs: w
+                        .startup_delay_secs
+                        .unwrap_or(base_defaults.warmup.startup_delay_secs),
+                })
+                .unwrap_or(base_defaults.warmup),
             browser: toml
                 .defaults
                 .browser
@@ -2417,6 +3013,11 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok()),
+            cron_timezone: toml
+                .defaults
+                .cron_timezone
+                .as_deref()
+                .and_then(resolve_env_value),
             history_backfill_count: base_defaults.history_backfill_count,
             cron: Vec::new(),
             opencode: toml
@@ -2563,6 +3164,16 @@ impl Config {
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
                     }),
+                    warmup: a.warmup.map(|w| WarmupConfig {
+                        enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
+                        eager_embedding_load: w
+                            .eager_embedding_load
+                            .unwrap_or(defaults.warmup.eager_embedding_load),
+                        refresh_secs: w.refresh_secs.unwrap_or(defaults.warmup.refresh_secs),
+                        startup_delay_secs: w
+                            .startup_delay_secs
+                            .unwrap_or(defaults.warmup.startup_delay_secs),
+                    }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -2587,6 +3198,7 @@ impl Config {
                         None => None,
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
+                    cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
                     cron,
                 })
             })
@@ -2608,9 +3220,11 @@ impl Config {
                 coalesce: None,
                 ingestion: None,
                 cortex: None,
+                warmup: None,
                 browser: None,
                 mcp: None,
                 brave_search_key: None,
+                cron_timezone: None,
                 cron: Vec::new(),
             });
         }
@@ -2691,10 +3305,28 @@ impl Config {
                     .as_deref()
                     .and_then(resolve_env_value)
                     .or_else(|| std::env::var("TWITCH_OAUTH_TOKEN").ok())?;
+                let client_id = t
+                    .client_id
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_CLIENT_ID").ok());
+                let client_secret = t
+                    .client_secret
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_CLIENT_SECRET").ok());
+                let refresh_token = t
+                    .refresh_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("TWITCH_REFRESH_TOKEN").ok());
                 Some(TwitchConfig {
                     enabled: t.enabled,
                     username,
                     oauth_token,
+                    client_id,
+                    client_secret,
+                    refresh_token,
                     channels: t.channels,
                     trigger_prefix: t.trigger_prefix,
                 })
@@ -2812,7 +3444,13 @@ pub struct RuntimeConfig {
     pub mcp: ArcSwap<Vec<McpServerConfig>>,
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
+    pub cron_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
+    pub warmup: ArcSwap<WarmupConfig>,
+    /// Current warmup lifecycle status for API and observability.
+    pub warmup_status: ArcSwap<WarmupStatus>,
+    /// Synchronizes warmup passes so periodic and API-triggered runs don't overlap.
+    pub warmup_lock: Arc<tokio::sync::Mutex<()>>,
     /// Cached memory bulletin generated by the cortex. Injected into every
     /// channel's system prompt. Empty string until the first cortex run.
     pub memory_bulletin: ArcSwap<String>,
@@ -2864,7 +3502,11 @@ impl RuntimeConfig {
             mcp: ArcSwap::from_pointee(agent_config.mcp.clone()),
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
+            cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
+            warmup: ArcSwap::from_pointee(agent_config.warmup),
+            warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
+            warmup_lock: Arc::new(tokio::sync::Mutex::new(())),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -2890,6 +3532,18 @@ impl RuntimeConfig {
     /// Set the settings store after initialization.
     pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings.store(Arc::new(Some(settings)));
+    }
+
+    /// Compute the current dispatch-readiness signal.
+    pub fn work_readiness(&self) -> WorkReadiness {
+        let warmup_config = **self.warmup.load();
+        let status = self.warmup_status.load().as_ref().clone();
+        evaluate_work_readiness(warmup_config, status, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// True when branch/worker/cron dispatches should run in fully-ready mode.
+    pub fn ready_for_work(&self) -> bool {
+        self.work_readiness().ready
     }
 
     /// Reload tunable config values from a freshly parsed Config.
@@ -2934,7 +3588,9 @@ impl RuntimeConfig {
             .store(Arc::new(resolved.history_backfill_count));
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
+        self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
+        self.warmup.store(Arc::new(resolved.warmup));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -3181,6 +3837,7 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
                         // Discord: start if enabled and not already running
@@ -3258,9 +3915,14 @@ pub fn spawn_file_watcher(
                                         Arc::new(arc_swap::ArcSwap::from_pointee(perms))
                                     }
                                 };
+                                let token_path = instance_dir.join("twitch_token.json");
                                 let adapter = crate::messaging::twitch::TwitchAdapter::new(
                                     &twitch_config.username,
                                     &twitch_config.oauth_token,
+                                    twitch_config.client_id.clone(),
+                                    twitch_config.client_secret.clone(),
+                                    twitch_config.refresh_token.clone(),
+                                    Some(token_path),
                                     twitch_config.channels.clone(),
                                     twitch_config.trigger_prefix.clone(),
                                     perms,
@@ -3625,9 +4287,10 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 21] = [
+            const KEYS: [&str; 22] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
+                "SPACEBOT_CRON_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
@@ -3924,6 +4587,26 @@ name = "Custom OpenAI"
     }
 
     #[test]
+    fn test_needs_onboarding_false_with_openai_oauth_credentials() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let instance_dir = Config::default_instance_dir();
+        let creds = crate::openai_auth::OAuthCredentials {
+            access_token: "openai-access-token-test".to_string(),
+            refresh_token: "openai-refresh-token-test".to_string(),
+            expires_at: chrono::Utc::now().timestamp_millis() + 3_600_000,
+            account_id: Some("acct_test_123".to_string()),
+        };
+        crate::openai_auth::save_credentials(&instance_dir, &creds)
+            .expect("failed to save OpenAI OAuth credentials");
+
+        assert!(!Config::needs_onboarding());
+    }
+
+    #[test]
     fn test_load_from_env_populates_legacy_key_and_provider() {
         let _lock = env_test_lock()
             .lock()
@@ -3984,5 +4667,553 @@ bind = "127.0.0.1"
             .expect("failed to load config from env");
 
         assert_eq!(config.api.bind, "[::]");
+    }
+
+    /// Helper to build a minimal `SlackConfig` for permission tests.
+    fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
+        SlackConfig {
+            enabled: true,
+            bot_token: "xoxb-test".into(),
+            app_token: "xapp-test".into(),
+            dm_allowed_users,
+            commands: vec![],
+        }
+    }
+
+    /// Helper to build a Slack binding with optional dm_allowed_users.
+    fn slack_binding(workspace_id: Option<&str>, dm_allowed_users: Vec<String>) -> Binding {
+        Binding {
+            agent_id: "test-agent".into(),
+            channel: "slack".into(),
+            guild_id: None,
+            workspace_id: workspace_id.map(String::from),
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users,
+        }
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_config_and_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U003".into(), "U004".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003", "U004"]);
+    }
+
+    #[test]
+    fn slack_permissions_deduplicates_dm_users() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U002".into(), "U003".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        // U002 appears in both config and binding — should appear only once
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_empty_dm_users_stays_empty() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(Some("T1"), vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.dm_allowed_users.is_empty());
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_multiple_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec!["U002".into()]),
+            slack_binding(Some("T2"), vec!["U003".into()]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_ignores_non_slack_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let mut discord_binding = slack_binding(Some("T1"), vec!["U099".into()]);
+        discord_binding.channel = "discord".into();
+        let perms = SlackPermissions::from_config(&config, &[discord_binding]);
+        // U099 should not appear — that binding is for discord, not slack
+        assert_eq!(perms.dm_allowed_users, vec!["U001"]);
+    }
+
+    #[test]
+    fn slack_permissions_workspace_filter_from_bindings() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec![]),
+            slack_binding(Some("T2"), vec![]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(
+            perms.workspace_filter,
+            Some(vec!["T1".to_string(), "T2".to_string()])
+        );
+    }
+
+    #[test]
+    fn slack_permissions_no_workspace_filter_when_none_specified() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(None, vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.workspace_filter.is_none());
+    }
+
+    #[test]
+    fn test_cron_timezone_resolution_precedence() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+cron_timezone = "Europe/Berlin"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(
+            config.defaults.cron_timezone.as_deref(),
+            Some("America/New_York")
+        );
+        assert_eq!(
+            config.agents[0].cron_timezone.as_deref(),
+            Some("Europe/Berlin")
+        );
+
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Europe/Berlin"));
+
+        let toml_without_agent_override = r#"
+[defaults]
+cron_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_agent_override).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("America/New_York"));
+
+        let toml_without_default = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_default).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_cron_timezone_invalid_falls_back_to_system() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Not/A-Real-Tz");
+        }
+
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone, None);
+    }
+
+    #[test]
+    fn ollama_base_url_registers_provider() {
+        let toml = r#"
+[llm]
+ollama_base_url = "http://localhost:11434"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://localhost:11434");
+        assert_eq!(provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(provider.api_key, "");
+    }
+
+    #[test]
+    fn ollama_key_alone_registers_provider_with_default_url() {
+        let toml = r#"
+[llm]
+ollama_key = "test-key"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://localhost:11434");
+        assert_eq!(provider.api_key, "test-key");
+    }
+
+    #[test]
+    fn ollama_custom_provider_takes_precedence_over_shorthand() {
+        // Custom provider block should win over shorthand keys (or_insert_with semantics)
+        let toml = r#"
+[llm]
+ollama_base_url = "http://localhost:11434"
+
+[llm.providers.ollama]
+api_type = "openai_completions"
+base_url = "http://remote-ollama:11434"
+api_key = ""
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let provider = config
+            .llm
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+        assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    #[test]
+    fn test_warmup_defaults_applied_when_not_configured() {
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(config.defaults.warmup.enabled);
+        assert!(config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 900);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 5);
+
+        assert_eq!(resolved.warmup.enabled, config.defaults.warmup.enabled);
+        assert_eq!(
+            resolved.warmup.eager_embedding_load,
+            config.defaults.warmup.eager_embedding_load
+        );
+        assert_eq!(
+            resolved.warmup.refresh_secs,
+            config.defaults.warmup.refresh_secs
+        );
+        assert_eq!(
+            resolved.warmup.startup_delay_secs,
+            config.defaults.warmup.startup_delay_secs
+        );
+    }
+
+    #[test]
+    fn test_warmup_default_and_agent_override_resolution() {
+        let toml = r#"
+[defaults.warmup]
+enabled = false
+eager_embedding_load = false
+refresh_secs = 120
+startup_delay_secs = 9
+
+[[agents]]
+id = "main"
+
+[agents.warmup]
+enabled = true
+startup_delay_secs = 2
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(!config.defaults.warmup.enabled);
+        assert!(!config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 120);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 9);
+
+        assert!(resolved.warmup.enabled);
+        assert!(!resolved.warmup.eager_embedding_load);
+        assert_eq!(resolved.warmup.refresh_secs, 120);
+        assert_eq!(resolved.warmup.startup_delay_secs, 2);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_warm_state() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Cold,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::StateNotWarm));
+    }
+
+    #[test]
+    fn test_work_readiness_requires_embedding_ready() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason,
+            Some(WorkReadinessReason::EmbeddingNotReady)
+        );
+    }
+
+    #[test]
+    fn test_work_readiness_does_not_require_embedding_when_eager_load_disabled() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                eager_embedding_load: false,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_bulletin_timestamp() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: None,
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinMissing));
+    }
+
+    #[test]
+    fn test_work_readiness_rejects_stale_bulletin() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 60,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            122_000,
+        );
+
+        assert_eq!(readiness.stale_after_secs, 120);
+        assert_eq!(readiness.bulletin_age_secs, Some(121));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinStale));
+    }
+
+    #[test]
+    fn test_work_readiness_ready_when_all_constraints_hold() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 120,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(200_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            310_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+        assert_eq!(readiness.bulletin_age_secs, Some(110));
+    }
+
+    /// Verify that every shorthand key field in `LlmConfig` actually registers a provider.
+    ///
+    /// This is a regression test for the recurring "unknown provider: X" bug pattern
+    /// (nvidia #82, ollama #175, deepseek #179). If a new shorthand key is added to
+    /// `LlmConfig` without wiring it up in `load_from_env` / `from_toml`, this test fails.
+    #[test]
+    fn all_shorthand_keys_register_providers_via_toml() {
+        // (toml_key, toml_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
+            ("openai_key", "test-key", "openai", "openai.com"),
+            ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
+            ("minimax_key", "test-key", "minimax", "minimax.io"),
+            ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
+            ("moonshot_key", "test-key", "moonshot", "moonshot.ai"),
+            ("nvidia_key", "test-key", "nvidia", "nvidia.com"),
+            ("fireworks_key", "test-key", "fireworks", "fireworks.ai"),
+            ("zhipu_key", "test-key", "zhipu", "z.ai"),
+            ("gemini_key", "test-key", "gemini", "google"),
+            ("groq_key", "test-key", "groq", "groq.com"),
+            ("together_key", "test-key", "together", "together"),
+            ("xai_key", "test-key", "xai", "x.ai"),
+            ("mistral_key", "test-key", "mistral", "mistral.ai"),
+            (
+                "ollama_base_url",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (toml_key, toml_value, provider_name, url_substr) in cases {
+            let toml_str =
+                format!("[llm]\n{toml_key} = \"{toml_value}\"\n\n[[agents]]\nid = \"main\"\n");
+
+            let parsed: TomlConfig = toml::from_str(&toml_str)
+                .unwrap_or_else(|e| panic!("failed to parse toml for {toml_key}: {e}"));
+            let config = Config::from_toml(parsed, PathBuf::from("."))
+                .unwrap_or_else(|e| panic!("failed to build config for {toml_key}: {e}"));
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{toml_key}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in from_toml()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
+    }
+
+    #[test]
+    fn all_shorthand_keys_register_providers_via_env() {
+        let _lock = env_test_lock().lock().unwrap();
+
+        // (env_var, env_value, provider_name, expected_base_url_substring)
+        let cases: &[(&str, &str, &str, &str)] = &[
+            (
+                "ANTHROPIC_API_KEY",
+                "test-key",
+                "anthropic",
+                "anthropic.com",
+            ),
+            ("OPENAI_API_KEY", "test-key", "openai", "openai.com"),
+            (
+                "OPENROUTER_API_KEY",
+                "test-key",
+                "openrouter",
+                "openrouter.ai",
+            ),
+            ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
+            ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
+            ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
+            ("FIREWORKS_API_KEY", "test-key", "fireworks", "fireworks.ai"),
+            ("ZHIPU_API_KEY", "test-key", "zhipu", "z.ai"),
+            ("GEMINI_API_KEY", "test-key", "gemini", "google"),
+            ("GROQ_API_KEY", "test-key", "groq", "groq.com"),
+            ("TOGETHER_API_KEY", "test-key", "together", "together"),
+            ("XAI_API_KEY", "test-key", "xai", "x.ai"),
+            ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OLLAMA_BASE_URL",
+                "http://localhost:11434",
+                "ollama",
+                "localhost:11434",
+            ),
+        ];
+
+        for (env_var, env_value, provider_name, url_substr) in cases {
+            let guard = EnvGuard::new();
+            unsafe {
+                std::env::set_var(env_var, env_value);
+            }
+
+            let config = Config::load_from_env(&guard.test_dir)
+                .unwrap_or_else(|e| panic!("load_from_env failed for {env_var}: {e}"));
+            drop(guard);
+
+            let provider = config.llm.providers.get(*provider_name).unwrap_or_else(|| {
+                panic!(
+                    "provider '{provider_name}' not registered when '{env_var}' is set — \
+                     add an .entry(\"{provider_name}\").or_insert_with(...) block in load_from_env()"
+                )
+            });
+
+            assert!(
+                provider.base_url.contains(url_substr),
+                "provider '{provider_name}' base_url '{}' does not contain '{url_substr}'",
+                provider.base_url
+            );
+        }
     }
 }

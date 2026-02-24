@@ -112,6 +112,7 @@ Every memory has a type, an importance score, and graph edges connecting it to r
 - **Memory import** — dump files into the `ingest/` folder and Spacebot extracts structured memories automatically. Supports text, markdown, and PDF files. Migrating from OpenClaw? Drop your markdown memory files in and walk away.
 - **Cross-channel recall** — branches can read transcripts from other conversations
 - **Memory bulletin** — the cortex generates a periodic briefing of the agent's knowledge, injected into every conversation
+- **Warmup readiness contract** — branch/worker/cron dispatch checks `ready_for_work` (warm state + embedding ready + fresh bulletin), records cold-dispatch metrics, and triggers background forced warmup without blocking channels
 
 ### Scheduling
 

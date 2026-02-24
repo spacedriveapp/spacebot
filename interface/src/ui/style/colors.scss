@@ -1,56 +1,56 @@
 :root {
-	--dark-hue: 235;
-	--light-hue: 235;
+	--dark-hue: 230;
+	--light-hue: 230;
 
 	// global
 	--color-black: 0, 0%, 0%;
 	--color-white: 0, 0%, 100%;
 	// accent theme colors
-	--color-accent: 208, 100%, 57%;
-	--color-accent-faint: 208, 100%, 64%;
-	--color-accent-deep: 208, 100%, 47%;
+	--color-accent: 282, 70%, 57%;
+	--color-accent-faint: 282, 65%, 64%;
+	--color-accent-deep: 282, 75%, 48%;
 	// text
-	--color-ink: var(--dark-hue), 35%, 92%;
-	--color-ink-dull: var(--dark-hue), 10%, 70%;
-	--color-ink-faint: var(--dark-hue), 10%, 55%;
+	--color-ink: var(--dark-hue), 15%, 94%;
+	--color-ink-dull: var(--dark-hue), 8%, 65%;
+	--color-ink-faint: var(--dark-hue), 5%, 45%;
 	// sidebar
-	--color-sidebar: var(--dark-hue), 15%, 7%;
-	--color-sidebar-box: var(--dark-hue), 15%, 16%;
-	--color-sidebar-line: var(--dark-hue), 15%, 23%;
-	--color-sidebar-ink: var(--dark-hue), 15%, 92%;
-	--color-sidebar-ink-dull: var(--dark-hue), 10%, 70%;
-	--color-sidebar-ink-faint: var(--dark-hue), 10%, 55%;
-	--color-sidebar-divider: var(--dark-hue), 15%, 17%;
-	--color-sidebar-button: var(--dark-hue), 15%, 18%;
-	--color-sidebar-selected: var(--dark-hue), 15%, 16%;
-	--color-sidebar-shade: var(--dark-hue), 15%, 23%;
+	--color-sidebar: var(--dark-hue), 8%, 3%;
+	--color-sidebar-box: var(--dark-hue), 8%, 6%;
+	--color-sidebar-line: var(--dark-hue), 8%, 12%;
+	--color-sidebar-ink: var(--dark-hue), 15%, 94%;
+	--color-sidebar-ink-dull: var(--dark-hue), 8%, 65%;
+	--color-sidebar-ink-faint: var(--dark-hue), 5%, 45%;
+	--color-sidebar-divider: var(--dark-hue), 8%, 5%;
+	--color-sidebar-button: var(--dark-hue), 8%, 12%;
+	--color-sidebar-selected: var(--dark-hue), 8%, 15%;
+	--color-sidebar-shade: var(--dark-hue), 8%, 12%;
 	// main
-	--color-app: var(--dark-hue), 15%, 13%;
-	--color-app-box: var(--dark-hue), 15%, 18%;
-	--color-app-dark-box: var(--dark-hue), 15%, 15%;
-	--color-app-darker-box: var(--dark-hue), 16%, 11%;
-	--color-app-light-box: var(--dark-hue), 15%, 23%;
-	--color-app-overlay: var(--dark-hue), 15%, 17%;
-	--color-app-input: var(--dark-hue), 15%, 20%;
-	--color-app-focus: var(--dark-hue), 15%, 10%;
-	--color-app-line: var(--dark-hue), 15%, 23%;
-	--color-app-divider: var(--dark-hue), 15%, 5%;
-	--color-app-button: var(--dark-hue), 15%, 23%;
-	--color-app-hover: var(--dark-hue), 15%, 25%;
-	--color-app-selected: var(--dark-hue), 15%, 20%;
-	--color-app-selected-item: var(--dark-hue), 15%, 18%;
-	--color-app-active: var(--dark-hue), 15%, 30%;
-	--color-app-shade: var(--dark-hue), 15%, 0%;
-	--color-app-frame: var(--dark-hue), 15%, 25%;
-	--color-app-slider: var(--dark-hue), 15%, 20%;
-	--color-app-explorer-scrollbar: var(--dark-hue), 20%, 25%;
+	--color-app: var(--dark-hue), 8%, 5%;
+	--color-app-box: var(--dark-hue), 8%, 8%;
+	--color-app-dark-box: var(--dark-hue), 8%, 6%;
+	--color-app-darker-box: var(--dark-hue), 8%, 4%;
+	--color-app-light-box: var(--dark-hue), 8%, 15%;
+	--color-app-overlay: var(--dark-hue), 8%, 7%;
+	--color-app-input: var(--dark-hue), 8%, 10%;
+	--color-app-focus: var(--dark-hue), 8%, 4%;
+	--color-app-line: var(--dark-hue), 8%, 14%;
+	--color-app-divider: var(--dark-hue), 8%, 3%;
+	--color-app-button: var(--dark-hue), 8%, 12%;
+	--color-app-hover: var(--dark-hue), 8%, 16%;
+	--color-app-selected: var(--dark-hue), 8%, 18%;
+	--color-app-selected-item: var(--dark-hue), 8%, 8%;
+	--color-app-active: var(--dark-hue), 8%, 20%;
+	--color-app-shade: var(--dark-hue), 8%, 0%;
+	--color-app-frame: var(--dark-hue), 8%, 16%;
+	--color-app-slider: var(--dark-hue), 8%, 10%;
+	--color-app-explorer-scrollbar: var(--dark-hue), 8%, 18%;
 	// menu
-	--color-menu: var(--dark-hue), 15%, 10%;
-	--color-menu-line: var(--dark-hue), 15%, 14%;
-	--color-menu-ink: var(--dark-hue), 25%, 92%;
-	--color-menu-faint: var(--dark-hue), 5%, 80%;
-	--color-menu-hover: var(--dark-hue), 15%, 30%;
-	--color-menu-selected: var(--dark-hue), 5%, 30%;
+	--color-menu: var(--dark-hue), 8%, 4%;
+	--color-menu-line: var(--dark-hue), 8%, 8%;
+	--color-menu-ink: var(--dark-hue), 15%, 94%;
+	--color-menu-faint: var(--dark-hue), 5%, 65%;
+	--color-menu-hover: var(--dark-hue), 8%, 16%;
+	--color-menu-selected: var(--dark-hue), 5%, 18%;
 	--color-menu-shade: var(--dark-hue), 5%, 0%;
 }
 

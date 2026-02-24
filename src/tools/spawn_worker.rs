@@ -35,10 +35,11 @@ pub struct SpawnWorkerArgs {
     /// Whether this is an interactive worker (accepts follow-up messages).
     #[serde(default)]
     pub interactive: bool,
-    /// Optional skill name to load into the worker's context. The worker will
-    /// receive the full skill instructions in its system prompt.
+    /// Optional list of skill names to suggest to the worker. The worker sees
+    /// all available skills and can read any of them via read_skill, but
+    /// suggested skills are flagged as recommended for this task.
     #[serde(default)]
-    pub skill: Option<String>,
+    pub suggested_skills: Vec<String>,
     /// Worker type: "builtin" (default) runs a Rig agent loop with shell/file/exec
     /// tools. "opencode" spawns an OpenCode subprocess with full coding agent
     /// capabilities. Use "opencode" for complex coding tasks that benefit from
@@ -106,14 +107,15 @@ impl Tool for SpawnWorkerTool {
                 "default": false,
                 "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns."
             },
-            "skill": {
-                "type": "string",
-                "description": "Name of a skill to load into the worker. The worker receives the full skill instructions in its system prompt. Only use skill names from <available_skills>."
+            "suggested_skills": {
+                "type": "array",
+                "items": { "type": "string" },
+                "description": "Skill names from <available_skills> that are likely relevant to this task. The worker sees all skills and decides what to read, but suggested skills are flagged as recommended."
             }
         });
 
-        if opencode_enabled {
-            properties.as_object_mut().unwrap().insert(
+        if opencode_enabled && let Some(obj) = properties.as_object_mut() {
+            obj.insert(
                 "worker_type".to_string(),
                 serde_json::json!({
                     "type": "string",
@@ -122,7 +124,7 @@ impl Tool for SpawnWorkerTool {
                     "description": "\"builtin\" (default) runs a Rig agent loop. \"opencode\" spawns a full OpenCode coding agent — use for complex multi-file coding tasks."
                 }),
             );
-            properties.as_object_mut().unwrap().insert(
+            obj.insert(
                 "directory".to_string(),
                 serde_json::json!({
                     "type": "string",
@@ -143,6 +145,7 @@ impl Tool for SpawnWorkerTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let readiness = self.state.deps.runtime_config.work_readiness();
         let is_opencode = args.worker_type.as_deref() == Some("opencode");
 
         let worker_id = if is_opencode {
@@ -158,7 +161,11 @@ impl Tool for SpawnWorkerTool {
                 &self.state,
                 &args.task,
                 args.interactive,
-                args.skill.as_deref(),
+                &args
+                    .suggested_skills
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>(),
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?
@@ -176,12 +183,24 @@ impl Tool for SpawnWorkerTool {
                 args.task
             )
         };
+        let readiness_note = if readiness.ready {
+            String::new()
+        } else {
+            let reason = readiness
+                .reason
+                .map(|value| value.as_str())
+                .unwrap_or("unknown");
+            format!(
+                " Readiness note: warmup is not fully ready ({reason}, state: {:?}); a warmup pass may already be running or was queued in the background.",
+                readiness.warmup_state
+            )
+        };
 
         Ok(SpawnWorkerOutput {
             worker_id,
             spawned: true,
             interactive: args.interactive,
-            message,
+            message: format!("{message}{readiness_note}"),
         })
     }
 }

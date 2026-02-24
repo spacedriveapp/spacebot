@@ -4,9 +4,7 @@
 //! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
 //! ref system for LLM-friendly element addressing.
 
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use crate::config::BrowserConfig;
-
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide_cdp::cdp::browser_protocol::accessibility::{
@@ -17,11 +15,13 @@ use chromiumoxide_cdp::cdp::browser_protocol::input::{
 };
 use chromiumoxide_cdp::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt as _;
+use reqwest::Url;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -31,9 +31,8 @@ use tokio::task::JoinHandle;
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
 /// to prevent server-side request forgery.
 fn validate_url(url: &str) -> Result<(), BrowserError> {
-    let parsed = url::Url::parse(url).map_err(|error| {
-        BrowserError::new(format!("invalid URL '{url}': {error}"))
-    })?;
+    let parsed = Url::parse(url)
+        .map_err(|error| BrowserError::new(format!("invalid URL '{url}': {error}")))?;
 
     match parsed.scheme() {
         "http" | "https" => {}
@@ -59,23 +58,22 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
     }
 
     // If the host parses as an IP address, check against blocked ranges
-    if let Ok(ip) = host.parse::<IpAddr>() {
-        if is_blocked_ip(ip) {
-            return Err(BrowserError::new(format!(
-                "navigation to private/loopback address {ip} is blocked"
-            )));
-        }
+    if let Ok(ip) = host.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(BrowserError::new(format!(
+            "navigation to private/loopback address {ip} is blocked"
+        )));
     }
 
     // IPv6 addresses in brackets (url crate strips them for host_str)
-    if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')) {
-        if let Ok(ip) = stripped.parse::<IpAddr>() {
-            if is_blocked_ip(ip) {
-                return Err(BrowserError::new(format!(
-                    "navigation to private/loopback address {ip} is blocked"
-                )));
-            }
-        }
+    if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
+        && let Ok(ip) = stripped.parse::<IpAddr>()
+        && is_blocked_ip(ip)
+    {
+        return Err(BrowserError::new(format!(
+            "navigation to private/loopback address {ip} is blocked"
+        )));
     }
 
     Ok(())
@@ -91,7 +89,7 @@ fn is_blocked_ip(ip: IpAddr) -> bool {
             || v4.is_link_local()                         // 169.254.0.0/16
             || v4.is_broadcast()                          // 255.255.255.255
             || v4.is_unspecified()                        // 0.0.0.0
-            || is_v4_cgnat(v4)                            // 100.64.0.0/10
+            || is_v4_cgnat(v4) // 100.64.0.0/10
         }
         IpAddr::V6(v6) => {
             v6.is_loopback()                             // ::1

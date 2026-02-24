@@ -149,11 +149,20 @@ Any code with access to `CronStore` and `Scheduler` can create cron jobs. The co
 
 ## Active Hours
 
-The active window uses 24-hour local time. If `active_start_hour` and `active_end_hour` are both set, the cron job only fires within that window.
+The active window uses a resolved timezone for each agent:
+
+1. `agents.cron_timezone`
+2. `defaults.cron_timezone`
+3. `SPACEBOT_CRON_TIMEZONE`
+4. server local timezone
+
+If `active_start_hour` and `active_end_hour` are both set, the cron job only fires within that window.
 
 Midnight wrapping is handled: a window of `22:00-06:00` means "10pm to 6am" — the cron job fires if the current hour is >= 22 or < 6.
 
 If active hours are not set, the cron job runs at all hours.
+
+If a configured timezone is invalid, Spacebot logs a warning and falls back to server local timezone.
 
 Active hours don't affect the timer interval — the timer still ticks at `interval_secs`. When a tick lands outside the active window, it's skipped. The next tick happens at the normal interval, not "as soon as the window opens."
 

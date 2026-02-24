@@ -129,7 +129,7 @@ struct ActiveChannel {
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
-        .expect("failed to install rustls crypto provider");
+        .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
     let cli = Cli::parse();
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
@@ -559,12 +559,15 @@ fn get_agent_config<'a>(
     config: &'a spacebot::config::Config,
     agent_id: Option<&str>,
 ) -> anyhow::Result<&'a spacebot::config::AgentConfig> {
-    let agent_id = agent_id.unwrap_or_else(|| {
-        if config.agents.is_empty() {
-            panic!("no agents configured");
+    let agent_id = match agent_id {
+        Some(id) => id,
+        None => {
+            if config.agents.is_empty() {
+                anyhow::bail!("no agents configured");
+            }
+            &config.agents[0].id
         }
-        &config.agents[0].id
-    });
+    };
 
     config
         .agents
@@ -582,6 +585,15 @@ fn load_config(
     } else {
         spacebot::config::Config::load().with_context(|| "failed to load configuration")
     }
+}
+
+fn has_provider_credentials(
+    llm_config: &spacebot::config::LlmConfig,
+    instance_dir: &std::path::Path,
+) -> bool {
+    llm_config.has_any_key()
+        || spacebot::auth::credentials_path(instance_dir).exists()
+        || spacebot::openai_auth::credentials_path(instance_dir).exists()
 }
 
 async fn run(
@@ -607,16 +619,25 @@ async fn run(
     let (agent_remove_tx, mut agent_remove_rx) = mpsc::channel::<String>(8);
 
     // Start HTTP API server if enabled
-    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
-        provider_tx,
-        agent_tx,
-        agent_remove_tx,
-    );
+    let mut api_state =
+        spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx, agent_remove_tx);
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
+
+    // Start metrics server if enabled (requires `metrics` cargo feature)
+    #[cfg(feature = "metrics")]
+    let _metrics_handle = if config.metrics.enabled {
+        Some(
+            spacebot::telemetry::start_metrics_server(&config.metrics, shutdown_rx.clone())
+                .await
+                .context("failed to start metrics server")?,
+        )
+    } else {
+        None
+    };
 
     let _http_handle = if config.api.enabled {
         // IPv6 addresses need brackets when combined with port: [::]:19898
@@ -642,8 +663,7 @@ async fn run(
     };
 
     // Check if we have provider configuration (API keys or OAuth credentials)
-    let has_providers =
-        config.llm.has_any_key() || spacebot::auth::credentials_path(&config.instance_dir).exists();
+    let has_providers = has_provider_credentials(&config.llm, &config.instance_dir);
 
     if !has_providers {
         tracing::info!("No LLM providers configured. Starting in setup mode.");
@@ -703,6 +723,7 @@ async fn run(
     // Set the config path on the API state for config.toml writes
     let config_path = config.instance_dir.join("config.toml");
     api_state.set_config_path(config_path.clone()).await;
+    api_state.set_instance_dir(config.instance_dir.clone());
     api_state.set_llm_manager(llm_manager.clone()).await;
     api_state.set_embedding_model(embedding_model.clone()).await;
     api_state.set_prompt_engine(prompt_engine.clone()).await;
@@ -1038,9 +1059,16 @@ async fn run(
                 };
 
                 match new_config {
-                    Ok(new_config) if new_config.llm.has_any_key() => {
+                    Ok(new_config)
+                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
+                    {
                         // Rebuild LlmManager with the new keys
-                        match spacebot::llm::LlmManager::new(new_config.llm.clone()).await {
+                        match spacebot::llm::LlmManager::with_instance_dir(
+                            new_config.llm.clone(),
+                            new_config.instance_dir.clone(),
+                        )
+                        .await
+                        {
                             Ok(new_llm) => {
                                 let new_llm_manager = Arc::new(new_llm);
                                 let mut new_watcher_agents = Vec::new();
@@ -1232,7 +1260,8 @@ async fn initialize_agents(
         );
 
         // Per-agent memory system
-        let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
+        let memory_store =
+            spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
         let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
             .await
             .with_context(|| {
@@ -1373,9 +1402,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::discord::DiscordAdapter::new(
             &discord_config.token,
-            discord_permissions
-                .clone()
-                .expect("discord permissions initialized when discord is enabled"),
+            discord_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("discord permissions not initialized when discord is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1395,9 +1424,9 @@ async fn initialize_agents(
         match spacebot::messaging::slack::SlackAdapter::new(
             &slack_config.bot_token,
             &slack_config.app_token,
-            slack_permissions
-                .clone()
-                .expect("slack permissions initialized when slack is enabled"),
+            slack_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("slack permissions not initialized when slack is enabled")
+            })?,
             slack_config.commands.clone(),
         ) {
             Ok(adapter) => {
@@ -1421,9 +1450,9 @@ async fn initialize_agents(
     {
         let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
             &telegram_config.token,
-            telegram_permissions
-                .clone()
-                .expect("telegram permissions initialized when telegram is enabled"),
+            telegram_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("telegram permissions not initialized when telegram is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1449,14 +1478,19 @@ async fn initialize_agents(
     if let Some(twitch_config) = &config.messaging.twitch
         && twitch_config.enabled
     {
+        let twitch_token_path = config.instance_dir.join("twitch_token.json");
         let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
             &twitch_config.username,
             &twitch_config.oauth_token,
+            twitch_config.client_id.clone(),
+            twitch_config.client_secret.clone(),
+            twitch_config.refresh_token.clone(),
+            Some(twitch_token_path),
             twitch_config.channels.clone(),
             twitch_config.trigger_prefix.clone(),
-            twitch_permissions
-                .clone()
-                .expect("twitch permissions initialized when twitch is enabled"),
+            twitch_permissions.clone().ok_or_else(|| {
+                anyhow::anyhow!("twitch permissions not initialized when twitch is enabled")
+            })?,
         );
         new_messaging_manager.register(adapter).await;
     }
@@ -1569,9 +1603,14 @@ async fn initialize_agents(
         }
     }
 
-    // Start cortex bulletin loops and association loops for each agent
+    // Start cortex warmup, bulletin loops, and association loops for each agent
     for (agent_id, agent) in agents.iter() {
         let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
+        let warmup_handle =
+            spacebot::agent::cortex::spawn_warmup_loop(agent.deps.clone(), cortex_logger.clone());
+        cortex_handles.push(warmup_handle);
+        tracing::info!(agent_id = %agent_id, "warmup loop started");
+
         let bulletin_handle =
             spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger.clone());
         cortex_handles.push(bulletin_handle);

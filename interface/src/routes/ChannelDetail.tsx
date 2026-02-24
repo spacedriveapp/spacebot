@@ -78,16 +78,16 @@ function LiveWorkerRunItem({ item, live, channelId }: { item: TimelineWorkerRun;
 			</span>
 			<div className="min-w-0 flex-1">
 				<div className="rounded-md bg-amber-500/10 px-3 py-2">
-					<div className="flex items-center gap-2">
+					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
 						<span className="text-sm font-medium text-amber-300">Worker</span>
-						<span className="truncate text-sm text-ink-dull">{item.task}</span>
+						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
 						<CancelButton onClick={() => { api.cancelProcess(channelId, "worker", item.id).catch(console.warn); }} />
 					</div>
-					<div className="mt-1 flex items-center gap-3 pl-4 text-tiny text-ink-faint">
-						<span>{live.status}</span>
+					<div className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden pl-4 text-tiny text-ink-faint">
+						<span className="truncate">{live.status}</span>
 						{live.currentTool && (
-							<span className="text-amber-400/70">{live.currentTool}</span>
+							<span className="truncate text-amber-400/70">{live.currentTool}</span>
 						)}
 						{live.toolCalls > 0 && (
 							<span>{live.toolCalls} tool calls</span>
@@ -146,23 +146,22 @@ function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<Button
+				<button
 					type="button"
 					onClick={() => setExpanded(!expanded)}
-					variant="ghost"
-					className="h-auto w-full justify-start rounded-md bg-amber-500/10 px-3 py-2 text-left hover:bg-amber-500/15"
+					className="w-full rounded-md bg-amber-500/10 px-3 py-2 text-left transition-colors hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
 				>
-					<div className="flex items-center gap-2">
+					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 						<div className="h-2 w-2 rounded-full bg-amber-400/50" />
 						<span className="text-sm font-medium text-amber-300">Worker</span>
-						<span className="truncate text-sm text-ink-dull">{item.task}</span>
+						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
 						{item.result && (
 							<span className="ml-auto text-tiny text-ink-faint">
 								{expanded ? "▾" : "▸"}
 							</span>
 						)}
 					</div>
-				</Button>
+				</button>
 				{expanded && item.result && (
 					<div className="mt-1 rounded-md border border-amber-500/10 bg-amber-500/5 px-3 py-2">
 						<div className="text-sm text-ink-dull">

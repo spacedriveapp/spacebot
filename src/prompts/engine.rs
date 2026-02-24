@@ -136,12 +136,15 @@ impl PromptEngine {
     /// * `context` - MiniJinja Value containing template variables
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
+    /// use minijinja::context;
+    /// # let engine = spacebot::prompts::engine::PromptEngine::new("en")?;
     /// let ctx = context! {
     ///     identity_context => "Some identity text",
     ///     browser_enabled => true,
     /// };
     /// let rendered = engine.render("channel", ctx)?;
+    /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn render(&self, template_name: &str, context: Value) -> Result<String> {
         let template = self
@@ -242,13 +245,15 @@ impl PromptEngine {
         )
     }
 
-    /// Convenience method for rendering skills worker fragment.
-    pub fn render_skills_worker(&self, skill_name: &str, skill_content: &str) -> Result<String> {
+    /// Render the skills listing for a worker system prompt.
+    ///
+    /// Workers see all available skills with suggestions from the channel flagged.
+    /// They read whichever skills they need via the read_skill tool.
+    pub fn render_skills_worker(&self, skills: Vec<SkillInfo>) -> Result<String> {
         self.render(
             "fragments/skills_worker",
             context! {
-                skill_name => skill_name,
-                skill_content => skill_content,
+                skills => skills,
             },
         )
     }
@@ -429,6 +434,9 @@ pub struct SkillInfo {
     pub name: String,
     pub description: String,
     pub location: String,
+    /// Whether the spawning channel suggested this skill for the current task.
+    /// Workers should prioritise suggested skills but may read others too.
+    pub suggested: bool,
 }
 
 /// Information about a channel for template rendering.

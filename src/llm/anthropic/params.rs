@@ -7,7 +7,6 @@ use super::tools;
 use reqwest::RequestBuilder;
 use rig::completion::CompletionRequest;
 
-const ANTHROPIC_API_URL: &str = "https://api.anthropic.com/v1/messages";
 const CLAUDE_CODE_SYSTEM_PREAMBLE: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
 
@@ -32,13 +31,30 @@ fn is_opus(model_id: &str) -> bool {
     model_id.contains("opus")
 }
 
+/// Construct the full messages endpoint URL from a base URL.
+///
+/// If the base URL already ends with a path segment (e.g. `/v1/messages`),
+/// use it as-is. Otherwise append `/v1/messages`.
+fn messages_url(base_url: &str) -> String {
+    let trimmed = base_url.trim_end_matches('/');
+    if trimmed.ends_with("/v1/messages") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/v1/messages")
+    }
+}
+
 /// Build a fully configured Anthropic API request from a CompletionRequest.
+///
+/// `base_url` is the provider's configured base URL (e.g. `https://api.anthropic.com`
+/// or a custom proxy). The `/v1/messages` path is appended automatically.
 ///
 /// `thinking_effort` controls adaptive thinking: "auto" picks max for Opus /
 /// high for others, or pass "max", "high", "medium", "low" explicitly.
 pub fn build_anthropic_request(
     http_client: &reqwest::Client,
     api_key: &str,
+    base_url: &str,
     model_name: &str,
     request: &CompletionRequest,
     thinking_effort: &str,
@@ -46,7 +62,8 @@ pub fn build_anthropic_request(
     let is_oauth = auth::detect_auth_path(api_key) == AnthropicAuthPath::OAuthToken;
     let adaptive_thinking = supports_adaptive_thinking(model_name);
     let retention = cache::resolve_cache_retention(None);
-    let cache_control = cache::get_cache_control(ANTHROPIC_API_URL, retention);
+    let url = messages_url(base_url);
+    let cache_control = cache::get_cache_control(&url, retention);
 
     let mut body = serde_json::json!({
         "model": model_name,
@@ -80,7 +97,7 @@ pub fn build_anthropic_request(
     }
 
     let builder = http_client
-        .post(ANTHROPIC_API_URL)
+        .post(&url)
         .header("anthropic-version", "2023-06-01")
         .header("content-type", "application/json");
 

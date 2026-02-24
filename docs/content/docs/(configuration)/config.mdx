@@ -59,6 +59,7 @@ max_turns = 5                  # max LLM turns per channel message
 context_window = 128000        # context window size in tokens
 history_backfill_count = 50    # messages to fetch from platform on new channel
 worker_log_mode = "errors_only" # "errors_only", "all_separate", or "all_combined"
+cron_timezone = "UTC"          # optional default timezone for cron active hours
 
 # Model routing per process type.
 [defaults.routing]
@@ -90,6 +91,13 @@ worker_timeout_secs = 300
 branch_timeout_secs = 60
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
+# Warmup controls for cold-start behavior and manual rewarm.
+[defaults.warmup]
+enabled = true
+eager_embedding_load = true
+refresh_secs = 900
+startup_delay_secs = 5
+
 # Browser automation for workers.
 [defaults.browser]
 enabled = true
@@ -105,6 +113,7 @@ screenshot_dir = "/path/to/screenshots" # optional, defaults to data_dir/screens
 id = "main"
 default = true
 workspace = "/custom/workspace/path"   # optional, defaults to ~/.spacebot/agents/{id}/workspace
+cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone override
 
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
@@ -180,7 +189,7 @@ This creates a single "main" agent with default settings.
 For any setting, the resolution chain is:
 
 ```
-agent-level override  >  [defaults] section  >  hardcoded default
+agent-level override  >  [defaults] section  >  env var fallback (if supported)  >  hardcoded default
 ```
 
 An agent with no overrides inherits everything from `[defaults]`. An agent with partial overrides gets those values from its own config and everything else from defaults. See [Agents](/docs/agents) for how agent config merging works.
@@ -212,6 +221,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
+| Warmup config | Yes | Next warmup pass uses new values |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
@@ -394,6 +404,7 @@ At least one provider (legacy key or custom provider) must be configured.
 | `context_window` | integer | 128000 | Context window size in tokens |
 | `history_backfill_count` | integer | 50 | Messages to fetch from platform on new channel |
 | `worker_log_mode` | string | `"errors_only"` | Worker log persistence: `"errors_only"`, `"all_separate"`, or `"all_combined"` |
+| `cron_timezone` | string | None | Default timezone for cron active-hours evaluation (IANA name like `UTC` or `America/New_York`) |
 
 ### `[defaults.routing]`
 
@@ -464,6 +475,23 @@ Thresholds are fractions of `context_window`.
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
 
+### `[defaults.warmup]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | true | Enable background warmup loop |
+| `eager_embedding_load` | bool | true | Warm embedding model before first recall/write workload |
+| `refresh_secs` | integer | 900 | Seconds between background warmup passes |
+| `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
+
+Dispatch readiness is derived from warmup runtime state:
+
+- warmup state must be `warm`
+- embedding must be ready
+- bulletin age must be fresh (<= `max(60s, refresh_secs * 2)`)
+
+When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot still dispatches, increments cold-dispatch metrics, and queues a forced warmup pass in the background.
+
 ### `[defaults.browser]`
 
 | Key | Type | Default | Description |
@@ -481,6 +509,7 @@ Thresholds are fractions of `context_window`.
 | `id` | string | **required** | Agent identifier |
 | `default` | bool | false | Whether this is the default agent |
 | `workspace` | string | `~/.spacebot/agents/{id}/workspace` | Custom workspace path |
+| `cron_timezone` | string | inherits | Per-agent timezone override for cron active-hours evaluation |
 | `max_concurrent_branches` | integer | inherits | Override instance default |
 | `max_turns` | integer | inherits | Override instance default |
 | `context_window` | integer | inherits | Override instance default |
@@ -498,6 +527,15 @@ Agent-specific routing is set via `[agents.routing]` with the same keys as `[def
 | `active_start_hour` | integer | None | Start of active hours window (24h format) |
 | `active_end_hour` | integer | None | End of active hours window |
 | `enabled` | bool | true | Whether this cron job is active |
+
+Cron timezone precedence is:
+
+1. `agents.cron_timezone`
+2. `defaults.cron_timezone`
+3. `SPACEBOT_CRON_TIMEZONE`
+4. server local timezone
+
+If a configured timezone is invalid, Spacebot logs a warning and falls back to server local time.
 
 ### `[messaging.discord]`
 

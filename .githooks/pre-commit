@@ -1,14 +1,14 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
-set -euo pipefail
+set -eu
 
-mapfile -t staged_rust_files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
+staged_rust_files=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
 
-if [ "${#staged_rust_files[@]}" -eq 0 ]; then
+if [ -z "$staged_rust_files" ]; then
   exit 0
 fi
 
-if ! git diff --quiet -- "${staged_rust_files[@]}"; then
+if ! echo "$staged_rust_files" | xargs git diff --quiet --; then
   echo "pre-commit: staged Rust files have unstaged changes." >&2
   echo "Please stage or stash those changes, then commit again." >&2
   exit 1
@@ -17,4 +17,4 @@ fi
 echo "pre-commit: running cargo fmt --all"
 cargo fmt --all
 
-git add -- "${staged_rust_files[@]}"
+echo "$staged_rust_files" | xargs git add --

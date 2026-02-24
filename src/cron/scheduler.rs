@@ -12,6 +12,7 @@ use crate::messaging::MessagingManager;
 use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
 use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
 use chrono::Timelike;
+use chrono_tz::Tz;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -75,6 +76,7 @@ pub struct CronContext {
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
 pub struct Scheduler {
@@ -96,6 +98,10 @@ impl Scheduler {
             timers: Arc::new(RwLock::new(HashMap::new())),
             context,
         }
+    }
+
+    pub fn cron_timezone_label(&self) -> String {
+        cron_timezone_label(&self.context)
     }
 
     /// Register and start a cron job from config.
@@ -211,16 +217,12 @@ impl Scheduler {
 
                 // Check active hours window
                 if let Some((start, end)) = job.active_hours {
-                    let current_hour = chrono::Local::now().hour() as u8;
-                    let in_window = if start <= end {
-                        current_hour >= start && current_hour < end
-                    } else {
-                        // Wraps midnight (e.g. 22:00 - 06:00)
-                        current_hour >= start || current_hour < end
-                    };
+                    let (current_hour, timezone) = current_hour_and_timezone(&context, &job_id);
+                    let in_window = hour_in_active_window(current_hour, start, end);
                     if !in_window {
                         tracing::debug!(
                             cron_id = %job_id,
+                            cron_timezone = %timezone,
                             current_hour,
                             start,
                             end,
@@ -472,9 +474,93 @@ impl Scheduler {
     }
 }
 
+fn cron_timezone_label(context: &CronContext) -> String {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) if name.parse::<Tz>().is_ok() => name.to_string(),
+        _ => SYSTEM_TIMEZONE_LABEL.to_string(),
+    }
+}
+
+fn current_hour_and_timezone(context: &CronContext, cron_id: &str) -> (u8, String) {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) => match name.parse::<Tz>() {
+            Ok(timezone) => (
+                chrono::Utc::now().with_timezone(&timezone).hour() as u8,
+                name.into(),
+            ),
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %context.deps.agent_id,
+                    cron_id,
+                    cron_timezone = %name,
+                    %error,
+                    "invalid cron timezone in runtime config, falling back to system timezone"
+                );
+                (
+                    chrono::Local::now().hour() as u8,
+                    SYSTEM_TIMEZONE_LABEL.into(),
+                )
+            }
+        },
+        None => (
+            chrono::Local::now().hour() as u8,
+            SYSTEM_TIMEZONE_LABEL.into(),
+        ),
+    }
+}
+
+fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool {
+    if start_hour <= end_hour {
+        current_hour >= start_hour && current_hour < end_hour
+    } else {
+        current_hour >= start_hour || current_hour < end_hour
+    }
+}
+
+fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
+    let readiness = context.deps.runtime_config.work_readiness();
+    if readiness.ready {
+        return;
+    }
+
+    let reason = readiness
+        .reason
+        .map(|value| value.as_str())
+        .unwrap_or("unknown");
+    tracing::warn!(
+        agent_id = %context.deps.agent_id,
+        cron_id,
+        dispatch_type = "cron",
+        reason,
+        warmup_state = ?readiness.warmup_state,
+        embedding_ready = readiness.embedding_ready,
+        bulletin_age_secs = ?readiness.bulletin_age_secs,
+        stale_after_secs = readiness.stale_after_secs,
+        "cron dispatch requested before readiness contract was satisfied"
+    );
+
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .dispatch_while_cold_count
+        .with_label_values(&[&*context.deps.agent_id, "cron", reason])
+        .inc();
+
+    let warmup_config = **context.deps.runtime_config.warmup.load();
+    let should_trigger = readiness.warmup_state != crate::config::WarmupState::Warming
+        && (readiness.reason != Some(crate::config::WorkReadinessReason::EmbeddingNotReady)
+            || warmup_config.eager_embedding_load);
+
+    if should_trigger {
+        crate::agent::cortex::trigger_forced_warmup(context.deps.clone(), "cron");
+    }
+}
+
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
 async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
+    ensure_cron_dispatch_readiness(context, &job.id);
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
@@ -602,4 +688,24 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hour_in_active_window;
+
+    #[test]
+    fn test_hour_in_active_window_non_wrapping() {
+        assert!(hour_in_active_window(9, 9, 17));
+        assert!(hour_in_active_window(16, 9, 17));
+        assert!(!hour_in_active_window(8, 9, 17));
+        assert!(!hour_in_active_window(17, 9, 17));
+    }
+
+    #[test]
+    fn test_hour_in_active_window_midnight_wrapping() {
+        assert!(hour_in_active_window(22, 22, 6));
+        assert!(hour_in_active_window(3, 22, 6));
+        assert!(!hour_in_active_window(12, 22, 6));
+    }
 }
