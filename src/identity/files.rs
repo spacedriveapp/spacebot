@@ -9,6 +9,7 @@ pub struct Identity {
     pub soul: Option<String>,
     pub identity: Option<String>,
     pub user: Option<String>,
+    pub role: Option<String>,
 }
 
 impl Identity {
@@ -18,6 +19,7 @@ impl Identity {
             soul: load_optional_file(&workspace.join("SOUL.md")).await,
             identity: load_optional_file(&workspace.join("IDENTITY.md")).await,
             user: load_optional_file(&workspace.join("USER.md")).await,
+            role: load_optional_file(&workspace.join("ROLE.md")).await,
         }
     }
 
@@ -38,6 +40,11 @@ impl Identity {
         if let Some(user) = &self.user {
             output.push_str("## User\n\n");
             output.push_str(user);
+            output.push_str("\n\n");
+        }
+        if let Some(role) = &self.role {
+            output.push_str("## Role\n\n");
+            output.push_str(role);
             output.push_str("\n\n");
         }
 

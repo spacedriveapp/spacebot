@@ -92,7 +92,7 @@ Each worker gets its own isolated ToolServer, created at spawn time via `create_
 └──────────────────────────────────────────┘
 ```
 
-`shell`, `file`, and `exec` are stateless unit structs. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config.
+`shell` and `exec` hold a shared `Sandbox` reference that wraps commands in OS-level containment (bubblewrap on Linux, sandbox-exec on macOS). `file` validates paths against the workspace boundary. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config.
 
 Workers don't get memory tools or channel tools. They can't talk to the user, can't recall memories, can't spawn branches. They execute their task and report status.
 
@@ -171,9 +171,13 @@ async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
 }
 ```
 
-### Protected paths
+### Sandbox containment
 
-The `file` tool rejects reads and writes to identity/memory paths (`prompts/`, `identity/`, `data/`, `SOUL.md`, `IDENTITY.md`, `USER.md`). Workers should use `memory_save` for that content, not raw file writes.
+Shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, sandbox-exec on macOS). The entire filesystem is mounted read-only except the workspace, `/tmp`, and any configured `writable_paths`. The agent's data directory (databases, config files) is explicitly protected. See [Configuration](/docs/config#agentssandbox) for sandbox config options.
+
+The `file` tool independently validates paths against the workspace boundary and rejects writes to identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`). The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection regardless of sandbox state.
+
+Leak detection (via `SpacebotHook`) scans all tool output for secret patterns (API keys, tokens, PEM keys) and terminates the process if a leak is found.
 
 ### Status reporting
 
@@ -230,7 +234,7 @@ Reports the worker's current progress. The status string appears in the channel'
 
 ### shell
 
-Runs a shell command via `sh -c` (Unix) or `cmd /C` (Windows). Captures stdout, stderr, exit code. Has a configurable timeout (default 60s).
+Runs a shell command via `sh -c` (Unix) or `cmd /C` (Windows). Captures stdout, stderr, exit code. Has a configurable timeout (default 60s). Commands are wrapped in the sandbox when enabled — the filesystem is read-only except for the workspace and configured writable paths.
 
 ### file
 
@@ -238,7 +242,7 @@ Read, write, or list files. Protects identity/memory paths. Creates parent direc
 
 ### exec
 
-Runs a specific program with explicit arguments and environment variables. More precise than `shell` for running compilers, test runners, etc. Configurable timeout.
+Runs a specific program with explicit arguments and environment variables. More precise than `shell` for running compilers, test runners, etc. Configurable timeout. Sandboxed like `shell`. Blocks dangerous env vars (`LD_PRELOAD`, `NODE_OPTIONS`, etc.) that enable code injection.
 
 ### browser
 

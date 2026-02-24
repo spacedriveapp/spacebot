@@ -70,18 +70,25 @@ function LiveBranchRunItem({ item, live, channelId }: { item: TimelineBranchRun;
 	);
 }
 
-function LiveWorkerRunItem({ item, live, channelId }: { item: TimelineWorkerRun; live: ActiveWorker; channelId: string }) {
+function LiveWorkerRunItem({ item, live, channelId, agentId }: { item: TimelineWorkerRun; live: ActiveWorker; channelId: string; agentId: string }) {
 	return (
 		<div className="flex gap-3 px-3 py-2">
 			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<div className="rounded-md bg-amber-500/10 px-3 py-2">
+				<div className="rounded-md bg-amber-500/10 px-3 py-2 transition-colors hover:bg-amber-500/15">
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-400" />
 						<span className="text-sm font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
+						<Link
+							to="/agents/$agentId/workers"
+							params={{ agentId }}
+							search={{ worker: item.id }}
+							className="min-w-0 flex-1 truncate text-sm text-ink-dull hover:text-ink"
+						>
+							{item.task}
+						</Link>
 						<CancelButton onClick={() => { api.cancelProcess(channelId, "worker", item.id).catch(console.warn); }} />
 					</div>
 					<div className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden pl-4 text-tiny text-ink-faint">
@@ -137,48 +144,37 @@ function BranchRunItem({ item }: { item: TimelineBranchRun }) {
 	);
 }
 
-function WorkerRunItem({ item }: { item: TimelineWorkerRun }) {
-	const [expanded, setExpanded] = useState(false);
-
+function WorkerRunItem({ item, agentId }: { item: TimelineWorkerRun; agentId: string }) {
 	return (
 		<div className="flex gap-3 px-3 py-2">
 			<span className="flex-shrink-0 pt-0.5 text-tiny text-ink-faint">
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<button
-					type="button"
-					onClick={() => setExpanded(!expanded)}
-					className="w-full rounded-md bg-amber-500/10 px-3 py-2 text-left transition-colors hover:bg-amber-500/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-400/60"
+				<Link
+					to="/agents/$agentId/workers"
+					params={{ agentId }}
+					search={{ worker: item.id }}
+					className="block w-full rounded-md bg-amber-500/10 px-3 py-2 text-left transition-colors hover:bg-amber-500/15"
 				>
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 						<div className="h-2 w-2 rounded-full bg-amber-400/50" />
 						<span className="text-sm font-medium text-amber-300">Worker</span>
 						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">{item.task}</span>
-						{item.result && (
-							<span className="ml-auto text-tiny text-ink-faint">
-								{expanded ? "▾" : "▸"}
-							</span>
-						)}
+						<span className="ml-auto text-tiny text-ink-faint">▸</span>
 					</div>
-				</button>
-				{expanded && item.result && (
-					<div className="mt-1 rounded-md border border-amber-500/10 bg-amber-500/5 px-3 py-2">
-						<div className="text-sm text-ink-dull">
-							<Markdown>{item.result}</Markdown>
-						</div>
-					</div>
-				)}
+				</Link>
 			</div>
 		</div>
 	);
 }
 
-function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
+function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: {
 	item: TimelineItem;
 	liveWorkers: Record<string, ActiveWorker>;
 	liveBranches: Record<string, ActiveBranch>;
 	channelId: string;
+	agentId: string;
 }) {
 	switch (item.type) {
 		case "message":
@@ -195,7 +191,7 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 						<span className={`text-sm font-medium ${
 							item.role === "user" ? "text-accent-faint" : "text-green-400"
 						}`}>
-							{item.role === "user" ? (item.sender_name ?? "user") : "bot"}
+							{item.role === "user" ? (item.sender_name ?? "user") : (item.sender_name ?? "bot")}
 						</span>
 						<div className="mt-0.5 text-sm text-ink-dull">
 							<Markdown>{item.content}</Markdown>
@@ -210,8 +206,8 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId }: {
 		}
 		case "worker_run": {
 			const live = liveWorkers[item.id];
-			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} />;
-			return <WorkerRunItem item={item} />;
+			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
+			return <WorkerRunItem item={item} agentId={agentId} />;
 		}
 	}
 }
@@ -339,6 +335,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 									liveWorkers={workers}
 									liveBranches={branches}
 									channelId={channelId}
+									agentId={agentId}
 								/>
 							))
 						)}

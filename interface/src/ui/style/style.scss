@@ -112,3 +112,12 @@ body {
 		@apply my-2 max-w-full rounded;
 	}
 }
+
+// Override React Flow's default group node styles
+.react-flow__node-group {
+	background-color: transparent !important;
+	border: none !important;
+	padding: 0 !important;
+	width: auto !important;
+	box-shadow: none !important;
+}

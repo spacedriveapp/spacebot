@@ -70,6 +70,16 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox = Arc::new(
+        spacebot::sandbox::Sandbox::new(
+            &agent_config.sandbox,
+            agent_config.workspace.clone(),
+            &config.instance_dir,
+            agent_config.data_dir.clone(),
+        )
+        .await,
+    );
+
     let deps = spacebot::AgentDeps {
         agent_id,
         memory_search,
@@ -80,6 +90,9 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
+        sandbox,
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+        agent_names: Arc::new(std::collections::HashMap::new()),
     };
 
     Ok((deps, config))
@@ -205,6 +218,11 @@ async fn dump_channel_context() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -256,10 +274,13 @@ async fn dump_branch_context() {
     let conversation_logger =
         spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
+    let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        run_logger,
+        "test-agent",
     );
 
     let tool_defs = branch_tool_server
@@ -319,7 +340,7 @@ async fn dump_worker_context() {
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );
@@ -416,6 +437,11 @@ async fn dump_all_contexts() {
         skip_flag,
         replied_flag,
         None,
+        None,
+        None,
+        None,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -436,10 +462,13 @@ async fn dump_all_contexts() {
     let branch_prompt = prompt_engine
         .render_branch_prompt(&instance_dir, &workspace_dir)
         .expect("failed to render branch prompt");
+    let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
     let branch_tool_server = spacebot::tools::create_branch_tool_server(
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        run_logger,
+        "test-agent",
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -469,7 +498,7 @@ async fn dump_all_contexts() {
         std::path::PathBuf::from("/tmp/screenshots"),
         brave_search_key,
         std::path::PathBuf::from("/tmp"),
-        std::path::PathBuf::from("/tmp"),
+        deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
     );

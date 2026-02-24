@@ -40,7 +40,7 @@ impl SpacebotHook {
             process_id: self.process_id.clone(),
             status: status.into(),
         };
-        let _ = self.event_tx.send(event);
+        self.event_tx.send(event).ok();
     }
 
     /// Check a string against the leak pattern set.
@@ -192,14 +192,16 @@ where
             };
         }
 
-        // Send event without blocking
+        // Send event without blocking. Truncate args to keep broadcast payloads bounded.
+        let capped_args = crate::tools::truncate_output(args, 2_000);
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
             channel_id: self.channel_id.clone(),
             tool_name: tool_name.to_string(),
+            args: capped_args,
         };
-        let _ = self.event_tx.send(event);
+        self.event_tx.send(event).ok();
 
         tracing::debug!(
             process_id = %self.process_id,
@@ -251,7 +253,7 @@ where
             tool_name: tool_name.to_string(),
             result: capped_result,
         };
-        let _ = self.event_tx.send(event);
+        self.event_tx.send(event).ok();
 
         tracing::debug!(
             process_id = %self.process_id,
