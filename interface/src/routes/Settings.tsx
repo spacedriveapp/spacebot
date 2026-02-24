@@ -134,7 +134,7 @@ const PROVIDERS = [
 		description: "Fast inference for popular OSS models",
 		placeholder: "...",
 		envVar: "FIREWORKS_API_KEY",
-		defaultModel: "fireworks/accounts/fireworks/models/llama-v3p3-70b-instruct",
+		defaultModel: "fireworks/accounts/fireworks/models/minimax-m2p5",
 	},
 	{
 		id: "deepseek",
@@ -260,6 +260,24 @@ export function Settings() {
 		queryFn: api.providers,
 		staleTime: 5_000,
 		enabled: activeSection === "providers",
+	});
+
+	// Fetch agents list and default agent config so we can pre-populate the
+	// model field with the currently active routing model when editing an
+	// already-configured provider (instead of always showing the hardcoded
+	// defaultModel).
+	const { data: agentsData } = useQuery({
+		queryKey: ["agents"],
+		queryFn: api.agents,
+		staleTime: 10_000,
+		enabled: activeSection === "providers",
+	});
+	const defaultAgentId = agentsData?.agents?.[0]?.id;
+	const { data: defaultAgentConfig } = useQuery({
+		queryKey: ["agent-config", defaultAgentId],
+		queryFn: () => api.agentConfig(defaultAgentId!),
+		staleTime: 10_000,
+		enabled: activeSection === "providers" && !!defaultAgentId,
 	});
 
 	// Fetch global settings (only when on api-keys, server, or worker-logs tabs)
@@ -591,7 +609,16 @@ export function Settings() {
 												onEdit={() => {
 													setEditingProvider(provider.id);
 													setKeyInput("");
-													setModelInput(provider.defaultModel ?? "");
+													// When the provider is already configured, pre-populate
+													// the model field with the current routing model so the
+													// user sees (and can adjust) what's actually active,
+													// rather than the hardcoded defaultModel placeholder.
+													const currentChannel = defaultAgentConfig?.routing?.channel;
+													const currentModel =
+														isConfigured(provider.id) && currentChannel?.startsWith(`${provider.id}/`)
+															? currentChannel
+															: null;
+													setModelInput(currentModel ?? provider.defaultModel ?? "");
 													setTestedSignature(null);
 													setTestResult(null);
 													setMessage(null);
