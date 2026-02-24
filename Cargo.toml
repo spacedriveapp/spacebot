@@ -1,6 +1,6 @@
 [package]
 name = "spacebot"
-version = "0.1.14"
+version = "0.1.15"
 edition = "2024"
 default-run = "spacebot"
 
@@ -93,6 +93,7 @@ async-trait = "0.1"
 
 # Slack
 slack-morphism = { version = "2.17", features = ["hyper"] }
+emojis = "0.8"
 
 # TLS (shared crypto backend for slack-morphism, reqwest, teloxide)
 rustls = { version = "0.23", default-features = false, features = ["ring"] }

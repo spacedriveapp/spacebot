@@ -5,7 +5,6 @@
 //! ref system for LLM-friendly element addressing.
 
 use crate::config::BrowserConfig;
-
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide_cdp::cdp::browser_protocol::accessibility::{

@@ -1162,7 +1162,15 @@ impl SlackPermissions {
             filter
         };
 
-        let dm_allowed_users = slack.dm_allowed_users.clone();
+        let mut dm_allowed_users = slack.dm_allowed_users.clone();
+
+        for binding in &slack_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
 
         Self {
             workspace_filter,
@@ -4659,6 +4667,105 @@ bind = "127.0.0.1"
             .expect("failed to load config from env");
 
         assert_eq!(config.api.bind, "[::]");
+    }
+
+    /// Helper to build a minimal `SlackConfig` for permission tests.
+    fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
+        SlackConfig {
+            enabled: true,
+            bot_token: "xoxb-test".into(),
+            app_token: "xapp-test".into(),
+            dm_allowed_users,
+            commands: vec![],
+        }
+    }
+
+    /// Helper to build a Slack binding with optional dm_allowed_users.
+    fn slack_binding(workspace_id: Option<&str>, dm_allowed_users: Vec<String>) -> Binding {
+        Binding {
+            agent_id: "test-agent".into(),
+            channel: "slack".into(),
+            guild_id: None,
+            workspace_id: workspace_id.map(String::from),
+            chat_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users,
+        }
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_config_and_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U003".into(), "U004".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003", "U004"]);
+    }
+
+    #[test]
+    fn slack_permissions_deduplicates_dm_users() {
+        let config = slack_config_with_dm_users(vec!["U001".into(), "U002".into()]);
+        let bindings = vec![slack_binding(
+            Some("T1"),
+            vec!["U002".into(), "U003".into()],
+        )];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        // U002 appears in both config and binding — should appear only once
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_empty_dm_users_stays_empty() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(Some("T1"), vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.dm_allowed_users.is_empty());
+    }
+
+    #[test]
+    fn slack_permissions_merges_dm_users_from_multiple_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec!["U002".into()]),
+            slack_binding(Some("T2"), vec!["U003".into()]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(perms.dm_allowed_users, vec!["U001", "U002", "U003"]);
+    }
+
+    #[test]
+    fn slack_permissions_ignores_non_slack_bindings() {
+        let config = slack_config_with_dm_users(vec!["U001".into()]);
+        let mut discord_binding = slack_binding(Some("T1"), vec!["U099".into()]);
+        discord_binding.channel = "discord".into();
+        let perms = SlackPermissions::from_config(&config, &[discord_binding]);
+        // U099 should not appear — that binding is for discord, not slack
+        assert_eq!(perms.dm_allowed_users, vec!["U001"]);
+    }
+
+    #[test]
+    fn slack_permissions_workspace_filter_from_bindings() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![
+            slack_binding(Some("T1"), vec![]),
+            slack_binding(Some("T2"), vec![]),
+        ];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert_eq!(
+            perms.workspace_filter,
+            Some(vec!["T1".to_string(), "T2".to_string()])
+        );
+    }
+
+    #[test]
+    fn slack_permissions_no_workspace_filter_when_none_specified() {
+        let config = slack_config_with_dm_users(vec![]);
+        let bindings = vec![slack_binding(None, vec![])];
+        let perms = SlackPermissions::from_config(&config, &bindings);
+        assert!(perms.workspace_filter.is_none());
     }
 
     #[test]

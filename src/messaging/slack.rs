@@ -117,12 +117,29 @@ async fn handle_push_event(
 ) -> UserCallbackResult<()> {
     match event.event {
         SlackEventCallbackBody::Message(msg) => {
+            let channel = msg
+                .origin
+                .channel
+                .as_ref()
+                .map(|c| c.0.as_str())
+                .unwrap_or("none");
+            let sender = msg
+                .sender
+                .user
+                .as_ref()
+                .map(|u| u.0.as_str())
+                .unwrap_or("none");
+            let subtype = msg.subtype.as_ref().map(|s| format!("{:?}", s));
+            tracing::debug!(channel, sender, ?subtype, "slack push event: message");
             handle_message_event(msg, &event.team_id, client, states).await
         }
         SlackEventCallbackBody::AppMention(mention) => {
             handle_app_mention_event(mention, &event.team_id, client, states).await
         }
-        _ => Ok(()),
+        _ => {
+            tracing::debug!(event_type = ?std::mem::discriminant(&event.event), "slack push event: unhandled");
+            Ok(())
+        }
     }
 }
 
@@ -166,32 +183,46 @@ async fn handle_message_event(
     let ts = msg_event.origin.ts.0.clone();
 
     let perms = adapter_state.permissions.load();
+    let is_dm = channel_id.starts_with('D');
 
-    // DM filter
-    if channel_id.starts_with('D') {
+    // DM filter — allowed DMs skip workspace/channel filters entirely
+    if is_dm {
         if perms.dm_allowed_users.is_empty() {
+            tracing::debug!(channel_id, "DM dropped: dm_allowed_users is empty");
             return Ok(());
         }
-        if let Some(ref uid) = user_id
-            && !perms.dm_allowed_users.contains(uid)
+        if let Some(ref sender_id) = user_id
+            && !perms.dm_allowed_users.contains(sender_id)
+        {
+            tracing::debug!(
+                channel_id,
+                user_id = sender_id.as_str(),
+                "DM dropped: user not in dm_allowed_users"
+            );
+            return Ok(());
+        }
+        tracing::info!(
+            channel_id,
+            ?user_id,
+            "DM permitted, bypassing channel filter"
+        );
+    }
+
+    if !is_dm {
+        // Workspace filter
+        if let Some(ref filter) = perms.workspace_filter
+            && !filter.contains(&team_id_str)
         {
             return Ok(());
         }
-    }
 
-    // Workspace filter
-    if let Some(ref filter) = perms.workspace_filter
-        && !filter.contains(&team_id_str)
-    {
-        return Ok(());
-    }
-
-    // Channel filter
-    if let Some(allowed) = perms.channel_filter.get(&team_id_str)
-        && !allowed.is_empty()
-        && !allowed.contains(&channel_id)
-    {
-        return Ok(());
+        // Channel filter
+        if let Some(allowed) = perms.channel_filter.get(&team_id_str)
+            && !allowed.is_empty()
+            && !allowed.contains(&channel_id)
+        {
+            return Ok(());
+        }
     }
 
     let conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
@@ -1499,10 +1530,38 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
-/// Sanitize an emoji name for Slack reactions (strip colons, lowercase).
+/// Convert an emoji input to a Slack reaction short-code name.
+///
+/// Handles three input forms:
+/// 1. Unicode emoji (e.g. "👍") → looked up via the `emojis` crate → "thumbsup"
+/// 2. Colon-wrapped short-code (e.g. ":thumbsup:") → stripped to "thumbsup"
+/// 3. Plain short-code (e.g. "thumbsup") → passed through as-is
 fn sanitize_reaction_name(emoji: &str) -> String {
-    emoji
-        .trim()
+    let trimmed = emoji.trim();
+    if let Some(emoji) = emojis::get(trimmed) {
+        if let Some(shortcode) = emoji.shortcode() {
+            // Note: shortcodes come from gemoji (GitHub's set) which may not match Slack's
+            // shortcode names for uncommon emojis. Common emojis (thumbsup, heart, etc.) are
+            // consistent across both sets.
+            tracing::debug!(
+                unicode = trimmed,
+                shortcode,
+                "resolved unicode emoji to shortcode"
+            );
+            return shortcode.to_string();
+        }
+        // Unicode emoji matched but has no shortcode — use the emoji's name as fallback.
+        // Raw unicode would be rejected by Slack's reactions API.
+        let name = emoji.name().replace(' ', "_").to_lowercase();
+        tracing::warn!(
+            unicode = trimmed,
+            fallback_name = %name,
+            "emoji matched but has no shortcode, using name as fallback"
+        );
+        return name;
+    }
+    // Fall back to stripping colons and lowercasing (handles ":thumbsup:" and "thumbsup").
+    trimmed
         .trim_start_matches(':')
         .trim_end_matches(':')
         .to_lowercase()
@@ -1520,5 +1579,82 @@ fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIden
     SlackUserIdentity {
         display_name,
         username,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sanitize_reaction_name_unicode_emoji_with_shortcode() {
+        // gemoji maps 👍 to "+1" — verify we get the shortcode, not the unicode back
+        let result = sanitize_reaction_name("\u{1F44D}"); // 👍
+        assert_eq!(
+            result, "+1",
+            "should resolve unicode thumbs-up to its gemoji shortcode"
+        );
+    }
+
+    #[test]
+    fn sanitize_reaction_name_unicode_heart() {
+        let result = sanitize_reaction_name("\u{2764}\u{FE0F}"); // ❤️
+        assert_eq!(result, "heart");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_colon_wrapped_shortcode() {
+        let result = sanitize_reaction_name(":thumbsup:");
+        assert_eq!(result, "thumbsup");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_plain_shortcode() {
+        let result = sanitize_reaction_name("thumbsup");
+        assert_eq!(result, "thumbsup");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_colon_wrapped_uppercased() {
+        let result = sanitize_reaction_name(":ThumbsUp:");
+        assert_eq!(result, "thumbsup");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_whitespace_trimmed() {
+        let result = sanitize_reaction_name("  :fire:  ");
+        // After trim, this won't match emojis::get (it's a shortcode string),
+        // so falls through to colon-stripping path
+        assert_eq!(result, "fire");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_unicode_emoji_without_shortcode() {
+        // The emojis crate may have entries without shortcodes.
+        // Find one programmatically to keep the test resilient.
+        let emoji_without_shortcode = emojis::iter().find(|e| e.shortcode().is_none());
+        if let Some(emoji) = emoji_without_shortcode {
+            let result = sanitize_reaction_name(emoji.as_str());
+            let expected = emoji.name().replace(' ', "_").to_lowercase();
+            assert_eq!(
+                result, expected,
+                "emoji without shortcode should fall back to name with underscores"
+            );
+        }
+        // If all emojis have shortcodes, the fallback path is untestable
+        // with real data, but the code path still exists for safety.
+    }
+
+    #[test]
+    fn sanitize_reaction_name_custom_slack_emoji() {
+        // Custom Slack emojis come as plain names like "partyparrot"
+        let result = sanitize_reaction_name("partyparrot");
+        assert_eq!(result, "partyparrot");
+    }
+
+    #[test]
+    fn sanitize_reaction_name_custom_with_colons() {
+        let result = sanitize_reaction_name(":partyparrot:");
+        assert_eq!(result, "partyparrot");
     }
 }
