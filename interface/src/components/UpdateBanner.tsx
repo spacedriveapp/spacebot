@@ -64,7 +64,7 @@ export function UpdateBanner() {
 					)}
 					{!data.can_apply && data.deployment === "docker" && (
 						<span className="text-xs text-ink-faint">
-							Mount docker.sock for one-click updates
+							Mount the container runtime socket for one-click updates
 						</span>
 					)}
 					<Button

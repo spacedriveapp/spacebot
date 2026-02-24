@@ -215,7 +215,8 @@ docker compose up -d
 
 ### One-Click Update
 
-Mount the Docker socket to enable updating directly from the web UI:
+Mount the container runtime socket to enable updating directly from the web UI.
+For Docker, mount `/var/run/docker.sock`. For Podman, see the [Podman](#podman) section below.
 
 ```yaml
 services:
@@ -277,3 +278,128 @@ fly volumes create spacebot_data --size 5
 fly secrets set ANTHROPIC_API_KEY="sk-ant-..."
 fly deploy
 ```
+
+## Podman
+
+Spacebot works with Podman as a drop-in replacement for Docker. Set
+`SPACEBOT_DEPLOYMENT=docker` (the same value used for Docker) and mount the
+Podman socket to enable one-click updates from the web UI.
+
+### Quick Start
+
+```bash
+podman run -d \
+  --name spacebot \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e SPACEBOT_DEPLOYMENT=docker \
+  -v spacebot-data:/data \
+  -p 19898:19898 \
+  ghcr.io/spacedriveapp/spacebot:slim
+```
+
+### One-Click Updates with Podman
+
+Spacebot supports both rootful and rootless Podman socket paths.
+
+**Rootful Podman** — start the socket service and mount it:
+
+```bash
+sudo systemctl enable --now podman.socket
+```
+
+```bash
+podman run -d \
+  --name spacebot \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e SPACEBOT_DEPLOYMENT=docker \
+  -v spacebot-data:/data \
+  -v /run/podman/podman.sock:/run/podman/podman.sock \
+  --security-opt label=disable \
+  -p 19898:19898 \
+  ghcr.io/spacedriveapp/spacebot:slim
+```
+
+**Rootless Podman** — enable the user socket and map it to the standard rootful
+path inside the container. The container has no user profile, so mapping to
+`/run/podman/podman.sock` (not the host's user-scoped path) is cleaner and
+requires no extra environment variables:
+
+```bash
+systemctl --user enable --now podman.socket
+```
+
+```bash
+podman run -d \
+  --name spacebot \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e SPACEBOT_DEPLOYMENT=docker \
+  -v spacebot-data:/data \
+  -v $XDG_RUNTIME_DIR/podman/podman.sock:/run/podman/podman.sock \
+  --security-opt label=disable \
+  -p 19898:19898 \
+  ghcr.io/spacedriveapp/spacebot:slim
+```
+
+You can also set `DOCKER_HOST=unix:///path/to/podman.sock` to point Spacebot at
+any custom socket location.
+
+> **SELinux note (Fedora, RHEL, and derivatives):** SELinux blocks containers
+> from connecting to the Podman socket by default. Add
+> `--security-opt label=disable` to the `podman run` command, or
+> `security_opt: [label=disable]` in your `podman-compose.yml`, when mounting
+> the socket.
+
+### Podman Compose
+
+For rootful Podman, use the system socket directly:
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    container_name: spacebot
+    restart: unless-stopped
+    ports:
+      - "19898:19898"
+    volumes:
+      - spacebot-data:/data
+      - /run/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SPACEBOT_DEPLOYMENT=docker
+    security_opt:
+      - label=disable
+
+volumes:
+  spacebot-data:
+```
+
+For rootless Podman, map the user socket to the standard rootful path inside
+the container (no `XDG_RUNTIME_DIR` needed inside the container):
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    container_name: spacebot
+    restart: unless-stopped
+    ports:
+      - "19898:19898"
+    volumes:
+      - spacebot-data:/data
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - SPACEBOT_DEPLOYMENT=docker
+    security_opt:
+      - label=disable
+
+volumes:
+  spacebot-data:
+```
+
+Run with `podman-compose up -d`.
+
+> **Note:** `SPACEBOT_DEPLOYMENT=docker` is required regardless of whether you
+> use Docker or Podman — the value tells Spacebot that it is running inside a
+> container and can manage its own lifecycle via the socket.
