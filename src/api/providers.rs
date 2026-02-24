@@ -1,10 +1,10 @@
-use crate::openai_auth::DeviceTokenPollResult;
 use super::state::ApiState;
+use crate::openai_auth::DeviceTokenPollResult;
 
 use anyhow::Context as _;
+use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::Json;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use serde::{Deserialize, Serialize};
@@ -407,8 +407,7 @@ async fn finalize_openai_oauth(
         String::new()
     };
 
-    let mut doc: toml_edit::DocumentMut =
-        content.parse().context("failed to parse config.toml")?;
+    let mut doc: toml_edit::DocumentMut = content.parse().context("failed to parse config.toml")?;
     apply_model_routing(&mut doc, model);
     tokio::fs::write(&config_path, doc.to_string())
         .await
@@ -686,8 +685,7 @@ async fn run_device_oauth_background(
 
         sleep(Duration::from_secs(poll_interval_secs)).await;
 
-        let poll_result =
-            crate::openai_auth::poll_device_token(&device_auth_id, &user_code).await;
+        let poll_result = crate::openai_auth::poll_device_token(&device_auth_id, &user_code).await;
         let grant = match poll_result {
             Ok(DeviceTokenPollResult::Pending) => continue,
             Ok(DeviceTokenPollResult::SlowDown) => {
@@ -700,11 +698,8 @@ async fn run_device_oauth_background(
             Err(error) => {
                 let message = format!("Device authorization polling failed: {error}");
                 tracing::warn!(%message, "OpenAI device OAuth polling failed");
-                update_device_oauth_status(
-                    &state_key,
-                    DeviceOAuthSessionStatus::Failed(message),
-                )
-                .await;
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
                 return;
             }
         };
@@ -719,11 +714,8 @@ async fn run_device_oauth_background(
             Err(error) => {
                 let message = format!("Device code exchange failed: {error}");
                 tracing::warn!(%message, "OpenAI device OAuth failed during token exchange");
-                update_device_oauth_status(
-                    &state_key,
-                    DeviceOAuthSessionStatus::Failed(message),
-                )
-                .await;
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
                 return;
             }
         };
@@ -740,15 +732,11 @@ async fn run_device_oauth_background(
                 .await;
             }
             Err(error) => {
-                let message = format!(
-                    "Device OAuth sign-in completed but finalization failed: {error}"
-                );
+                let message =
+                    format!("Device OAuth sign-in completed but finalization failed: {error}");
                 tracing::warn!(%message, "OpenAI device OAuth finalization failed");
-                update_device_oauth_status(
-                    &state_key,
-                    DeviceOAuthSessionStatus::Failed(message),
-                )
-                .await;
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
             }
         }
 

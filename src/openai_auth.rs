@@ -1,18 +1,16 @@
 //! OpenAI ChatGPT Plus OAuth device code flow, token exchange, refresh, and storage.
 
 use anyhow::{Context as _, Result};
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde::{Deserialize, Serialize};
 
 use std::path::{Path, PathBuf};
 
 const CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
-const DEVICE_USERCODE_URL: &str =
-    "https://auth.openai.com/api/accounts/deviceauth/usercode";
-const DEVICE_TOKEN_URL: &str =
-    "https://auth.openai.com/api/accounts/deviceauth/token";
+const DEVICE_USERCODE_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/usercode";
+const DEVICE_TOKEN_URL: &str = "https://auth.openai.com/api/accounts/deviceauth/token";
 const DEVICE_REDIRECT_URI: &str = "https://auth.openai.com/deviceauth/callback";
 const DEFAULT_DEVICE_VERIFICATION_URL: &str = "https://auth.openai.com/codex/device";
 
@@ -137,7 +135,9 @@ fn extract_account_id(token_response: &TokenResponse) -> Option<String> {
         .or_else(|| parse_jwt_claims(&token_response.access_token).and_then(from_claims))
 }
 
-fn deserialize_optional_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+fn deserialize_optional_u64<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<u64>, D::Error> {
     use serde::de::Error;
 
     let value: Option<serde_json::Value> = Option::deserialize(d)?;
@@ -271,7 +271,10 @@ pub async fn poll_device_token(
         || status == reqwest::StatusCode::TOO_MANY_REQUESTS
     {
         if let Ok(error_response) = serde_json::from_str::<DeviceTokenErrorResponse>(&body) {
-            if matches!(error_response.error.as_deref(), Some("authorization_pending")) {
+            if matches!(
+                error_response.error.as_deref(),
+                Some("authorization_pending")
+            ) {
                 return Ok(DeviceTokenPollResult::Pending);
             }
             if matches!(error_response.error.as_deref(), Some("slow_down")) {
