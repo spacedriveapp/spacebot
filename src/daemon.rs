@@ -487,15 +487,21 @@ pub async fn start_ipc_server(
     let cleanup_socket = socket_path.clone();
     let mut cleanup_rx = shutdown_rx.clone();
     tokio::spawn(async move {
-        let _ = cleanup_rx.wait_for(|shutdown| *shutdown).await;
-        if let Err(error) = std::fs::remove_file(&cleanup_socket)
-            && error.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(
-                %error,
-                path = %cleanup_socket.display(),
-                "failed to remove cleanup socket file"
-            );
+        match cleanup_rx.wait_for(|shutdown| *shutdown).await {
+            Ok(_) => {}
+            Err(error) => {
+                tracing::warn!(%error, "cleanup wait_for failed");
+            }
+        }
+
+        if let Err(error) = std::fs::remove_file(&cleanup_socket) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(
+                    %error,
+                    path = %cleanup_socket.display(),
+                    "failed to remove cleanup socket file"
+                );
+            }
         }
     });
 
