@@ -365,26 +365,27 @@ pub(super) async fn trigger_warmup(
         &sqlite_pool_ids,
     )?;
 
-    for agent_id in accepted_agents.iter().cloned() {
-        let Some(runtime_config) = runtime_configs.get(&agent_id).cloned() else {
+    for agent_id in accepted_agents.iter() {
+        let Some(runtime_config) = runtime_configs.get(agent_id).cloned() else {
             continue;
         };
-        let Some(memory_search) = memory_searches.get(&agent_id).cloned() else {
+        let Some(memory_search) = memory_searches.get(agent_id).cloned() else {
             continue;
         };
-        let Some(mcp_manager) = mcp_managers.get(&agent_id).cloned() else {
+        let Some(mcp_manager) = mcp_managers.get(agent_id).cloned() else {
             continue;
         };
-        let Some(sqlite_pool) = pools.get(&agent_id).cloned() else {
+        let Some(sqlite_pool) = pools.get(agent_id).cloned() else {
             continue;
         };
 
         let llm_manager = llm_manager.clone();
         let force = request.force;
+        let agent_id = agent_id.clone();
         tokio::spawn(async move {
             let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
             let deps = crate::AgentDeps {
-                agent_id: Arc::from(agent_id.clone()),
+                agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
                 llm_manager,
                 mcp_manager,
