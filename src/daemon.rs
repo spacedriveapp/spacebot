@@ -11,7 +11,7 @@ use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithHttpConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -34,7 +34,11 @@ use windows_sys::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
 };
 #[cfg(windows)]
+// Win32 SYNCHRONIZE access right (0x0010_0000). The windows-sys constant is
+// not available from the imported modules in this crate/version combination.
 const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+const MAX_IPC_LINE_BYTES: u64 = 64 * 1024;
+const IPC_ROUND_TRIP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Spawn options used when detaching into background mode.
 #[derive(Debug, Clone, Default)]
@@ -80,15 +84,15 @@ impl DaemonPaths {
         Self::new(&Config::default_instance_dir())
     }
 
-    #[cfg(windows)]
-    fn pipe_name(&self) -> String {
-        let mut hasher = sha2::Sha256::new();
-        use sha2::Digest as _;
+#[cfg(windows)]
+fn pipe_name(&self) -> String {
+    use sha2::Digest as _;
+    let mut hasher = sha2::Sha256::new();
 
-        hasher.update(self.pid_file.as_os_str().to_string_lossy().as_bytes());
-        let digest = hasher.finalize();
-        let digest_hex = digest.encode_hex::<String>();
-        format!(r"\\.\pipe\spacebot-{}", &digest_hex[..32])
+    hasher.update(self.pid_file.as_os_str().to_string_lossy().as_bytes());
+    let digest = hasher.finalize();
+    let digest_hex = digest.encode_hex::<String>();
+    format!(r"\\.\pipe\spacebot-{}", &digest_hex[..32])
     }
 }
 
@@ -193,7 +197,7 @@ pub fn daemonize(paths: &DaemonPaths, _options: &DaemonStartOptions) -> anyhow::
 }
 
 #[cfg(windows)]
-pub fn daemonize(_paths: &DaemonPaths, options: &DaemonStartOptions) -> anyhow::Result<()> {
+pub fn daemonize(paths: &DaemonPaths, options: &DaemonStartOptions) -> anyhow::Result<()> {
     use std::os::windows::process::CommandExt as _;
 
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
@@ -207,10 +211,27 @@ pub fn daemonize(_paths: &DaemonPaths, options: &DaemonStartOptions) -> anyhow::
         command.arg("--config").arg(config_path);
     }
 
+    std::fs::create_dir_all(&paths.log_dir).with_context(|| {
+        format!(
+            "failed to create log directory: {}",
+            paths.log_dir.display()
+        )
+    })?;
+    let stdout = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.log_dir.join("spacebot.out"))
+        .context("failed to open stdout log")?;
+    let stderr = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(paths.log_dir.join("spacebot.err"))
+        .context("failed to open stderr log")?;
+
     command
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::from(stdout))
+        .stderr(std::process::Stdio::from(stderr))
         .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 
     let child = command
@@ -467,7 +488,15 @@ pub async fn start_ipc_server(
     let mut cleanup_rx = shutdown_rx.clone();
     tokio::spawn(async move {
         let _ = cleanup_rx.wait_for(|shutdown| *shutdown).await;
-        let _ = std::fs::remove_file(&cleanup_socket);
+        if let Err(error) = std::fs::remove_file(&cleanup_socket)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                %error,
+                path = %cleanup_socket.display(),
+                "failed to remove cleanup socket file"
+            );
+        }
     });
 
     Ok((shutdown_rx, handle))
@@ -479,7 +508,9 @@ pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::R
     let stream = UnixStream::connect(&paths.socket)
         .await
         .with_context(|| "failed to connect to spacebot daemon. is it running?")?;
-    send_command_over_stream(stream, command).await
+    tokio::time::timeout(IPC_ROUND_TRIP_TIMEOUT, send_command_over_stream(stream, command))
+        .await
+        .map_err(|_| anyhow!("timed out waiting for daemon IPC response"))?
 }
 
 #[cfg(windows)]
@@ -559,7 +590,9 @@ pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::R
         }
     };
 
-    send_command_over_stream(stream, command).await
+    tokio::time::timeout(IPC_ROUND_TRIP_TIMEOUT, send_command_over_stream(stream, command))
+        .await
+        .map_err(|_| anyhow!("timed out waiting for daemon IPC response"))?
 }
 
 #[cfg(all(not(unix), not(windows)))]
@@ -591,9 +624,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin,
 {
     let (reader, mut writer) = tokio::io::split(stream);
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    let line = read_bounded_ipc_line(reader, "IPC command").await?;
 
     let command: IpcCommand =
         serde_json::from_str(line.trim()).map_err(|error| anyhow!("invalid IPC command: {error}"))?;
@@ -628,11 +659,30 @@ where
     writer.write_all(&command_bytes).await?;
     writer.flush().await?;
 
-    let mut reader = tokio::io::BufReader::new(reader);
-    let mut line = String::new();
-    reader.read_line(&mut line).await?;
+    let line = read_bounded_ipc_line(reader, "IPC response").await?;
 
     serde_json::from_str(line.trim()).map_err(|error| anyhow!("invalid IPC response: {error}"))
+}
+
+async fn read_bounded_ipc_line<R>(reader: R, label: &str) -> anyhow::Result<String>
+where
+    R: AsyncRead + Unpin,
+{
+    let limited_reader = reader.take(MAX_IPC_LINE_BYTES + 1);
+    let mut reader = tokio::io::BufReader::new(limited_reader);
+    let mut line = String::new();
+    let bytes_read = reader.read_line(&mut line).await?;
+
+    if bytes_read == 0 {
+        return Err(anyhow!("{label} stream closed before a line was received"));
+    }
+
+    let exceeded_limit = bytes_read as u64 > MAX_IPC_LINE_BYTES;
+    if exceeded_limit || !line.ends_with('\n') {
+        return Err(anyhow!("{label} too large or missing newline terminator"));
+    }
+
+    Ok(line)
 }
 
 /// Clean up PID and socket files on shutdown.
@@ -680,12 +730,14 @@ fn is_process_alive(pid: u32) -> bool {
             0,
             pid,
         );
-        if handle.is_null() {
+        if (handle as isize) == 0 {
             return false;
         }
 
         let wait_result = WaitForSingleObject(handle, 0);
-        let _ = CloseHandle(handle);
+        if CloseHandle(handle) == 0 {
+            tracing::warn!(pid, "CloseHandle failed during process liveness check");
+        }
 
         match wait_result {
             WAIT_TIMEOUT => true,
