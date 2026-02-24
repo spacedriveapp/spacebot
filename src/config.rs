@@ -5,7 +5,7 @@ use crate::llm::routing::RoutingConfig;
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use chrono_tz::Tz;
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -302,6 +302,7 @@ pub struct DefaultsConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
@@ -329,6 +330,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("coalesce", &self.coalesce)
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
+            .field("warmup", &self.warmup)
             .field("browser", &self.browser)
             .field("mcp", &self.mcp)
             .field(
@@ -570,6 +572,132 @@ impl Default for CortexConfig {
     }
 }
 
+/// Warmup configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct WarmupConfig {
+    /// Enable background warmup passes.
+    pub enabled: bool,
+    /// Force-load the embedding model before first recall/write workloads.
+    pub eager_embedding_load: bool,
+    /// Interval in seconds between warmup refresh passes.
+    pub refresh_secs: u64,
+    /// Startup delay before the first warmup pass.
+    pub startup_delay_secs: u64,
+}
+
+impl Default for WarmupConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            eager_embedding_load: true,
+            refresh_secs: 900,
+            startup_delay_secs: 5,
+        }
+    }
+}
+
+/// Current warmup lifecycle state.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WarmupState {
+    Cold,
+    Warming,
+    Warm,
+    Degraded,
+}
+
+/// Warmup runtime status snapshot for API and observability.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WarmupStatus {
+    pub state: WarmupState,
+    pub embedding_ready: bool,
+    pub last_refresh_unix_ms: Option<i64>,
+    pub last_error: Option<String>,
+    pub bulletin_age_secs: Option<u64>,
+}
+
+impl Default for WarmupStatus {
+    fn default() -> Self {
+        Self {
+            state: WarmupState::Cold,
+            embedding_ready: false,
+            last_refresh_unix_ms: None,
+            last_error: None,
+            bulletin_age_secs: None,
+        }
+    }
+}
+
+/// Why `ready_for_work` is currently false.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkReadinessReason {
+    StateNotWarm,
+    EmbeddingNotReady,
+    BulletinMissing,
+    BulletinStale,
+}
+
+impl WorkReadinessReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::StateNotWarm => "state_not_warm",
+            Self::EmbeddingNotReady => "embedding_not_ready",
+            Self::BulletinMissing => "bulletin_missing",
+            Self::BulletinStale => "bulletin_stale",
+        }
+    }
+}
+
+/// Derived readiness signal used to gate dispatch behavior.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkReadiness {
+    pub ready: bool,
+    pub reason: Option<WorkReadinessReason>,
+    pub warmup_state: WarmupState,
+    pub embedding_ready: bool,
+    pub bulletin_age_secs: Option<u64>,
+    pub stale_after_secs: u64,
+}
+
+fn evaluate_work_readiness(
+    warmup_config: WarmupConfig,
+    status: WarmupStatus,
+    now_unix_ms: i64,
+) -> WorkReadiness {
+    let stale_after_secs = warmup_config.refresh_secs.max(1).saturating_mul(2).max(60);
+    let bulletin_age_secs = status
+        .last_refresh_unix_ms
+        .map(|refresh_ms| {
+            if now_unix_ms > refresh_ms {
+                ((now_unix_ms - refresh_ms) / 1000) as u64
+            } else {
+                0
+            }
+        })
+        .or(status.bulletin_age_secs);
+
+    let reason = if status.state != WarmupState::Warm {
+        Some(WorkReadinessReason::StateNotWarm)
+    } else if warmup_config.eager_embedding_load && !status.embedding_ready {
+        Some(WorkReadinessReason::EmbeddingNotReady)
+    } else if bulletin_age_secs.is_none() {
+        Some(WorkReadinessReason::BulletinMissing)
+    } else if bulletin_age_secs.is_some_and(|age| age > stale_after_secs) {
+        Some(WorkReadinessReason::BulletinStale)
+    } else {
+        None
+    };
+
+    WorkReadiness {
+        ready: reason.is_none(),
+        reason,
+        warmup_state: status.state,
+        embedding_ready: status.embedding_ready,
+        bulletin_age_secs,
+        stale_after_secs,
+    }
+}
+
 /// Per-agent configuration (raw, before resolution with defaults).
 #[derive(Debug, Clone)]
 pub struct AgentConfig {
@@ -589,6 +717,7 @@ pub struct AgentConfig {
     pub coalesce: Option<CoalesceConfig>,
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
+    pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
@@ -634,6 +763,7 @@ pub struct ResolvedAgentConfig {
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
+    pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
@@ -657,6 +787,7 @@ impl Default for DefaultsConfig {
             coalesce: CoalesceConfig::default(),
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
+            warmup: WarmupConfig::default(),
             browser: BrowserConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
@@ -702,6 +833,7 @@ impl AgentConfig {
             coalesce: self.coalesce.unwrap_or(defaults.coalesce),
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
+            warmup: self.warmup.unwrap_or(defaults.warmup),
             browser: self
                 .browser
                 .clone()
@@ -1481,6 +1613,7 @@ struct TomlDefaultsConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     #[serde(default)]
     mcp: Vec<TomlMcpServerConfig>,
@@ -1554,6 +1687,14 @@ struct TomlCortexConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlWarmupConfig {
+    enabled: Option<bool>,
+    eager_embedding_load: Option<bool>,
+    refresh_secs: Option<u64>,
+    startup_delay_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -1616,6 +1757,7 @@ struct TomlAgentConfig {
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
+    warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
@@ -2293,6 +2435,7 @@ impl Config {
             coalesce: None,
             ingestion: None,
             cortex: None,
+            warmup: None,
             browser: None,
             mcp: None,
             brave_search_key: None,
@@ -2824,6 +2967,20 @@ impl Config {
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
                 })
                 .unwrap_or(base_defaults.cortex),
+            warmup: toml
+                .defaults
+                .warmup
+                .map(|w| WarmupConfig {
+                    enabled: w.enabled.unwrap_or(base_defaults.warmup.enabled),
+                    eager_embedding_load: w
+                        .eager_embedding_load
+                        .unwrap_or(base_defaults.warmup.eager_embedding_load),
+                    refresh_secs: w.refresh_secs.unwrap_or(base_defaults.warmup.refresh_secs),
+                    startup_delay_secs: w
+                        .startup_delay_secs
+                        .unwrap_or(base_defaults.warmup.startup_delay_secs),
+                })
+                .unwrap_or(base_defaults.warmup),
             browser: toml
                 .defaults
                 .browser
@@ -2999,6 +3156,16 @@ impl Config {
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
                     }),
+                    warmup: a.warmup.map(|w| WarmupConfig {
+                        enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
+                        eager_embedding_load: w
+                            .eager_embedding_load
+                            .unwrap_or(defaults.warmup.eager_embedding_load),
+                        refresh_secs: w.refresh_secs.unwrap_or(defaults.warmup.refresh_secs),
+                        startup_delay_secs: w
+                            .startup_delay_secs
+                            .unwrap_or(defaults.warmup.startup_delay_secs),
+                    }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -3045,6 +3212,7 @@ impl Config {
                 coalesce: None,
                 ingestion: None,
                 cortex: None,
+                warmup: None,
                 browser: None,
                 mcp: None,
                 brave_search_key: None,
@@ -3270,6 +3438,11 @@ pub struct RuntimeConfig {
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cron_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
+    pub warmup: ArcSwap<WarmupConfig>,
+    /// Current warmup lifecycle status for API and observability.
+    pub warmup_status: ArcSwap<WarmupStatus>,
+    /// Synchronizes warmup passes so periodic and API-triggered runs don't overlap.
+    pub warmup_lock: Arc<tokio::sync::Mutex<()>>,
     /// Cached memory bulletin generated by the cortex. Injected into every
     /// channel's system prompt. Empty string until the first cortex run.
     pub memory_bulletin: ArcSwap<String>,
@@ -3323,6 +3496,9 @@ impl RuntimeConfig {
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
+            warmup: ArcSwap::from_pointee(agent_config.warmup),
+            warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
+            warmup_lock: Arc::new(tokio::sync::Mutex::new(())),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
             prompts: ArcSwap::from_pointee(prompts),
             identity: ArcSwap::from_pointee(identity),
@@ -3348,6 +3524,18 @@ impl RuntimeConfig {
     /// Set the settings store after initialization.
     pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings.store(Arc::new(Some(settings)));
+    }
+
+    /// Compute the current dispatch-readiness signal.
+    pub fn work_readiness(&self) -> WorkReadiness {
+        let warmup_config = **self.warmup.load();
+        let status = self.warmup_status.load().as_ref().clone();
+        evaluate_work_readiness(warmup_config, status, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// True when branch/worker/cron dispatches should run in fully-ready mode.
+    pub fn ready_for_work(&self) -> bool {
+        self.work_readiness().ready
     }
 
     /// Reload tunable config values from a freshly parsed Config.
@@ -3394,6 +3582,7 @@ impl RuntimeConfig {
             .store(Arc::new(resolved.brave_search_key));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
+        self.warmup.store(Arc::new(resolved.warmup));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -4617,6 +4806,190 @@ id = "main"
             .get("ollama")
             .expect("ollama provider should be registered");
         assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    #[test]
+    fn test_warmup_defaults_applied_when_not_configured() {
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(config.defaults.warmup.enabled);
+        assert!(config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 900);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 5);
+
+        assert_eq!(resolved.warmup.enabled, config.defaults.warmup.enabled);
+        assert_eq!(
+            resolved.warmup.eager_embedding_load,
+            config.defaults.warmup.eager_embedding_load
+        );
+        assert_eq!(
+            resolved.warmup.refresh_secs,
+            config.defaults.warmup.refresh_secs
+        );
+        assert_eq!(
+            resolved.warmup.startup_delay_secs,
+            config.defaults.warmup.startup_delay_secs
+        );
+    }
+
+    #[test]
+    fn test_warmup_default_and_agent_override_resolution() {
+        let toml = r#"
+[defaults.warmup]
+enabled = false
+eager_embedding_load = false
+refresh_secs = 120
+startup_delay_secs = 9
+
+[[agents]]
+id = "main"
+
+[agents.warmup]
+enabled = true
+startup_delay_secs = 2
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert!(!config.defaults.warmup.enabled);
+        assert!(!config.defaults.warmup.eager_embedding_load);
+        assert_eq!(config.defaults.warmup.refresh_secs, 120);
+        assert_eq!(config.defaults.warmup.startup_delay_secs, 9);
+
+        assert!(resolved.warmup.enabled);
+        assert!(!resolved.warmup.eager_embedding_load);
+        assert_eq!(resolved.warmup.refresh_secs, 120);
+        assert_eq!(resolved.warmup.startup_delay_secs, 2);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_warm_state() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Cold,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::StateNotWarm));
+    }
+
+    #[test]
+    fn test_work_readiness_requires_embedding_ready() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(
+            readiness.reason,
+            Some(WorkReadinessReason::EmbeddingNotReady)
+        );
+    }
+
+    #[test]
+    fn test_work_readiness_does_not_require_embedding_when_eager_load_disabled() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                eager_embedding_load: false,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: false,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+    }
+
+    #[test]
+    fn test_work_readiness_requires_bulletin_timestamp() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig::default(),
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: None,
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            2_000,
+        );
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinMissing));
+    }
+
+    #[test]
+    fn test_work_readiness_rejects_stale_bulletin() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 60,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(1_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            122_000,
+        );
+
+        assert_eq!(readiness.stale_after_secs, 120);
+        assert_eq!(readiness.bulletin_age_secs, Some(121));
+        assert!(!readiness.ready);
+        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinStale));
+    }
+
+    #[test]
+    fn test_work_readiness_ready_when_all_constraints_hold() {
+        let readiness = evaluate_work_readiness(
+            WarmupConfig {
+                refresh_secs: 120,
+                ..Default::default()
+            },
+            WarmupStatus {
+                state: WarmupState::Warm,
+                embedding_ready: true,
+                last_refresh_unix_ms: Some(200_000),
+                last_error: None,
+                bulletin_age_secs: None,
+            },
+            310_000,
+        );
+
+        assert!(readiness.ready);
+        assert_eq!(readiness.reason, None);
+        assert_eq!(readiness.bulletin_age_secs, Some(110));
     }
 
     /// Verify that every shorthand key field in `LlmConfig` actually registers a provider.

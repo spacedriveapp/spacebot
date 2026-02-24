@@ -46,6 +46,14 @@ pub(super) struct CortexSection {
 }
 
 #[derive(Serialize, Debug)]
+pub(super) struct WarmupSection {
+    enabled: bool,
+    eager_embedding_load: bool,
+    refresh_secs: u64,
+    startup_delay_secs: u64,
+}
+
+#[derive(Serialize, Debug)]
 pub(super) struct CoalesceSection {
     enabled: bool,
     debounce_ms: u64,
@@ -79,6 +87,7 @@ pub(super) struct AgentConfigResponse {
     tuning: TuningSection,
     compaction: CompactionSection,
     cortex: CortexSection,
+    warmup: WarmupSection,
     coalesce: CoalesceSection,
     memory_persistence: MemoryPersistenceSection,
     browser: BrowserSection,
@@ -101,6 +110,8 @@ pub(super) struct AgentConfigUpdateRequest {
     compaction: Option<CompactionUpdate>,
     #[serde(default)]
     cortex: Option<CortexUpdate>,
+    #[serde(default)]
+    warmup: Option<WarmupUpdate>,
     #[serde(default)]
     coalesce: Option<CoalesceUpdate>,
     #[serde(default)]
@@ -151,6 +162,14 @@ pub(super) struct CortexUpdate {
 }
 
 #[derive(Deserialize, Debug)]
+pub(super) struct WarmupUpdate {
+    enabled: Option<bool>,
+    eager_embedding_load: Option<bool>,
+    refresh_secs: Option<u64>,
+    startup_delay_secs: Option<u64>,
+}
+
+#[derive(Deserialize, Debug)]
 pub(super) struct CoalesceUpdate {
     enabled: Option<bool>,
     debounce_ms: Option<u64>,
@@ -191,6 +210,7 @@ pub(super) async fn get_agent_config(
     let routing = rc.routing.load();
     let compaction = rc.compaction.load();
     let cortex = rc.cortex.load();
+    let warmup = rc.warmup.load();
     let coalesce = rc.coalesce.load();
     let memory_persistence = rc.memory_persistence.load();
     let browser = rc.browser_config.load();
@@ -226,6 +246,12 @@ pub(super) async fn get_agent_config(
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
             bulletin_max_turns: cortex.bulletin_max_turns,
+        },
+        warmup: WarmupSection {
+            enabled: warmup.enabled,
+            eager_embedding_load: warmup.eager_embedding_load,
+            refresh_secs: warmup.refresh_secs,
+            startup_delay_secs: warmup.startup_delay_secs,
         },
         coalesce: CoalesceSection {
             enabled: coalesce.enabled,
@@ -303,6 +329,9 @@ pub(super) async fn update_agent_config(
     }
     if let Some(cortex) = &request.cortex {
         update_cortex_table(&mut doc, agent_idx, cortex)?;
+    }
+    if let Some(warmup) = &request.warmup {
+        update_warmup_table(&mut doc, agent_idx, warmup)?;
     }
     if let Some(coalesce) = &request.coalesce {
         update_coalesce_table(&mut doc, agent_idx, coalesce)?;
@@ -550,6 +579,30 @@ fn update_coalesce_table(
     Ok(())
 }
 
+fn update_warmup_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    warmup: &WarmupUpdate,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    let table = get_or_create_subtable(agent, "warmup")?;
+    if let Some(v) = warmup.enabled {
+        table["enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = warmup.eager_embedding_load {
+        table["eager_embedding_load"] = toml_edit::value(v);
+    }
+    if let Some(v) = warmup.refresh_secs {
+        table["refresh_secs"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
+    if let Some(v) = warmup.startup_delay_secs {
+        table["startup_delay_secs"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
+    Ok(())
+}
+
 fn update_memory_persistence_table(
     doc: &mut toml_edit::DocumentMut,
     agent_idx: usize,
@@ -605,4 +658,103 @@ fn update_discord_table(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_update_warmup_table_writes_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WarmupUpdate {
+            enabled: Some(false),
+            eager_embedding_load: Some(false),
+            refresh_secs: Some(300),
+            startup_delay_secs: Some(7),
+        };
+
+        update_warmup_table(&mut doc, agent_idx, &update).expect("failed to update warmup");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let warmup = agent
+            .get("warmup")
+            .and_then(|item| item.as_table())
+            .expect("missing warmup table");
+
+        assert_eq!(warmup["enabled"].as_bool(), Some(false));
+        assert_eq!(warmup["eager_embedding_load"].as_bool(), Some(false));
+        assert_eq!(warmup["refresh_secs"].as_integer(), Some(300));
+        assert_eq!(warmup["startup_delay_secs"].as_integer(), Some(7));
+    }
+
+    #[test]
+    fn test_update_warmup_table_partial_update_only_sets_requested_keys() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WarmupUpdate {
+            enabled: Some(true),
+            eager_embedding_load: None,
+            refresh_secs: None,
+            startup_delay_secs: None,
+        };
+
+        update_warmup_table(&mut doc, agent_idx, &update).expect("failed to update warmup");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let warmup = agent
+            .get("warmup")
+            .and_then(|item| item.as_table())
+            .expect("missing warmup table");
+
+        assert_eq!(warmup["enabled"].as_bool(), Some(true));
+        assert!(warmup.get("eager_embedding_load").is_none());
+        assert!(warmup.get("refresh_secs").is_none());
+        assert!(warmup.get("startup_delay_secs").is_none());
+    }
+
+    #[test]
+    fn test_update_warmup_table_rejects_large_u64_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WarmupUpdate {
+            enabled: None,
+            eager_embedding_load: None,
+            refresh_secs: Some(u64::MAX),
+            startup_delay_secs: None,
+        };
+
+        let result = update_warmup_table(&mut doc, agent_idx, &update);
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
 }

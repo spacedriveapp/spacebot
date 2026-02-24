@@ -91,6 +91,13 @@ worker_timeout_secs = 300
 branch_timeout_secs = 60
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
+# Warmup controls for cold-start behavior and manual rewarm.
+[defaults.warmup]
+enabled = true
+eager_embedding_load = true
+refresh_secs = 900
+startup_delay_secs = 5
+
 # Browser automation for workers.
 [defaults.browser]
 enabled = true
@@ -214,6 +221,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
+| Warmup config | Yes | Next warmup pass uses new values |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
@@ -466,6 +474,23 @@ Thresholds are fractions of `context_window`.
 | `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
+
+### `[defaults.warmup]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | true | Enable background warmup loop |
+| `eager_embedding_load` | bool | true | Warm embedding model before first recall/write workload |
+| `refresh_secs` | integer | 900 | Seconds between background warmup passes |
+| `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
+
+Dispatch readiness is derived from warmup runtime state:
+
+- warmup state must be `warm`
+- embedding must be ready
+- bulletin age must be fresh (<= `max(60s, refresh_secs * 2)`)
+
+When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot still dispatches, increments cold-dispatch metrics, and queues a forced warmup pass in the background.
 
 ### `[defaults.browser]`
 
