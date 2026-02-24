@@ -135,10 +135,6 @@ pub async fn start_http_server(
             "/providers/openai/oauth/browser/status",
             get(providers::openai_browser_oauth_status),
         )
-        .route(
-            "/providers/openai/oauth/browser/callback",
-            get(providers::openai_browser_oauth_callback),
-        )
         .route("/providers/test", post(providers::test_provider_model))
         .route("/providers/{provider}", delete(providers::delete_provider))
         .route("/models", get(models::get_models))

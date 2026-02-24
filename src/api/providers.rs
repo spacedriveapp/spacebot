@@ -1,35 +1,37 @@
 use super::state::ApiState;
+use crate::openai_auth::DeviceTokenPollResult;
 
 use anyhow::Context as _;
 use axum::Json;
 use axum::extract::{Query, State};
-use axum::http::{HeaderMap, StatusCode};
-use axum::response::Html;
-use reqwest::Url;
+use axum::http::StatusCode;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
+use tokio::time::sleep;
+use uuid::Uuid;
+
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
-use tokio::sync::RwLock;
+use std::time::Duration;
 
-const OPENAI_BROWSER_OAUTH_SESSION_TTL_SECS: i64 = 15 * 60;
-const OPENAI_BROWSER_OAUTH_REDIRECT_PATH: &str = "/providers/openai/oauth/browser/callback";
+const OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS: i64 = 30 * 60;
+const OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
+const OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
+const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
 
-static OPENAI_BROWSER_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, BrowserOAuthSession>>> =
+static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
-struct BrowserOAuthSession {
-    pkce_verifier: String,
-    redirect_uri: String,
-    model: String,
-    created_at: i64,
-    status: BrowserOAuthSessionStatus,
+struct DeviceOAuthSession {
+    expires_at: i64,
+    status: DeviceOAuthSessionStatus,
 }
 
 #[derive(Clone, Debug)]
-enum BrowserOAuthSessionStatus {
+enum DeviceOAuthSessionStatus {
     Pending,
     Completed(String),
     Failed(String),
@@ -102,7 +104,8 @@ pub(super) struct OpenAiOAuthBrowserStartRequest {
 pub(super) struct OpenAiOAuthBrowserStartResponse {
     success: bool,
     message: String,
-    authorization_url: Option<String>,
+    user_code: Option<String>,
+    verification_url: Option<String>,
     state: Option<String>,
 }
 
@@ -117,14 +120,6 @@ pub(super) struct OpenAiOAuthBrowserStatusResponse {
     done: bool,
     success: bool,
     message: Option<String>,
-}
-
-#[derive(Deserialize)]
-pub(super) struct OpenAiOAuthBrowserCallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-    error: Option<String>,
-    error_description: Option<String>,
 }
 
 fn provider_toml_key(provider: &str) -> Option<&'static str> {
@@ -353,129 +348,77 @@ fn apply_model_routing(doc: &mut toml_edit::DocumentMut, model: &str) {
     }
 }
 
-async fn prune_expired_browser_oauth_sessions() {
-    let cutoff = chrono::Utc::now().timestamp() - OPENAI_BROWSER_OAUTH_SESSION_TTL_SECS;
-    let mut sessions = OPENAI_BROWSER_OAUTH_SESSIONS.write().await;
-    sessions.retain(|_, session| session.created_at >= cutoff);
+impl DeviceOAuthSession {
+    fn is_expired(&self, now: i64) -> bool {
+        now >= self.expires_at
+    }
 }
 
-fn resolve_browser_oauth_redirect_uri(headers: &HeaderMap) -> Option<String> {
-    if let Some(origin) = header_value(headers, axum::http::header::ORIGIN.as_str())
-        && let Ok(origin_url) = Url::parse(origin)
+impl DeviceOAuthSessionStatus {
+    fn is_pending(&self) -> bool {
+        matches!(self, DeviceOAuthSessionStatus::Pending)
+    }
+}
+
+async fn prune_expired_device_oauth_sessions() {
+    let cutoff = chrono::Utc::now().timestamp() - OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS;
+    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
+    sessions.retain(|_, session| session.expires_at >= cutoff);
+}
+
+async fn is_device_oauth_session_pending(state_key: &str) -> bool {
+    let sessions = OPENAI_DEVICE_OAUTH_SESSIONS.read().await;
+    sessions
+        .get(state_key)
+        .is_some_and(|session| session.status.is_pending())
+}
+
+async fn update_device_oauth_status(state_key: &str, status: DeviceOAuthSessionStatus) {
+    if let Some(session) = OPENAI_DEVICE_OAUTH_SESSIONS
+        .write()
+        .await
+        .get_mut(state_key)
     {
-        let origin = origin_url.origin().ascii_serialization();
-        if origin != "null" {
-            return Some(format!("{origin}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"));
-        }
+        session.status = status;
     }
-
-    if let (Some(proto), Some(host)) = (
-        header_value(headers, "x-forwarded-proto"),
-        header_value(headers, "x-forwarded-host"),
-    ) {
-        let proto = first_header_value(proto);
-        let host = normalize_host(first_header_value(host));
-        return Some(format!(
-            "{proto}://{host}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"
-        ));
-    }
-
-    if let Some(host) = header_value(headers, "host") {
-        let host = normalize_host(host);
-        let scheme = if is_local_host(&host) {
-            "http"
-        } else {
-            "https"
-        };
-        return Some(format!(
-            "{scheme}://{host}{OPENAI_BROWSER_OAUTH_REDIRECT_PATH}"
-        ));
-    }
-
-    None
 }
 
-fn header_value(headers: &HeaderMap, name: impl AsRef<str>) -> Option<&str> {
-    headers
-        .get(name.as_ref())
-        .and_then(|value| value.to_str().ok())
-}
+async fn finalize_openai_oauth(
+    state: &Arc<ApiState>,
+    credentials: &crate::openai_auth::OAuthCredentials,
+    model: &str,
+) -> anyhow::Result<()> {
+    let instance_dir = (**state.instance_dir.load()).clone();
+    crate::openai_auth::save_credentials(&instance_dir, credentials)
+        .context("failed to save OpenAI OAuth credentials")?;
 
-fn first_header_value(value: &str) -> &str {
-    value.split(',').next().map(str::trim).unwrap_or(value)
-}
+    if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
+        llm_manager
+            .set_openai_oauth_credentials(credentials.clone())
+            .await;
+    }
 
-fn normalize_host(host: &str) -> String {
-    let host = host.trim();
-    let colon_count = host.matches(':').count();
-    if colon_count > 1 && !host.starts_with('[') {
-        format!("[{host}]")
+    let config_path = state.config_path.read().await.clone();
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .context("failed to read config.toml")?
     } else {
-        host.to_string()
-    }
-}
+        String::new()
+    };
 
-fn is_local_host(host: &str) -> bool {
-    let host = host
-        .trim_start_matches('[')
-        .trim_end_matches(']')
-        .split(':')
-        .next()
-        .unwrap_or(host);
-    matches!(host, "localhost" | "127.0.0.1" | "::1")
-}
+    let mut doc: toml_edit::DocumentMut = content.parse().context("failed to parse config.toml")?;
+    apply_model_routing(&mut doc, model);
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .context("failed to write config.toml")?;
 
-fn browser_oauth_success_html() -> String {
-    r#"<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Spacebot OpenAI Sign-in</title>
-    <style>
-      body { font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f1115; color: #ecf0f1; display: grid; place-items: center; min-height: 100vh; }
-      .card { max-width: 520px; padding: 28px; border: 1px solid #2b313a; border-radius: 12px; background: #161a21; text-align: center; }
-      h1 { margin: 0 0 12px 0; font-size: 22px; }
-      p { margin: 0; color: #b2bcc8; line-height: 1.45; }
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Sign-in complete</h1>
-      <p>You can close this window and return to Spacebot settings.</p>
-    </div>
-    <script>setTimeout(() => window.close(), 1800);</script>
-  </body>
-</html>"#
-        .to_string()
-}
+    state
+        .provider_setup_tx
+        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
+        .ok();
 
-fn browser_oauth_error_html(message: &str) -> String {
-    let escaped = message
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;");
-    format!(
-        r#"<!doctype html>
-<html>
-  <head>
-    <meta charset="utf-8" />
-    <title>Spacebot OpenAI Sign-in</title>
-    <style>
-      body {{ font-family: system-ui, -apple-system, sans-serif; margin: 0; background: #0f1115; color: #ecf0f1; display: grid; place-items: center; min-height: 100vh; }}
-      .card {{ max-width: 560px; padding: 28px; border: 1px solid #4a2d31; border-radius: 12px; background: #1f1416; }}
-      h1 {{ margin: 0 0 12px 0; font-size: 22px; color: #ff7878; }}
-      p {{ margin: 0; color: #e6b9b9; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }}
-    </style>
-  </head>
-  <body>
-    <div class="card">
-      <h1>Sign-in failed</h1>
-      <p>{}</p>
-    </div>
-  </body>
-</html>"#,
-        escaped
-    )
+    Ok(())
 }
 
 pub(super) async fn get_providers(
@@ -617,14 +560,15 @@ pub(super) async fn get_providers(
 }
 
 pub(super) async fn start_openai_browser_oauth(
-    headers: HeaderMap,
+    State(state): State<Arc<ApiState>>,
     Json(request): Json<OpenAiOAuthBrowserStartRequest>,
 ) -> Result<Json<OpenAiOAuthBrowserStartResponse>, StatusCode> {
     if request.model.trim().is_empty() {
         return Ok(Json(OpenAiOAuthBrowserStartResponse {
             success: false,
             message: "Model cannot be empty".to_string(),
-            authorization_url: None,
+            user_code: None,
+            verification_url: None,
             state: None,
         }));
     }
@@ -635,48 +579,175 @@ pub(super) async fn start_openai_browser_oauth(
                 "Model '{}' must use provider 'openai' or 'openai-chatgpt'.",
                 request.model
             ),
-            authorization_url: None,
+            user_code: None,
+            verification_url: None,
             state: None,
         }));
     };
 
-    let Some(redirect_uri) = resolve_browser_oauth_redirect_uri(&headers) else {
+    prune_expired_device_oauth_sessions().await;
+
+    let device_code = match crate::openai_auth::request_device_code().await {
+        Ok(device_code) => device_code,
+        Err(error) => {
+            return Ok(Json(OpenAiOAuthBrowserStartResponse {
+                success: false,
+                message: format!("Failed to start device authorization: {error}"),
+                user_code: None,
+                verification_url: None,
+                state: None,
+            }));
+        }
+    };
+
+    if device_code.device_auth_id.trim().is_empty() || device_code.user_code.trim().is_empty() {
         return Ok(Json(OpenAiOAuthBrowserStartResponse {
             success: false,
-            message: "Unable to determine OAuth callback URL. Check your Host/Origin headers."
-                .to_string(),
-            authorization_url: None,
+            message: "Device authorization response was missing required fields.".to_string(),
+            user_code: None,
+            verification_url: None,
             state: None,
         }));
-    };
+    }
 
-    prune_expired_browser_oauth_sessions().await;
-    let browser_authorization = crate::openai_auth::start_browser_authorization(&redirect_uri);
-    let state_key = browser_authorization.state.clone();
+    let now = chrono::Utc::now().timestamp();
+    let expires_in = device_code
+        .expires_in
+        .unwrap_or(OPENAI_DEVICE_OAUTH_SESSION_TTL_SECS as u64);
+    let expires_at = now + expires_in as i64;
+    let poll_interval = device_code
+        .interval
+        .unwrap_or(OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS);
+    let verification_url = crate::openai_auth::device_verification_url(&device_code);
+    let state_key = Uuid::new_v4().to_string();
 
-    OPENAI_BROWSER_OAUTH_SESSIONS.write().await.insert(
+    OPENAI_DEVICE_OAUTH_SESSIONS.write().await.insert(
         state_key.clone(),
-        BrowserOAuthSession {
-            pkce_verifier: browser_authorization.pkce_verifier,
-            redirect_uri,
-            model: chatgpt_model,
-            created_at: chrono::Utc::now().timestamp(),
-            status: BrowserOAuthSessionStatus::Pending,
+        DeviceOAuthSession {
+            expires_at,
+            status: DeviceOAuthSessionStatus::Pending,
         },
     );
 
+    let state_clone = state.clone();
+    let state_key_clone = state_key.clone();
+    let device_auth_id = device_code.device_auth_id.clone();
+    let user_code = device_code.user_code.clone();
+    tokio::spawn(async move {
+        run_device_oauth_background(
+            state_clone,
+            state_key_clone,
+            device_auth_id,
+            user_code,
+            poll_interval,
+            expires_at,
+            chatgpt_model,
+        )
+        .await;
+    });
+
     Ok(Json(OpenAiOAuthBrowserStartResponse {
         success: true,
-        message: "OpenAI browser OAuth started".to_string(),
-        authorization_url: Some(browser_authorization.authorization_url),
+        message: "Device authorization started".to_string(),
+        user_code: Some(device_code.user_code),
+        verification_url: Some(verification_url),
         state: Some(state_key),
     }))
+}
+
+async fn run_device_oauth_background(
+    state: Arc<ApiState>,
+    state_key: String,
+    device_auth_id: String,
+    user_code: String,
+    mut poll_interval_secs: u64,
+    expires_at: i64,
+    model: String,
+) {
+    poll_interval_secs = poll_interval_secs.max(1);
+
+    loop {
+        if !is_device_oauth_session_pending(&state_key).await {
+            return;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        if now >= expires_at {
+            update_device_oauth_status(
+                &state_key,
+                DeviceOAuthSessionStatus::Failed(
+                    "Sign-in expired. Please start again.".to_string(),
+                ),
+            )
+            .await;
+            return;
+        }
+
+        sleep(Duration::from_secs(poll_interval_secs)).await;
+
+        let poll_result = crate::openai_auth::poll_device_token(&device_auth_id, &user_code).await;
+        let grant = match poll_result {
+            Ok(DeviceTokenPollResult::Pending) => continue,
+            Ok(DeviceTokenPollResult::SlowDown) => {
+                poll_interval_secs = poll_interval_secs
+                    .saturating_add(OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS)
+                    .min(OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS);
+                continue;
+            }
+            Ok(DeviceTokenPollResult::Approved(grant)) => grant,
+            Err(error) => {
+                let message = format!("Device authorization polling failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth polling failed");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+                return;
+            }
+        };
+
+        let credentials = match crate::openai_auth::exchange_device_code(
+            &grant.authorization_code,
+            &grant.code_verifier,
+        )
+        .await
+        {
+            Ok(credentials) => credentials,
+            Err(error) => {
+                let message = format!("Device code exchange failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth failed during token exchange");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+                return;
+            }
+        };
+
+        match finalize_openai_oauth(&state, &credentials, &model).await {
+            Ok(()) => {
+                update_device_oauth_status(
+                    &state_key,
+                    DeviceOAuthSessionStatus::Completed(format!(
+                        "OpenAI configured via device OAuth. Model '{}' applied to defaults and default agent routing.",
+                        model
+                    )),
+                )
+                .await;
+            }
+            Err(error) => {
+                let message =
+                    format!("Device OAuth sign-in completed but finalization failed: {error}");
+                tracing::warn!(%message, "OpenAI device OAuth finalization failed");
+                update_device_oauth_status(&state_key, DeviceOAuthSessionStatus::Failed(message))
+                    .await;
+            }
+        }
+
+        return;
+    }
 }
 
 pub(super) async fn openai_browser_oauth_status(
     Query(request): Query<OpenAiOAuthBrowserStatusRequest>,
 ) -> Result<Json<OpenAiOAuthBrowserStatusResponse>, StatusCode> {
-    prune_expired_browser_oauth_sessions().await;
+    prune_expired_device_oauth_sessions().await;
     if request.state.trim().is_empty() {
         return Ok(Json(OpenAiOAuthBrowserStatusResponse {
             found: false,
@@ -686,8 +757,10 @@ pub(super) async fn openai_browser_oauth_status(
         }));
     }
 
-    let sessions = OPENAI_BROWSER_OAUTH_SESSIONS.read().await;
-    let Some(session) = sessions.get(request.state.trim()) else {
+    let state_key = request.state.trim();
+    let now = chrono::Utc::now().timestamp();
+    let mut sessions = OPENAI_DEVICE_OAUTH_SESSIONS.write().await;
+    let Some(session) = sessions.get_mut(state_key) else {
         return Ok(Json(OpenAiOAuthBrowserStatusResponse {
             found: false,
             done: false,
@@ -696,20 +769,25 @@ pub(super) async fn openai_browser_oauth_status(
         }));
     };
 
+    if session.status.is_pending() && session.is_expired(now) {
+        session.status =
+            DeviceOAuthSessionStatus::Failed("Sign-in expired. Please start again.".to_string());
+    }
+
     let response = match &session.status {
-        BrowserOAuthSessionStatus::Pending => OpenAiOAuthBrowserStatusResponse {
+        DeviceOAuthSessionStatus::Pending => OpenAiOAuthBrowserStatusResponse {
             found: true,
             done: false,
             success: false,
             message: None,
         },
-        BrowserOAuthSessionStatus::Completed(message) => OpenAiOAuthBrowserStatusResponse {
+        DeviceOAuthSessionStatus::Completed(message) => OpenAiOAuthBrowserStatusResponse {
             found: true,
             done: true,
             success: true,
             message: Some(message.clone()),
         },
-        BrowserOAuthSessionStatus::Failed(message) => OpenAiOAuthBrowserStatusResponse {
+        DeviceOAuthSessionStatus::Failed(message) => OpenAiOAuthBrowserStatusResponse {
             found: true,
             done: true,
             success: false,
@@ -717,153 +795,6 @@ pub(super) async fn openai_browser_oauth_status(
         },
     };
     Ok(Json(response))
-}
-
-pub(super) async fn openai_browser_oauth_callback(
-    State(state): State<Arc<ApiState>>,
-    Query(query): Query<OpenAiOAuthBrowserCallbackQuery>,
-) -> Html<String> {
-    prune_expired_browser_oauth_sessions().await;
-
-    let Some(state_key) = query
-        .state
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-    else {
-        return Html(browser_oauth_error_html("Missing OAuth state."));
-    };
-
-    if let Some(error_code) = query.error.as_deref() {
-        let mut message = format!("OpenAI returned OAuth error: {}", error_code);
-        if let Some(description) = query.error_description.as_deref() {
-            message.push_str(&format!(" ({})", description));
-        }
-        if let Some(session) = OPENAI_BROWSER_OAUTH_SESSIONS
-            .write()
-            .await
-            .get_mut(&state_key)
-        {
-            session.status = BrowserOAuthSessionStatus::Failed(message.clone());
-        }
-        return Html(browser_oauth_error_html(&message));
-    }
-
-    let Some(code) = query
-        .code
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        let message = "OpenAI callback did not include an authorization code.";
-        if let Some(session) = OPENAI_BROWSER_OAUTH_SESSIONS
-            .write()
-            .await
-            .get_mut(&state_key)
-        {
-            session.status = BrowserOAuthSessionStatus::Failed(message.to_string());
-        }
-        return Html(browser_oauth_error_html(message));
-    };
-
-    let (pkce_verifier, redirect_uri, model) = {
-        let sessions = OPENAI_BROWSER_OAUTH_SESSIONS.read().await;
-        let Some(session) = sessions.get(&state_key) else {
-            return Html(browser_oauth_error_html(
-                "OAuth session expired or was not found. Start sign-in again.",
-            ));
-        };
-        (
-            session.pkce_verifier.clone(),
-            session.redirect_uri.clone(),
-            session.model.clone(),
-        )
-    };
-
-    let credentials = match crate::openai_auth::exchange_browser_code(
-        code,
-        &redirect_uri,
-        &pkce_verifier,
-    )
-    .await
-    {
-        Ok(credentials) => credentials,
-        Err(error) => {
-            let message = format!("Failed to exchange OpenAI authorization code: {error}");
-            if let Some(session) = OPENAI_BROWSER_OAUTH_SESSIONS
-                .write()
-                .await
-                .get_mut(&state_key)
-            {
-                session.status = BrowserOAuthSessionStatus::Failed(message.clone());
-            }
-            return Html(browser_oauth_error_html(&message));
-        }
-    };
-
-    let persist_result = async {
-        let instance_dir = (**state.instance_dir.load()).clone();
-        crate::openai_auth::save_credentials(&instance_dir, &credentials)
-            .context("failed to save OpenAI OAuth credentials")?;
-
-        if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
-            llm_manager
-                .set_openai_oauth_credentials(credentials.clone())
-                .await;
-        }
-
-        let config_path = state.config_path.read().await.clone();
-        let content = if config_path.exists() {
-            tokio::fs::read_to_string(&config_path)
-                .await
-                .context("failed to read config.toml")?
-        } else {
-            String::new()
-        };
-
-        let mut doc: toml_edit::DocumentMut =
-            content.parse().context("failed to parse config.toml")?;
-        apply_model_routing(&mut doc, &model);
-        tokio::fs::write(&config_path, doc.to_string())
-            .await
-            .context("failed to write config.toml")?;
-
-        state
-            .provider_setup_tx
-            .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
-            .ok();
-
-        anyhow::Ok(())
-    }
-    .await;
-
-    match persist_result {
-        Ok(()) => {
-            if let Some(session) = OPENAI_BROWSER_OAUTH_SESSIONS
-                .write()
-                .await
-                .get_mut(&state_key)
-            {
-                session.status = BrowserOAuthSessionStatus::Completed(format!(
-                    "OpenAI configured via browser OAuth. Model '{}' applied to defaults and default agent routing.",
-                    model
-                ));
-            }
-            Html(browser_oauth_success_html())
-        }
-        Err(error) => {
-            let message = format!("OAuth sign-in completed but finalization failed: {error}");
-            if let Some(session) = OPENAI_BROWSER_OAUTH_SESSIONS
-                .write()
-                .await
-                .get_mut(&state_key)
-            {
-                session.status = BrowserOAuthSessionStatus::Failed(message.clone());
-            }
-            Html(browser_oauth_error_html(&message))
-        }
-    }
 }
 
 pub(super) async fn update_provider(
@@ -1027,6 +958,25 @@ pub(super) async fn delete_provider(
     State(state): State<Arc<ApiState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
+    // OpenAI ChatGPT OAuth credentials are stored as a separate JSON file,
+    // not in the TOML config, so handle removal separately.
+    if provider == "openai-chatgpt" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::openai_auth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(mgr) = state.llm_manager.read().await.as_ref() {
+            mgr.clear_openai_oauth_credentials().await;
+        }
+        return Ok(Json(ProviderUpdateResponse {
+            success: true,
+            message: "ChatGPT Plus OAuth credentials removed".into(),
+        }));
+    }
+
     let Some(key_name) = provider_toml_key(&provider) else {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
