@@ -71,18 +71,30 @@ impl ConversationLogger {
 
     /// Log a bot (assistant) message. Fire-and-forget.
     pub fn log_bot_message(&self, channel_id: &ChannelId, content: &str) {
+        self.log_bot_message_with_name(channel_id, content, None);
+    }
+
+    /// Log a bot (assistant) message with an agent display name. Fire-and-forget.
+    pub fn log_bot_message_with_name(
+        &self,
+        channel_id: &ChannelId,
+        content: &str,
+        sender_name: Option<&str>,
+    ) {
         let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
         let channel_id = channel_id.to_string();
         let content = content.to_string();
+        let sender_name = sender_name.map(String::from);
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT INTO conversation_messages (id, channel_id, role, content) \
-                 VALUES (?, ?, 'assistant', ?)",
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'assistant', ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
+            .bind(&sender_name)
             .bind(&content)
             .execute(&pool)
             .await
@@ -268,19 +280,26 @@ impl ProcessRunLogger {
         channel_id: Option<&ChannelId>,
         worker_id: WorkerId,
         task: &str,
+        worker_type: &str,
+        agent_id: &crate::AgentId,
     ) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let channel_id = channel_id.map(|c| c.to_string());
         let task = task.to_string();
+        let worker_type = worker_type.to_string();
+        let agent_id = agent_id.to_string();
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task) VALUES (?, ?, ?)",
+                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task, worker_type, agent_id) \
+                 VALUES (?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
             .bind(&task)
+            .bind(&worker_type)
+            .bind(&agent_id)
             .execute(&pool)
             .await
             {
@@ -290,34 +309,29 @@ impl ProcessRunLogger {
     }
 
     /// Update a worker's status. Fire-and-forget.
-    pub fn log_worker_status(&self, worker_id: WorkerId, status: &str) {
-        let pool = self.pool.clone();
-        let id = worker_id.to_string();
-        let status = status.to_string();
-
-        tokio::spawn(async move {
-            if let Err(error) = sqlx::query("UPDATE worker_runs SET status = ? WHERE id = ?")
-                .bind(&status)
-                .bind(&id)
-                .execute(&pool)
-                .await
-            {
-                tracing::warn!(%error, worker_id = %id, "failed to persist worker status");
-            }
-        });
+    /// Worker status text updates are transient — they're available via the
+    /// in-memory StatusBlock for live workers and don't need to be persisted.
+    /// The `status` column is reserved for the state enum (running/done/failed).
+    pub fn log_worker_status(&self, _worker_id: WorkerId, _status: &str) {
+        // Intentionally a no-op. Status text was previously written to the
+        // `status` column, overwriting the state enum with free-text like
+        // "Searching for weather in Germany" which broke badge rendering
+        // and status filtering.
     }
 
     /// Record a worker completing with its result. Fire-and-forget.
-    pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str) {
+    pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str, success: bool) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
+        let status = if success { "done" } else { "failed" };
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET result = ?, status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = ?"
+                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
             )
             .bind(&result)
+            .bind(status)
             .bind(&id)
             .execute(&pool)
             .await
@@ -426,4 +440,161 @@ impl ProcessRunLogger {
         items.reverse();
         Ok(items)
     }
+
+    /// List worker runs for an agent, ordered by most recent first.
+    /// Does NOT include the transcript blob — that's fetched separately via `get_worker_detail`.
+    pub async fn list_worker_runs(
+        &self,
+        agent_id: &str,
+        limit: i64,
+        offset: i64,
+        status_filter: Option<&str>,
+    ) -> crate::error::Result<(Vec<WorkerRunRow>, i64)> {
+        let (count_where_clause, list_where_clause, has_status_filter) = if status_filter.is_some()
+        {
+            (
+                "WHERE w.agent_id = ?1 AND w.status = ?2",
+                "WHERE w.agent_id = ?1 AND w.status = ?4",
+                true,
+            )
+        } else {
+            ("WHERE w.agent_id = ?1", "WHERE w.agent_id = ?1", false)
+        };
+
+        let count_query =
+            format!("SELECT COUNT(*) as total FROM worker_runs w {count_where_clause}");
+        let list_query = format!(
+            "SELECT w.id, w.task, w.status, w.worker_type, w.channel_id, w.started_at, \
+                    w.completed_at, w.transcript IS NOT NULL as has_transcript, \
+                    w.tool_calls, c.display_name as channel_name \
+             FROM worker_runs w \
+             LEFT JOIN channels c ON w.channel_id = c.id \
+             {list_where_clause} \
+             ORDER BY w.started_at DESC \
+             LIMIT ?2 OFFSET ?3"
+        );
+
+        let mut count_q = sqlx::query(&count_query).bind(agent_id);
+        let mut list_q = sqlx::query(&list_query)
+            .bind(agent_id)
+            .bind(limit)
+            .bind(offset);
+
+        if has_status_filter {
+            let filter = status_filter.unwrap_or("");
+            count_q = count_q.bind(filter);
+            list_q = list_q.bind(filter);
+        }
+
+        let total: i64 = count_q
+            .fetch_one(&self.pool)
+            .await
+            .map(|row| row.try_get("total").unwrap_or(0))
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let rows = list_q
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let items = rows
+            .into_iter()
+            .map(|row| WorkerRunRow {
+                id: row.try_get("id").unwrap_or_default(),
+                task: row.try_get("task").unwrap_or_default(),
+                status: row.try_get("status").unwrap_or_default(),
+                worker_type: row
+                    .try_get("worker_type")
+                    .unwrap_or_else(|_| "builtin".into()),
+                channel_id: row.try_get("channel_id").ok(),
+                channel_name: row.try_get("channel_name").ok(),
+                started_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_default(),
+                completed_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
+                    .ok()
+                    .map(|t| t.to_rfc3339()),
+                has_transcript: row.try_get::<bool, _>("has_transcript").unwrap_or(false),
+                tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+            })
+            .collect();
+
+        Ok((items, total))
+    }
+
+    /// Get full detail for a single worker run, including the compressed transcript blob.
+    pub async fn get_worker_detail(
+        &self,
+        agent_id: &str,
+        worker_id: &str,
+    ) -> crate::error::Result<Option<WorkerDetailRow>> {
+        let row = sqlx::query(
+            "SELECT w.id, w.task, w.result, w.status, w.worker_type, w.channel_id, \
+                    w.started_at, w.completed_at, w.transcript, w.tool_calls, \
+                    c.display_name as channel_name \
+             FROM worker_runs w \
+             LEFT JOIN channels c ON w.channel_id = c.id \
+             WHERE w.agent_id = ? AND w.id = ?",
+        )
+        .bind(agent_id)
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        Ok(row.map(|row| WorkerDetailRow {
+            id: row.try_get("id").unwrap_or_default(),
+            task: row.try_get("task").unwrap_or_default(),
+            result: row.try_get("result").ok(),
+            status: row.try_get("status").unwrap_or_default(),
+            worker_type: row
+                .try_get("worker_type")
+                .unwrap_or_else(|_| "builtin".into()),
+            channel_id: row.try_get("channel_id").ok(),
+            channel_name: row.try_get("channel_name").ok(),
+            started_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("started_at")
+                .map(|t| t.to_rfc3339())
+                .unwrap_or_default(),
+            completed_at: row
+                .try_get::<chrono::DateTime<chrono::Utc>, _>("completed_at")
+                .ok()
+                .map(|t| t.to_rfc3339()),
+            transcript_blob: row.try_get("transcript").ok(),
+            tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+        }))
+    }
+}
+
+/// A worker run row without the transcript blob (for list queries).
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerRunRow {
+    pub id: String,
+    pub task: String,
+    pub status: String,
+    pub worker_type: String,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub has_transcript: bool,
+    pub tool_calls: i64,
+}
+
+/// A worker run row with full detail including the transcript blob.
+#[derive(Debug, Clone)]
+pub struct WorkerDetailRow {
+    pub id: String,
+    pub task: String,
+    pub result: Option<String>,
+    pub status: String,
+    pub worker_type: String,
+    pub channel_id: Option<String>,
+    pub channel_name: Option<String>,
+    pub started_at: String,
+    pub completed_at: Option<String>,
+    pub transcript_blob: Option<Vec<u8>>,
+    pub tool_calls: i64,
 }

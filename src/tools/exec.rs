@@ -1,61 +1,26 @@
 //! Exec tool for running subprocesses (task workers only).
 
+use crate::sandbox::Sandbox;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 use tokio::process::Command;
 
-/// Tool for executing subprocesses, with path restrictions to prevent
-/// access to instance-level configuration and secrets.
+/// Tool for executing subprocesses within a sandboxed environment.
 #[derive(Debug, Clone)]
 pub struct ExecTool {
-    instance_dir: PathBuf,
     workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
 }
 
 impl ExecTool {
-    /// Create a new exec tool with the given instance directory for path blocking.
-    pub fn new(instance_dir: PathBuf, workspace: PathBuf) -> Self {
-        Self {
-            instance_dir,
-            workspace,
-        }
-    }
-
-    /// Check if program arguments reference sensitive instance paths.
-    fn check_args(&self, program: &str, args: &[String]) -> Result<(), ExecError> {
-        let instance_str = self.instance_dir.to_string_lossy();
-        let workspace_str = self.workspace.to_string_lossy();
-        let all_args = std::iter::once(program.to_string())
-            .chain(args.iter().cloned())
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        // Block references to instance dir (unless targeting workspace within it)
-        if all_args.contains(instance_str.as_ref()) && !all_args.contains(workspace_str.as_ref()) {
-            return Err(ExecError {
-                message: "Cannot access the instance directory — it contains protected configuration and data.".to_string(),
-                exit_code: -1,
-            });
-        }
-
-        // Block references to sensitive files by name
-        for file in super::shell::SENSITIVE_FILES {
-            if all_args.contains(file)
-                && (all_args.contains(instance_str.as_ref())
-                    || !all_args.contains(workspace_str.as_ref()))
-            {
-                return Err(ExecError {
-                    message: format!("Cannot access {file} — instance configuration is protected."),
-                    exit_code: -1,
-                });
-            }
-        }
-
-        Ok(())
+    /// Create a new exec tool with sandbox containment.
+    pub fn new(workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
+        Self { workspace, sandbox }
     }
 }
 
@@ -115,6 +80,22 @@ pub struct ExecOutput {
     /// Formatted summary.
     pub summary: String,
 }
+
+/// Env vars that enable library injection or alter runtime loading behavior.
+const DANGEROUS_ENV_VARS: &[&str] = &[
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "PYTHONPATH",
+    "PYTHONSTARTUP",
+    "NODE_OPTIONS",
+    "RUBYOPT",
+    "PERL5OPT",
+    "PERL5LIB",
+    "BASH_ENV",
+    "ENV",
+];
 
 impl Tool for ExecTool {
     const NAME: &'static str = "exec";
@@ -178,11 +159,8 @@ impl Tool for ExecTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Check for references to sensitive instance paths
-        self.check_args(&args.program, &args.args)?;
-
         // Validate working_dir stays within workspace if specified
-        if let Some(ref dir) = args.working_dir {
+        let working_dir = if let Some(ref dir) = args.working_dir {
             let path = std::path::Path::new(dir);
             let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
             let workspace_canonical = self
@@ -198,36 +176,14 @@ impl Tool for ExecTool {
                     exit_code: -1,
                 });
             }
-        }
-
-        // Block passing secret env var values directly
-        for env_var in &args.env {
-            for secret in super::shell::SECRET_ENV_VARS {
-                if env_var.key == *secret {
-                    return Err(ExecError {
-                        message: "Cannot set secret environment variables.".to_string(),
-                        exit_code: -1,
-                    });
-                }
-            }
-        }
+            canonical
+        } else {
+            self.workspace.clone()
+        };
 
         // Block env vars that enable library injection or alter runtime
-        // loading behavior — these allow arbitrary code execution.
-        const DANGEROUS_ENV_VARS: &[&str] = &[
-            "LD_PRELOAD",
-            "LD_LIBRARY_PATH",
-            "DYLD_INSERT_LIBRARIES",
-            "DYLD_LIBRARY_PATH",
-            "PYTHONPATH",
-            "PYTHONSTARTUP",
-            "NODE_OPTIONS",
-            "RUBYOPT",
-            "PERL5OPT",
-            "PERL5LIB",
-            "BASH_ENV",
-            "ENV",
-        ];
+        // loading behavior — these allow arbitrary code execution regardless
+        // of filesystem sandbox state.
         for env_var in &args.env {
             if DANGEROUS_ENV_VARS
                 .iter()
@@ -243,23 +199,10 @@ impl Tool for ExecTool {
             }
         }
 
-        let mut cmd = Command::new(&args.program);
-        cmd.args(&args.args);
+        let arg_refs: Vec<&str> = args.args.iter().map(|s| s.as_str()).collect();
+        let mut cmd = self.sandbox.wrap(&args.program, &arg_refs, &working_dir);
 
-        // Default to workspace as working directory
-        if let Some(dir) = args.working_dir {
-            cmd.current_dir(dir);
-        } else {
-            cmd.current_dir(&self.workspace);
-        }
-
-        // Prepend persistent tools directory to PATH so user-installed
-        // binaries survive container restarts.
-        let tools_bin = self.instance_dir.join("tools/bin");
-        if let Ok(current_path) = std::env::var("PATH") {
-            cmd.env("PATH", format!("{}:{current_path}", tools_bin.display()));
-        }
-
+        // Apply user-specified env vars after sandbox wrapping
         for env_var in args.env {
             cmd.env(env_var.key, env_var.value);
         }

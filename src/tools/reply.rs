@@ -45,6 +45,7 @@ pub struct ReplyTool {
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
     replied_flag: RepliedFlag,
+    agent_display_name: String,
 }
 
 impl ReplyTool {
@@ -55,6 +56,7 @@ impl ReplyTool {
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
         replied_flag: RepliedFlag,
+        agent_display_name: impl Into<String>,
     ) -> Self {
         Self {
             response_tx,
@@ -62,6 +64,7 @@ impl ReplyTool {
             conversation_logger,
             channel_id,
             replied_flag,
+            agent_display_name: agent_display_name.into(),
         }
     }
 }
@@ -351,8 +354,11 @@ impl Tool for ReplyTool {
         )
         .await;
 
-        self.conversation_logger
-            .log_bot_message(&self.channel_id, &converted_content);
+        self.conversation_logger.log_bot_message_with_name(
+            &self.channel_id,
+            &converted_content,
+            Some(&self.agent_display_name),
+        );
 
         let response = if let Some(ref name) = args.thread_name {
             // Cap thread names at 100 characters (Discord limit)

@@ -202,7 +202,7 @@ impl Worker {
             self.screenshot_dir.clone(),
             self.brave_search_key.clone(),
             self.deps.runtime_config.workspace_dir.clone(),
-            self.deps.runtime_config.instance_dir.clone(),
+            self.deps.sandbox.clone(),
             mcp_tools,
             self.deps.runtime_config.clone(),
         );
@@ -221,6 +221,7 @@ impl Worker {
 
         // Fresh history for the worker (no channel context)
         let mut history = Vec::new();
+        let mut compacted_history = Vec::new();
 
         // Run the initial task in segments with compaction checkpoints
         let mut prompt = self.task.clone();
@@ -271,7 +272,8 @@ impl Worker {
                             });
                     }
 
-                    self.maybe_compact_history(&mut history).await;
+                    self.maybe_compact_history(&mut compacted_history, &mut history)
+                        .await;
                     prompt = "Continue where you left off. Do not repeat completed work.".into();
                     self.hook
                         .send_status(format!("working (segment {segments_run})"));
@@ -287,6 +289,7 @@ impl Worker {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("cancelled");
                     self.write_failure_log(&history, &format!("cancelled: {reason}"));
+                    self.persist_transcript(&compacted_history, &history);
                     tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
                     return Ok(format!("Worker cancelled: {reason}"));
                 }
@@ -296,6 +299,7 @@ impl Worker {
                         self.state = WorkerState::Failed;
                         self.hook.send_status("failed");
                         self.write_failure_log(&history, &format!("context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
+                        self.persist_transcript(&compacted_history, &history);
                         tracing::error!(worker_id = %self.id, %error, "worker context overflow unrecoverable");
                         return Err(crate::error::AgentError::Other(error.into()).into());
                     }
@@ -307,7 +311,8 @@ impl Worker {
                         "context overflow, compacting and retrying"
                     );
                     self.hook.send_status("compacting (overflow recovery)");
-                    self.force_compact_history(&mut history).await;
+                    self.force_compact_history(&mut compacted_history, &mut history)
+                        .await;
                     prompt = "Continue where you left off. Do not repeat completed work. \
                               Your previous attempt exceeded the context limit, so older history \
                               has been compacted."
@@ -317,6 +322,7 @@ impl Worker {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("failed");
                     self.write_failure_log(&history, &error.to_string());
+                    self.persist_transcript(&compacted_history, &history);
                     tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
                     return Err(crate::error::AgentError::Other(error.into()).into());
                 }
@@ -333,7 +339,8 @@ impl Worker {
                 self.hook.send_status("processing follow-up");
 
                 // Compact before follow-up if needed
-                self.maybe_compact_history(&mut history).await;
+                self.maybe_compact_history(&mut compacted_history, &mut history)
+                    .await;
 
                 let mut follow_up_prompt = follow_up.clone();
                 let mut follow_up_overflow_retries = 0;
@@ -360,7 +367,8 @@ impl Worker {
                                 "follow-up context overflow, compacting and retrying"
                             );
                             self.hook.send_status("compacting (overflow recovery)");
-                            self.force_compact_history(&mut history).await;
+                            self.force_compact_history(&mut compacted_history, &mut history)
+                                .await;
                             let prompt_engine = self.deps.runtime_config.prompts.load();
                             let overflow_msg = prompt_engine.render_system_worker_overflow()?;
                             follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
@@ -393,6 +401,9 @@ impl Worker {
             self.write_success_log(&history);
         }
 
+        // Persist transcript blob (fire-and-forget)
+        self.persist_transcript(&compacted_history, &history);
+
         tracing::info!(worker_id = %self.id, "worker completed");
         Ok(result)
     }
@@ -402,7 +413,11 @@ impl Worker {
     /// Workers don't have a full Compactor instance — they do inline compaction
     /// by summarizing older tool calls and results into a condensed recap.
     /// No LLM call, just programmatic truncation with a summary marker.
-    async fn maybe_compact_history(&self, history: &mut Vec<rig::message::Message>) {
+    async fn maybe_compact_history(
+        &self,
+        compacted_history: &mut Vec<rig::message::Message>,
+        history: &mut Vec<rig::message::Message>,
+    ) {
         let context_window = **self.deps.runtime_config.context_window.load();
         let estimated = estimate_history_tokens(history);
         let usage = estimated as f32 / context_window as f32;
@@ -411,7 +426,7 @@ impl Worker {
             return;
         }
 
-        self.compact_history(history, 0.50, "worker history compacted")
+        self.compact_history(compacted_history, history, 0.50, "worker history compacted")
             .await;
     }
 
@@ -420,8 +435,13 @@ impl Worker {
     /// Unlike `maybe_compact_history`, this always fires regardless of current
     /// usage and removes 75% of messages. Used when the provider has already
     /// rejected the request for exceeding context limits.
-    async fn force_compact_history(&self, history: &mut Vec<rig::message::Message>) {
+    async fn force_compact_history(
+        &self,
+        compacted_history: &mut Vec<rig::message::Message>,
+        history: &mut Vec<rig::message::Message>,
+    ) {
         self.compact_history(
+            compacted_history,
             history,
             0.75,
             "worker history force-compacted (overflow recovery)",
@@ -432,6 +452,7 @@ impl Worker {
     /// Compact worker history by removing a fraction of the oldest messages.
     async fn compact_history(
         &self,
+        compacted_history: &mut Vec<rig::message::Message>,
         history: &mut Vec<rig::message::Message>,
         fraction: f32,
         log_message: &str,
@@ -449,6 +470,7 @@ impl Worker {
             .max(1)
             .min(total.saturating_sub(2));
         let removed: Vec<rig::message::Message> = history.drain(..remove_count).collect();
+        compacted_history.extend(removed.iter().cloned());
 
         let recap = build_worker_recap(&removed);
         let prompt_engine = self.deps.runtime_config.prompts.load();
@@ -468,6 +490,47 @@ impl Worker {
             usage = %format!("{:.0}%", usage * 100.0),
             "{log_message}"
         );
+    }
+
+    /// Persist the compressed transcript blob to worker_runs. Fire-and-forget.
+    fn persist_transcript(
+        &self,
+        compacted_history: &[rig::message::Message],
+        history: &[rig::message::Message],
+    ) {
+        let mut full_history = compacted_history.to_vec();
+        full_history.extend(history.iter().cloned());
+        let transcript_blob =
+            crate::conversation::worker_transcript::serialize_transcript(&full_history);
+        let pool = self.deps.sqlite_pool.clone();
+        let worker_id = self.id.to_string();
+
+        // Count tool calls from the Rig history (each ToolCall in an Assistant message)
+        let tool_calls: i64 = full_history
+            .iter()
+            .filter_map(|message| match message {
+                rig::message::Message::Assistant { content, .. } => Some(
+                    content
+                        .iter()
+                        .filter(|c| matches!(c, rig::message::AssistantContent::ToolCall(_)))
+                        .count() as i64,
+                ),
+                _ => None,
+            })
+            .sum();
+
+        tokio::spawn(async move {
+            if let Err(error) =
+                sqlx::query("UPDATE worker_runs SET transcript = ?, tool_calls = ? WHERE id = ?")
+                    .bind(&transcript_blob)
+                    .bind(tool_calls)
+                    .bind(&worker_id)
+                    .execute(&pool)
+                    .await
+            {
+                tracing::warn!(%error, worker_id, "failed to persist worker transcript");
+            }
+        });
     }
 
     /// Check if worker is in a terminal state.
@@ -672,7 +735,8 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
             rig::message::Message::Assistant { content, .. } => {
                 for item in content.iter() {
                     if let rig::message::AssistantContent::ToolCall(tc) = item {
-                        let args = tc.function.arguments.to_string();
+                        let args =
+                            crate::tools::truncate_output(&tc.function.arguments.to_string(), 200);
                         recap.push_str(&format!("- Called `{}` ({args})\n", tc.function.name));
                     }
                     if let rig::message::AssistantContent::Text(t) = item
@@ -687,7 +751,8 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
                     if let rig::message::UserContent::ToolResult(tr) = item {
                         for c in tr.content.iter() {
                             if let rig::message::ToolResultContent::Text(t) = c {
-                                recap.push_str(&format!("  Result: {}\n", t.text));
+                                let truncated = crate::tools::truncate_output(&t.text, 200);
+                                recap.push_str(&format!("  Result: {truncated}\n"));
                             }
                         }
                     }

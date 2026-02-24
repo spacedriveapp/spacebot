@@ -53,6 +53,7 @@ export interface WorkerStartedEvent {
 	channel_id: string | null;
 	worker_id: string;
 	task: string;
+	worker_type?: string;
 }
 
 export interface WorkerStatusEvent {
@@ -69,6 +70,7 @@ export interface WorkerCompletedEvent {
 	channel_id: string | null;
 	worker_id: string;
 	result: string;
+	success?: boolean;
 }
 
 export interface BranchStartedEvent {
@@ -94,6 +96,7 @@ export interface ToolStartedEvent {
 	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
+	args: string;
 }
 
 export interface ToolCompletedEvent {
@@ -103,6 +106,7 @@ export interface ToolCompletedEvent {
 	process_type: ProcessType;
 	process_id: string;
 	tool_name: string;
+	result: string;
 }
 
 export type ApiEvent =
@@ -193,8 +197,53 @@ export interface StatusBlockSnapshot {
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
+// --- Workers API types ---
+
+export type ActionContent =
+	| { type: "text"; text: string }
+	| { type: "tool_call"; id: string; name: string; args: string };
+
+export type TranscriptStep =
+	| { type: "action"; content: ActionContent[] }
+	| { type: "tool_result"; call_id: string; name: string; text: string };
+
+export interface WorkerRunInfo {
+	id: string;
+	task: string;
+	status: string;
+	worker_type: string;
+	channel_id: string | null;
+	channel_name: string | null;
+	started_at: string;
+	completed_at: string | null;
+	has_transcript: boolean;
+	live_status: string | null;
+	tool_calls: number;
+}
+
+export interface WorkerDetailResponse {
+	id: string;
+	task: string;
+	result: string | null;
+	status: string;
+	worker_type: string;
+	channel_id: string | null;
+	channel_name: string | null;
+	started_at: string;
+	completed_at: string | null;
+	transcript: TranscriptStep[] | null;
+	tool_calls: number;
+}
+
+export interface WorkerListResponse {
+	workers: WorkerRunInfo[];
+	total: number;
+}
+
 export interface AgentInfo {
 	id: string;
+	display_name?: string;
+	role?: string;
 	workspace: string;
 	context_window: number;
 	max_turns: number;
@@ -961,6 +1010,100 @@ export interface RawConfigUpdateResponse {
 	message: string;
 }
 
+// -- Agent Links & Topology --
+
+export type LinkDirection = "one_way" | "two_way";
+export type LinkKind = "hierarchical" | "peer";
+
+export interface AgentLinkResponse {
+	from_agent_id: string;
+	to_agent_id: string;
+	direction: LinkDirection;
+	kind: LinkKind;
+}
+
+export interface LinksResponse {
+	links: AgentLinkResponse[];
+}
+
+export interface TopologyAgent {
+	id: string;
+	name: string;
+	display_name?: string;
+	role?: string;
+}
+
+export interface TopologyLink {
+	from: string;
+	to: string;
+	direction: string;
+	kind: string;
+}
+
+export interface TopologyGroup {
+	name: string;
+	agent_ids: string[];
+	color?: string;
+}
+
+export interface TopologyHuman {
+	id: string;
+	display_name?: string;
+	role?: string;
+	bio?: string;
+}
+
+export interface TopologyResponse {
+	agents: TopologyAgent[];
+	humans: TopologyHuman[];
+	links: TopologyLink[];
+	groups: TopologyGroup[];
+}
+
+export interface CreateHumanRequest {
+	id: string;
+	display_name?: string;
+	role?: string;
+	bio?: string;
+}
+
+export interface UpdateHumanRequest {
+	display_name?: string;
+	role?: string;
+	bio?: string;
+}
+
+export interface CreateGroupRequest {
+	name: string;
+	agent_ids?: string[];
+	color?: string;
+}
+
+export interface UpdateGroupRequest {
+	name?: string;
+	agent_ids?: string[];
+	color?: string;
+}
+
+export interface CreateLinkRequest {
+	from: string;
+	to: string;
+	direction?: LinkDirection;
+	kind?: LinkKind;
+}
+
+export interface UpdateLinkRequest {
+	direction?: LinkDirection;
+	kind?: LinkKind;
+}
+
+export interface AgentMessageEvent {
+	from_agent_id: string;
+	to_agent_id: string;
+	link_id: string;
+	channel_id: string;
+}
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
@@ -968,12 +1111,27 @@ export const api = {
 	agentOverview: (agentId: string) =>
 		fetchJson<AgentOverviewResponse>(`/agents/overview?agent_id=${encodeURIComponent(agentId)}`),
 	channels: () => fetchJson<ChannelsResponse>("/channels"),
+	deleteChannel: async (agentId: string, channelId: string) => {
+		const params = new URLSearchParams({ agent_id: agentId, channel_id: channelId });
+		const response = await fetch(`${API_BASE}/channels?${params}`, { method: "DELETE" });
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<{ success: boolean }>;
+	},
 	channelMessages: (channelId: string, limit = 20, before?: string) => {
 		const params = new URLSearchParams({ channel_id: channelId, limit: String(limit) });
 		if (before) params.set("before", before);
 		return fetchJson<MessagesResponse>(`/channels/messages?${params}`);
 	},
 	channelStatus: () => fetchJson<ChannelStatusResponse>("/channels/status"),
+	workersList: (agentId: string, params: { limit?: number; offset?: number; status?: string } = {}) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params.limit) search.set("limit", String(params.limit));
+		if (params.offset) search.set("offset", String(params.offset));
+		if (params.status) search.set("status", params.status);
+		return fetchJson<WorkerListResponse>(`/agents/workers?${search}`);
+	},
+	workerDetail: (agentId: string, workerId: string) =>
+		fetchJson<WorkerDetailResponse>(`/agents/workers/detail?agent_id=${encodeURIComponent(agentId)}&worker_id=${encodeURIComponent(workerId)}`),
 	agentMemories: (agentId: string, params: MemoriesListParams = {}) => {
 		const search = new URLSearchParams({ agent_id: agentId });
 		if (params.limit) search.set("limit", String(params.limit));
@@ -1040,11 +1198,23 @@ export const api = {
 		}
 		return response.json() as Promise<IdentityFiles>;
 	},
-	createAgent: async (agentId: string) => {
+	createAgent: async (agentId: string, displayName?: string, role?: string) => {
 		const response = await fetch(`${API_BASE}/agents`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent_id: agentId }),
+			body: JSON.stringify({ agent_id: agentId, display_name: displayName || undefined, role: role || undefined }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<{ success: boolean; agent_id: string; message: string }>;
+	},
+
+	updateAgent: async (agentId: string, update: { display_name?: string; role?: string }) => {
+		const response = await fetch(`${API_BASE}/agents`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, ...update }),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
@@ -1405,6 +1575,120 @@ export const api = {
 		fetchJson<RegistrySearchResponse>(
 			`/skills/registry/search?q=${encodeURIComponent(query)}&limit=${limit}`,
 		),
+
+	// Agent Links & Topology API
+	topology: () => fetchJson<TopologyResponse>("/topology"),
+	links: () => fetchJson<LinksResponse>("/links"),
+	agentLinks: (agentId: string) =>
+		fetchJson<LinksResponse>(`/agents/${encodeURIComponent(agentId)}/links`),
+	createLink: async (request: CreateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
+		const response = await fetch(`${API_BASE}/links`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	updateLink: async (from: string, to: string, request: UpdateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
+		const response = await fetch(
+			`${API_BASE}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(request),
+			},
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	deleteLink: async (from: string, to: string): Promise<void> => {
+		const response = await fetch(
+			`${API_BASE}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+	},
+
+	// Agent Groups API
+	groups: () => fetchJson<{ groups: TopologyGroup[] }>("/groups"),
+	createGroup: async (request: CreateGroupRequest): Promise<{ group: TopologyGroup }> => {
+		const response = await fetch(`${API_BASE}/groups`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	updateGroup: async (name: string, request: UpdateGroupRequest): Promise<{ group: TopologyGroup }> => {
+		const response = await fetch(
+			`${API_BASE}/groups/${encodeURIComponent(name)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(request),
+			},
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	deleteGroup: async (name: string): Promise<void> => {
+		const response = await fetch(
+			`${API_BASE}/groups/${encodeURIComponent(name)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+	},
+
+	// Humans API
+	humans: () => fetchJson<{ humans: TopologyHuman[] }>("/humans"),
+	createHuman: async (request: CreateHumanRequest): Promise<{ human: TopologyHuman }> => {
+		const response = await fetch(`${API_BASE}/humans`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	updateHuman: async (id: string, request: UpdateHumanRequest): Promise<{ human: TopologyHuman }> => {
+		const response = await fetch(
+			`${API_BASE}/humans/${encodeURIComponent(id)}`,
+			{
+				method: "PUT",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify(request),
+			},
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	deleteHuman: async (id: string): Promise<void> => {
+		const response = await fetch(
+			`${API_BASE}/humans/${encodeURIComponent(id)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+	},
 
 	// Web Chat API
 	webChatSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>

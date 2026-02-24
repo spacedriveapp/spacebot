@@ -89,19 +89,19 @@ The `direction` label on token counts distinguishes input tokens, output (comple
 
 Token usage and estimated costs are tracked per-request. To see total estimated spend:
 
-```promql
+```text
 sum(spacebot_llm_estimated_cost_dollars) by (agent_id)
 ```
 
 To see spend rate over the last hour:
 
-```promql
+```text
 sum(rate(spacebot_llm_estimated_cost_dollars[1h])) by (agent_id, model) * 3600
 ```
 
 To see token throughput:
 
-```promql
+```text
 sum(rate(spacebot_llm_tokens_total[5m])) by (direction)
 ```
 

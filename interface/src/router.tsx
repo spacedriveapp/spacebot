@@ -20,6 +20,7 @@ import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
 import {AgentIngest} from "@/routes/AgentIngest";
 import {AgentSkills} from "@/routes/AgentSkills";
+import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
@@ -67,8 +68,8 @@ const indexRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/",
 	component: function IndexPage() {
-		const {liveStates} = useLiveContext();
-		return <Overview liveStates={liveStates} />;
+		const {liveStates, activeLinks} = useLiveContext();
+		return <Overview liveStates={liveStates} activeLinks={activeLinks} />;
 	},
 });
 
@@ -187,15 +188,16 @@ const agentIngestRoute = createRoute({
 const agentWorkersRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/workers",
+	validateSearch: (search: Record<string, unknown>): {worker?: string} => ({
+		worker: typeof search.worker === "string" ? search.worker : undefined,
+	}),
 	component: function AgentWorkersPage() {
 		const {agentId} = agentWorkersRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
-				<div className="flex flex-1 items-center justify-center">
-					<p className="text-sm text-ink-faint">
-						Workers control interface coming soon
-					</p>
+				<div className="flex-1 overflow-hidden">
+					<AgentWorkers agentId={agentId} />
 				</div>
 			</div>
 		);

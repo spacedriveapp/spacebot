@@ -8259,6 +8259,7 @@ dependencies = [
  "dirs",
  "emojis",
  "fastembed",
+ "flate2",
  "futures",
  "hex",
  "ignore",

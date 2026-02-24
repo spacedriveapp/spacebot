@@ -148,6 +148,39 @@ pub(super) async fn channel_status(
     Json(result)
 }
 
+#[derive(Deserialize)]
+pub(super) struct DeleteChannelQuery {
+    agent_id: String,
+    channel_id: String,
+}
+
+/// Delete a channel and its message history.
+pub(super) async fn delete_channel(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<DeleteChannelQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = ChannelStore::new(pool.clone());
+
+    let deleted = store.delete(&query.channel_id).await.map_err(|error| {
+        tracing::error!(%error, "failed to delete channel");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if !deleted {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    tracing::info!(
+        agent_id = %query.agent_id,
+        channel_id = %query.channel_id,
+        "channel deleted via API"
+    );
+
+    Ok(Json(serde_json::json!({ "success": true })))
+}
+
 /// Cancel a running worker or branch via the API.
 pub(super) async fn cancel_process(
     State(state): State<Arc<ApiState>>,

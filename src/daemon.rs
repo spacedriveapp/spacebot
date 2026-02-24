@@ -55,6 +55,13 @@ impl DaemonPaths {
     }
 }
 
+fn truncate_for_log(message: &str, max_chars: usize) -> (&str, bool) {
+    match message.char_indices().nth(max_chars) {
+        Some((byte_index, _character)) => (&message[..byte_index], true),
+        None => (message, false),
+    }
+}
+
 /// Check whether a daemon is already running by testing PID file liveness
 /// and socket connectivity.
 pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
@@ -140,10 +147,9 @@ pub fn init_background_tracing(
         } else if field_name == "message" {
             let formatted = format!("{value:?}");
             const MAX_MESSAGE_CHARS: usize = 280;
-            if formatted.len() > MAX_MESSAGE_CHARS {
-                let boundary = formatted.floor_char_boundary(MAX_MESSAGE_CHARS);
-                write!(writer, "{}={}", field_name, &formatted[..boundary])?;
-                write!(writer, "...")
+            let (truncated, was_truncated) = truncate_for_log(&formatted, MAX_MESSAGE_CHARS);
+            if was_truncated {
+                write!(writer, "{}={}...", field_name, truncated)
             } else {
                 write!(writer, "{}={formatted}", field_name)
             }
@@ -201,13 +207,14 @@ pub fn init_foreground_tracing(
         } else if field_name == "message" {
             let formatted = format!("{value:?}");
             const MAX_MESSAGE_CHARS: usize = 280;
-            if formatted.len() > MAX_MESSAGE_CHARS {
-                let boundary = formatted.floor_char_boundary(MAX_MESSAGE_CHARS);
-                write!(writer, "{}={}", field_name, &formatted[..boundary])?;
-                write!(writer, "...")
+            let (truncated, was_truncated) = truncate_for_log(&formatted, MAX_MESSAGE_CHARS);
+            if was_truncated {
+                write!(writer, "{}={}", field_name, truncated)?;
+                write!(writer, "...")?;
             } else {
-                write!(writer, "{}={formatted}", field_name)
+                write!(writer, "{}={formatted}", field_name)?;
             }
+            Ok(())
         } else {
             write!(writer, "{}={value:?}", field_name)
         }
@@ -461,4 +468,27 @@ pub fn wait_for_exit(pid: u32) -> bool {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_for_log_handles_multibyte_characters() {
+        let message = "abc→def";
+        let (truncated, was_truncated) = truncate_for_log(message, 4);
+
+        assert!(was_truncated);
+        assert_eq!(truncated, "abc→");
+    }
+
+    #[test]
+    fn truncate_for_log_returns_original_when_within_limit() {
+        let message = "hello";
+        let (truncated, was_truncated) = truncate_for_log(message, 10);
+
+        assert!(!was_truncated);
+        assert_eq!(truncated, "hello");
+    }
 }
