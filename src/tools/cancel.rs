@@ -100,7 +100,7 @@ impl Tool for CancelTool {
                     .parse::<WorkerId>()
                     .map_err(|e| CancelError(format!("Invalid worker ID: {e}")))?;
                 self.state
-                    .cancel_worker(worker_id)
+                    .cancel_worker(worker_id, args.reason.as_deref())
                     .await
                     .map_err(CancelError)?;
             }

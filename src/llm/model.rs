@@ -519,7 +519,7 @@ impl SpacebotModel {
             "messages": messages,
         });
 
-        if let Some(max_tokens) = request.max_tokens {
+        if let Some(max_tokens) = positive_max_tokens(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
 
@@ -632,7 +632,7 @@ impl SpacebotModel {
             );
         }
 
-        if !is_chatgpt_codex && let Some(max_tokens) = request.max_tokens {
+        if !is_chatgpt_codex && let Some(max_tokens) = positive_max_tokens(request.max_tokens) {
             body["max_output_tokens"] = serde_json::json!(max_tokens);
         }
 
@@ -760,7 +760,7 @@ impl SpacebotModel {
             "messages": messages,
         });
 
-        if let Some(max_tokens) = request.max_tokens {
+        if let Some(max_tokens) = positive_max_tokens(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
 
@@ -861,7 +861,7 @@ impl SpacebotModel {
             "messages": messages,
         });
 
-        if let Some(max_tokens) = request.max_tokens {
+        if let Some(max_tokens) = positive_max_tokens(request.max_tokens) {
             body["max_tokens"] = serde_json::json!(max_tokens);
         }
 
@@ -941,6 +941,10 @@ fn reverse_map_tool_names(
                 crate::llm::anthropic::from_claude_code_name(&tc.function.name, original_tools);
         }
     }
+}
+
+fn positive_max_tokens(max_tokens: Option<u64>) -> Option<u64> {
+    max_tokens.filter(|value| *value > 0)
 }
 
 fn tool_result_content_to_string(content: &OneOrMany<rig::message::ToolResultContent>) -> String {
@@ -1567,5 +1571,17 @@ mod tests {
         } else {
             panic!("expected ToolCall");
         }
+    }
+
+    #[test]
+    fn positive_max_tokens_omits_zero() {
+        assert_eq!(positive_max_tokens(None), None);
+        assert_eq!(positive_max_tokens(Some(0)), None);
+    }
+
+    #[test]
+    fn positive_max_tokens_keeps_positive_values() {
+        assert_eq!(positive_max_tokens(Some(1)), Some(1));
+        assert_eq!(positive_max_tokens(Some(2048)), Some(2048));
     }
 }

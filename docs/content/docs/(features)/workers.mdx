@@ -95,7 +95,7 @@ Workers run in segments of 25 turns each. After each segment:
 
 - If the agent returned a result: done
 - If max turns hit: compact if needed, continue with "Continue where you left off"
-- If cancelled: state = Failed
+- If cancelled: state = Cancelled
 - If context overflow: force compact, retry
 
 This prevents runaway workers and handles long tasks that exceed a single agent loop.
@@ -111,9 +111,31 @@ Workers report progress via the `set_status` tool. The status string (max 256 ch
 
 The channel LLM sees this and can decide whether to wait, ask for more info, or cancel.
 
+Spacebot also forwards throttled worker checkpoints to the user-facing adapter:
+
+- Start and completion updates are always surfaced.
+- Mid-run checkpoints are deduped and rate-limited (default: at most one every 20s per worker, with urgent states bypassing the limit).
+- Adapters that support message editing (for example Discord) update a single progress message in place to avoid channel spam.
+
 ## Concurrency
 
 Workers run concurrently. The default limit is `max_concurrent_workers: 5` per channel (configurable per agent). Attempting to spawn beyond the limit returns an error to the LLM so it can wait or cancel an existing worker.
+
+## Timeouts
+
+Worker runs are bounded by `worker_timeout_secs` (default `300`) as an inactivity timeout. Any worker progress event (status updates, tool activity, permission/question prompts) resets the timer.
+
+If no progress arrives within the timeout window, Spacebot marks the worker as `timed_out`, records a terminal result, and removes it from active worker state so the channel can continue delegating work.
+
+## Terminal Delivery Reliability
+
+Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued as durable delivery receipts before they are sent to the messaging adapter.
+
+- Receipts are retried with bounded backoff on adapter delivery errors.
+- Successful delivery marks the receipt as acknowledged.
+- On process restart, in-flight (`sending`) receipts are re-queued so completion notices are not silently dropped.
+- Old terminal receipts (`acked`, `failed`) are pruned periodically to keep storage bounded.
+- `/api/channels/status` includes `worker_delivery_receipts` counts (`pending`, `failed`) per channel for observability.
 
 ## Model Routing
 

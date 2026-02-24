@@ -214,6 +214,43 @@ pub enum TimelineItem {
     },
 }
 
+const WORKER_TERMINAL_RECEIPT_KIND: &str = "worker_terminal";
+const WORKER_RECEIPT_MAX_ATTEMPTS: i64 = 6;
+const WORKER_RECEIPT_BACKOFF_SECS: [i64; 5] = [5, 15, 45, 120, 300];
+const WORKER_RECEIPT_RETENTION_DAYS: i64 = 30;
+
+fn worker_receipt_backoff_secs(attempt_count: i64) -> Option<i64> {
+    if attempt_count <= 0 {
+        return WORKER_RECEIPT_BACKOFF_SECS.first().copied();
+    }
+    WORKER_RECEIPT_BACKOFF_SECS
+        .get((attempt_count - 1) as usize)
+        .copied()
+}
+
+#[derive(Debug, Clone)]
+pub struct PendingWorkerDeliveryReceipt {
+    pub id: String,
+    pub worker_id: String,
+    pub channel_id: String,
+    pub terminal_state: String,
+    pub payload_text: String,
+    pub attempt_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerDeliveryReceiptStats {
+    pub pending: u64,
+    pub failed: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerDeliveryRetryOutcome {
+    pub status: String,
+    pub attempt_count: i64,
+    pub next_attempt_at: Option<String>,
+}
+
 /// Persists branch and worker run records for channel timeline history.
 ///
 /// All write methods are fire-and-forget, same pattern as ConversationLogger.
@@ -328,10 +365,22 @@ impl ProcessRunLogger {
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
+                "UPDATE worker_runs \
+                 SET result = ?, \
+                     status = CASE \
+                         WHEN status IN ('cancelled', 'failed', 'timed_out') THEN status \
+                         WHEN ? LIKE 'Worker cancelled:%' THEN 'cancelled' \
+                         WHEN ? LIKE 'Worker failed:%' THEN 'failed' \
+                         WHEN ? LIKE 'Worker timed out after %' THEN 'timed_out' \
+                         ELSE 'done' \
+                     END, \
+                     completed_at = CURRENT_TIMESTAMP \
+                 WHERE id = ?",
             )
             .bind(&result)
-            .bind(status)
+            .bind(&result)
+            .bind(&result)
+            .bind(&result)
             .bind(&id)
             .execute(&pool)
             .await
@@ -339,6 +388,399 @@ impl ProcessRunLogger {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
             }
         });
+    }
+
+    /// Create (or refresh) the durable terminal delivery receipt for a worker.
+    ///
+    /// One terminal receipt exists per worker (`kind = worker_terminal`). If the
+    /// receipt already exists and is not acked, it is reset to pending so it can
+    /// be retried.
+    pub async fn upsert_worker_terminal_receipt(
+        &self,
+        channel_id: &ChannelId,
+        worker_id: WorkerId,
+        terminal_state: &str,
+        payload_text: &str,
+    ) -> crate::error::Result<String> {
+        let worker_id = worker_id.to_string();
+        let channel_id = channel_id.to_string();
+
+        let existing = sqlx::query(
+            "SELECT id, status \
+             FROM worker_delivery_receipts \
+             WHERE worker_id = ? AND kind = ?",
+        )
+        .bind(&worker_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        if let Some(row) = existing {
+            let receipt_id: String = row.try_get("id").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+
+            if status != "acked" {
+                sqlx::query(
+                    "UPDATE worker_delivery_receipts \
+                     SET channel_id = ?, \
+                         terminal_state = ?, \
+                         payload_text = ?, \
+                         status = 'pending', \
+                         last_error = NULL, \
+                         next_attempt_at = CURRENT_TIMESTAMP, \
+                         updated_at = CURRENT_TIMESTAMP \
+                     WHERE id = ?",
+                )
+                .bind(&channel_id)
+                .bind(terminal_state)
+                .bind(payload_text)
+                .bind(&receipt_id)
+                .execute(&self.pool)
+                .await
+                .map_err(|error| anyhow::anyhow!(error))?;
+            }
+
+            return Ok(receipt_id);
+        }
+
+        let receipt_id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at) \
+             VALUES (?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(&receipt_id)
+        .bind(&worker_id)
+        .bind(&channel_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind(terminal_state)
+        .bind(payload_text)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(receipt_id)
+    }
+
+    /// Claim due pending terminal receipts for delivery.
+    ///
+    /// Claimed receipts are transitioned to `sending` so we can distinguish in-flight
+    /// deliveries from queued retries.
+    pub async fn claim_due_worker_terminal_receipts(
+        &self,
+        channel_id: &ChannelId,
+        limit: i64,
+    ) -> crate::error::Result<Vec<PendingWorkerDeliveryReceipt>> {
+        let channel_id = channel_id.to_string();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let rows = sqlx::query(
+            "SELECT id, worker_id, channel_id, terminal_state, payload_text, attempt_count \
+             FROM worker_delivery_receipts \
+             WHERE channel_id = ? \
+               AND kind = ? \
+               AND status = 'pending' \
+               AND next_attempt_at <= CURRENT_TIMESTAMP \
+             ORDER BY next_attempt_at ASC, created_at ASC \
+             LIMIT ?",
+        )
+        .bind(&channel_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let receipt_id: String = row.try_get("id").unwrap_or_default();
+            let updated = sqlx::query(
+                "UPDATE worker_delivery_receipts \
+                 SET status = 'sending', updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? AND status = 'pending'",
+            )
+            .bind(&receipt_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
+            .rows_affected();
+
+            if updated == 0 {
+                continue;
+            }
+
+            claimed.push(PendingWorkerDeliveryReceipt {
+                id: receipt_id,
+                worker_id: row.try_get("worker_id").unwrap_or_default(),
+                channel_id: row.try_get("channel_id").unwrap_or_default(),
+                terminal_state: row.try_get("terminal_state").unwrap_or_default(),
+                payload_text: row.try_get("payload_text").unwrap_or_default(),
+                attempt_count: row.try_get("attempt_count").unwrap_or_default(),
+            });
+        }
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(claimed)
+    }
+
+    /// Claim due pending terminal receipts across all channels.
+    ///
+    /// Used by the global receipt dispatcher to drain terminal notices even
+    /// when no channel loop is currently active.
+    pub async fn claim_due_worker_terminal_receipts_any(
+        &self,
+        limit: i64,
+    ) -> crate::error::Result<Vec<PendingWorkerDeliveryReceipt>> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let rows = sqlx::query(
+            "SELECT id, worker_id, channel_id, terminal_state, payload_text, attempt_count \
+             FROM worker_delivery_receipts \
+             WHERE kind = ? \
+               AND status = 'pending' \
+               AND next_attempt_at <= CURRENT_TIMESTAMP \
+             ORDER BY next_attempt_at ASC, created_at ASC \
+             LIMIT ?",
+        )
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut claimed = Vec::with_capacity(rows.len());
+        for row in rows {
+            let receipt_id: String = row.try_get("id").unwrap_or_default();
+            let updated = sqlx::query(
+                "UPDATE worker_delivery_receipts \
+                 SET status = 'sending', updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? AND status = 'pending'",
+            )
+            .bind(&receipt_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
+            .rows_affected();
+
+            if updated == 0 {
+                continue;
+            }
+
+            claimed.push(PendingWorkerDeliveryReceipt {
+                id: receipt_id,
+                worker_id: row.try_get("worker_id").unwrap_or_default(),
+                channel_id: row.try_get("channel_id").unwrap_or_default(),
+                terminal_state: row.try_get("terminal_state").unwrap_or_default(),
+                payload_text: row.try_get("payload_text").unwrap_or_default(),
+                attempt_count: row.try_get("attempt_count").unwrap_or_default(),
+            });
+        }
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(claimed)
+    }
+
+    /// Mark a terminal receipt as delivered.
+    ///
+    /// Returns true if this call transitioned the row to acked.
+    pub async fn ack_worker_delivery_receipt(
+        &self,
+        receipt_id: &str,
+    ) -> crate::error::Result<bool> {
+        let updated = sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET status = 'acked', \
+                 acked_at = CURRENT_TIMESTAMP, \
+                 updated_at = CURRENT_TIMESTAMP, \
+                 last_error = NULL \
+             WHERE id = ? AND status != 'acked'",
+        )
+        .bind(receipt_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?
+        .rows_affected();
+
+        Ok(updated > 0)
+    }
+
+    /// Record a delivery failure and schedule the next retry (or terminal failure).
+    pub async fn fail_worker_delivery_receipt_attempt(
+        &self,
+        receipt_id: &str,
+        error: &str,
+    ) -> crate::error::Result<WorkerDeliveryRetryOutcome> {
+        let row = sqlx::query(
+            "SELECT status, attempt_count \
+             FROM worker_delivery_receipts \
+             WHERE id = ?",
+        )
+        .bind(receipt_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|db_error| anyhow::anyhow!(db_error))?
+        .ok_or_else(|| anyhow::anyhow!("worker delivery receipt not found: {receipt_id}"))?;
+
+        let current_status: String = row.try_get("status").unwrap_or_default();
+        let current_attempts: i64 = row.try_get("attempt_count").unwrap_or_default();
+
+        if current_status == "acked" {
+            return Ok(WorkerDeliveryRetryOutcome {
+                status: "acked".to_string(),
+                attempt_count: current_attempts,
+                next_attempt_at: None,
+            });
+        }
+
+        let attempt_count = current_attempts + 1;
+        if attempt_count >= WORKER_RECEIPT_MAX_ATTEMPTS {
+            sqlx::query(
+                "UPDATE worker_delivery_receipts \
+                 SET status = 'failed', \
+                     attempt_count = ?, \
+                     last_error = ?, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ?",
+            )
+            .bind(attempt_count)
+            .bind(error)
+            .bind(receipt_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|db_error| anyhow::anyhow!(db_error))?;
+
+            return Ok(WorkerDeliveryRetryOutcome {
+                status: "failed".to_string(),
+                attempt_count,
+                next_attempt_at: None,
+            });
+        }
+
+        let delay_secs = worker_receipt_backoff_secs(attempt_count).unwrap_or(300);
+        sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET status = 'pending', \
+                 attempt_count = ?, \
+                 last_error = ?, \
+                 next_attempt_at = datetime('now', '+' || ? || ' seconds'), \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE id = ?",
+        )
+        .bind(attempt_count)
+        .bind(error)
+        .bind(delay_secs)
+        .bind(receipt_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|db_error| anyhow::anyhow!(db_error))?;
+
+        let next_attempt_at = chrono::Utc::now()
+            .checked_add_signed(chrono::TimeDelta::seconds(delay_secs))
+            .map(|timestamp| timestamp.to_rfc3339());
+
+        Ok(WorkerDeliveryRetryOutcome {
+            status: "pending".to_string(),
+            attempt_count,
+            next_attempt_at,
+        })
+    }
+
+    /// Load worker delivery receipt stats for a channel.
+    pub async fn load_worker_delivery_receipt_stats(
+        &self,
+        channel_id: &str,
+    ) -> crate::error::Result<WorkerDeliveryReceiptStats> {
+        let row = sqlx::query(
+            "SELECT \
+                SUM(CASE WHEN status IN ('pending', 'sending') THEN 1 ELSE 0 END) AS pending_count, \
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_count \
+             FROM worker_delivery_receipts \
+             WHERE channel_id = ? \
+               AND kind = ?",
+        )
+        .bind(channel_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let pending = row.try_get::<i64, _>("pending_count").unwrap_or(0).max(0) as u64;
+        let failed = row.try_get::<i64, _>("failed_count").unwrap_or(0).max(0) as u64;
+
+        Ok(WorkerDeliveryReceiptStats { pending, failed })
+    }
+
+    /// Delete old terminal delivery receipts that are no longer actionable.
+    ///
+    /// Keeps `pending` and `sending` rows intact, and only removes terminal rows
+    /// (`acked`, `failed`) older than the configured retention period.
+    pub async fn prune_worker_delivery_receipts(&self) -> crate::error::Result<u64> {
+        let deleted = sqlx::query(
+            "DELETE FROM worker_delivery_receipts \
+             WHERE status IN ('acked', 'failed') \
+               AND julianday(updated_at) < julianday('now', '-' || ? || ' days')",
+        )
+        .bind(WORKER_RECEIPT_RETENTION_DAYS)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?
+        .rows_affected();
+
+        Ok(deleted)
+    }
+
+    /// Close orphaned branch and worker runs from a previous process lifetime.
+    ///
+    /// This is called on startup before channels begin handling messages. Any
+    /// rows with NULL `completed_at` cannot be resumed and should be marked
+    /// terminal so timelines and analytics stay accurate.
+    pub async fn close_orphaned_runs(&self) -> crate::error::Result<(u64, u64, u64)> {
+        let worker_result = sqlx::query(
+            "UPDATE worker_runs \
+             SET status = 'failed', \
+                 result = COALESCE(result, 'Worker interrupted by restart before completion.'), \
+                 completed_at = CURRENT_TIMESTAMP \
+             WHERE completed_at IS NULL",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let branch_result = sqlx::query(
+            "UPDATE branch_runs \
+             SET conclusion = COALESCE(conclusion, 'Branch interrupted by restart before completion.'), \
+                 completed_at = CURRENT_TIMESTAMP \
+             WHERE completed_at IS NULL",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let receipt_result = sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET status = 'pending', \
+                 next_attempt_at = CURRENT_TIMESTAMP, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE status = 'sending'",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok((
+            worker_result.rows_affected(),
+            branch_result.rows_affected(),
+            receipt_result.rows_affected(),
+        ))
     }
 
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
@@ -597,4 +1039,420 @@ pub struct WorkerDetailRow {
     pub completed_at: Option<String>,
     pub transcript_blob: Option<Vec<u8>>,
     pub tool_calls: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlx::sqlite::SqliteConnectOptions;
+    use std::sync::Arc;
+
+    async fn connect_logger() -> ProcessRunLogger {
+        let options = SqliteConnectOptions::new()
+            .in_memory(true)
+            .create_if_missing(true);
+        let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
+            .max_connections(1)
+            .connect_with(options)
+            .await
+            .expect("in-memory SQLite");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("migrations");
+        ProcessRunLogger::new(pool)
+    }
+
+    #[tokio::test]
+    async fn worker_terminal_receipt_claim_ack_and_stats() {
+        let logger = connect_logger().await;
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "done",
+                "Background task completed: finished indexing",
+            )
+            .await
+            .expect("upsert receipt");
+
+        let initial_stats = logger
+            .load_worker_delivery_receipt_stats(channel_id.as_ref())
+            .await
+            .expect("load initial stats");
+        assert_eq!(initial_stats.pending, 1);
+        assert_eq!(initial_stats.failed, 0);
+
+        let claimed = logger
+            .claim_due_worker_terminal_receipts(&channel_id, 8)
+            .await
+            .expect("claim due receipts");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, receipt_id);
+        assert_eq!(claimed[0].terminal_state, "done");
+        assert_eq!(claimed[0].attempt_count, 0);
+
+        let acked_now = logger
+            .ack_worker_delivery_receipt(&receipt_id)
+            .await
+            .expect("ack receipt");
+        assert!(acked_now);
+
+        let acked_again = logger
+            .ack_worker_delivery_receipt(&receipt_id)
+            .await
+            .expect("idempotent ack");
+        assert!(!acked_again);
+
+        let final_stats = logger
+            .load_worker_delivery_receipt_stats(channel_id.as_ref())
+            .await
+            .expect("load final stats");
+        assert_eq!(final_stats.pending, 0);
+        assert_eq!(final_stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn worker_terminal_receipt_failure_retries_then_fails() {
+        let logger = connect_logger().await;
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "failed",
+                "Background task failed: network timeout",
+            )
+            .await
+            .expect("upsert receipt");
+
+        let first_outcome = logger
+            .fail_worker_delivery_receipt_attempt(&receipt_id, "temporary send failure")
+            .await
+            .expect("record first failure");
+        assert_eq!(first_outcome.status, "pending");
+        assert_eq!(first_outcome.attempt_count, 1);
+        assert!(first_outcome.next_attempt_at.is_some());
+
+        sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET next_attempt_at = CURRENT_TIMESTAMP \
+             WHERE id = ?",
+        )
+        .bind(&receipt_id)
+        .execute(&logger.pool)
+        .await
+        .expect("advance retry deadline");
+
+        let claimed = logger
+            .claim_due_worker_terminal_receipts(&channel_id, 8)
+            .await
+            .expect("claim receipt after retry scheduling");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].attempt_count, 1);
+
+        for attempt in 2..=WORKER_RECEIPT_MAX_ATTEMPTS {
+            let outcome = logger
+                .fail_worker_delivery_receipt_attempt(&receipt_id, "adapter unavailable")
+                .await
+                .expect("record retry failure");
+            assert_eq!(outcome.attempt_count, attempt);
+            if attempt < WORKER_RECEIPT_MAX_ATTEMPTS {
+                assert_eq!(outcome.status, "pending");
+                assert!(outcome.next_attempt_at.is_some());
+            } else {
+                assert_eq!(outcome.status, "failed");
+                assert!(outcome.next_attempt_at.is_none());
+            }
+        }
+
+        let stats = logger
+            .load_worker_delivery_receipt_stats(channel_id.as_ref())
+            .await
+            .expect("load retry stats");
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.failed, 1);
+    }
+
+    #[tokio::test]
+    async fn close_orphaned_runs_requeues_sending_receipts() {
+        let logger = connect_logger().await;
+        let receipt_id = "receipt-test";
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at) \
+             VALUES (?, ?, ?, ?, 'sending', ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind(receipt_id)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind("channel:test")
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("done")
+        .bind("Background task completed: done")
+        .execute(&logger.pool)
+        .await
+        .expect("insert sending receipt");
+
+        let (_, _, recovered_receipts) = logger
+            .close_orphaned_runs()
+            .await
+            .expect("recover orphaned runs");
+        assert_eq!(recovered_receipts, 1);
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM worker_delivery_receipts WHERE id = ?")
+                .bind(receipt_id)
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load receipt status");
+        assert_eq!(status, "pending");
+    }
+
+    #[tokio::test]
+    async fn claim_due_worker_terminal_receipts_any_claims_multiple_channels() {
+        let logger = connect_logger().await;
+        let channel_a: ChannelId = Arc::from("discord:1:100");
+        let channel_b: ChannelId = Arc::from("discord:1:200");
+
+        logger
+            .upsert_worker_terminal_receipt(
+                &channel_a,
+                uuid::Uuid::new_v4(),
+                "done",
+                "Background task completed: channel a",
+            )
+            .await
+            .expect("upsert channel a receipt");
+        logger
+            .upsert_worker_terminal_receipt(
+                &channel_b,
+                uuid::Uuid::new_v4(),
+                "done",
+                "Background task completed: channel b",
+            )
+            .await
+            .expect("upsert channel b receipt");
+
+        let claimed = logger
+            .claim_due_worker_terminal_receipts_any(10)
+            .await
+            .expect("claim due receipts across channels");
+        assert_eq!(claimed.len(), 2);
+        assert!(
+            claimed
+                .iter()
+                .any(|receipt| receipt.channel_id == channel_a.as_ref())
+        );
+        assert!(
+            claimed
+                .iter()
+                .any(|receipt| receipt.channel_id == channel_b.as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn worker_terminal_receipt_cancelled_claim_ack_round_trip() {
+        let logger = connect_logger().await;
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "cancelled",
+                "Background task was cancelled.",
+            )
+            .await
+            .expect("upsert cancelled receipt");
+
+        let claimed = logger
+            .claim_due_worker_terminal_receipts(&channel_id, 8)
+            .await
+            .expect("claim cancelled receipt");
+        assert_eq!(claimed.len(), 1);
+        assert_eq!(claimed[0].id, receipt_id);
+        assert_eq!(claimed[0].terminal_state, "cancelled");
+        assert_eq!(claimed[0].payload_text, "Background task was cancelled.");
+
+        let acked = logger
+            .ack_worker_delivery_receipt(&receipt_id)
+            .await
+            .expect("ack cancelled receipt");
+        assert!(acked);
+
+        let stats = logger
+            .load_worker_delivery_receipt_stats(channel_id.as_ref())
+            .await
+            .expect("load stats");
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn cancelled_receipt_delivery_failure_retries_then_acks() {
+        let logger = connect_logger().await;
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "cancelled",
+                "Background task was cancelled.",
+            )
+            .await
+            .expect("upsert cancelled receipt");
+
+        let first_claim = logger
+            .claim_due_worker_terminal_receipts(&channel_id, 8)
+            .await
+            .expect("first claim");
+        assert_eq!(first_claim.len(), 1);
+        assert_eq!(first_claim[0].id, receipt_id);
+        assert_eq!(first_claim[0].attempt_count, 0);
+
+        let retry = logger
+            .fail_worker_delivery_receipt_attempt(&receipt_id, "adapter unavailable")
+            .await
+            .expect("record first delivery failure");
+        assert_eq!(retry.status, "pending");
+        assert_eq!(retry.attempt_count, 1);
+        assert!(retry.next_attempt_at.is_some());
+
+        sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET next_attempt_at = CURRENT_TIMESTAMP \
+             WHERE id = ?",
+        )
+        .bind(&receipt_id)
+        .execute(&logger.pool)
+        .await
+        .expect("advance retry deadline");
+
+        let second_claim = logger
+            .claim_due_worker_terminal_receipts(&channel_id, 8)
+            .await
+            .expect("second claim after retry");
+        assert_eq!(second_claim.len(), 1);
+        assert_eq!(second_claim[0].id, receipt_id);
+        assert_eq!(second_claim[0].attempt_count, 1);
+
+        let acked = logger
+            .ack_worker_delivery_receipt(&receipt_id)
+            .await
+            .expect("ack retried receipt");
+        assert!(acked);
+
+        let status: String =
+            sqlx::query_scalar("SELECT status FROM worker_delivery_receipts WHERE id = ?")
+                .bind(&receipt_id)
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load receipt status");
+        assert_eq!(status, "acked");
+
+        let stats = logger
+            .load_worker_delivery_receipt_stats(channel_id.as_ref())
+            .await
+            .expect("load stats after ack");
+        assert_eq!(stats.pending, 0);
+        assert_eq!(stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn prune_worker_delivery_receipts_deletes_only_old_terminal_rows() {
+        let logger = connect_logger().await;
+        let worker_old_acked = uuid::Uuid::new_v4().to_string();
+        let worker_old_failed = uuid::Uuid::new_v4().to_string();
+        let worker_old_pending = uuid::Uuid::new_v4().to_string();
+        let worker_recent_acked = uuid::Uuid::new_v4().to_string();
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        )
+        .bind("old-acked")
+        .bind(&worker_old_acked)
+        .bind("channel:test")
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("acked")
+        .bind("done")
+        .bind("Background task completed: old")
+        .bind("2000-01-01T00:00:00Z")
+        .execute(&logger.pool)
+        .await
+        .expect("insert old acked");
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        )
+        .bind("old-failed")
+        .bind(&worker_old_failed)
+        .bind("channel:test")
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("failed")
+        .bind("failed")
+        .bind("Background task failed: old")
+        .bind("2000-01-01T00:00:00Z")
+        .execute(&logger.pool)
+        .await
+        .expect("insert old failed");
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)",
+        )
+        .bind("old-pending")
+        .bind(&worker_old_pending)
+        .bind("channel:test")
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("pending")
+        .bind("done")
+        .bind("Background task completed: pending")
+        .bind("2000-01-01T00:00:00Z")
+        .execute(&logger.pool)
+        .await
+        .expect("insert old pending");
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind("recent-acked")
+        .bind(&worker_recent_acked)
+        .bind("channel:test")
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("acked")
+        .bind("done")
+        .bind("Background task completed: recent")
+        .execute(&logger.pool)
+        .await
+        .expect("insert recent acked");
+
+        let deleted = logger
+            .prune_worker_delivery_receipts()
+            .await
+            .expect("prune receipts");
+        assert_eq!(deleted, 2);
+
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM worker_delivery_receipts ORDER BY id ASC")
+                .fetch_all(&logger.pool)
+                .await
+                .expect("load remaining receipt ids");
+        assert_eq!(remaining, vec!["old-pending", "recent-acked"]);
+    }
 }

@@ -126,6 +126,10 @@ struct ActiveChannel {
     _outbound_handle: tokio::task::JoinHandle<()>,
 }
 
+const WORKER_RECEIPT_GLOBAL_DISPATCH_INTERVAL_SECS: u64 = 5;
+const WORKER_RECEIPT_GLOBAL_DISPATCH_BATCH_SIZE: i64 = 32;
+const WORKER_RECEIPT_PRUNE_INTERVAL_SECS: u64 = 60 * 60;
+
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -241,6 +245,159 @@ async fn cmd_stop() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn spawn_worker_receipt_dispatch_loop(
+    agent_id: String,
+    process_run_logger: spacebot::conversation::history::ProcessRunLogger,
+    channel_store: spacebot::conversation::ChannelStore,
+    conversation_logger: spacebot::conversation::history::ConversationLogger,
+    messaging_manager: Arc<spacebot::messaging::MessagingManager>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut next_prune_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if tokio::time::Instant::now() >= next_prune_at {
+                match process_run_logger.prune_worker_delivery_receipts().await {
+                    Ok(deleted) if deleted > 0 => {
+                        tracing::info!(
+                            agent_id = %agent_id,
+                            deleted,
+                            "pruned old worker delivery receipts"
+                        );
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            %error,
+                            "failed to prune worker delivery receipts"
+                        );
+                    }
+                }
+                next_prune_at = tokio::time::Instant::now()
+                    + std::time::Duration::from_secs(WORKER_RECEIPT_PRUNE_INTERVAL_SECS);
+            }
+
+            let due = match process_run_logger
+                .claim_due_worker_terminal_receipts_any(WORKER_RECEIPT_GLOBAL_DISPATCH_BATCH_SIZE)
+                .await
+            {
+                Ok(receipts) => receipts,
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %agent_id,
+                        %error,
+                        "global worker receipt dispatcher failed to claim receipts"
+                    );
+                    Vec::new()
+                }
+            };
+
+            for receipt in due {
+                let delivery_result = async {
+                    let channel_info = channel_store
+                        .get(&receipt.channel_id)
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!("failed to resolve channel info: {error}")
+                        })?
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "cannot deliver worker receipt: channel '{}' not found",
+                                receipt.channel_id
+                            )
+                        })?;
+
+                    let target =
+                        spacebot::messaging::target::resolve_broadcast_target(&channel_info)
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "cannot resolve broadcast target for channel '{}'",
+                                    receipt.channel_id
+                                )
+                            })?;
+
+                    messaging_manager
+                        .broadcast(
+                            &target.adapter,
+                            &target.target,
+                            spacebot::OutboundResponse::Text(receipt.payload_text.clone()),
+                        )
+                        .await
+                }
+                .await;
+
+                match delivery_result {
+                    Ok(()) => match process_run_logger
+                        .ack_worker_delivery_receipt(&receipt.id)
+                        .await
+                    {
+                        Ok(acked_now) => {
+                            if acked_now {
+                                let channel_id: spacebot::ChannelId =
+                                    Arc::from(receipt.channel_id.as_str());
+                                conversation_logger
+                                    .log_bot_message(&channel_id, &receipt.payload_text);
+                                tracing::info!(
+                                    agent_id = %agent_id,
+                                    channel_id = %receipt.channel_id,
+                                    worker_id = %receipt.worker_id,
+                                    receipt_id = %receipt.id,
+                                    "global worker receipt dispatcher delivered terminal receipt"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                agent_id = %agent_id,
+                                channel_id = %receipt.channel_id,
+                                worker_id = %receipt.worker_id,
+                                receipt_id = %receipt.id,
+                                %error,
+                                "failed to ack globally delivered worker terminal receipt"
+                            );
+                        }
+                    },
+                    Err(error) => {
+                        match process_run_logger
+                            .fail_worker_delivery_receipt_attempt(&receipt.id, &error.to_string())
+                            .await
+                        {
+                            Ok(outcome) => {
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    channel_id = %receipt.channel_id,
+                                    worker_id = %receipt.worker_id,
+                                    receipt_id = %receipt.id,
+                                    attempt_count = outcome.attempt_count,
+                                    status = %outcome.status,
+                                    next_attempt_at = ?outcome.next_attempt_at,
+                                    %error,
+                                    "global worker receipt dispatcher failed to deliver terminal receipt"
+                                );
+                            }
+                            Err(update_error) => {
+                                tracing::warn!(
+                                    agent_id = %agent_id,
+                                    channel_id = %receipt.channel_id,
+                                    worker_id = %receipt.worker_id,
+                                    receipt_id = %receipt.id,
+                                    %update_error,
+                                    "failed to record global worker receipt delivery failure"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+
+            tokio::time::sleep(std::time::Duration::from_secs(
+                WORKER_RECEIPT_GLOBAL_DISPATCH_INTERVAL_SECS,
+            ))
+            .await;
+        }
+    })
 }
 
 /// Stop if running, don't error if not.
@@ -856,7 +1013,8 @@ async fn run(
                     };
 
                     // Create outbound response channel
-                    let (response_tx, mut response_rx) = mpsc::channel::<spacebot::OutboundResponse>(32);
+                    let (response_tx, mut response_rx) =
+                        mpsc::channel::<spacebot::OutboundEnvelope>(32);
 
                     // Subscribe to the agent's event bus
                     let event_rx = agent.deps.event_tx.subscribe();
@@ -930,12 +1088,35 @@ async fn run(
                     let latest_message = Arc::new(tokio::sync::RwLock::new(message.clone()));
                     let outbound_message = latest_message.clone();
                     let outbound_conversation_id = conversation_id.clone();
+                    let outbound_channel_id: spacebot::ChannelId =
+                        Arc::from(outbound_conversation_id.clone());
+                    let outbound_process_logger =
+                        spacebot::conversation::history::ProcessRunLogger::new(
+                            agent.db.sqlite.clone(),
+                        );
+                    let outbound_conversation_logger =
+                        spacebot::conversation::history::ConversationLogger::new(
+                            agent.db.sqlite.clone(),
+                        );
                     let api_event_tx = api_state.event_tx.clone();
                     let sse_agent_id = agent_id.to_string();
                     let sse_channel_id = conversation_id.clone();
                     let outbound_agent_names = agent.deps.agent_names.clone();
                     let outbound_handle = tokio::spawn(async move {
-                        while let Some(response) = response_rx.recv().await {
+                        while let Some(envelope) = response_rx.recv().await {
+                            let receipt_id = envelope.receipt_id.clone();
+                            let response = envelope.response;
+                            let receipt_log_text = match &response {
+                                spacebot::OutboundResponse::Text(text) => Some(text.clone()),
+                                spacebot::OutboundResponse::RichMessage { text, .. } => {
+                                    Some(text.clone())
+                                }
+                                spacebot::OutboundResponse::ThreadReply { text, .. } => {
+                                    Some(text.clone())
+                                }
+                                _ => None,
+                            };
+
                             // Forward relevant events to SSE clients
                             match &response {
                                 spacebot::OutboundResponse::Text(text) => {
@@ -977,121 +1158,87 @@ async fn run(
                             }
 
                             let current_message = outbound_message.read().await.clone();
-
-                            // Internal link channels: route replies back to the sender's link channel
-                            if current_message.source == "internal" {
-                                let reply_text = match &response {
-                                    spacebot::OutboundResponse::Text(t) => Some(t.clone()),
-                                    spacebot::OutboundResponse::RichMessage { text, .. } => Some(text.clone()),
-                                    spacebot::OutboundResponse::ThreadReply { text, .. } => Some(text.clone()),
-                                    spacebot::OutboundResponse::Status(_) => None,
-                                    _ => None,
-                                };
-
-                                if let Some(text) = reply_text {
-                                    let reply_to_agent = current_message.metadata
-                                        .get("reply_to_agent")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
-                                    let reply_to_channel = current_message.metadata
-                                        .get("reply_to_channel")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
-
-                                    if let (Some(target_agent), Some(target_channel)) = (reply_to_agent, reply_to_channel) {
-                                        let agent_display = outbound_agent_names
-                                            .get(&sse_agent_id)
-                                            .cloned()
-                                            .unwrap_or_else(|| sse_agent_id.clone());
-
-                                        // Include the original sent message so the receiving
-                                        // agent's link channel can seed its history with context
-                                        let original_text = match &current_message.content {
-                                            spacebot::MessageContent::Text(t) => Some(t.clone()),
-                                            spacebot::MessageContent::Media { text, .. } => text.clone(),
-                                            _ => None,
-                                        };
-
-                                        let mut metadata = std::collections::HashMap::from([
-                                            ("from_agent_id".into(), serde_json::json!(&sse_agent_id)),
-                                            ("reply_to_agent".into(), serde_json::json!(&sse_agent_id)),
-                                            ("reply_to_channel".into(), serde_json::json!(&outbound_conversation_id)),
-                                        ]);
-                                        if let Some(original) = original_text {
-                                            metadata.insert("original_sent_message".into(), serde_json::json!(original));
-                                        }
-                                        // Propagate originating_channel and originating_source so both sides
-                                        // know where to route conclusions and which adapter to use.
-                                        if let Some(originating) = current_message.metadata.get("originating_channel") {
-                                            metadata.insert("originating_channel".into(), originating.clone());
-                                        }
-                                        if let Some(source) = current_message.metadata.get("originating_source") {
-                                            metadata.insert("originating_source".into(), source.clone());
-                                        }
-
-                                        let reply_message = spacebot::InboundMessage {
-                                            id: uuid::Uuid::new_v4().to_string(),
-                                            source: "internal".into(),
-                                            conversation_id: target_channel.clone(),
-                                            sender_id: sse_agent_id.clone(),
-                                            agent_id: Some(Arc::from(target_agent.as_str())),
-                                            content: spacebot::MessageContent::Text(text),
-                                            timestamp: chrono::Utc::now(),
-                                            metadata,
-                                            formatted_author: Some(format!("[{agent_display}]")),
-                                        };
-
-                                        if let Err(error) = messaging_for_outbound
-                                            .inject_message(reply_message)
-                                            .await
-                                        {
-                                            tracing::error!(
-                                                %error,
-                                                from = %sse_agent_id,
-                                                to = %target_agent,
-                                                "failed to route link channel reply"
-                                            );
-                                        } else {
-                                            // Emit SSE event so the dashboard animates the edge
-                                            api_event_tx.send(spacebot::api::ApiEvent::AgentMessageSent {
-                                                from_agent_id: sse_agent_id.clone(),
-                                                to_agent_id: target_agent.clone(),
-                                                link_id: target_channel.clone(),
-                                                channel_id: target_channel.clone(),
-                                            }).ok();
-
-                                            tracing::info!(
-                                                from = %sse_agent_id,
-                                                to = %target_agent,
-                                                channel = %target_channel,
-                                                "routed link channel reply"
-                                            );
-                                        }
-                                    }
-                                }
-                                continue;
-                            }
-
-                            match response {
+                            let is_status_update =
+                                matches!(response, spacebot::OutboundResponse::Status(_));
+                            let delivery_result = match response {
                                 spacebot::OutboundResponse::Status(status) => {
-                                    if let Err(error) = messaging_for_outbound
-                                        .send_status(&current_message, status)
-                                        .await
-                                    {
-                                        tracing::warn!(%error, "failed to send status update");
-                                    }
+                                    messaging_for_outbound.send_status(&current_message, status).await
                                 }
                                 response => {
                                     tracing::info!(
                                         conversation_id = %outbound_conversation_id,
                                         "routing outbound response to messaging adapter"
                                     );
-                                    if let Err(error) = messaging_for_outbound
-                                        .respond(&current_message, response)
-                                        .await
-                                    {
-                                        tracing::error!(%error, "failed to send outbound response");
+                                    messaging_for_outbound.respond(&current_message, response).await
+                                }
+                            };
+
+                            if let Some(receipt_id) = receipt_id {
+                                match &delivery_result {
+                                    Ok(()) => {
+                                        match outbound_process_logger
+                                            .ack_worker_delivery_receipt(&receipt_id)
+                                            .await
+                                        {
+                                            Ok(acked_now) => {
+                                                if acked_now {
+                                                    if let Some(text) = receipt_log_text.as_deref() {
+                                                        outbound_conversation_logger
+                                                            .log_bot_message(&outbound_channel_id, text);
+                                                    }
+                                                    tracing::info!(
+                                                        channel_id = %outbound_conversation_id,
+                                                        receipt_id = %receipt_id,
+                                                        "worker terminal receipt delivered"
+                                                    );
+                                                }
+                                            }
+                                            Err(error) => {
+                                                tracing::warn!(
+                                                    %error,
+                                                    channel_id = %outbound_conversation_id,
+                                                    receipt_id = %receipt_id,
+                                                    "failed to ack worker terminal receipt"
+                                                );
+                                            }
+                                        }
                                     }
+                                    Err(error) => {
+                                        match outbound_process_logger
+                                            .fail_worker_delivery_receipt_attempt(
+                                                &receipt_id,
+                                                &error.to_string(),
+                                            )
+                                            .await
+                                        {
+                                            Ok(outcome) => {
+                                                tracing::warn!(
+                                                    channel_id = %outbound_conversation_id,
+                                                    receipt_id = %receipt_id,
+                                                    attempt_count = outcome.attempt_count,
+                                                    status = %outcome.status,
+                                                    next_attempt_at = ?outcome.next_attempt_at,
+                                                    "worker terminal receipt delivery failed"
+                                                );
+                                            }
+                                            Err(update_error) => {
+                                                tracing::warn!(
+                                                    %update_error,
+                                                    channel_id = %outbound_conversation_id,
+                                                    receipt_id = %receipt_id,
+                                                    "failed to record worker terminal receipt delivery failure"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            if let Err(error) = delivery_result {
+                                if is_status_update {
+                                    tracing::warn!(%error, "failed to send status update");
+                                } else {
+                                    tracing::error!(%error, "failed to send outbound response");
                                 }
                             }
                         }
@@ -1371,6 +1518,27 @@ async fn initialize_agents(
                     agent_config.id
                 )
             })?;
+
+        let process_run_logger =
+            spacebot::conversation::history::ProcessRunLogger::new(db.sqlite.clone());
+        let (recovered_workers, recovered_branches, recovered_receipts) = process_run_logger
+            .close_orphaned_runs()
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to recover orphaned runs for agent '{}'",
+                    agent_config.id
+                )
+            })?;
+        if recovered_workers > 0 || recovered_branches > 0 || recovered_receipts > 0 {
+            tracing::warn!(
+                agent_id = %agent_config.id,
+                recovered_workers,
+                recovered_branches,
+                recovered_receipts,
+                "recovered orphaned process runs from previous startup"
+            );
+        }
 
         // Per-agent settings store (redb-backed)
         let settings_path = agent_config.data_dir.join("settings.redb");
@@ -1656,6 +1824,20 @@ async fn initialize_agents(
     *inbound_stream = Some(new_inbound);
 
     tracing::info!("messaging adapters started");
+
+    // Start a global worker terminal receipt dispatcher for each agent so
+    // pending receipts are delivered even when no channel loop is active.
+    for (agent_id, agent) in agents.iter() {
+        let handle = spawn_worker_receipt_dispatch_loop(
+            agent_id.to_string(),
+            spacebot::conversation::history::ProcessRunLogger::new(agent.db.sqlite.clone()),
+            spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone()),
+            spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone()),
+            messaging_manager.clone(),
+        );
+        cortex_handles.push(handle);
+        tracing::info!(agent_id = %agent_id, "worker receipt dispatcher loop started");
+    }
 
     // Initialize cron schedulers for each agent
     let mut cron_stores_map = std::collections::HashMap::new();

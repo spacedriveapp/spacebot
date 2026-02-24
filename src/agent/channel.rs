@@ -10,8 +10,8 @@ use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::{
-    AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
-    ProcessType, WorkerId,
+    AgentDeps, BranchId, ChannelId, InboundMessage, OutboundEnvelope, OutboundResponse,
+    ProcessEvent, ProcessId, ProcessType, WorkerId,
 };
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
@@ -32,6 +32,21 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// Maximum retriggers allowed since the last real user message. Prevents
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
+
+/// Minimum interval between user-facing worker checkpoint updates.
+/// This keeps progress useful without flooding channel messages.
+const WORKER_CHECKPOINT_MIN_INTERVAL_SECS: u64 = 20;
+
+/// Maximum length for user-facing checkpoint text.
+const WORKER_CHECKPOINT_MAX_CHARS: usize = 220;
+const WORKER_RECEIPT_DISPATCH_INTERVAL_SECS: u64 = 5;
+const WORKER_RECEIPT_DISPATCH_BATCH_SIZE: i64 = 8;
+
+#[derive(Debug, Clone)]
+struct WorkerCheckpointState {
+    last_status: String,
+    last_sent_at: tokio::time::Instant,
+}
 
 /// Shared state that channel tools need to act on the channel.
 ///
@@ -62,7 +77,11 @@ pub struct ChannelState {
 impl ChannelState {
     /// Cancel a running worker by aborting its tokio task and cleaning up state.
     /// Returns an error message if the worker is not found.
-    pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
+    pub async fn cancel_worker(
+        &self,
+        worker_id: WorkerId,
+        reason: Option<&str>,
+    ) -> std::result::Result<(), String> {
         let handle = self.worker_handles.write().await.remove(&worker_id);
         let removed = self
             .active_workers
@@ -74,13 +93,49 @@ impl ChannelState {
 
         if let Some(handle) = handle {
             handle.abort();
-            // Mark the DB row as cancelled since the abort prevents WorkerComplete from firing
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
+            let reason = reason
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("cancelled by request");
+            let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStatus {
+                agent_id: self.deps.agent_id.clone(),
+                worker_id,
+                channel_id: Some(self.channel_id.clone()),
+                status: "cancelled".to_string(),
+            });
+            let _ = self
+                .deps
+                .event_tx
+                .send(crate::ProcessEvent::WorkerComplete {
+                    agent_id: self.deps.agent_id.clone(),
+                    worker_id,
+                    channel_id: Some(self.channel_id.clone()),
+                    result: format!("Worker cancelled: {reason}."),
+                    notify: true,
+                });
             Ok(())
         } else if removed {
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
+            // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
+            let reason = reason
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("cancelled by request");
+            let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStatus {
+                agent_id: self.deps.agent_id.clone(),
+                worker_id,
+                channel_id: Some(self.channel_id.clone()),
+                status: "cancelled".to_string(),
+            });
+            let _ = self
+                .deps
+                .event_tx
+                .send(crate::ProcessEvent::WorkerComplete {
+                    agent_id: self.deps.agent_id.clone(),
+                    worker_id,
+                    channel_id: Some(self.channel_id.clone()),
+                    result: format!("Worker cancelled: {reason}."),
+                    notify: true,
+                });
             Ok(())
         } else {
             Err(format!("Worker {worker_id} not found"))
@@ -122,7 +177,7 @@ pub struct Channel {
     /// Event receiver for process events.
     pub event_rx: broadcast::Receiver<ProcessEvent>,
     /// Outbound response sender for the messaging layer.
-    pub response_tx: mpsc::Sender<OutboundResponse>,
+    pub response_tx: mpsc::Sender<OutboundEnvelope>,
     /// Self-sender for re-triggering the channel after background process completion.
     pub self_tx: mpsc::Sender<InboundMessage>,
     /// Conversation ID from the first message (for synthetic re-trigger messages).
@@ -149,19 +204,10 @@ pub struct Channel {
     pending_retrigger_metadata: HashMap<String, serde_json::Value>,
     /// Deadline for firing the pending retrigger (debounce timer).
     retrigger_deadline: Option<tokio::time::Instant>,
-    /// Optional send_agent_message tool (only when agent has active links).
-    send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
-    /// Turn counter for link channels (used for safety cap).
-    link_turn_count: u32,
-    /// Originating channel that triggered this link conversation (for routing conclusions back).
-    originating_channel: Option<String>,
-    /// Messaging adapter name from the originating channel (e.g. "webchat", "discord").
-    /// Used by `route_link_conclusion` to set the correct `source` on injected messages.
-    originating_source: Option<String>,
-    /// Set after `conclude_link` fires. Prevents the channel from processing
-    /// further messages, stopping the ping-pong that happens when both sides
-    /// keep responding to each other after the task is done.
-    link_concluded: bool,
+    /// Per-worker checkpoint state used for status dedupe/throttling.
+    worker_checkpoints: HashMap<WorkerId, WorkerCheckpointState>,
+    /// Periodic deadline for checking due worker terminal delivery receipts.
+    worker_receipt_dispatch_deadline: tokio::time::Instant,
 }
 
 impl Channel {
@@ -173,7 +219,7 @@ impl Channel {
     pub fn new(
         id: ChannelId,
         deps: AgentDeps,
-        response_tx: mpsc::Sender<OutboundResponse>,
+        response_tx: mpsc::Sender<OutboundEnvelope>,
         event_rx: broadcast::Receiver<ProcessEvent>,
         screenshot_dir: std::path::PathBuf,
         logs_dir: std::path::PathBuf,
@@ -265,11 +311,9 @@ impl Channel {
             pending_retrigger: false,
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
-            send_agent_message_tool,
-            link_turn_count: 0,
-            originating_channel: None,
-            originating_source: None,
-            link_concluded: false,
+            worker_checkpoints: HashMap::new(),
+            worker_receipt_dispatch_deadline: tokio::time::Instant::now()
+                + std::time::Duration::from_secs(WORKER_RECEIPT_DISPATCH_INTERVAL_SECS),
         };
 
         (channel, message_tx)
@@ -289,13 +333,15 @@ impl Channel {
         tracing::info!(channel_id = %self.id, "channel started");
 
         loop {
-            // Compute next deadline from coalesce and retrigger timers
-            let next_deadline = match (self.coalesce_deadline, self.retrigger_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            // Compute next deadline from coalesce/retrigger timers and receipt dispatch.
+            let next_deadline = [
+                self.coalesce_deadline,
+                self.retrigger_deadline,
+                Some(self.worker_receipt_dispatch_deadline),
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let sleep_duration = next_deadline
                 .map(|deadline| {
                     let now = tokio::time::Instant::now();
@@ -323,13 +369,28 @@ impl Channel {
                         }
                     }
                 }
-                Ok(event) = self.event_rx.recv() => {
-                    // Events bypass coalescing - flush buffer first if needed
-                    if let Err(error) = self.flush_coalesce_buffer().await {
-                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
-                    }
-                    if let Err(error) = self.handle_event(event).await {
-                        tracing::error!(%error, channel_id = %self.id, "error handling event");
+                event = self.event_rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            // Events bypass coalescing - flush buffer first if needed
+                            if let Err(error) = self.flush_coalesce_buffer().await {
+                                tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
+                            }
+                            if let Err(error) = self.handle_event(event).await {
+                                tracing::error!(%error, channel_id = %self.id, "error handling event");
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                skipped,
+                                "channel event stream lagged; continuing after dropping stale events"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            tracing::warn!(channel_id = %self.id, "channel event stream closed");
+                            break;
+                        }
                     }
                 }
                 _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() => {
@@ -343,6 +404,14 @@ impl Channel {
                     // Check retrigger deadline
                     if self.retrigger_deadline.is_some_and(|d| d <= now) {
                         self.flush_pending_retrigger().await;
+                    }
+                    // Check worker terminal receipt dispatch deadline
+                    if self.worker_receipt_dispatch_deadline <= now {
+                        self.flush_due_worker_delivery_receipts().await;
+                        self.worker_receipt_dispatch_deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(
+                                WORKER_RECEIPT_DISPATCH_INTERVAL_SECS,
+                            );
                     }
                 }
                 else => break,
@@ -1318,7 +1387,9 @@ impl Channel {
 
         let _ = self
             .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+            .send(OutboundEnvelope::from(OutboundResponse::Status(
+                crate::StatusUpdate::Thinking,
+            )))
             .await;
 
         // Inject attachments as a user message before the text prompt
@@ -1347,24 +1418,11 @@ impl Channel {
             .await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
-        // to use the tool calling API. Inject a correction and retry a couple
-        // times so the model can recover by calling `reply` or `skip`.
-        const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
-        let mut recovery_attempts = 0;
-        while let Ok(ref response) = result {
-            if !crate::tools::should_block_user_visible_text(response)
-                || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
-            {
-                break;
-            }
-
-            recovery_attempts += 1;
-            tracing::warn!(
-                channel_id = %self.id,
-                attempt = recovery_attempts,
-                "LLM emitted blocked structured output, retrying with correction"
-            );
-
+        // to use the tool calling API. Inject a correction and give it one more try.
+        if let Ok(ref response) = result
+            && extract_reply_from_tool_syntax(response.trim()).is_some()
+        {
+            tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
             result = agent
@@ -1418,28 +1476,28 @@ impl Channel {
                     // fallback since the user hasn't seen the result yet.
                     let text = response.trim();
                     if !text.is_empty() {
-                        if crate::tools::should_block_user_visible_text(text) {
-                            tracing::warn!(
-                                channel_id = %self.id,
-                                "blocked retrigger fallback output containing structured or tool syntax"
-                            );
-                        } else {
-                            tracing::info!(
-                                channel_id = %self.id,
-                                response_len = text.len(),
-                                "LLM skipped on retrigger but produced text, sending as fallback"
-                            );
-                            let extracted = extract_reply_from_tool_syntax(text);
-                            let source = self
-                                .conversation_id
-                                .as_deref()
-                                .and_then(|conversation_id| conversation_id.split(':').next())
-                                .unwrap_or("unknown");
-                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                                extracted.as_deref().unwrap_or(text),
-                                source,
-                            );
-                            if !final_text.is_empty() {
+                        tracing::info!(
+                            channel_id = %self.id,
+                            response_len = text.len(),
+                            "LLM skipped on retrigger but produced text, sending as fallback"
+                        );
+                        let extracted = extract_reply_from_tool_syntax(text);
+                        let source = self
+                            .conversation_id
+                            .as_deref()
+                            .and_then(|conversation_id| conversation_id.split(':').next())
+                            .unwrap_or("unknown");
+                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                            extracted.as_deref().unwrap_or(text),
+                            source,
+                        );
+                        if !final_text.is_empty() {
+                            if crate::tools::reply::is_low_value_waiting_update(&final_text) {
+                                tracing::info!(
+                                    channel_id = %self.id,
+                                    "suppressing low-value waiting retrigger fallback text"
+                                );
+                            } else {
                                 if extracted.is_some() {
                                     tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
                                 }
@@ -1448,7 +1506,9 @@ impl Channel {
                                     .log_bot_message(&self.state.channel_id, &final_text);
                                 if let Err(error) = self
                                     .response_tx
-                                    .send(OutboundResponse::Text(final_text))
+                                    .send(OutboundEnvelope::from(OutboundResponse::Text(
+                                        final_text,
+                                    )))
                                     .await
                                 {
                                     tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
@@ -1466,61 +1526,14 @@ impl Channel {
                 } else if replied {
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
                 } else if is_retrigger {
-                    // On retrigger turns the LLM should use the reply tool, but
-                    // some models return the result as raw text instead. Send it
-                    // as a fallback so the user still gets the worker/branch output.
+                    // Retrigger turns are vulnerable to tool-call misses; when the
+                    // model emits substantive text without calling `reply`, relay it.
+                    // Keep suppressing low-value "still waiting" chatter.
                     let text = response.trim();
-                    if !text.is_empty() {
-                        if crate::tools::should_block_user_visible_text(text) {
-                            tracing::warn!(
-                                channel_id = %self.id,
-                                "blocked retrigger output containing structured or tool syntax"
-                            );
-                        } else {
-                            tracing::info!(
-                                channel_id = %self.id,
-                                response_len = text.len(),
-                                "retrigger produced text without reply tool, sending as fallback"
-                            );
-                            let extracted = extract_reply_from_tool_syntax(text);
-                            let source = self
-                                .conversation_id
-                                .as_deref()
-                                .and_then(|conversation_id| conversation_id.split(':').next())
-                                .unwrap_or("unknown");
-                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                                extracted.as_deref().unwrap_or(text),
-                                source,
-                            );
-                            if !final_text.is_empty() {
-                                self.state
-                                    .conversation_logger
-                                    .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
-                            }
-                        }
-                    } else {
+                    if text.is_empty() {
                         tracing::debug!(
                             channel_id = %self.id,
-                            "retrigger turn produced no text and no reply tool call"
-                        );
-                    }
-                } else {
-                    // If the LLM returned text without using the reply tool, send it
-                    // directly. Some models respond with text instead of tool calls.
-                    // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
-                    // attempt to extract the reply content and send that instead.
-                    let text = response.trim();
-                    if crate::tools::should_block_user_visible_text(text) {
-                        tracing::warn!(
-                            channel_id = %self.id,
-                            "blocked fallback output containing structured or tool syntax"
+                            "retrigger turn fallback suppressed (empty text)"
                         );
                     } else {
                         let extracted = extract_reply_from_tool_syntax(text);
@@ -1533,18 +1546,64 @@ impl Channel {
                             extracted.as_deref().unwrap_or(text),
                             source,
                         );
-                        if !final_text.is_empty() {
+                        if final_text.is_empty() {
+                            tracing::debug!(
+                                channel_id = %self.id,
+                                "retrigger turn fallback suppressed (empty normalized text)"
+                            );
+                        } else if crate::tools::reply::is_low_value_waiting_update(&final_text) {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                "suppressing low-value waiting retrigger fallback text"
+                            );
+                        } else {
+                            if extracted.is_some() {
+                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger text output");
+                            }
+                            self.state
+                                .conversation_logger
+                                .log_bot_message(&self.state.channel_id, &final_text);
+                            if let Err(error) = self
+                                .response_tx
+                                .send(OutboundEnvelope::from(OutboundResponse::Text(final_text)))
+                                .await
+                            {
+                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                            }
+                        }
+                    }
+                } else {
+                    // If the LLM returned text without using the reply tool, send it
+                    // directly. Some models respond with text instead of tool calls.
+                    // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
+                    // attempt to extract the reply content and send that instead.
+                    let text = response.trim();
+                    let extracted = extract_reply_from_tool_syntax(text);
+                    let source = self
+                        .conversation_id
+                        .as_deref()
+                        .and_then(|conversation_id| conversation_id.split(':').next())
+                        .unwrap_or("unknown");
+                    let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                        extracted.as_deref().unwrap_or(text),
+                        source,
+                    );
+                    if !final_text.is_empty() {
+                        if crate::tools::reply::is_low_value_waiting_update(&final_text) {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                "suppressing low-value waiting fallback text"
+                            );
+                        } else {
                             if extracted.is_some() {
                                 tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                             }
-                            self.state.conversation_logger.log_bot_message_with_name(
-                                &self.state.channel_id,
-                                &final_text,
-                                Some(self.agent_display_name()),
-                            );
+                            self.state
+                                .conversation_logger
+                                .log_bot_message(&self.state.channel_id, &final_text);
                             if let Err(error) = self
                                 .response_tx
-                                .send(OutboundResponse::Text(final_text))
+                                .send(OutboundEnvelope::from(OutboundResponse::Text(final_text)))
                                 .await
                             {
                                 tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
@@ -1573,7 +1632,9 @@ impl Channel {
         // Ensure typing indicator is always cleaned up, even on error paths
         let _ = self
             .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .send(OutboundEnvelope::from(OutboundResponse::Status(
+                crate::StatusUpdate::StopTyping,
+            )))
             .await;
     }
 
@@ -1654,18 +1715,32 @@ impl Channel {
                 worker_type,
                 ..
             } => {
-                run_logger.log_worker_started(
-                    channel_id.as_ref(),
-                    *worker_id,
-                    task,
-                    worker_type,
-                    &self.deps.agent_id,
-                );
+                run_logger.log_worker_started(channel_id.as_ref(), *worker_id, task);
+                let public_task_summary = summarize_worker_start_for_status(task);
+                if self.worker_is_user_visible(*worker_id).await {
+                    self.send_status_update(crate::StatusUpdate::WorkerStarted {
+                        worker_id: *worker_id,
+                        task: public_task_summary.clone(),
+                    })
+                    .await;
+                    if let Some(status) = normalize_worker_checkpoint_status(&public_task_summary) {
+                        self.worker_checkpoints.insert(
+                            *worker_id,
+                            WorkerCheckpointState {
+                                last_status: status,
+                                last_sent_at: tokio::time::Instant::now(),
+                            },
+                        );
+                    }
+                }
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
             } => {
                 run_logger.log_worker_status(*worker_id, status);
+                if self.worker_is_user_visible(*worker_id).await {
+                    self.maybe_send_worker_checkpoint(*worker_id, status).await;
+                }
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -1674,7 +1749,50 @@ impl Channel {
                 success,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result, *success);
+                run_logger.log_worker_completed(*worker_id, result);
+                self.worker_checkpoints.remove(worker_id);
+                if *notify {
+                    self.send_status_update(crate::StatusUpdate::WorkerCompleted {
+                        worker_id: *worker_id,
+                        result: summarize_worker_result_for_status(result),
+                    })
+                    .await;
+
+                    let terminal_state = classify_worker_terminal_state(result);
+                    let payload_text =
+                        build_worker_terminal_receipt_payload(terminal_state, result);
+                    match self
+                        .state
+                        .process_run_logger
+                        .upsert_worker_terminal_receipt(
+                            &self.id,
+                            *worker_id,
+                            terminal_state,
+                            &payload_text,
+                        )
+                        .await
+                    {
+                        Ok(receipt_id) => {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                worker_id = %worker_id,
+                                receipt_id = %receipt_id,
+                                terminal_state,
+                                "queued worker terminal receipt"
+                            );
+                            self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                channel_id = %self.id,
+                                worker_id = %worker_id,
+                                terminal_state,
+                                "failed to queue worker terminal receipt"
+                            );
+                        }
+                    }
+                }
 
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
@@ -1683,7 +1801,7 @@ impl Channel {
                 self.state.worker_handles.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
 
-                if *notify {
+                if *notify && !is_worker_terminal_failure(result) {
                     let mut history = self.state.history.write().await;
                     let worker_message = format!("[Worker {worker_id} completed]: {result}");
                     history.push(rig::message::Message::from(worker_message));
@@ -1720,6 +1838,108 @@ impl Channel {
         }
 
         Ok(())
+    }
+
+    async fn send_status_update(&self, status: crate::StatusUpdate) {
+        if let Err(error) = self
+            .response_tx
+            .send(OutboundEnvelope::from(OutboundResponse::Status(status)))
+            .await
+        {
+            tracing::debug!(
+                %error,
+                channel_id = %self.id,
+                "failed to route status update to messaging adapter"
+            );
+        }
+    }
+
+    async fn maybe_send_worker_checkpoint(&mut self, worker_id: WorkerId, raw_status: &str) {
+        let Some(status) = normalize_worker_checkpoint_status(raw_status) else {
+            return;
+        };
+
+        let now = tokio::time::Instant::now();
+        let previous = self.worker_checkpoints.get(&worker_id);
+        if !should_emit_worker_checkpoint(previous, &status, now) {
+            return;
+        }
+
+        self.send_status_update(crate::StatusUpdate::WorkerCheckpoint {
+            worker_id,
+            status: status.clone(),
+        })
+        .await;
+
+        self.worker_checkpoints.insert(
+            worker_id,
+            WorkerCheckpointState {
+                last_status: status,
+                last_sent_at: now,
+            },
+        );
+    }
+
+    async fn flush_due_worker_delivery_receipts(&mut self) {
+        let due = match self
+            .state
+            .process_run_logger
+            .claim_due_worker_terminal_receipts(&self.id, WORKER_RECEIPT_DISPATCH_BATCH_SIZE)
+            .await
+        {
+            Ok(receipts) => receipts,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to claim due worker terminal receipts"
+                );
+                return;
+            }
+        };
+
+        if due.is_empty() {
+            return;
+        }
+
+        for receipt in due {
+            let message = OutboundResponse::Text(receipt.payload_text.clone());
+            let envelope = OutboundEnvelope::tracked(message, receipt.id.clone());
+
+            if let Err(error) = self.response_tx.send(envelope).await {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    worker_id = %receipt.worker_id,
+                    receipt_id = %receipt.id,
+                    "failed to queue worker terminal receipt for outbound delivery"
+                );
+
+                if let Err(update_error) = self
+                    .state
+                    .process_run_logger
+                    .fail_worker_delivery_receipt_attempt(&receipt.id, &error.to_string())
+                    .await
+                {
+                    tracing::warn!(
+                        %update_error,
+                        channel_id = %self.id,
+                        worker_id = %receipt.worker_id,
+                        receipt_id = %receipt.id,
+                        "failed to mark worker terminal receipt send failure"
+                    );
+                }
+            }
+        }
+    }
+
+    async fn worker_is_user_visible(&self, worker_id: WorkerId) -> bool {
+        let status_block = self.state.status_block.read().await;
+        status_block
+            .active_workers
+            .iter()
+            .find(|worker| worker.id == worker_id)
+            .is_some_and(|worker| worker.notify_on_complete)
     }
 
     /// Flush the pending retrigger: send a synthetic system message to re-trigger
@@ -2009,8 +2229,8 @@ async fn spawn_branch(
 /// Check whether the channel has capacity for another worker.
 async fn check_worker_limit(state: &ChannelState) -> std::result::Result<(), AgentError> {
     let max_workers = **state.deps.runtime_config.max_concurrent_workers.load();
-    let workers = state.active_workers.read().await;
-    if workers.len() >= max_workers {
+    let worker_handles = state.worker_handles.read().await;
+    if worker_handles.len() >= max_workers {
         return Err(AgentError::WorkerLimitReached {
             channel_id: state.channel_id.to_string(),
             max: max_workers,
@@ -2100,6 +2320,7 @@ pub async fn spawn_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        (**state.deps.runtime_config.cortex.load()).worker_timeout_secs,
         worker.run().instrument(worker_span),
     );
 
@@ -2107,7 +2328,7 @@ pub async fn spawn_worker_from_state(
 
     {
         let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, &task, false);
+        status.add_worker(worker_id, &task, true);
     }
 
     state
@@ -2195,6 +2416,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        (**state.deps.runtime_config.cortex.load()).worker_timeout_secs,
         async move {
             let result = worker.run().await?;
             Ok::<String, anyhow::Error>(result.result_text)
@@ -2207,7 +2429,7 @@ pub async fn spawn_opencode_worker_from_state(
     let opencode_task = format!("[opencode] {task}");
     {
         let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, &opencode_task, false);
+        status.add_worker(worker_id, &opencode_task, true);
     }
 
     state
@@ -2237,6 +2459,7 @@ fn spawn_worker_task<F, E>(
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
+    timeout_secs: u64,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -2253,13 +2476,74 @@ where
             .with_label_values(&[&*agent_id])
             .inc();
 
-        let (result_text, notify, success) = match future.await {
-            Ok(text) => (text, true, true),
-            Err(error) => {
-                tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                (format!("Worker failed: {error}"), true, false)
+        let outcome = if timeout_secs == 0 {
+            match future.await {
+                Ok(text) => ("done", text, true),
+                Err(error) => {
+                    tracing::error!(worker_id = %worker_id, %error, "worker failed");
+                    ("failed", format!("Worker failed: {error}"), true)
+                }
+            }
+        } else {
+            let timeout_duration = std::time::Duration::from_secs(timeout_secs.max(1));
+            let mut event_rx = event_tx.subscribe();
+            let future = future;
+            tokio::pin!(future);
+            let mut deadline = tokio::time::Instant::now() + timeout_duration;
+
+            loop {
+                let sleep = tokio::time::sleep_until(deadline);
+                tokio::pin!(sleep);
+
+                tokio::select! {
+                    result = &mut future => {
+                        let outcome = match result {
+                            Ok(text) => ("done", text, true),
+                            Err(error) => {
+                                tracing::error!(worker_id = %worker_id, %error, "worker failed");
+                                ("failed", format!("Worker failed: {error}"), true)
+                            }
+                        };
+                        break outcome;
+                    }
+                    event = event_rx.recv() => {
+                        match event {
+                            Ok(event) => {
+                                if is_worker_progress_event(&event, worker_id) {
+                                    deadline = tokio::time::Instant::now() + timeout_duration;
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    worker_id = %worker_id,
+                                    skipped,
+                                    "worker timeout watcher lagged on event stream"
+                                );
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                                tracing::warn!(
+                                    worker_id = %worker_id,
+                                    "worker timeout watcher event stream closed"
+                                );
+                            }
+                        }
+                    }
+                    _ = &mut sleep => {
+                        tracing::error!(
+                            worker_id = %worker_id,
+                            timeout_secs,
+                            "worker timed out due to inactivity"
+                        );
+                        break (
+                            "timed_out",
+                            format!("Worker timed out after {timeout_secs} seconds without progress."),
+                            true,
+                        );
+                    }
+                }
             }
         };
+        let (terminal_status, result_text, notify) = outcome;
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -2273,6 +2557,13 @@ where
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 
+        let _ = event_tx.send(ProcessEvent::WorkerStatus {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: channel_id.clone(),
+            status: terminal_status.to_string(),
+        });
+
         let _ = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,
             worker_id,
@@ -2282,6 +2573,32 @@ where
             success,
         });
     })
+}
+
+fn is_worker_progress_event(event: &ProcessEvent, worker_id: WorkerId) -> bool {
+    match event {
+        ProcessEvent::WorkerStatus {
+            worker_id: event_worker_id,
+            ..
+        } => *event_worker_id == worker_id,
+        ProcessEvent::ToolStarted {
+            process_id: crate::ProcessId::Worker(event_worker_id),
+            ..
+        } => *event_worker_id == worker_id,
+        ProcessEvent::ToolCompleted {
+            process_id: crate::ProcessId::Worker(event_worker_id),
+            ..
+        } => *event_worker_id == worker_id,
+        ProcessEvent::WorkerPermission {
+            worker_id: event_worker_id,
+            ..
+        } => *event_worker_id == worker_id,
+        ProcessEvent::WorkerQuestion {
+            worker_id: event_worker_id,
+            ..
+        } => *event_worker_id == worker_id,
+        _ => false,
+    }
 }
 
 /// Some models emit tool call syntax as plain text instead of making actual tool calls.
@@ -2345,12 +2662,7 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
 /// System-generated messages (re-triggers) are passed through as-is.
 fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
     if message.source == "system" {
-        // System messages should never be empty, but guard against it
-        return if raw_text.trim().is_empty() {
-            "[system event]".to_string()
-        } else {
-            raw_text.to_string()
-        };
+        return raw_text.to_string();
     }
 
     // Use platform-formatted author if available, fall back to metadata
@@ -2395,15 +2707,7 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         })
         .unwrap_or_default();
 
-    // If raw_text is empty or just whitespace, use a placeholder to avoid
-    // sending empty text content blocks to the LLM API.
-    let text_content = if raw_text.trim().is_empty() {
-        "[attachment or empty message]"
-    } else {
-        raw_text
-    };
-
-    format!("{display_name}{bot_tag}{reply_context}: {text_content}")
+    format!("{display_name}{bot_tag}{reply_context}: {raw_text}")
 }
 
 fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
@@ -2415,6 +2719,118 @@ fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
         .metadata
         .get("discord_message_id")
         .and_then(|value| value.as_u64())
+}
+
+fn normalize_worker_checkpoint_status(status: &str) -> Option<String> {
+    let trimmed = status.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.len() <= WORKER_CHECKPOINT_MAX_CHARS {
+        return Some(trimmed.to_string());
+    }
+
+    let end = trimmed.floor_char_boundary(WORKER_CHECKPOINT_MAX_CHARS);
+    let boundary = trimmed[..end].rfind(char::is_whitespace).unwrap_or(end);
+    Some(format!("{}...", &trimmed[..boundary]))
+}
+
+fn is_high_priority_worker_checkpoint(status: &str) -> bool {
+    let normalized = status.to_ascii_lowercase();
+    normalized.contains("waiting for input")
+        || normalized.contains("permission")
+        || normalized.contains("question")
+        || normalized.contains("failed")
+        || normalized.contains("error")
+        || normalized.contains("cancelled")
+        || normalized.contains("timed out")
+}
+
+fn should_emit_worker_checkpoint(
+    previous: Option<&WorkerCheckpointState>,
+    next_status: &str,
+    now: tokio::time::Instant,
+) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+
+    if previous.last_status == next_status {
+        return false;
+    }
+
+    if is_high_priority_worker_checkpoint(next_status) {
+        return true;
+    }
+
+    now.duration_since(previous.last_sent_at)
+        >= std::time::Duration::from_secs(WORKER_CHECKPOINT_MIN_INTERVAL_SECS)
+}
+
+fn summarize_worker_result_for_status(result: &str) -> String {
+    let first_non_empty_line = result
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or(result);
+    normalize_worker_checkpoint_status(first_non_empty_line).unwrap_or_else(|| "completed".into())
+}
+
+fn summarize_worker_start_for_status(task: &str) -> String {
+    let lowered = task.to_ascii_lowercase();
+    if lowered.contains("research")
+        || lowered.contains("investigat")
+        || lowered.contains("verify")
+        || lowered.contains("source")
+    {
+        "research task".to_string()
+    } else if lowered.contains("[opencode]")
+        || lowered.contains("code")
+        || lowered.contains("implement")
+        || lowered.contains("refactor")
+        || lowered.contains("fix")
+    {
+        "coding task".to_string()
+    } else if lowered.contains("test")
+        || lowered.contains("pytest")
+        || lowered.contains("cargo test")
+    {
+        "test task".to_string()
+    } else if lowered.contains("summar") || lowered.contains("analy") || lowered.contains("review")
+    {
+        "analysis task".to_string()
+    } else {
+        "background task".to_string()
+    }
+}
+
+fn is_worker_terminal_failure(result: &str) -> bool {
+    let trimmed = result.trim_start();
+    trimmed.starts_with("Worker failed:")
+        || trimmed.starts_with("Worker timed out after ")
+        || trimmed.starts_with("Worker cancelled:")
+}
+
+fn classify_worker_terminal_state(result: &str) -> &'static str {
+    let trimmed = result.trim_start();
+    if trimmed.starts_with("Worker failed:") {
+        "failed"
+    } else if trimmed.starts_with("Worker timed out after ") {
+        "timed_out"
+    } else if trimmed.starts_with("Worker cancelled:") {
+        "cancelled"
+    } else {
+        "done"
+    }
+}
+
+fn build_worker_terminal_receipt_payload(terminal_state: &str, result: &str) -> String {
+    let summary = summarize_worker_result_for_status(result);
+    match terminal_state {
+        "failed" => format!("Background task failed: {summary}"),
+        "timed_out" => format!("Background task timed out: {summary}"),
+        "cancelled" => "Background task was cancelled.".to_string(),
+        _ => format!("Background task completed: {summary}"),
+    }
 }
 
 /// Check if a ProcessEvent is targeted at a specific channel.
@@ -2433,6 +2849,10 @@ fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
             ..
         } => event_channel.as_ref() == Some(channel_id),
         ProcessEvent::WorkerStatus {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::WorkerStarted {
             channel_id: event_channel,
             ..
         } => event_channel.as_ref() == Some(channel_id),
@@ -2849,10 +3269,26 @@ fn apply_history_after_turn(
 
 #[cfg(test)]
 mod tests {
+    use super::WORKER_CHECKPOINT_MIN_INTERVAL_SECS;
+    use super::WorkerCheckpointState;
     use super::apply_history_after_turn;
+    use super::build_worker_terminal_receipt_payload;
+    use super::classify_worker_terminal_state;
+    use super::is_worker_progress_event;
+    use super::is_worker_terminal_failure;
+    use super::normalize_worker_checkpoint_status;
+    use super::should_emit_worker_checkpoint;
+    use super::spawn_worker_task;
+    use super::summarize_worker_result_for_status;
+    use super::summarize_worker_start_for_status;
+    use crate::ProcessEvent;
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
     use rig::tool::ToolSetError;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::{broadcast, oneshot};
+    use uuid::Uuid;
 
     fn user_msg(text: &str) -> Message {
         Message::User {
@@ -3083,71 +3519,305 @@ mod tests {
         );
     }
 
-    #[test]
-    fn format_user_message_handles_empty_text() {
-        use super::format_user_message;
-        use crate::{Arc, InboundMessage};
-        use chrono::Utc;
-        use std::collections::HashMap;
+    #[tokio::test]
+    async fn worker_task_timeout_emits_terminal_events() {
+        let (event_tx, mut event_rx) = broadcast::channel(16);
+        let worker_id = Uuid::new_v4();
+        let agent_id: crate::AgentId = Arc::from("test-agent");
+        let channel_id: crate::ChannelId = Arc::from("test-channel");
 
-        // Test empty text with user message
-        let message = InboundMessage {
-            id: "test".to_string(),
-            agent_id: Some(Arc::from("test_agent")),
-            sender_id: "user123".to_string(),
-            conversation_id: "conv".to_string(),
-            content: crate::MessageContent::Text("".to_string()),
-            source: "discord".to_string(),
-            metadata: HashMap::new(),
-            formatted_author: Some("TestUser".to_string()),
-            timestamp: Utc::now(),
-        };
+        let handle = spawn_worker_task(worker_id, event_tx, agent_id, Some(channel_id), 1, async {
+            tokio::time::sleep(Duration::from_secs(3)).await;
+            Ok::<String, anyhow::Error>("should not complete".to_string())
+        });
 
-        let formatted = format_user_message("", &message);
-        assert!(
-            !formatted.trim().is_empty(),
-            "formatted message should not be empty"
-        );
-        assert!(
-            formatted.contains("[attachment or empty message]"),
-            "should use placeholder for empty text"
-        );
+        let mut saw_status = false;
+        let mut saw_complete = false;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
 
-        // Test whitespace-only text
-        let formatted_ws = format_user_message("   ", &message);
-        assert!(
-            formatted_ws.contains("[attachment or empty message]"),
-            "should use placeholder for whitespace-only text"
-        );
+        while tokio::time::Instant::now() < deadline && !(saw_status && saw_complete) {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let event = tokio::time::timeout(remaining, event_rx.recv())
+                .await
+                .expect("timed out waiting for worker events")
+                .expect("failed to receive worker event");
 
-        // Test empty system message
-        let system_message = InboundMessage {
-            id: "test".to_string(),
-            agent_id: Some(Arc::from("test_agent")),
-            sender_id: "system".to_string(),
-            conversation_id: "conv".to_string(),
-            content: crate::MessageContent::Text("".to_string()),
-            source: "system".to_string(),
-            metadata: HashMap::new(),
-            formatted_author: None,
-            timestamp: Utc::now(),
-        };
+            match event {
+                ProcessEvent::WorkerStatus {
+                    worker_id: event_worker_id,
+                    status,
+                    ..
+                } if event_worker_id == worker_id => {
+                    saw_status = true;
+                    assert_eq!(status, "timed_out");
+                }
+                ProcessEvent::WorkerComplete {
+                    worker_id: event_worker_id,
+                    result,
+                    ..
+                } if event_worker_id == worker_id => {
+                    saw_complete = true;
+                    assert!(result.contains("timed out after 1 seconds"));
+                }
+                _ => {}
+            }
+        }
 
-        let formatted_sys = format_user_message("", &system_message);
+        handle.await.expect("worker task join failed");
+        assert!(saw_status, "expected terminal WorkerStatus event");
+        assert!(saw_complete, "expected WorkerComplete event");
+    }
+
+    #[tokio::test]
+    async fn worker_timeout_resets_on_progress_events() {
+        let (event_tx, mut event_rx) = broadcast::channel(32);
+        let worker_id = Uuid::new_v4();
+        let agent_id: crate::AgentId = Arc::from("test-agent");
+        let channel_id: crate::ChannelId = Arc::from("test-channel");
+
+        let progress_tx = event_tx.clone();
+        let progress_agent_id = agent_id.clone();
+        let progress_channel_id = channel_id.clone();
+        let progress_task = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(700)).await;
+            let _ = progress_tx.send(ProcessEvent::WorkerStatus {
+                agent_id: progress_agent_id,
+                worker_id,
+                channel_id: Some(progress_channel_id),
+                status: "still working".to_string(),
+            });
+        });
+
+        let handle = spawn_worker_task(worker_id, event_tx, agent_id, Some(channel_id), 1, async {
+            tokio::time::sleep(Duration::from_millis(1500)).await;
+            Ok::<String, anyhow::Error>("completed after progress heartbeat".to_string())
+        });
+
+        let mut terminal_status = None::<String>;
+        let mut complete_result = None::<String>;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while tokio::time::Instant::now() < deadline
+            && (terminal_status.is_none() || complete_result.is_none())
+        {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let event = tokio::time::timeout(remaining, event_rx.recv())
+                .await
+                .expect("timed out waiting for worker events")
+                .expect("failed to receive worker event");
+            match event {
+                ProcessEvent::WorkerStatus {
+                    worker_id: event_worker_id,
+                    status,
+                    ..
+                } if event_worker_id == worker_id => {
+                    if status == "done" || status == "timed_out" || status == "failed" {
+                        terminal_status = Some(status);
+                    }
+                }
+                ProcessEvent::WorkerComplete {
+                    worker_id: event_worker_id,
+                    result,
+                    ..
+                } if event_worker_id == worker_id => {
+                    complete_result = Some(result);
+                }
+                _ => {}
+            }
+        }
+
+        progress_task.await.expect("progress sender task failed");
+        handle.await.expect("worker task join failed");
+
         assert_eq!(
-            formatted_sys, "[system event]",
-            "system messages should use [system event] placeholder"
+            terminal_status.as_deref(),
+            Some("done"),
+            "worker should finish after progress heartbeat"
+        );
+        assert_eq!(
+            complete_result.as_deref(),
+            Some("completed after progress heartbeat")
+        );
+    }
+
+    #[tokio::test]
+    async fn aborting_worker_task_drops_inner_future() {
+        struct DropSignal(Option<oneshot::Sender<()>>);
+
+        impl Drop for DropSignal {
+            fn drop(&mut self) {
+                if let Some(sender) = self.0.take() {
+                    let _ = sender.send(());
+                }
+            }
+        }
+
+        let (event_tx, _event_rx) = broadcast::channel(8);
+        let worker_id = Uuid::new_v4();
+        let agent_id: crate::AgentId = Arc::from("test-agent");
+        let channel_id: crate::ChannelId = Arc::from("test-channel");
+        let (drop_tx, drop_rx) = oneshot::channel();
+        let (started_tx, started_rx) = oneshot::channel();
+
+        let handle =
+            spawn_worker_task(worker_id, event_tx, agent_id, Some(channel_id), 30, async {
+                let _guard = DropSignal(Some(drop_tx));
+                let _ = started_tx.send(());
+                tokio::time::sleep(Duration::from_secs(120)).await;
+                Ok::<String, anyhow::Error>("should not finish".to_string())
+            });
+
+        tokio::time::timeout(Duration::from_secs(1), started_rx)
+            .await
+            .expect("future should start before cancellation")
+            .expect("start signal channel unexpectedly closed");
+        handle.abort();
+        let _ = handle.await;
+
+        tokio::time::timeout(Duration::from_secs(1), drop_rx)
+            .await
+            .expect("future should be dropped when worker task is aborted")
+            .expect("drop signal channel unexpectedly closed");
+    }
+
+    #[test]
+    fn progress_event_detection_matches_worker_events() {
+        let worker_id = Uuid::new_v4();
+        let other_worker_id = Uuid::new_v4();
+        let agent_id: crate::AgentId = Arc::from("test-agent");
+        let channel_id: crate::ChannelId = Arc::from("test-channel");
+
+        let progress = ProcessEvent::WorkerStatus {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: Some(channel_id.clone()),
+            status: "working".to_string(),
+        };
+        let non_progress = ProcessEvent::WorkerStatus {
+            agent_id,
+            worker_id: other_worker_id,
+            channel_id: Some(channel_id),
+            status: "working".to_string(),
+        };
+
+        assert!(is_worker_progress_event(&progress, worker_id));
+        assert!(!is_worker_progress_event(&non_progress, worker_id));
+    }
+
+    #[test]
+    fn worker_failure_detection_matches_terminal_messages() {
+        assert!(is_worker_terminal_failure(
+            "Worker timed out after 300 seconds."
+        ));
+        assert!(is_worker_terminal_failure("Worker failed: request error"));
+        assert!(is_worker_terminal_failure(
+            "Worker cancelled: cancelled by request."
+        ));
+        assert!(!is_worker_terminal_failure(
+            "Completed summary with citations"
+        ));
+    }
+
+    #[test]
+    fn worker_terminal_receipt_payload_reflects_terminal_state() {
+        assert_eq!(
+            classify_worker_terminal_state("Worker failed: provider error"),
+            "failed"
+        );
+        assert_eq!(
+            classify_worker_terminal_state("Worker timed out after 45 seconds."),
+            "timed_out"
+        );
+        assert_eq!(
+            classify_worker_terminal_state("Worker cancelled: cancelled by request."),
+            "cancelled"
+        );
+        assert_eq!(
+            classify_worker_terminal_state("Completed report with citations"),
+            "done"
         );
 
-        // Test normal message with text
-        let formatted_normal = format_user_message("hello", &message);
+        assert_eq!(
+            build_worker_terminal_receipt_payload("failed", "Worker failed: provider error"),
+            "Background task failed: Worker failed: provider error"
+        );
+        assert_eq!(
+            build_worker_terminal_receipt_payload("done", "Completed report with citations"),
+            "Background task completed: Completed report with citations"
+        );
+    }
+
+    #[test]
+    fn worker_checkpoint_status_normalizes_and_truncates() {
+        assert_eq!(normalize_worker_checkpoint_status("   "), None);
+        assert_eq!(
+            normalize_worker_checkpoint_status("running tests"),
+            Some("running tests".to_string())
+        );
+
+        let long_status = "word ".repeat(80);
+        let normalized =
+            normalize_worker_checkpoint_status(&long_status).expect("expected normalized status");
         assert!(
-            formatted_normal.contains("hello"),
-            "normal messages should preserve text"
+            normalized.len() <= 223,
+            "status should be capped with ellipsis"
         );
         assert!(
-            !formatted_normal.contains("[attachment or empty message]"),
-            "normal messages should not use placeholder"
+            normalized.ends_with("..."),
+            "truncated checkpoint should end with ellipsis"
+        );
+    }
+
+    #[test]
+    fn worker_checkpoint_throttles_non_critical_updates() {
+        let now = tokio::time::Instant::now();
+        let previous = WorkerCheckpointState {
+            last_status: "running".to_string(),
+            last_sent_at: now,
+        };
+
+        assert!(
+            !should_emit_worker_checkpoint(Some(&previous), "still running", now),
+            "non-critical updates should be throttled inside the interval"
+        );
+        assert!(
+            should_emit_worker_checkpoint(
+                Some(&previous),
+                "waiting for input",
+                now + Duration::from_secs(1),
+            ),
+            "high-priority checkpoints should bypass throttle"
+        );
+        assert!(
+            should_emit_worker_checkpoint(
+                Some(&previous),
+                "indexing repository",
+                now + Duration::from_secs(WORKER_CHECKPOINT_MIN_INTERVAL_SECS + 1),
+            ),
+            "non-critical updates should flow once interval elapsed"
+        );
+    }
+
+    #[test]
+    fn worker_result_summary_uses_first_non_empty_line() {
+        let summary = summarize_worker_result_for_status(
+            "\n\nCompleted research with 8 cited sources.\nAdditional detail that should not be included.",
+        );
+        assert_eq!(summary, "Completed research with 8 cited sources.");
+    }
+
+    #[test]
+    fn worker_start_summary_redacts_task_details() {
+        let research = summarize_worker_start_for_status(
+            "Research this GitHub commit thoroughly: https://github.com/openai/codex/commit/...",
+        );
+        let coding =
+            summarize_worker_start_for_status("[opencode] Implement a retry loop in channel.rs");
+
+        assert_eq!(research, "research task");
+        assert_eq!(coding, "coding task");
+        assert!(
+            !research.contains("http"),
+            "public summary should not expose raw task content"
         );
     }
 }

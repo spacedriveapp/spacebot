@@ -132,16 +132,78 @@ pub(super) async fn channel_messages(
 pub(super) async fn channel_status(
     State(state): State<Arc<ApiState>>,
 ) -> Json<HashMap<String, serde_json::Value>> {
-    let snapshot: Vec<_> = {
+    let status_snapshot: Vec<_> = {
         let blocks = state.channel_status_blocks.read().await;
         blocks.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     };
+    let state_snapshot: HashMap<String, crate::agent::channel::ChannelState> = {
+        let channel_states = state.channel_states.read().await;
+        channel_states
+            .iter()
+            .map(|(channel_id, channel_state)| (channel_id.clone(), channel_state.clone()))
+            .collect()
+    };
 
     let mut result = HashMap::new();
-    for (channel_id, status_block) in snapshot {
+    for (channel_id, status_block) in status_snapshot {
         let block = status_block.read().await;
-        if let Ok(value) = serde_json::to_value(&*block) {
+        if let Ok(mut value) = serde_json::to_value(&*block) {
+            if let Some(channel_state) = state_snapshot.get(&channel_id) {
+                match channel_state
+                    .process_run_logger
+                    .load_worker_delivery_receipt_stats(&channel_id)
+                    .await
+                {
+                    Ok(stats) => {
+                        if let Some(object) = value.as_object_mut() {
+                            if let Ok(stats_value) = serde_json::to_value(stats) {
+                                object.insert("worker_delivery_receipts".to_string(), stats_value);
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            "failed to load worker delivery receipt stats"
+                        );
+                    }
+                }
+            }
             result.insert(channel_id, value);
+        }
+    }
+
+    // Include channels that are active in state but missing from the
+    // channel_status_blocks snapshot (for example, during registration races).
+    for (channel_id, channel_state) in &state_snapshot {
+        if result.contains_key(channel_id) {
+            continue;
+        }
+
+        let block = channel_state.status_block.read().await;
+        if let Ok(mut value) = serde_json::to_value(&*block) {
+            match channel_state
+                .process_run_logger
+                .load_worker_delivery_receipt_stats(channel_id)
+                .await
+            {
+                Ok(stats) => {
+                    if let Some(object) = value.as_object_mut() {
+                        if let Ok(stats_value) = serde_json::to_value(stats) {
+                            object.insert("worker_delivery_receipts".to_string(), stats_value);
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        "failed to load worker delivery receipt stats"
+                    );
+                }
+            }
+            result.insert(channel_id.clone(), value);
         }
     }
 
@@ -198,7 +260,7 @@ pub(super) async fn cancel_process(
                 .parse()
                 .map_err(|_| StatusCode::BAD_REQUEST)?;
             channel_state
-                .cancel_worker(worker_id)
+                .cancel_worker(worker_id, None)
                 .await
                 .map_err(|_| StatusCode::NOT_FOUND)?;
             Ok(Json(CancelProcessResponse {

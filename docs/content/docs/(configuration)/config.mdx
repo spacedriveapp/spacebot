@@ -476,7 +476,7 @@ Thresholds are fractions of `context_window`.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `tick_interval_secs` | integer | 30 | How often the cortex checks system state |
-| `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
+| `worker_timeout_secs` | integer | 300 | Inactivity timeout for worker progress events before forced cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
 

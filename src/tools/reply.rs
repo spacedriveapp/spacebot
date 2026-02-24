@@ -2,7 +2,7 @@
 
 use crate::conversation::ConversationLogger;
 
-use crate::{ChannelId, OutboundResponse};
+use crate::{ChannelId, OutboundEnvelope, OutboundResponse};
 use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -40,7 +40,7 @@ pub fn new_replied_flag() -> RepliedFlag {
 /// tools once and shares them across calls.
 #[derive(Debug, Clone)]
 pub struct ReplyTool {
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: mpsc::Sender<OutboundEnvelope>,
     conversation_id: String,
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
@@ -51,7 +51,7 @@ pub struct ReplyTool {
 impl ReplyTool {
     /// Create a new reply tool bound to a conversation's response channel.
     pub fn new(
-        response_tx: mpsc::Sender<OutboundResponse>,
+        response_tx: mpsc::Sender<OutboundEnvelope>,
         conversation_id: impl Into<String>,
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
@@ -218,6 +218,31 @@ pub(crate) fn normalize_discord_mention_tokens(content: &str, source: &str) -> S
         .into_owned();
 
     normalized
+}
+
+pub(crate) fn is_low_value_waiting_update(content: &str) -> bool {
+    let lowered = content.to_ascii_lowercase();
+
+    let spawned = lowered.contains("worker was spawned")
+        || lowered.contains("spawned a worker")
+        || lowered.contains("worker was started");
+    let no_report = lowered.contains("hasn't reported back")
+        || lowered.contains("has not reported back")
+        || lowered.contains("hasn't come back")
+        || lowered.contains("has not come back");
+    if spawned && no_report {
+        return true;
+    }
+
+    let known_template = lowered.contains("still waiting on the research results")
+        || lowered.contains("still waiting on the worker results")
+        || lowered.contains("still waiting on the results")
+        || lowered.contains("still waiting for the worker results");
+    if known_template {
+        return true;
+    }
+
+    false
 }
 
 impl Tool for ReplyTool {
@@ -395,7 +420,7 @@ impl Tool for ReplyTool {
         };
 
         self.response_tx
-            .send(response)
+            .send(response.into())
             .await
             .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 
@@ -414,7 +439,9 @@ impl Tool for ReplyTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_discord_mention_tokens, sanitize_discord_user_id};
+    use super::{
+        is_low_value_waiting_update, normalize_discord_mention_tokens, sanitize_discord_user_id,
+    };
 
     #[test]
     fn normalizes_broken_discord_mentions() {
@@ -444,5 +471,17 @@ mod tests {
     fn sanitizes_discord_ids_with_prefix_noise() {
         let parsed = sanitize_discord_user_id(">234152400653385729").expect("should parse id");
         assert_eq!(parsed, "234152400653385729");
+    }
+
+    #[test]
+    fn suppresses_low_value_waiting_updates() {
+        let content = "Still waiting on the research results — the worker was spawned and hasn't reported back yet.";
+        assert!(is_low_value_waiting_update(content));
+        assert!(!is_low_value_waiting_update(
+            "Still waiting on your approval before I run anything."
+        ));
+        assert!(!is_low_value_waiting_update(
+            "I found 3 key findings and linked the sources below."
+        ));
     }
 }
