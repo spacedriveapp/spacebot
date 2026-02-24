@@ -386,6 +386,15 @@ pub enum OutboundResponse {
     StreamStart,
     StreamChunk(String),
     StreamEnd,
+    /// Edit a previously sent message by ID.
+    /// Telegram: edits the text of a message using editMessageText.
+    /// Other platforms: falls back to sending a new message (no-op).
+    EditMessage {
+        /// The platform-specific message ID to edit.
+        message_id: String,
+        /// The new text content.
+        text: String,
+    },
     Status(StatusUpdate),
 }
 

@@ -471,6 +471,27 @@ impl Messaging for TelegramAdapter {
                     .await
                     .remove(&message.conversation_id);
             }
+            OutboundResponse::EditMessage { message_id, text } => {
+                let msg_id = message_id
+                    .parse::<i32>()
+                    .context("invalid telegram message_id for edit")?;
+                let html = markdown_to_telegram_html(&text);
+                
+                if let Err(html_error) = self
+                    .bot
+                    .edit_message_text(chat_id, MessageId(msg_id), &html)
+                    .parse_mode(ParseMode::Html)
+                    .send()
+                    .await
+                {
+                    tracing::debug!(%html_error, "HTML edit failed, retrying as plain text");
+                    self.bot
+                        .edit_message_text(chat_id, MessageId(msg_id), &text)
+                        .send()
+                        .await
+                        .context("failed to edit telegram message")?;
+                }
+            }
             OutboundResponse::Status(status) => {
                 self.send_status(message, status).await?;
             }

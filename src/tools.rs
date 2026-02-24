@@ -38,6 +38,7 @@ pub mod memory_save;
 pub mod react;
 pub mod read_skill;
 pub mod reply;
+pub mod edit_message;
 pub mod route;
 pub mod send_agent_message;
 pub mod send_file;
@@ -77,6 +78,7 @@ pub use memory_save::{
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
+pub use edit_message::{EditedFlag, EditMessageArgs, EditMessageError, EditMessageOutput, EditMessageTool, new_edited_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
 pub use send_agent_message::{
     SendAgentMessageArgs, SendAgentMessageError, SendAgentMessageOutput, SendAgentMessageTool,
@@ -233,9 +235,10 @@ pub async fn add_channel_tools(
     handle: &ToolServerHandle,
     state: ChannelState,
     response_tx: mpsc::Sender<OutboundResponse>,
-    conversation_id: impl Into<String>,
+    conversation_id: impl Into<String> + Clone,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    edited_flag: EditedFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
@@ -255,6 +258,15 @@ pub async fn add_channel_tools(
             state.channel_id.clone(),
             replied_flag.clone(),
             agent_display_name,
+        ))
+        .await?;
+    handle
+        .add_tool(EditMessageTool::new(
+            response_tx.clone(),
+            conversation_id.clone(),
+            state.conversation_logger.clone(),
+            state.channel_id.clone(),
+            edited_flag.clone(),
         ))
         .await?;
     handle.add_tool(BranchTool::new(state.clone())).await?;

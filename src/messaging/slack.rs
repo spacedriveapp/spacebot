@@ -937,6 +937,12 @@ impl Messaging for SlackAdapter {
                     .context("failed to remove slack reaction")?;
             }
 
+            // Telegram-specific: edit a previously sent message
+            OutboundResponse::EditMessage { .. } => {
+                // Slack does not support editing arbitrary messages in the same way
+                tracing::debug!("EditMessage not supported on Slack, message unchanged");
+            }
+
             OutboundResponse::Ephemeral { text, user_id } => {
                 let thread_ts = extract_thread_ts(message);
                 let req = SlackApiChatPostEphemeralRequest::new(
@@ -1493,6 +1499,7 @@ fn variant_name(response: &OutboundResponse) -> &'static str {
         OutboundResponse::StreamStart => "StreamStart",
         OutboundResponse::StreamChunk(_) => "StreamChunk",
         OutboundResponse::StreamEnd => "StreamEnd",
+        OutboundResponse::EditMessage { .. } => "EditMessage",
         OutboundResponse::Status(_) => "Status",
     }
 }

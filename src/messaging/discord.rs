@@ -330,6 +330,11 @@ impl Messaging for DiscordAdapter {
             }
             // Slack-specific variants — graceful fallbacks for Discord
             OutboundResponse::RemoveReaction(_) => {} // no-op
+            // Telegram-specific: edit a previously sent message
+            OutboundResponse::EditMessage { .. } => {
+                // Discord doesn't support editing arbitrary messages via API in the same way
+                tracing::debug!("EditMessage not supported on Discord, message unchanged");
+            }
             OutboundResponse::Ephemeral { text, .. } => {
                 // Discord has no ephemeral equivalent here; send as regular text
                 if let Ok(channel_id) = self.extract_channel_id(message) {

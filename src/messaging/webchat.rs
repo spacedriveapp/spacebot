@@ -92,7 +92,8 @@ impl Messaging for WebChatAdapter {
             | OutboundResponse::Ephemeral { .. }
             | OutboundResponse::ScheduledMessage { .. }
             | OutboundResponse::RichMessage { .. }
-            | OutboundResponse::Status(_) => return Ok(()),
+            | OutboundResponse::Status(_)
+            | OutboundResponse::EditMessage { .. } => return Ok(()),
         };
 
         let _ = tx.send(event).await;

@@ -621,7 +621,7 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, edited_flag) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
@@ -631,7 +631,7 @@ impl Channel {
             )
             .await?;
 
-        self.handle_agent_result(result, &skip_flag, &replied_flag, false)
+        self.handle_agent_result(result, &skip_flag, &replied_flag, &edited_flag, false)
             .await;
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
@@ -792,7 +792,7 @@ impl Channel {
 
         let is_retrigger = message.source == "system";
 
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, edited_flag) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
@@ -802,7 +802,7 @@ impl Channel {
             )
             .await?;
 
-        self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
+        self.handle_agent_result(result, &skip_flag, &replied_flag, &edited_flag, is_retrigger)
             .await;
 
         // After a successful retrigger relay, inject a compact record into
@@ -998,9 +998,11 @@ impl Channel {
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
         crate::tools::RepliedFlag,
+        crate::tools::EditedFlag,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
+        let edited_flag = crate::tools::new_edited_flag();
 
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
@@ -1009,6 +1011,7 @@ impl Channel {
             conversation_id,
             skip_flag.clone(),
             replied_flag.clone(),
+            edited_flag.clone(),
             self.deps.cron_tool.clone(),
             self.send_agent_message_tool.clone(),
         )
@@ -1106,7 +1109,7 @@ impl Channel {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
-        Ok((result, skip_flag, replied_flag))
+        Ok((result, skip_flag, replied_flag, edited_flag))
     }
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
@@ -1121,6 +1124,7 @@ impl Channel {
         result: std::result::Result<String, rig::completion::PromptError>,
         skip_flag: &crate::tools::SkipFlag,
         replied_flag: &crate::tools::RepliedFlag,
+        edited_flag: &crate::tools::EditedFlag,
         is_retrigger: bool,
     ) {
         match result {

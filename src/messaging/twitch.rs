@@ -387,6 +387,10 @@ impl Messaging for TwitchAdapter {
             OutboundResponse::Reaction(_)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_) => {}
+            OutboundResponse::EditMessage { .. } => {
+                // Telegram-specific: edit a previously sent message
+                tracing::debug!("EditMessage not supported on Twitch");
+            }
             OutboundResponse::Ephemeral { text, .. } => {
                 // No ephemeral concept in Twitch — send as regular chat message
                 client
