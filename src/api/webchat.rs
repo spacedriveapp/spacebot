@@ -86,9 +86,6 @@ pub(super) async fn webchat_send(
                 WebChatEvent::StreamEnd => "stream_end",
                 WebChatEvent::ToolStarted { .. } => "tool_started",
                 WebChatEvent::ToolCompleted { .. } => "tool_completed",
-                WebChatEvent::WorkerStarted { .. } => "worker_started",
-                WebChatEvent::WorkerCheckpoint { .. } => "worker_checkpoint",
-                WebChatEvent::WorkerCompleted { .. } => "worker_completed",
                 WebChatEvent::StopTyping => "stop_typing",
                 WebChatEvent::Done => "done",
             };
