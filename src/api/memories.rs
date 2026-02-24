@@ -184,7 +184,9 @@ pub(super) async fn create_memory(
     let memory_type = parse_required_memory_type(&request.memory_type)?;
 
     let searches = state.memory_searches.load();
-    let memory_search = searches.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let memory_search = searches
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let store = memory_search.store();
 
     let mut memory = Memory::new(content.clone(), memory_type);
@@ -197,23 +199,32 @@ pub(super) async fn create_memory(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let embedding = memory_search
+    let embedding = match memory_search
         .embedding_model_arc()
         .embed_one(&memory.content)
         .await
-        .map_err(|error| {
+    {
+        Ok(embedding) => embedding,
+        Err(error) => {
             tracing::warn!(%error, agent_id = %request.agent_id, memory_id = %memory.id, "failed to embed memory content");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            if let Err(rollback_error) = store.delete(&memory.id).await {
+                tracing::warn!(%rollback_error, agent_id = %request.agent_id, memory_id = %memory.id, "failed to rollback memory after embedding error");
+            }
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    };
 
-    memory_search
+    if let Err(error) = memory_search
         .embedding_table()
         .store(&memory.id, &memory.content, &embedding)
         .await
-        .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, memory_id = %memory.id, "failed to store memory embedding");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    {
+        tracing::warn!(%error, agent_id = %request.agent_id, memory_id = %memory.id, "failed to store memory embedding");
+        if let Err(rollback_error) = store.delete(&memory.id).await {
+            tracing::warn!(%rollback_error, agent_id = %request.agent_id, memory_id = %memory.id, "failed to rollback memory after embedding storage error");
+        }
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     if let Err(error) = memory_search.embedding_table().ensure_fts_index().await {
         tracing::warn!(%error, "failed to ensure FTS index after memory create");
@@ -231,7 +242,9 @@ pub(super) async fn update_memory(
     Json(request): Json<UpdateMemoryRequest>,
 ) -> Result<Json<MemoryWriteResponse>, StatusCode> {
     let searches = state.memory_searches.load();
-    let memory_search = searches.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let memory_search = searches
+        .get(&request.agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
     let store = memory_search.store();
 
     let mut memory = store.load(&request.memory_id).await.map_err(|error| {
@@ -332,7 +345,10 @@ pub(super) async fn delete_memory(
     })?;
 
     if forgotten
-        && let Err(error) = memory_search.embedding_table().delete(&query.memory_id).await
+        && let Err(error) = memory_search
+            .embedding_table()
+            .delete(&query.memory_id)
+            .await
     {
         tracing::warn!(%error, memory_id = %query.memory_id, "failed to delete memory embedding after forget");
     }

@@ -46,6 +46,11 @@ interface MemoryFormData {
 	importance: number;
 }
 
+interface UpdateMemoryMutationInput {
+	memoryId: string;
+	data: MemoryFormData;
+}
+
 function emptyFormData(): MemoryFormData {
 	return {
 		content: "",
@@ -175,12 +180,12 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	};
 
 	const createMutation = useMutation({
-		mutationFn: () => {
+		mutationFn: (data: MemoryFormData) => {
 			return api.createMemory({
 				agent_id: agentId,
-				content: formData.content,
-				memory_type: formData.memory_type,
-				importance: formData.importance,
+				content: data.content,
+				memory_type: data.memory_type,
+				importance: data.importance,
 			});
 		},
 		onSuccess: () => {
@@ -194,14 +199,13 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	});
 
 	const updateMutation = useMutation({
-		mutationFn: () => {
-			if (!editingMemory) throw new Error("No memory selected");
+		mutationFn: ({ memoryId, data }: UpdateMemoryMutationInput) => {
 			return api.updateMemory({
 				agent_id: agentId,
-				memory_id: editingMemory.id,
-				content: formData.content,
-				memory_type: formData.memory_type,
-				importance: formData.importance,
+				memory_id: memoryId,
+				content: data.content,
+				memory_type: data.memory_type,
+				importance: data.importance,
 			});
 		},
 		onSuccess: () => {
@@ -251,11 +255,17 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			return;
 		}
 
+		const payload: MemoryFormData = {
+			content: trimmedContent,
+			memory_type: formData.memory_type,
+			importance: formData.importance,
+		};
+
 		setFormError(null);
 		if (editingMemory) {
-			updateMutation.mutate();
+			updateMutation.mutate({ memoryId: editingMemory.id, data: payload });
 		} else {
-			createMutation.mutate();
+			createMutation.mutate(payload);
 		}
 	};
 
@@ -269,9 +279,10 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		overscan: 10,
 	});
 
+	// eslint-disable-next-line react-hooks/exhaustive-deps
 	useEffect(() => {
 		virtualizer.measure();
-	}, [memories.length, expandedId, virtualizer]);
+	}, [memories.length, expandedId]);
 
 	// Reset expanded when data changes
 	useEffect(() => {
