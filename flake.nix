@@ -81,7 +81,14 @@
 
           bun --eval '
             const lockText = await Bun.file("bun.lock").text()
-            const lock = (0, eval)("(" + lockText + ")")
+            let lock
+            try {
+              lock = JSON.parse(lockText.replace(/,\s*([}\]])/g, "$1"))
+            } catch (error) {
+              console.error("Failed to parse bun.lock for integrity check")
+              console.error(error)
+              process.exit(1)
+            }
             const packageEntries = Object.values(lock.packages ?? {})
             const emptyIntegrities = packageEntries.filter(
               (entry) => Array.isArray(entry) && entry[3] === ""
