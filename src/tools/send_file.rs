@@ -1,6 +1,6 @@
 //! Send file tool for delivering file attachments to users (channel only).
 
-use crate::OutboundResponse;
+use crate::{OutboundEnvelope, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -16,38 +16,12 @@ use tokio::sync::mpsc;
 /// File access is restricted to the agent's workspace boundary.
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
-    response_tx: mpsc::Sender<OutboundResponse>,
-    workspace: PathBuf,
+    response_tx: mpsc::Sender<OutboundEnvelope>,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>, workspace: PathBuf) -> Self {
-        Self {
-            response_tx,
-            workspace,
-        }
-    }
-
-    /// Validate that a path falls within the workspace boundary.
-    fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
-        let workspace = &self.workspace;
-
-        let canonical = path.canonicalize().map_err(|error| {
-            SendFileError(format!("can't resolve path '{}': {error}", path.display()))
-        })?;
-        let workspace_canonical = workspace
-            .canonicalize()
-            .unwrap_or_else(|_| workspace.clone());
-
-        if !canonical.starts_with(&workspace_canonical) {
-            return Err(SendFileError(format!(
-                "ACCESS DENIED: Path is outside the workspace boundary. \
-                 File operations are restricted to {}.",
-                workspace.display()
-            )));
-        }
-
-        Ok(canonical)
+    pub fn new(response_tx: mpsc::Sender<OutboundEnvelope>) -> Self {
+        Self { response_tx }
     }
 }
 
@@ -161,7 +135,7 @@ impl Tool for SendFileTool {
         };
 
         self.response_tx
-            .send(response)
+            .send(response.into())
             .await
             .map_err(|error| SendFileError(format!("failed to send file: {error}")))?;
 

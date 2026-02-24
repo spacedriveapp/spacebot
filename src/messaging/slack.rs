@@ -809,7 +809,14 @@ impl Messaging for SlackAdapter {
             StatusUpdate::StopTyping => String::new(), // empty string clears the status
             StatusUpdate::ToolStarted { .. } => "Working…".to_string(),
             StatusUpdate::ToolCompleted { .. } => "Working…".to_string(),
-            _ => "Working…".to_string(),
+            StatusUpdate::WorkerStarted { task, .. } => {
+                format!("Starting: {}", truncate_status_text(task, 120))
+            }
+            StatusUpdate::WorkerCheckpoint { status, .. } => truncate_status_text(status, 140),
+            StatusUpdate::WorkerCompleted { result, .. } => {
+                format!("Done: {}", truncate_status_text(result, 120))
+            }
+            StatusUpdate::BranchStarted { .. } => "Branch started…".to_string(),
         };
 
         let session = self.session();
@@ -1256,6 +1263,15 @@ fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
         // Exceeds markdown block limit — send as plain text
         SlackMessageContent::new().with_text(text)
     }
+}
+
+fn truncate_status_text(text: &str, max_chars: usize) -> String {
+    if text.len() <= max_chars {
+        return text.to_string();
+    }
+
+    let end = text.floor_char_boundary(max_chars.saturating_sub(3));
+    format!("{}...", &text[..end])
 }
 
 /// Extract `MessageContent` from an optional `SlackMessageContent`.

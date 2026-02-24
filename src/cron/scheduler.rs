@@ -564,7 +564,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<OutboundResponse>(32);
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<crate::OutboundEnvelope>(32);
 
     // Subscribe to the agent's event bus (the channel needs this for branch/worker events)
     let event_rx = context.deps.event_tx.subscribe();
@@ -615,10 +615,16 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
 
     loop {
         match tokio::time::timeout(timeout, response_rx.recv()).await {
-            Ok(Some(OutboundResponse::Text(text))) => {
+            Ok(Some(crate::OutboundEnvelope {
+                response: OutboundResponse::Text(text),
+                ..
+            })) => {
                 collected_text.push(text);
             }
-            Ok(Some(OutboundResponse::RichMessage { text, .. })) => {
+            Ok(Some(crate::OutboundEnvelope {
+                response: OutboundResponse::RichMessage { text, .. },
+                ..
+            })) => {
                 collected_text.push(text);
             }
             Ok(Some(_)) => {

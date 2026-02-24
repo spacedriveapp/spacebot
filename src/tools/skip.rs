@@ -5,7 +5,7 @@
 //! instead of `reply`. The channel checks the skip flag after the LLM turn and
 //! suppresses any fallback text output.
 
-use crate::OutboundResponse;
+use crate::{OutboundEnvelope, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -29,11 +29,11 @@ pub fn new_skip_flag() -> SkipFlag {
 #[derive(Debug, Clone)]
 pub struct SkipTool {
     flag: SkipFlag,
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: mpsc::Sender<OutboundEnvelope>,
 }
 
 impl SkipTool {
-    pub fn new(flag: SkipFlag, response_tx: mpsc::Sender<OutboundResponse>) -> Self {
+    pub fn new(flag: SkipFlag, response_tx: mpsc::Sender<OutboundEnvelope>) -> Self {
         Self { flag, response_tx }
     }
 }
@@ -86,7 +86,7 @@ impl Tool for SkipTool {
         // Cancel the typing indicator so it doesn't linger
         let _ = self
             .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping).into())
             .await;
 
         let reason = args.reason.as_deref().unwrap_or("no reason given");

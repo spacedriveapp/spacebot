@@ -24,8 +24,12 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+/// Per-browser-action timeout to avoid hanging worker runs on Chrome/CDP stalls.
+const BROWSER_ACTION_TIMEOUT_SECS: u64 = 45;
 
 /// Validate that a URL is safe for the browser to navigate to.
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
@@ -465,6 +469,28 @@ impl Tool for BrowserTool {
 }
 
 impl BrowserTool {
+    async fn with_action_timeout<T, F, E>(
+        action_name: &str,
+        action_future: F,
+    ) -> Result<T, BrowserError>
+    where
+        F: std::future::Future<Output = Result<T, E>>,
+        E: std::fmt::Display,
+    {
+        match tokio::time::timeout(
+            Duration::from_secs(BROWSER_ACTION_TIMEOUT_SECS),
+            action_future,
+        )
+        .await
+        {
+            Ok(Ok(value)) => Ok(value),
+            Ok(Err(error)) => Err(BrowserError::new(format!("{action_name} failed: {error}"))),
+            Err(_) => Err(BrowserError::new(format!(
+                "{action_name} timed out after {BROWSER_ACTION_TIMEOUT_SECS}s"
+            ))),
+        }
+    }
+
     async fn handle_launch(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
@@ -492,9 +518,8 @@ impl BrowserTool {
             "launching chrome"
         );
 
-        let (browser, mut handler) = Browser::launch(chrome_config)
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to launch browser: {error}")))?;
+        let (browser, mut handler) =
+            Self::with_action_timeout("browser launch", Browser::launch(chrome_config)).await?;
 
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
@@ -515,9 +540,7 @@ impl BrowserTool {
         let mut state = self.state.lock().await;
         let page = self.get_or_create_page(&mut state, Some(&url)).await?;
 
-        page.goto(&url)
-            .await
-            .map_err(|error| BrowserError::new(format!("navigation failed: {error}")))?;
+        Self::with_action_timeout("navigation", page.goto(&url)).await?;
 
         let title = page.get_title().await.ok().flatten();
         let current_url = page.url().await.ok().flatten();
@@ -545,10 +568,7 @@ impl BrowserTool {
             validate_url(target_url)?;
         }
 
-        let page = browser
-            .new_page(target_url)
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to open tab: {error}")))?;
+        let page = Self::with_action_timeout("open tab", browser.new_page(target_url)).await?;
 
         let target_id = page_target_id(&page);
         let title = page.get_title().await.ok().flatten();
@@ -989,10 +1009,7 @@ impl BrowserTool {
             .ok_or_else(|| BrowserError::new("browser not launched — call launch first"))?;
 
         let target_url = url.unwrap_or("about:blank");
-        let page = browser
-            .new_page(target_url)
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to create page: {error}")))?;
+        let page = Self::with_action_timeout("create page", browser.new_page(target_url)).await?;
 
         let target_id = page_target_id(&page);
         state.pages.insert(target_id.clone(), page);

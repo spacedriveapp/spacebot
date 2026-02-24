@@ -380,6 +380,38 @@ pub enum OutboundResponse {
     Status(StatusUpdate),
 }
 
+/// Internal wrapper for outbound channel routing.
+///
+/// Carries an optional durable delivery receipt ID for messages that must be
+/// acknowledged by the outbound adapter path.
+#[derive(Debug, Clone)]
+pub struct OutboundEnvelope {
+    pub response: OutboundResponse,
+    pub receipt_id: Option<String>,
+}
+
+impl OutboundEnvelope {
+    pub fn untracked(response: OutboundResponse) -> Self {
+        Self {
+            response,
+            receipt_id: None,
+        }
+    }
+
+    pub fn tracked(response: OutboundResponse, receipt_id: String) -> Self {
+        Self {
+            response,
+            receipt_id: Some(receipt_id),
+        }
+    }
+}
+
+impl From<OutboundResponse> for OutboundEnvelope {
+    fn from(response: OutboundResponse) -> Self {
+        Self::untracked(response)
+    }
+}
+
 /// A generic rich-formatted card (maps to Embeds in Discord).
 #[derive(Debug, Clone, Serialize, Deserialize, Default, schemars::JsonSchema)]
 pub struct Card {
@@ -502,5 +534,11 @@ pub enum StatusUpdate {
     WorkerCompleted {
         worker_id: WorkerId,
         result: String,
+    },
+    /// Progress checkpoint from a running worker.
+    /// Intended for sparse, meaningful user-facing updates.
+    WorkerCheckpoint {
+        worker_id: WorkerId,
+        status: String,
     },
 }

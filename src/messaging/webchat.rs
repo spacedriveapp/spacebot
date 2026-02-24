@@ -25,6 +25,9 @@ pub enum WebChatEvent {
     StreamEnd,
     ToolStarted { tool_name: String },
     ToolCompleted { tool_name: String },
+    WorkerStarted { worker_id: String, task: String },
+    WorkerCheckpoint { worker_id: String, status: String },
+    WorkerCompleted { worker_id: String, result: String },
     StopTyping,
     Done,
 }
@@ -117,7 +120,21 @@ impl Messaging for WebChatAdapter {
             StatusUpdate::StopTyping => WebChatEvent::StopTyping,
             StatusUpdate::ToolStarted { tool_name } => WebChatEvent::ToolStarted { tool_name },
             StatusUpdate::ToolCompleted { tool_name } => WebChatEvent::ToolCompleted { tool_name },
-            _ => return Ok(()),
+            StatusUpdate::WorkerStarted { worker_id, task } => WebChatEvent::WorkerStarted {
+                worker_id: worker_id.to_string(),
+                task,
+            },
+            StatusUpdate::WorkerCheckpoint { worker_id, status } => {
+                WebChatEvent::WorkerCheckpoint {
+                    worker_id: worker_id.to_string(),
+                    status,
+                }
+            }
+            StatusUpdate::WorkerCompleted { worker_id, result } => WebChatEvent::WorkerCompleted {
+                worker_id: worker_id.to_string(),
+                result,
+            },
+            StatusUpdate::BranchStarted { .. } => return Ok(()),
         };
 
         let _ = tx.send(event).await;

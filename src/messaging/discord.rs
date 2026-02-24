@@ -26,6 +26,8 @@ pub struct DiscordAdapter {
     bot_user_id: Arc<RwLock<Option<UserId>>>,
     /// Maps InboundMessage.id to the Discord MessageId being edited during streaming.
     active_messages: Arc<RwLock<HashMap<String, serenity::all::MessageId>>>,
+    /// Per-channel progress message used for worker checkpoint edits.
+    progress_messages: Arc<RwLock<HashMap<String, serenity::all::MessageId>>>,
     /// Typing handles per message. Typing stops when the handle is dropped.
     typing_tasks: Arc<RwLock<HashMap<String, serenity::http::Typing>>>,
     shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
@@ -39,6 +41,7 @@ impl DiscordAdapter {
             http: Arc::new(RwLock::new(None)),
             bot_user_id: Arc::new(RwLock::new(None)),
             active_messages: Arc::new(RwLock::new(HashMap::new())),
+            progress_messages: Arc::new(RwLock::new(HashMap::new())),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shard_manager: Arc::new(RwLock::new(None)),
         }
@@ -84,6 +87,57 @@ impl DiscordAdapter {
             .get("discord_reply_to_message_id")
             .and_then(|value| value.as_u64())
             .map(MessageId::new)
+    }
+
+    fn progress_message_key(message: &InboundMessage, worker_id: crate::WorkerId) -> String {
+        format!("{}:{worker_id}", Self::channel_key(message))
+    }
+
+    async fn upsert_progress_message(
+        &self,
+        message: &InboundMessage,
+        worker_id: crate::WorkerId,
+        content: &str,
+    ) -> anyhow::Result<()> {
+        let http = self.get_http().await?;
+        let channel_id = self.extract_channel_id(message)?;
+        let key = Self::progress_message_key(message, worker_id);
+        let display_text = if content.len() > 2000 {
+            let end = content.floor_char_boundary(1997);
+            format!("{}...", &content[..end])
+        } else {
+            content.to_string()
+        };
+
+        let existing_id = self.progress_messages.read().await.get(&key).copied();
+        if let Some(message_id) = existing_id {
+            let builder = EditMessage::new().content(display_text.clone());
+            match channel_id.edit_message(&*http, message_id, builder).await {
+                Ok(_) => return Ok(()),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to edit progress message; creating a new one");
+                }
+            }
+        }
+
+        let reply_to = Self::extract_reply_message_id(message);
+        let mut builder = CreateMessage::new().content(display_text);
+        if let Some(reply_message_id) = reply_to {
+            builder = builder.reference_message((channel_id, reply_message_id));
+        }
+        let sent = channel_id
+            .send_message(&*http, builder)
+            .await
+            .context("failed to send worker progress message")?;
+        self.progress_messages.write().await.insert(key, sent.id);
+        Ok(())
+    }
+
+    async fn clear_progress_message(&self, message: &InboundMessage, worker_id: crate::WorkerId) {
+        self.progress_messages
+            .write()
+            .await
+            .remove(&Self::progress_message_key(message, worker_id));
     }
 }
 
@@ -371,7 +425,53 @@ impl Messaging for DiscordAdapter {
                     .await
                     .insert(Self::channel_key(message), typing);
             }
-            _ => {
+            StatusUpdate::WorkerStarted { worker_id, task } => {
+                self.stop_typing(message).await;
+                let text = format!(
+                    "Background task `{}` started: {}",
+                    short_worker_id(worker_id),
+                    task
+                );
+                if let Err(error) = self
+                    .upsert_progress_message(message, worker_id, &text)
+                    .await
+                {
+                    tracing::debug!(%error, "failed to update discord progress message");
+                }
+            }
+            StatusUpdate::WorkerCheckpoint { worker_id, status } => {
+                self.stop_typing(message).await;
+                let text = format!(
+                    "Background task `{}`: {}",
+                    short_worker_id(worker_id),
+                    status
+                );
+                if let Err(error) = self
+                    .upsert_progress_message(message, worker_id, &text)
+                    .await
+                {
+                    tracing::debug!(%error, "failed to update discord progress message");
+                }
+            }
+            StatusUpdate::WorkerCompleted { worker_id, result } => {
+                self.stop_typing(message).await;
+                let text = format!(
+                    "Background task `{}` completed: {}",
+                    short_worker_id(worker_id),
+                    result
+                );
+                if let Err(error) = self
+                    .upsert_progress_message(message, worker_id, &text)
+                    .await
+                {
+                    tracing::debug!(%error, "failed to update discord progress message");
+                }
+                self.clear_progress_message(message, worker_id).await;
+            }
+            StatusUpdate::StopTyping
+            | StatusUpdate::ToolStarted { .. }
+            | StatusUpdate::ToolCompleted { .. }
+            | StatusUpdate::BranchStarted { .. } => {
                 self.stop_typing(message).await;
             }
         }
@@ -542,6 +642,7 @@ impl Messaging for DiscordAdapter {
 
     async fn shutdown(&self) -> crate::Result<()> {
         self.typing_tasks.write().await.clear();
+        self.progress_messages.write().await.clear();
 
         if let Some(shard_manager) = self.shard_manager.read().await.as_ref() {
             shard_manager.shutdown_all().await;
@@ -916,6 +1017,11 @@ async fn build_metadata(
     (metadata, formatted_author)
 }
 
+fn short_worker_id(worker_id: crate::WorkerId) -> String {
+    let full = worker_id.to_string();
+    full.chars().take(8).collect()
+}
+
 /// Split a message into chunks that fit within Discord's 2000 char limit.
 /// Tries to split at newlines, then spaces, then hard-cuts.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
@@ -1075,7 +1181,7 @@ fn build_poll(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
+    use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, MessageContent, Poll};
 
     #[test]
     fn test_build_embed_limits() {
@@ -1132,5 +1238,35 @@ mod tests {
         // build_poll should limit answers to 10 and duration to 720
         let _ = build_poll(&poll);
         // Again, can't easily inspect CreatePoll fields, but we verify it runs.
+    }
+
+    #[test]
+    fn progress_message_key_is_scoped_per_worker() {
+        let worker_a =
+            uuid::Uuid::parse_str("11111111-1111-1111-1111-111111111111").expect("valid uuid");
+        let worker_b =
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-222222222222").expect("valid uuid");
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            "discord_channel_id".to_string(),
+            serde_json::Value::from(42_u64),
+        );
+
+        let message = InboundMessage {
+            id: "msg-1".to_string(),
+            source: "discord".to_string(),
+            conversation_id: "discord:42".to_string(),
+            sender_id: "user-1".to_string(),
+            agent_id: None,
+            content: MessageContent::Text("hello".to_string()),
+            timestamp: chrono::Utc::now(),
+            metadata,
+            formatted_author: None,
+        };
+
+        let key_a = DiscordAdapter::progress_message_key(&message, worker_a);
+        let key_b = DiscordAdapter::progress_message_key(&message, worker_b);
+        assert_ne!(key_a, key_b, "workers in same channel need distinct keys");
     }
 }
