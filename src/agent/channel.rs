@@ -2068,7 +2068,11 @@ async fn transcribe_audio_attachment(
         "{}/v1/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    tracing::info!(
+    tracing::debug!(
+        endpoint = %endpoint,
+        model = %model_name,
+        "sending voice transcription request"
+    );
         endpoint = %endpoint,
         model = %model_name,
         "sending voice transcription request"
