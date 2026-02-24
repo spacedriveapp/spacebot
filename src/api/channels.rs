@@ -147,29 +147,7 @@ pub(super) async fn channel_status(
     let mut result = HashMap::new();
     for (channel_id, status_block) in status_snapshot {
         let block = status_block.read().await;
-        if let Ok(mut value) = serde_json::to_value(&*block) {
-            if let Some(channel_state) = state_snapshot.get(&channel_id) {
-                match channel_state
-                    .process_run_logger
-                    .load_worker_delivery_receipt_stats(&channel_id)
-                    .await
-                {
-                    Ok(stats) => {
-                        if let Some(object) = value.as_object_mut() {
-                            if let Ok(stats_value) = serde_json::to_value(stats) {
-                                object.insert("worker_delivery_receipts".to_string(), stats_value);
-                            }
-                        }
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            "failed to load worker delivery receipt stats"
-                        );
-                    }
-                }
-            }
+        if let Ok(value) = serde_json::to_value(&*block) {
             result.insert(channel_id, value);
         }
     }
@@ -182,27 +160,7 @@ pub(super) async fn channel_status(
         }
 
         let block = channel_state.status_block.read().await;
-        if let Ok(mut value) = serde_json::to_value(&*block) {
-            match channel_state
-                .process_run_logger
-                .load_worker_delivery_receipt_stats(channel_id)
-                .await
-            {
-                Ok(stats) => {
-                    if let Some(object) = value.as_object_mut() {
-                        if let Ok(stats_value) = serde_json::to_value(stats) {
-                            object.insert("worker_delivery_receipts".to_string(), stats_value);
-                        }
-                    }
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %channel_id,
-                        "failed to load worker delivery receipt stats"
-                    );
-                }
-            }
+        if let Ok(value) = serde_json::to_value(&*block) {
             result.insert(channel_id.clone(), value);
         }
     }

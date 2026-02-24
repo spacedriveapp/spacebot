@@ -135,7 +135,6 @@ Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued 
 - Successful delivery marks the receipt as acknowledged.
 - On process restart, in-flight (`sending`) receipts are re-queued so completion notices are not silently dropped.
 - Old terminal receipts (`acked`, `failed`) are pruned periodically to keep storage bounded.
-- `/api/channels/status` includes `worker_delivery_receipts` counts (`pending`, `failed`) per channel for observability.
 
 ## Model Routing
 
