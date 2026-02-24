@@ -309,21 +309,14 @@ impl ProcessRunLogger {
     }
 
     /// Update a worker's status. Fire-and-forget.
-    pub fn log_worker_status(&self, worker_id: WorkerId, status: &str) {
-        let pool = self.pool.clone();
-        let id = worker_id.to_string();
-        let status = status.to_string();
-
-        tokio::spawn(async move {
-            if let Err(error) = sqlx::query("UPDATE worker_runs SET status = ? WHERE id = ?")
-                .bind(&status)
-                .bind(&id)
-                .execute(&pool)
-                .await
-            {
-                tracing::warn!(%error, worker_id = %id, "failed to persist worker status");
-            }
-        });
+    /// Worker status text updates are transient — they're available via the
+    /// in-memory StatusBlock for live workers and don't need to be persisted.
+    /// The `status` column is reserved for the state enum (running/done/failed).
+    pub fn log_worker_status(&self, _worker_id: WorkerId, _status: &str) {
+        // Intentionally a no-op. Status text was previously written to the
+        // `status` column, overwriting the state enum with free-text like
+        // "Searching for weather in Germany" which broke badge rendering
+        // and status filtering.
     }
 
     /// Record a worker completing with its result. Fire-and-forget.

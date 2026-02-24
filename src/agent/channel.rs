@@ -74,9 +74,13 @@ impl ChannelState {
 
         if let Some(handle) = handle {
             handle.abort();
+            // Mark the DB row as cancelled since the abort prevents WorkerComplete from firing
+            self.process_run_logger
+                .log_worker_completed(worker_id, "Worker cancelled", false);
             Ok(())
         } else if removed {
-            // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
+            self.process_run_logger
+                .log_worker_completed(worker_id, "Worker cancelled", false);
             Ok(())
         } else {
             Err(format!("Worker {worker_id} not found"))

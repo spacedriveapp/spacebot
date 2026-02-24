@@ -19,16 +19,23 @@ import {cx} from "@/ui/utils";
 const STATUS_FILTERS = ["all", "running", "done", "failed"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
+const KNOWN_STATUSES = new Set(["running", "done", "failed"]);
+
+function normalizeStatus(status: string): string {
+	if (KNOWN_STATUSES.has(status)) return status;
+	// Legacy rows where set_status text overwrote the state enum.
+	// If it has a completed_at it finished, otherwise it was interrupted.
+	return "failed";
+}
+
 function statusBadgeVariant(status: string) {
 	switch (status) {
 		case "running":
 			return "amber" as const;
-		case "done":
-			return "outline" as const;
 		case "failed":
 			return "red" as const;
 		default:
-			return "default" as const;
+			return "outline" as const;
 	}
 }
 
@@ -297,7 +304,7 @@ function WorkerCard({
 					{isRunning && (
 						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
 					)}
-					{isRunning ? "running" : worker.status}
+					{isRunning ? "running" : normalizeStatus(worker.status)}
 				</Badge>
 			</div>
 			<div className="flex items-center gap-2 text-tiny text-ink-faint">
@@ -388,14 +395,14 @@ function WorkerDetail({
 						</Badge>
 						<Badge
 							variant={statusBadgeVariant(
-								isRunning ? "running" : detail.status,
+								isRunning ? "running" : normalizeStatus(detail.status),
 							)}
 							size="sm"
 						>
 							{isRunning && (
 								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
 							)}
-							{isRunning ? "running" : detail.status}
+							{isRunning ? "running" : normalizeStatus(detail.status)}
 						</Badge>
 					</div>
 				</div>
@@ -530,7 +537,7 @@ function CancelWorkerButton({
 				setCancelling(true);
 				api.cancelProcess(channelId, "worker", workerId).catch(console.warn);
 			}}
-			className="rounded-md border border-red-500/30 px-2 py-0.5 text-tiny font-medium text-red-400 transition-colors hover:bg-red-500/15 disabled:opacity-50"
+			className="rounded-md border border-app-line px-2 py-0.5 text-tiny font-medium text-ink-dull transition-colors hover:border-ink-faint hover:text-ink disabled:opacity-50"
 		>
 			{cancelling ? "Cancelling..." : "Cancel"}
 		</button>
