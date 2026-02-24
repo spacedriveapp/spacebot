@@ -453,9 +453,9 @@ export function Settings() {
 	};
 
 	return (
-		<div className="flex h-full">
+		<div className="flex h-full min-h-0 overflow-hidden">
 			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
+			<div className="flex min-h-0 w-52 flex-shrink-0 flex-col overflow-y-auto border-r border-app-line/50 bg-app-darkBox/20">
 				<div className="px-3 pb-1 pt-4">
 					<span className="text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						Settings
@@ -475,13 +475,13 @@ export function Settings() {
 			</div>
 
 			{/* Content */}
-			<div className="flex flex-1 flex-col overflow-hidden">
+			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
 				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
 					<h1 className="font-plex text-sm font-medium text-ink">
 						{SECTIONS.find((s) => s.id === activeSection)?.label}
 					</h1>
 				</header>
-				<div className="flex-1 overflow-y-auto">
+				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
 					{activeSection === "providers" ? (
 						<div className="mx-auto max-w-2xl px-6 py-6">
 							{/* Section header */}

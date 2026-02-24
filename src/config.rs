@@ -101,9 +101,13 @@ impl Default for MetricsConfig {
 /// API types supported by LLM providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiType {
-    /// OpenAI Completions API (https://api.openai.com/v1/completions)
+    /// OpenAI Chat Completions API (`/v1/chat/completions`)
     OpenAiCompletions,
-    /// OpenAI Responses API (https://api.openai.com/v1/chat/completions)
+    /// OpenAI-compatible Chat Completions API (`/chat/completions`)
+    OpenAiChatCompletions,
+    /// Kilo Gateway API (`/chat/completions`) with required gateway headers
+    KiloGateway,
+    /// OpenAI Responses API (`/v1/responses`)
     OpenAiResponses,
     /// Anthropic Messages API (https://api.anthropic.com/v1/messages)
     Anthropic,
@@ -118,12 +122,14 @@ impl<'de> serde::Deserialize<'de> for ApiType {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "openai_completions" => Ok(Self::OpenAiCompletions),
+            "openai_chat_completions" => Ok(Self::OpenAiChatCompletions),
+            "kilo_gateway" => Ok(Self::KiloGateway),
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", or \"gemini\"",
+                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", or \"gemini\"",
             )),
         }
     }
@@ -2251,10 +2257,10 @@ impl Config {
             llm.providers
                 .entry("kilo".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::KiloGateway,
                     base_url: KILO_PROVIDER_BASE_URL.to_string(),
                     api_key: kilo_key,
-                    name: None,
+                    name: Some("Kilo Gateway".to_string()),
                 });
         }
 
@@ -2262,10 +2268,10 @@ impl Config {
             llm.providers
                 .entry("zhipu".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::OpenAiChatCompletions,
                     base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
                     api_key: zhipu_key,
-                    name: None,
+                    name: Some("Z.AI (GLM)".to_string()),
                 });
         }
 
@@ -2273,10 +2279,10 @@ impl Config {
             llm.providers
                 .entry("zai-coding-plan".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::OpenAiChatCompletions,
                     base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
                     api_key: zai_coding_plan_key,
-                    name: None,
+                    name: Some("Z.AI Coding Plan".to_string()),
                 });
         }
 
@@ -2716,10 +2722,10 @@ impl Config {
             llm.providers
                 .entry("kilo".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::KiloGateway,
                     base_url: KILO_PROVIDER_BASE_URL.to_string(),
                     api_key: kilo_key,
-                    name: None,
+                    name: Some("Kilo Gateway".to_string()),
                 });
         }
 
@@ -2727,10 +2733,10 @@ impl Config {
             llm.providers
                 .entry("zhipu".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::OpenAiChatCompletions,
                     base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
                     api_key: zhipu_key,
-                    name: None,
+                    name: Some("Z.AI (GLM)".to_string()),
                 });
         }
 
@@ -2738,10 +2744,10 @@ impl Config {
             llm.providers
                 .entry("zai-coding-plan".to_string())
                 .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
+                    api_type: ApiType::OpenAiChatCompletions,
                     base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
                     api_key: zai_coding_plan_key,
-                    name: None,
+                    name: Some("Z.AI Coding Plan".to_string()),
                 });
         }
 
@@ -4407,22 +4413,40 @@ api_key = "test-key"
         assert_eq!(result1.unwrap().api_type, ApiType::OpenAiCompletions);
 
         let toml2 = r#"
-api_type = "openai_responses"
-base_url = "https://api.openai.com"
+api_type = "openai_chat_completions"
+base_url = "https://api.example.com"
 api_key = "test-key"
 "#;
         let result2: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml2);
         assert!(result2.is_ok(), "Error: {:?}", result2.err());
-        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiResponses);
+        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiChatCompletions);
 
         let toml3 = r#"
-api_type = "anthropic"
-base_url = "https://api.anthropic.com"
+api_type = "kilo_gateway"
+base_url = "https://api.kilo.ai/api/gateway"
 api_key = "test-key"
 "#;
         let result3: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml3);
         assert!(result3.is_ok(), "Error: {:?}", result3.err());
-        assert_eq!(result3.unwrap().api_type, ApiType::Anthropic);
+        assert_eq!(result3.unwrap().api_type, ApiType::KiloGateway);
+
+        let toml4 = r#"
+api_type = "openai_responses"
+base_url = "https://api.openai.com"
+api_key = "test-key"
+"#;
+        let result4: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml4);
+        assert!(result4.is_ok(), "Error: {:?}", result4.err());
+        assert_eq!(result4.unwrap().api_type, ApiType::OpenAiResponses);
+
+        let toml5 = r#"
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let result5: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml5);
+        assert!(result5.is_ok(), "Error: {:?}", result5.err());
+        assert_eq!(result5.unwrap().api_type, ApiType::Anthropic);
     }
 
     #[test]
@@ -4433,6 +4457,8 @@ api_key = "test-key"
         let error = result.unwrap_err();
         assert!(error.to_string().contains("invalid value"));
         assert!(error.to_string().contains("openai_completions"));
+        assert!(error.to_string().contains("openai_chat_completions"));
+        assert!(error.to_string().contains("kilo_gateway"));
         assert!(error.to_string().contains("openai_responses"));
         assert!(error.to_string().contains("anthropic"));
     }

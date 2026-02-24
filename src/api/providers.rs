@@ -195,16 +195,16 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             name: None,
         }),
         "kilo" => Some(ProviderConfig {
-            api_type: ApiType::OpenAiCompletions,
+            api_type: ApiType::KiloGateway,
             base_url: "https://api.kilo.ai/api/gateway".to_string(),
             api_key: credential.to_string(),
-            name: None,
+            name: Some("Kilo Gateway".to_string()),
         }),
         "zhipu" => Some(ProviderConfig {
-            api_type: ApiType::OpenAiCompletions,
+            api_type: ApiType::OpenAiChatCompletions,
             base_url: "https://api.z.ai/api/paas/v4".to_string(),
             api_key: credential.to_string(),
-            name: None,
+            name: Some("Z.AI (GLM)".to_string()),
         }),
         "groq" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -279,10 +279,10 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             name: None,
         }),
         "zai-coding-plan" => Some(ProviderConfig {
-            api_type: ApiType::OpenAiCompletions,
+            api_type: ApiType::OpenAiChatCompletions,
             base_url: "https://api.z.ai/api/coding/paas/v4".to_string(),
             api_key: credential.to_string(),
-            name: None,
+            name: Some("Z.AI Coding Plan".to_string()),
         }),
         _ => None,
     };

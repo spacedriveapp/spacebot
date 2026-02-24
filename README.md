@@ -184,7 +184,7 @@ coding = "ollama/qwen3"
 
 ```toml
 [llm.provider.my-provider]
-api_type = "openai_completions"  # or "anthropic"
+api_type = "openai_completions"  # or "openai_chat_completions", "openai_responses", "anthropic"
 base_url = "https://my-llm-host.example.com"
 api_key = "env:MY_PROVIDER_KEY"
 

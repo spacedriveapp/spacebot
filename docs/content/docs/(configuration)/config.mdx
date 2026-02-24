@@ -342,7 +342,7 @@ Custom providers allow configuring LLM providers with custom endpoints and API t
 
 ```toml
 [llm.provider.<id>]
-api_type = "anthropic"          # Required - one of: anthropic, openai_completions, openai_responses
+api_type = "anthropic"          # Required - see supported values below
 base_url = "https://api..."     # Required - valid URL
 api_key = "env:API_KEY"         # Required - API key (supports env:VAR_NAME format)
 name = "My Provider"            # Optional - friendly name for display
@@ -350,16 +350,18 @@ name = "My Provider"            # Optional - friendly name for display
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `api_type` | string | Yes | API protocol type. One of: `anthropic` (Anthropic Messages API), `openai_completions` (OpenAI Chat Completions-compatible API), or `openai_responses` (OpenAI Responses API-compatible) |
+| `api_type` | string | Yes | API protocol type. One of: `anthropic`, `openai_completions`, `openai_chat_completions`, `openai_responses`, `gemini`, or `kilo_gateway` |
 | `base_url` | string | Yes | Base URL of the API endpoint. Must be a valid URL (including protocol) |
 | `api_key` | string | Yes | API key for authentication. Supports `env:VAR_NAME` syntax to reference environment variables |
 | `name` | string | No | Optional friendly name for the provider (displayed in logs and UI) |
 
 > Note:
-> - For `openai_completions` and `openai_responses`, configure `base_url` as the provider root URL (usually without a trailing `/v1`).
+> - For `openai_completions`, `openai_chat_completions`, and `openai_responses`, configure `base_url` as the provider root URL (usually without a trailing `/v1`).
 > - Spacebot appends the endpoint path automatically:
 >   - `openai_completions` -> `/v1/chat/completions`
+>   - `openai_chat_completions` -> `/chat/completions`
 >   - `openai_responses` -> `/v1/responses`
+>   - `kilo_gateway` -> `/chat/completions` plus Kilo-required `HTTP-Referer` / `X-Title` headers
 > - If you include `/v1` in `base_url`, requests can end up with duplicated paths such as `/v1/v1/...`.
 
 **Provider ID Requirements:**
