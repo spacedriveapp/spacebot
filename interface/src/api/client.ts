@@ -663,6 +663,7 @@ export interface ProviderStatus {
 	openai: boolean;
 	openai_chatgpt: boolean;
 	openrouter: boolean;
+	kilo: boolean;
 	zhipu: boolean;
 	groq: boolean;
 	together: boolean;

@@ -24,6 +24,7 @@ spacebot --config /path/to.toml  # CLI override
 anthropic_key = "env:ANTHROPIC_API_KEY"
 openai_key = "env:OPENAI_API_KEY"
 openrouter_key = "env:OPENROUTER_API_KEY"
+kilo_key = "env:KILO_API_KEY"
 zhipu_key = "env:ZHIPU_API_KEY"
 groq_key = "env:GROQ_API_KEY"
 together_key = "env:TOGETHER_API_KEY"
@@ -168,7 +169,7 @@ anthropic_key = "env:ANTHROPIC_API_KEY"
 
 This reads `ANTHROPIC_API_KEY` from the environment at startup. If the variable is unset, the value is treated as missing.
 
-LLM keys also have implicit env fallbacks — if no key is set in the TOML, Spacebot checks `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, and `OPENROUTER_API_KEY` automatically.
+LLM keys also have implicit env fallbacks — if no key is set in the TOML, Spacebot checks `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, and `KILO_API_KEY` automatically.
 
 ## Env-Only Mode
 
@@ -203,6 +204,7 @@ Model names include the provider as a prefix:
 | Anthropic | `anthropic/<model>` | `anthropic/claude-sonnet-4-20250514` |
 | OpenAI | `openai/<model>` | `openai/gpt-4o` |
 | OpenRouter | `openrouter/<provider>/<model>` | `openrouter/anthropic/claude-sonnet-4-20250514` |
+| Kilo Gateway | `kilo/<provider>/<model>` | `kilo/anthropic/claude-sonnet-4.5` |
 | Custom provider | `<provider_id>/<model>` | `my_openai/gpt-4o-mini` |
 
 You can mix providers across process types. See [Routing](/docs/routing) for the full routing system.
@@ -324,6 +326,7 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 | `anthropic_key` | string | None | Anthropic API key (or `env:VAR_NAME`) |
 | `openai_key` | string | None | OpenAI API key (or `env:VAR_NAME`) |
 | `openrouter_key` | string | None | OpenRouter API key (or `env:VAR_NAME`) |
+| `kilo_key` | string | None | Kilo Gateway API key (or `env:VAR_NAME`) |
 | `zhipu_key` | string | None | Zhipu AI (GLM) API key (or `env:VAR_NAME`) |
 | `groq_key` | string | None | Groq API key (or `env:VAR_NAME`) |
 | `together_key` | string | None | Together AI API key (or `env:VAR_NAME`) |

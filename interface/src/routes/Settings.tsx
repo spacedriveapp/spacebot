@@ -73,6 +73,14 @@ const PROVIDERS = [
 		defaultModel: "openrouter/anthropic/claude-sonnet-4",
 	},
 	{
+		id: "kilo",
+		name: "Kilo Gateway",
+		description: "OpenAI-compatible multi-provider gateway",
+		placeholder: "sk-...",
+		envVar: "KILO_API_KEY",
+		defaultModel: "kilo/anthropic/claude-sonnet-4.5",
+	},
+	{
 		id: "opencode-zen",
 		name: "OpenCode Zen",
 		description: "Multi-format gateway (Kimi, GLM, MiniMax, Qwen)",

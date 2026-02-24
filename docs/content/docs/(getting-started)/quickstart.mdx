@@ -36,7 +36,7 @@ See [Docker deployment](/docs/docker) for image variants, compose files, and con
 
 - **Rust 1.85+** — `rustup update stable`
 - **Bun** (optional, for the web UI) — `curl -fsSL https://bun.sh/install | bash`
-- **An LLM API key** — Anthropic, OpenAI, or OpenRouter
+- **An LLM API key** — Anthropic, OpenAI, OpenRouter, or Kilo Gateway
 
 ### Install
 
@@ -77,6 +77,7 @@ Create `~/.spacebot/config.toml`:
 [llm]
 anthropic_key = "sk-ant-..."
 # or: openrouter_key = "sk-or-..."
+# or: kilo_key = "sk-..."
 # or: openai_key = "sk-..."
 # Keys also support env references: anthropic_key = "env:ANTHROPIC_API_KEY"
 

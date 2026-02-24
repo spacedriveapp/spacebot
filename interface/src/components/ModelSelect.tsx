@@ -15,6 +15,7 @@ interface ModelSelectProps {
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   openrouter: "OpenRouter",
+  kilo: "Kilo Gateway",
   openai: "OpenAI",
   "openai-chatgpt": "ChatGPT Plus (OAuth)",
   deepseek: "DeepSeek",
@@ -128,6 +129,7 @@ export function ModelSelect({
 
   const providerOrder = [
     "openrouter",
+    "kilo",
     "anthropic",
     "openai",
     "openai-chatgpt",

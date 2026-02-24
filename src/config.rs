@@ -155,6 +155,7 @@ pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
+    pub kilo_key: Option<String>,
     pub zhipu_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
@@ -189,6 +190,7 @@ impl std::fmt::Debug for LlmConfig {
                 "openrouter_key",
                 &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("kilo_key", &self.kilo_key.as_ref().map(|_| "[REDACTED]"))
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
             .field(
@@ -248,6 +250,7 @@ impl LlmConfig {
         self.anthropic_key.is_some()
             || self.openai_key.is_some()
             || self.openrouter_key.is_some()
+            || self.kilo_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -271,6 +274,7 @@ impl LlmConfig {
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
+const KILO_PROVIDER_BASE_URL: &str = "https://api.kilo.ai/api/gateway";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
@@ -1506,6 +1510,7 @@ struct TomlLlmConfigFields {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1534,6 +1539,7 @@ struct TomlLlmConfig {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1587,6 +1593,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             anthropic_key: fields.anthropic_key,
             openai_key: fields.openai_key,
             openrouter_key: fields.openrouter_key,
+            kilo_key: fields.kilo_key,
             zhipu_key: fields.zhipu_key,
             groq_key: fields.groq_key,
             together_key: fields.together_key,
@@ -2109,6 +2116,7 @@ impl Config {
         let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("KILO_API_KEY").is_ok()
             || std::env::var("ZHIPU_API_KEY").is_ok()
             || std::env::var("GROQ_API_KEY").is_ok()
             || std::env::var("TOGETHER_API_KEY").is_ok()
@@ -2141,6 +2149,7 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("KILO_API_KEY").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
 
         !has_provider_env_vars && !has_legacy_bootstrap_vars
@@ -2182,6 +2191,7 @@ impl Config {
                 .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            kilo_key: std::env::var("KILO_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
@@ -2233,6 +2243,17 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        if let Some(kilo_key) = llm.kilo_key.clone() {
+            llm.providers
+                .entry("kilo".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: KILO_PROVIDER_BASE_URL.to_string(),
+                    api_key: kilo_key,
                     name: None,
                 });
         }
@@ -2533,6 +2554,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+            kilo_key: toml
+                .llm
+                .kilo_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("KILO_API_KEY").ok()),
             zhipu_key: toml
                 .llm
                 .zhipu_key
@@ -2681,6 +2708,17 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
+                    name: None,
+                });
+        }
+
+        if let Some(kilo_key) = llm.kilo_key.clone() {
+            llm.providers
+                .entry("kilo".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: KILO_PROVIDER_BASE_URL.to_string(),
+                    api_key: kilo_key,
                     name: None,
                 });
         }
@@ -4012,6 +4050,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "MiniMax",
         "Moonshot AI (Kimi)",
         "Z.AI Coding Plan",
+        "Kilo Gateway",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -4075,6 +4114,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
+        16 => ("Kilo Gateway API key", "kilo_key", "kilo"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -4287,7 +4327,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 22] = [
+            const KEYS: [&str; 23] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
@@ -4295,6 +4335,7 @@ mod tests {
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
+                "KILO_API_KEY",
                 "ZHIPU_API_KEY",
                 "GROQ_API_KEY",
                 "TOGETHER_API_KEY",
@@ -5111,6 +5152,7 @@ startup_delay_secs = 2
             ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
             ("openai_key", "test-key", "openai", "openai.com"),
             ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("kilo_key", "test-key", "kilo", "api.kilo.ai"),
             ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
             ("minimax_key", "test-key", "minimax", "minimax.io"),
             ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
@@ -5174,6 +5216,7 @@ startup_delay_secs = 2
                 "openrouter",
                 "openrouter.ai",
             ),
+            ("KILO_API_KEY", "test-key", "kilo", "api.kilo.ai"),
             ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
             ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
             ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),

@@ -111,11 +111,20 @@ impl SpacebotModel {
                 .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
         };
 
-        if provider_id == "zai-coding-plan" || provider_id == "zhipu" {
-            let display_name = if provider_id == "zhipu" {
-                "Z.AI (GLM)"
+        if provider_id == "zai-coding-plan" || provider_id == "zhipu" || provider_id == "kilo" {
+            let (display_name, extra_headers): (&str, &[(&str, &str)]) = if provider_id == "zhipu"
+            {
+                ("Z.AI (GLM)", &[])
+            } else if provider_id == "zai-coding-plan" {
+                ("Z.AI Coding Plan", &[])
             } else {
-                "Z.AI Coding Plan"
+                (
+                    "Kilo Gateway",
+                    &[
+                        ("HTTP-Referer", "https://github.com/spacedriveapp/spacebot"),
+                        ("X-Title", "spacebot"),
+                    ],
+                )
             };
             let endpoint = format!(
                 "{}/chat/completions",
@@ -127,6 +136,7 @@ impl SpacebotModel {
                     display_name,
                     &endpoint,
                     Some(provider_config.api_key.clone()),
+                    extra_headers,
                 )
                 .await;
         }
@@ -826,6 +836,7 @@ impl SpacebotModel {
         provider_display_name: &str,
         endpoint: &str,
         api_key: Option<String>,
+        extra_headers: &[(&str, &str)],
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let mut messages = Vec::new();
 
@@ -869,15 +880,17 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self.llm_manager.http_client().post(endpoint);
+        let mut request_builder = self.llm_manager.http_client().post(endpoint);
 
-        let response = if let Some(api_key) = api_key {
-            response.header("authorization", format!("Bearer {api_key}"))
-        } else {
-            response
-        };
+        if let Some(api_key) = api_key {
+            request_builder = request_builder.header("authorization", format!("Bearer {api_key}"));
+        }
 
-        let response = response
+        for (header_name, header_value) in extra_headers {
+            request_builder = request_builder.header(*header_name, *header_value);
+        }
+
+        let response = request_builder
             .header("content-type", "application/json")
             .json(&body)
             .send()
