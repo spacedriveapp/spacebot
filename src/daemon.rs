@@ -136,6 +136,23 @@ pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
         return None;
     }
 
+    #[cfg(windows)]
+    {
+        let pipe_name = paths.pipe_name();
+        match ClientOptions::new().open(&pipe_name) {
+            Ok(stream) => {
+                drop(stream);
+                Some(pid)
+            }
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => Some(pid),
+            Err(_) => {
+                cleanup_stale_files(paths);
+                None
+            }
+        }
+    }
+
+    #[cfg(not(windows))]
     Some(pid)
 }
 
@@ -521,11 +538,17 @@ pub async fn start_ipc_server(
 #[cfg(windows)]
 pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::Result<IpcResponse> {
     let pipe_name = paths.pipe_name();
+    let connect_deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
 
     let stream = loop {
         match ClientOptions::new().open(&pipe_name) {
             Ok(stream) => break stream,
             Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                if std::time::Instant::now() >= connect_deadline {
+                    return Err(anyhow!(
+                        "timed out waiting for spacebot daemon IPC pipe; is it responsive?"
+                    ));
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(50)).await;
             }
             Err(error) => {
@@ -631,6 +654,7 @@ fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     content.trim().parse::<u32>().ok()
 }
 
+#[cfg(windows)]
 fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
@@ -677,10 +701,26 @@ fn is_process_alive(_pid: u32) -> bool {
 }
 
 fn cleanup_stale_files(paths: &DaemonPaths) {
-    let _ = std::fs::remove_file(&paths.pid_file);
+    if let Err(error) = std::fs::remove_file(&paths.pid_file)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(
+            %error,
+            path = %paths.pid_file.display(),
+            "failed to remove stale PID file"
+        );
+    }
     #[cfg(unix)]
     {
-        let _ = std::fs::remove_file(&paths.socket);
+        if let Err(error) = std::fs::remove_file(&paths.socket)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                %error,
+                path = %paths.socket.display(),
+                "failed to remove stale socket file"
+            );
+        }
     }
 }
 
