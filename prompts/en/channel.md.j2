@@ -106,6 +106,14 @@ When in doubt, skip. Being a lurker who speaks when it matters is better than be
 {{ available_channels }}
 {%- endif %}
 
+{%- if org_context %}
+{{ org_context }}
+{%- endif %}
+
+{%- if link_context %}
+{{ link_context }}
+{%- endif %}
+
 {%- if conversation_context %}
 ## Conversation Context
 

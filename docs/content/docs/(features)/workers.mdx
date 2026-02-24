@@ -143,15 +143,19 @@ Worker execution logs are controlled by `worker_log_mode`:
 
 Logs include: worker ID, channel ID, timestamp, state, task, error (if any), and the full message history with tool calls and results.
 
-## Protected Paths
+## Sandbox and Protected Paths
 
-The `file` and `shell` tools reject operations on protected paths:
+Worker shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, sandbox-exec on macOS). The entire host filesystem is mounted read-only except:
 
-- Identity files: `SOUL.md`, `IDENTITY.md`, `USER.md`
-- System paths: `/prompts/`, `/data/spacebot.db`, `/data/lancedb/`, `/data/config.redb`
-- Archives and ingest directories
+- The agent's workspace directory (writable)
+- `/tmp` (private per invocation)
+- Any paths listed in `[agents.sandbox].writable_paths`
 
-This prevents workers from accidentally corrupting system state.
+The agent's data directory (databases, config files) is explicitly re-mounted read-only. This is enforced at the kernel level — no amount of command creativity can bypass it.
+
+The `file` tool additionally validates paths against the workspace boundary and blocks writes to identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`). The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection.
+
+Sandbox mode is configurable per agent via `[agents.sandbox]`. See [Configuration](/docs/config#agentssandbox).
 
 ## Configuration
 
@@ -160,11 +164,17 @@ This prevents workers from accidentally corrupting system state.
 max_concurrent_workers = 5     # per channel
 context_window = 128000        # tokens
 
-[routing]
+[defaults.routing]
 worker = "anthropic/claude-haiku-4.5-20250514"
 
-[routing.task_overrides]
+[defaults.routing.task_overrides]
 coding = "anthropic/claude-sonnet-4-20250514"
+
+# Sandbox is enabled by default. Disable for self-hosted/local setups
+# that need full host filesystem access.
+[agents.sandbox]
+mode = "enabled"
+writable_paths = []
 ```
 
 ## OpenCode Workers

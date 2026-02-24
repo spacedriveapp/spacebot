@@ -119,6 +119,11 @@ cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone overri
 [agents.routing]
 channel = "anthropic/claude-opus-4-20250514"
 
+# Per-agent sandbox configuration.
+[agents.sandbox]
+mode = "enabled"                               # "enabled" (default) or "disabled"
+writable_paths = ["/home/user/projects/myapp"] # additional writable directories
+
 # Per-agent cron jobs.
 [[agents.cron]]
 id = "daily-check"
@@ -515,6 +520,34 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `context_window` | integer | inherits | Override instance default |
 
 Agent-specific routing is set via `[agents.routing]` with the same keys as `[defaults.routing]`.
+
+### `[agents.sandbox]`
+
+OS-level filesystem containment for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for full host access |
+| `writable_paths` | string[] | `[]` | Additional directories the agent can write to beyond its workspace |
+
+When `mode = "enabled"`, shell and exec commands run inside a mount namespace where the entire filesystem is read-only except:
+
+- The agent's workspace directory
+- `/tmp` (private per invocation)
+- `/dev` (standard device nodes)
+- Any paths listed in `writable_paths`
+
+The agent's data directory (databases, config) is explicitly re-mounted read-only even if it would otherwise be writable due to path overlap.
+
+When `SPACEBOT_DEPLOYMENT=hosted`, sandbox mode is always `"enabled"` regardless of config.
+
+If the sandbox backend isn't available (e.g. bubblewrap not installed), processes run unsandboxed with a warning at startup.
+
+```toml
+[agents.sandbox]
+mode = "enabled"
+writable_paths = ["/home/user/projects/myapp", "/var/data/shared"]
+```
 
 ### `[[agents.cron]]`
 

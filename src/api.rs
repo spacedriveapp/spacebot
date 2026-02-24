@@ -11,6 +11,7 @@ mod config;
 mod cortex;
 mod cron;
 mod ingest;
+mod links;
 mod mcp;
 mod memories;
 mod messaging;
