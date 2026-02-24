@@ -2,15 +2,16 @@
 
 use crate::config::{Config, TelemetryConfig};
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use anyhow::Context as _;
 use anyhow::anyhow;
+#[cfg(windows)]
+use hex::ToHex as _;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithHttpConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use serde::{Deserialize, Serialize};
-#[cfg(unix)]
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
@@ -21,6 +22,26 @@ use tracing_subscriber::util::SubscriberInitExt as _;
 use std::path::PathBuf;
 #[cfg(unix)]
 use std::time::Instant;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, ServerOptions};
+#[cfg(windows)]
+use windows_sys::Win32::Foundation::{
+    CloseHandle, ERROR_PIPE_BUSY, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
+};
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::{
+    CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW, DETACHED_PROCESS, OpenProcess,
+    PROCESS_QUERY_LIMITED_INFORMATION, WaitForSingleObject,
+};
+#[cfg(windows)]
+const SYNCHRONIZE_ACCESS: u32 = 0x0010_0000;
+
+/// Spawn options used when detaching into background mode.
+#[derive(Debug, Clone, Default)]
+pub struct DaemonStartOptions {
+    pub config_path: Option<PathBuf>,
+    pub debug: bool,
+}
 
 /// Commands sent from CLI client to the running daemon.
 #[derive(Debug, Serialize, Deserialize)]
@@ -58,6 +79,17 @@ impl DaemonPaths {
     pub fn from_default() -> Self {
         Self::new(&Config::default_instance_dir())
     }
+
+    #[cfg(windows)]
+    fn pipe_name(&self) -> String {
+        let mut hasher = sha2::Sha256::new();
+        use sha2::Digest as _;
+
+        hasher.update(self.pid_file.as_os_str().to_string_lossy().as_bytes());
+        let digest = hasher.finalize();
+        let digest_hex = digest.encode_hex::<String>();
+        format!(r"\\.\pipe\spacebot-{}", &digest_hex[..32])
+    }
 }
 
 /// Check whether a daemon is already running by testing PID file liveness
@@ -89,14 +121,21 @@ pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
 }
 
 #[cfg(not(unix))]
-pub fn is_running(_paths: &DaemonPaths) -> Option<u32> {
-    None
+pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
+    let pid = read_pid_file(&paths.pid_file)?;
+
+    if !is_process_alive(pid) {
+        cleanup_stale_files(paths);
+        return None;
+    }
+
+    Some(pid)
 }
 
 /// Daemonize the current process. Returns in the child; the parent prints
 /// a message and exits.
 #[cfg(unix)]
-pub fn daemonize(paths: &DaemonPaths) -> anyhow::Result<()> {
+pub fn daemonize(paths: &DaemonPaths, _options: &DaemonStartOptions) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.log_dir).with_context(|| {
         format!(
             "failed to create log directory: {}",
@@ -129,11 +168,38 @@ pub fn daemonize(paths: &DaemonPaths) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(not(unix))]
-pub fn daemonize(_paths: &DaemonPaths) -> anyhow::Result<()> {
-    Err(anyhow!(
-        "background daemon mode is only supported on Unix targets; rerun with --foreground"
-    ))
+#[cfg(windows)]
+pub fn daemonize(_paths: &DaemonPaths, options: &DaemonStartOptions) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt as _;
+
+    let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
+    let mut command = std::process::Command::new(current_exe);
+    command.arg("start").arg("--daemon-child");
+
+    if options.debug {
+        command.arg("--debug");
+    }
+    if let Some(config_path) = &options.config_path {
+        command.arg("--config").arg(config_path);
+    }
+
+    command
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
+
+    let child = command
+        .spawn()
+        .context("failed to spawn detached background process")?;
+
+    eprintln!("spacebot daemon started (pid {})", child.id());
+    std::process::exit(0);
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub fn daemonize(_paths: &DaemonPaths, _options: &DaemonStartOptions) -> anyhow::Result<()> {
+    Err(anyhow!("background daemon mode is not supported on this target"))
 }
 
 /// Initialize tracing for background (daemon) mode.
@@ -360,9 +426,7 @@ pub async fn start_ipc_server(
                     let shutdown_tx = shutdown_tx.clone();
                     let uptime = start_time.elapsed();
                     tokio::spawn(async move {
-                        if let Err(error) =
-                            handle_ipc_connection(stream, &shutdown_tx, uptime).await
-                        {
+                        if let Err(error) = handle_ipc_stream(stream, &shutdown_tx, uptime).await {
                             tracing::warn!(%error, "IPC connection handler failed");
                         }
                     });
@@ -385,20 +449,124 @@ pub async fn start_ipc_server(
     Ok((shutdown_rx, handle))
 }
 
-/// Handle a single IPC client connection.
+/// Send a command to the running daemon and return the response.
 #[cfg(unix)]
-async fn handle_ipc_connection(
-    stream: UnixStream,
+pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::Result<IpcResponse> {
+    let stream = UnixStream::connect(&paths.socket)
+        .await
+        .with_context(|| "failed to connect to spacebot daemon. is it running?")?;
+    send_command_over_stream(stream, command).await
+}
+
+#[cfg(windows)]
+pub async fn start_ipc_server(
+    paths: &DaemonPaths,
+) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
+    if let Some(parent) = paths.pid_file.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create instance directory: {}", parent.display())
+        })?;
+    }
+
+    write_pid_file(&paths.pid_file)?;
+
+    let pipe_name = paths.pipe_name();
+    let mut first_server_options = ServerOptions::new();
+    first_server_options.first_pipe_instance(true);
+    let mut server = first_server_options
+        .create(&pipe_name)
+        .with_context(|| format!("failed to create IPC named pipe: {pipe_name}"))?;
+
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let start_time = std::time::Instant::now();
+
+    let handle = tokio::spawn(async move {
+        loop {
+            if let Err(error) = server.connect().await {
+                tracing::warn!(%error, "failed to accept IPC named pipe connection");
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                continue;
+            }
+
+            let connected_server = server;
+            server = match ServerOptions::new().create(&pipe_name) {
+                Ok(next_server) => next_server,
+                Err(error) => {
+                    tracing::error!(%error, "failed to create next IPC named pipe server");
+                    break;
+                }
+            };
+
+            let shutdown_tx = shutdown_tx.clone();
+            let uptime = start_time.elapsed();
+            tokio::spawn(async move {
+                if let Err(error) = handle_ipc_stream(connected_server, &shutdown_tx, uptime).await
+                {
+                    tracing::warn!(%error, "IPC named pipe handler failed");
+                }
+            });
+        }
+    });
+
+    Ok((shutdown_rx, handle))
+}
+
+#[cfg(windows)]
+pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::Result<IpcResponse> {
+    let pipe_name = paths.pipe_name();
+
+    let stream = loop {
+        match ClientOptions::new().open(&pipe_name) {
+            Ok(stream) => break stream,
+            Err(error) if error.raw_os_error() == Some(ERROR_PIPE_BUSY as i32) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("failed to connect to spacebot daemon pipe {pipe_name}")
+                });
+            }
+        }
+    };
+
+    send_command_over_stream(stream, command).await
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub async fn start_ipc_server(
+    _paths: &DaemonPaths,
+) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        let _shutdown_tx = shutdown_tx;
+        std::future::pending::<()>().await;
+    });
+    Ok((shutdown_rx, handle))
+}
+
+#[cfg(all(not(unix), not(windows)))]
+pub async fn send_command(
+    _paths: &DaemonPaths,
+    _command: IpcCommand,
+) -> anyhow::Result<IpcResponse> {
+    Err(anyhow!("daemon IPC is not supported on this target"))
+}
+
+async fn handle_ipc_stream<S>(
+    stream: S,
     shutdown_tx: &watch::Sender<bool>,
     uptime: std::time::Duration,
-) -> anyhow::Result<()> {
-    let (reader, mut writer) = stream.into_split();
+) -> anyhow::Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut reader = tokio::io::BufReader::new(reader);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let command: IpcCommand = serde_json::from_str(line.trim())
-        .with_context(|| format!("invalid IPC command: {line}"))?;
+    let command: IpcCommand =
+        serde_json::from_str(line.trim()).map_err(|error| anyhow!("invalid IPC command: {error}"))?;
 
     let response = match command {
         IpcCommand::Shutdown => {
@@ -420,15 +588,11 @@ async fn handle_ipc_connection(
     Ok(())
 }
 
-/// Send a command to the running daemon and return the response.
-#[cfg(unix)]
-pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::Result<IpcResponse> {
-    let stream = UnixStream::connect(&paths.socket)
-        .await
-        .with_context(|| "failed to connect to spacebot daemon. is it running?")?;
-
-    let (reader, mut writer) = stream.into_split();
-
+async fn send_command_over_stream<S>(stream: S, command: IpcCommand) -> anyhow::Result<IpcResponse>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
     let mut command_bytes = serde_json::to_vec(&command)?;
     command_bytes.push(b'\n');
     writer.write_all(&command_bytes).await?;
@@ -438,32 +602,7 @@ pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::R
     let mut line = String::new();
     reader.read_line(&mut line).await?;
 
-    let response: IpcResponse = serde_json::from_str(line.trim())
-        .with_context(|| format!("invalid IPC response: {line}"))?;
-
-    Ok(response)
-}
-
-#[cfg(not(unix))]
-pub async fn start_ipc_server(
-    _paths: &DaemonPaths,
-) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    let handle = tokio::spawn(async move {
-        let _shutdown_tx = shutdown_tx;
-        std::future::pending::<()>().await;
-    });
-    Ok((shutdown_rx, handle))
-}
-
-#[cfg(not(unix))]
-pub async fn send_command(
-    _paths: &DaemonPaths,
-    _command: IpcCommand,
-) -> anyhow::Result<IpcResponse> {
-    Err(anyhow!(
-        "daemon IPC commands are only supported on Unix targets"
-    ))
+    serde_json::from_str(line.trim()).map_err(|error| anyhow!("invalid IPC response: {error}"))
 }
 
 /// Clean up PID and socket files on shutdown.
@@ -480,10 +619,20 @@ pub fn cleanup(paths: &DaemonPaths) {
     }
 }
 
-#[cfg(unix)]
 fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     let content = std::fs::read_to_string(path).ok()?;
     content.trim().parse::<u32>().ok()
+}
+
+fn write_pid_file(path: &std::path::Path) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create PID directory: {}", parent.display())
+        })?;
+    }
+
+    std::fs::write(path, format!("{}\n", std::process::id()))
+        .with_context(|| format!("failed to write PID file: {}", path.display()))
 }
 
 #[cfg(unix)]
@@ -492,15 +641,40 @@ fn is_process_alive(pid: u32) -> bool {
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn is_process_alive(pid: u32) -> bool {
+    unsafe {
+        let handle = OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE_ACCESS,
+            0,
+            pid,
+        );
+        if handle.is_null() {
+            return false;
+        }
+
+        let wait_result = WaitForSingleObject(handle, 0);
+        let _ = CloseHandle(handle);
+
+        match wait_result {
+            WAIT_TIMEOUT => true,
+            WAIT_OBJECT_0 | WAIT_FAILED => false,
+            _ => false,
+        }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
 fn is_process_alive(_pid: u32) -> bool {
     false
 }
 
-#[cfg(unix)]
 fn cleanup_stale_files(paths: &DaemonPaths) {
     let _ = std::fs::remove_file(&paths.pid_file);
-    let _ = std::fs::remove_file(&paths.socket);
+    #[cfg(unix)]
+    {
+        let _ = std::fs::remove_file(&paths.socket);
+    }
 }
 
 /// Wait for the daemon process to exit after sending a shutdown command.

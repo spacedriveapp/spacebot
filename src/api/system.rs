@@ -13,6 +13,10 @@ use std::io::Write as _;
 use std::path::Component;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -185,7 +189,37 @@ fn read_filesystem_usage(path: &Path) -> anyhow::Result<StorageStatus> {
 
     #[cfg(not(unix))]
     {
+        #[cfg(windows)]
+        {
+            let mut available_bytes = 0u64;
+            let mut total_bytes = 0u64;
+            let mut free_bytes = 0u64;
+            let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+            path_wide.push(0);
+
+            let result = unsafe {
+                GetDiskFreeSpaceExW(
+                    path_wide.as_ptr(),
+                    &mut available_bytes,
+                    &mut total_bytes,
+                    &mut free_bytes,
+                )
+            };
+            if result == 0 {
+                return Err(anyhow::anyhow!("GetDiskFreeSpaceExW call failed"));
+            }
+
+            let used_bytes = directory_size_bytes(path)?;
+            return Ok(StorageStatus {
+                used_bytes,
+                total_bytes,
+                available_bytes,
+            });
+        }
+
+        #[cfg(not(windows))]
         let used_bytes = directory_size_bytes(path)?;
+        #[cfg(not(windows))]
         Ok(StorageStatus {
             used_bytes,
             total_bytes: 0,
