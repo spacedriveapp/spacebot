@@ -152,13 +152,13 @@ async fn handle_message_event(
 ) -> UserCallbackResult<()> {
     // Skip message edits / deletes / bot_message subtypes, but allow file-related
     // subtypes so user-uploaded images and documents are processed.
-    if let Some(ref subtype) = msg_event.subtype {
-        if !matches!(
+    if let Some(ref subtype) = msg_event.subtype
+        && !matches!(
             subtype,
             SlackMessageEventType::FileShare | SlackMessageEventType::FileShared
-        ) {
-            return Ok(());
-        }
+        )
+    {
+        return Ok(());
     }
 
     let state_guard = states.read().await;

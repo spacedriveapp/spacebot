@@ -2162,7 +2162,9 @@ async fn transcribe_audio_attachment(
         "temperature": 0
     });
 
-    let response = match deps.llm_manager.http_client()
+    let response = match deps
+        .llm_manager
+        .http_client()
         .post(&endpoint)
         .header("authorization", format!("Bearer {}", provider.api_key))
         .header("content-type", "application/json")
