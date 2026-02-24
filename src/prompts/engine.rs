@@ -76,6 +76,14 @@ impl PromptEngine {
             "fragments/available_channels",
             crate::prompts::text::get("fragments/available_channels"),
         )?;
+        env.add_template(
+            "fragments/org_context",
+            crate::prompts::text::get("fragments/org_context"),
+        )?;
+        env.add_template(
+            "fragments/link_context",
+            crate::prompts::text::get("fragments/link_context"),
+        )?;
 
         // System message fragments
         env.add_template(
@@ -388,18 +396,17 @@ impl PromptEngine {
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
     ) -> Result<String> {
-        self.render(
-            "channel",
-            context! {
-                identity_context => identity_context,
-                memory_bulletin => memory_bulletin,
-                skills_prompt => skills_prompt,
-                worker_capabilities => worker_capabilities,
-                conversation_context => conversation_context,
-                status_text => status_text,
-                coalesce_hint => coalesce_hint,
-                available_channels => available_channels,
-            },
+        self.render_channel_prompt_with_links(
+            identity_context,
+            memory_bulletin,
+            skills_prompt,
+            worker_capabilities,
+            conversation_context,
+            status_text,
+            coalesce_hint,
+            available_channels,
+            None,
+            None,
         )
     }
 
@@ -422,10 +429,86 @@ impl PromptEngine {
         )
     }
 
+    /// Render the org context fragment showing the agent's position in the hierarchy.
+    pub fn render_org_context(&self, org_context: OrgContext) -> Result<String> {
+        self.render(
+            "fragments/org_context",
+            context! {
+                org_context => org_context,
+            },
+        )
+    }
+
+    /// Render the link context fragment for an internal agent-to-agent channel.
+    pub fn render_link_context(&self, link_context: LinkContext) -> Result<String> {
+        self.render(
+            "fragments/link_context",
+            context! {
+                link_context => link_context,
+            },
+        )
+    }
+
+    /// Render the channel system prompt with all dynamic components including org/link context.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_channel_prompt_with_links(
+        &self,
+        identity_context: Option<String>,
+        memory_bulletin: Option<String>,
+        skills_prompt: Option<String>,
+        worker_capabilities: String,
+        conversation_context: Option<String>,
+        status_text: Option<String>,
+        coalesce_hint: Option<String>,
+        available_channels: Option<String>,
+        org_context: Option<String>,
+        link_context: Option<String>,
+    ) -> Result<String> {
+        self.render(
+            "channel",
+            context! {
+                identity_context => identity_context,
+                memory_bulletin => memory_bulletin,
+                skills_prompt => skills_prompt,
+                worker_capabilities => worker_capabilities,
+                conversation_context => conversation_context,
+                status_text => status_text,
+                coalesce_hint => coalesce_hint,
+                available_channels => available_channels,
+                org_context => org_context,
+                link_context => link_context,
+            },
+        )
+    }
+
     /// Get the configured language code.
     pub fn language(&self) -> &str {
         &self.language
     }
+}
+
+/// Organizational context for an agent — grouped by relationship.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OrgContext {
+    pub superiors: Vec<LinkedAgent>,
+    pub subordinates: Vec<LinkedAgent>,
+    pub peers: Vec<LinkedAgent>,
+}
+
+/// Information about a linked agent or human for prompt rendering.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkedAgent {
+    pub name: String,
+    pub id: String,
+    /// Whether this is a human (true) or an agent (false).
+    pub is_human: bool,
+}
+
+/// Context for the current link channel.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkContext {
+    pub agent_name: String,
+    pub relationship: String,
 }
 
 /// Information about a skill for template rendering.

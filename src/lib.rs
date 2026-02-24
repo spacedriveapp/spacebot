@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod hooks;
 pub mod identity;
+pub mod links;
 pub mod llm;
 pub mod mcp;
 pub mod memory;
@@ -18,6 +19,7 @@ pub mod messaging;
 pub mod openai_auth;
 pub mod opencode;
 pub mod prompts;
+pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod skills;
@@ -114,6 +116,7 @@ pub enum ProcessEvent {
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         task: String,
+        worker_type: String,
     },
     WorkerStatus {
         agent_id: AgentId,
@@ -127,12 +130,14 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         result: String,
         notify: bool,
+        success: bool,
     },
     ToolStarted {
         agent_id: AgentId,
         process_id: ProcessId,
         channel_id: Option<ChannelId>,
         tool_name: String,
+        args: String,
     },
     ToolCompleted {
         agent_id: AgentId,
@@ -171,6 +176,18 @@ pub enum ProcessEvent {
         question_id: String,
         questions: Vec<opencode::QuestionInfo>,
     },
+    AgentMessageSent {
+        from_agent_id: AgentId,
+        to_agent_id: AgentId,
+        link_id: String,
+        channel_id: ChannelId,
+    },
+    AgentMessageReceived {
+        from_agent_id: AgentId,
+        to_agent_id: AgentId,
+        link_id: String,
+        channel_id: ChannelId,
+    },
 }
 
 /// Shared dependency bundle for agent processes.
@@ -185,6 +202,10 @@ pub struct AgentDeps {
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
+    pub sandbox: Arc<sandbox::Sandbox>,
+    pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
+    /// Map of all agent IDs to display names, for inter-agent message routing.
+    pub agent_names: Arc<std::collections::HashMap<String, String>>,
 }
 
 impl AgentDeps {

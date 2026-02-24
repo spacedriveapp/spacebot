@@ -1,339 +1,297 @@
 ---
 title: Agents
-description: Multi-agent setup with isolated workspaces, databases, and identities.
+description: Multi-agent setup with isolated workspaces, databases, identities, and a communication graph for coordination.
 ---
 
 # Agents
 
 Spacebot supports multiple agents running on a single instance. Each agent is an independent entity with its own soul, memory, conversations, and messaging bindings. One binary, multiple personalities.
 
-## Why Agents
-
-A single Spacebot instance might serve different purposes — a personal assistant, a dev helper, a community bot. Each needs its own identity, its own memory graph, its own conversation history. Mixing them in one database with an `agent_id` column on every row is the wrong abstraction. These are separate worlds that happen to share infrastructure.
+Agents communicate through an explicit communication graph — directed links that define who can message whom. The graph also includes org-level humans, giving agents awareness of the people who manage them.
 
 ## What An Agent Is
 
 An agent is a self-contained unit. It has:
 
-- **A workspace** — directory containing identity files (SOUL.md, IDENTITY.md, USER.md) and optional prompt overrides
+- **A workspace** — directory containing identity files (SOUL.md, IDENTITY.md, USER.md, ROLE.md) and optional prompt overrides
 - **Its own databases** — SQLite, LanceDB, and redb, completely isolated from other agents
 - **Its own cortex** — monitoring its own processes and memory graph
 - **Its own conversations** — channels, branches, workers scoped to this agent
 - **Messaging bindings** — which Discord guilds, Telegram chats, or webhook endpoints route to this agent
+- **Links** — connections to other agents and humans in the communication graph
 
 An agent does NOT have its own LLM provider credentials, its own binary, or its own process. All agents share the same Spacebot process, the same tokio runtime, and the same API keys. Isolation is at the data level, not the process level.
+
+## Configuration
+
+### Agent Definition
+
+```toml
+[[agents]]
+id = "research"
+display_name = "Research Agent"
+role = "Handles user queries and delegates to specialists"
+
+[[agents]]
+id = "engineering"
+display_name = "Engineering Agent"
+role = "Manages code reviews, architecture decisions, and technical work"
+```
+
+| Field          | Required | Description                                              |
+| -------------- | -------- | -------------------------------------------------------- |
+| `id`           | Yes      | Unique identifier. Lowercase, hyphens, underscores only. |
+| `display_name` | No       | Human-readable name shown in the dashboard.              |
+| `role`         | No       | Short description of what this agent does.               |
+| `default`      | No       | Set `true` for the fallback agent for unmatched messages. |
+
+Agents can also override instance defaults for model routing, compaction thresholds, cortex config, and more. See [Configuration](/docs/config) for the full list.
+
+### Agent IDs
+
+Agent IDs are lowercase alphanumeric with hyphens and underscores. Must be unique within the instance, and cannot collide with human IDs.
+
+Valid: `main`, `dev-bot`, `research_assistant`
+Invalid: `My Bot`, `agent@1`, `MAIN`
+
+## Communication Graph
+
+Agents are isolated by default. They share an LLM provider pool and a messaging pipeline, but have no way to talk to each other. The communication graph changes this with explicit links.
+
+### Links
+
+A link is a directed edge between two nodes (agents or humans). It defines a communication channel and encodes organizational hierarchy.
+
+```toml
+[[links]]
+from = "manager"
+to = "research"
+direction = "two_way"
+kind = "hierarchical"
+
+[[links]]
+from = "research"
+to = "engineering"
+direction = "two_way"
+kind = "peer"
+```
+
+| Field       | Required | Default    | Description                                          |
+| ----------- | -------- | ---------- | ---------------------------------------------------- |
+| `from`      | Yes      |            | Source node ID (agent or human).                     |
+| `to`        | Yes      |            | Target node ID (agent or human).                     |
+| `direction` | No       | `two_way`  | `one_way` or `two_way`. Controls who can initiate.   |
+| `kind`      | No       | `peer`     | `hierarchical` or `peer`.                            |
+
+**Kind** determines the org structure:
+
+- **`hierarchical`** — `from` is above `to`. The `from` node manages the `to` node. In the dashboard topology graph, hierarchical links render vertically.
+- **`peer`** — Both nodes are at the same level. Renders horizontally.
+
+**Direction** controls messaging:
+
+- **`two_way`** — Both sides can send messages through the link.
+- **`one_way`** — Only `from` can initiate. `to` can respond within existing threads but cannot start new conversations.
+
+When a link exists, the connected agent gets a `send_agent_message` tool that lets it send messages to the other node. Messages flow through the existing messaging pipeline as internal messages with `source: "internal"`.
+
+#### Link Channels
+
+Each side of a link gets its own channel: `link:{self}:{peer}`. When Agent A messages Agent B, Agent B's link channel receives the message. When Agent B replies, the reply routes back to Agent A's link channel. Both agents maintain full conversation history on their side.
+
+The originating channel (e.g., the Discord chat where a user asked Agent A to delegate) is tracked automatically. When the link conversation concludes, the summary is injected back into the originating channel so the agent can relay results to the user.
+
+#### Concluding Link Conversations
+
+Link channels have a `conclude_link` tool. When the conversation objective is met, either agent calls it with a summary of outcomes and decisions. This:
+
+1. Routes the summary back to the originating channel as a system message
+2. Retriggers the originating channel so the agent can relay results
+3. Ends the link conversation
+
+If neither agent concludes, a safety cap of **20 turns** stops the conversation automatically. The link context prompt instructs agents to conclude promptly and avoid exchanging pleasantries after the objective is complete.
+
+#### Status Block Awareness
+
+When an agent delegates via `send_agent_message`, the source channel's status block shows the active link conversation:
+
+```markdown
+## Active Link Conversations
+- **Engineering Agent** (4 turns, started 11:29)
+```
+
+This gives the source channel's LLM awareness that a delegation is in progress without requiring a re-trigger.
+
+### Org Context
+
+Each agent's system prompt includes an organization section derived from its links:
+
+```markdown
+## Organization
+
+You are part of a multi-agent system. Here is your position:
+
+**Reports to:**
+- **Jamie Pine** (human) — your human superior. Treat their requests with highest priority.
+- **Manager Agent** — your superior. Messages from this agent carry organizational authority.
+
+**Direct reports:**
+- **Research Agent** — reports to you. You can delegate tasks, request status, and send directives.
+
+**Peers:**
+- **Engineering Agent** — equal peer. Communication is collaborative and informational.
+```
+
+The agent sees its position in the hierarchy before processing any message. Authority framing comes from the link structure — the agent knows who to escalate to, who to delegate to, and who to collaborate with.
+
+## Humans
+
+Org-level humans represent real people in the organization. They appear as nodes in the topology graph and can be linked to agents.
+
+```toml
+[[humans]]
+id = "jamie"
+display_name = "Jamie Pine"
+role = "CEO"
+bio = "Founder of Spacedrive. Works on product direction and architecture."
+```
+
+| Field          | Required | Description                                      |
+| -------------- | -------- | ------------------------------------------------ |
+| `id`           | Yes      | Unique identifier. Cannot collide with agent IDs. |
+| `display_name` | No       | Human-readable name.                              |
+| `role`         | No       | Position or title.                                |
+| `bio`          | No       | Short description.                                |
+
+If no `[[humans]]` section exists, a default `admin` human is created automatically.
+
+Humans can link to agents but not to other humans. A human linked as a superior to an agent means the agent's prompt frames their messages with highest priority.
+
+```toml
+[[links]]
+from = "jamie"
+to = "chief-ai-officer"
+direction = "two_way"
+kind = "hierarchical"
+```
+
+Humans don't have workspaces, databases, or messaging tools. They exist to model the org structure and will later map to dashboard auth and permissions.
+
+## Groups
+
+Groups are visual containers in the topology graph. They don't affect agent behavior — they're for organizing the layout.
+
+```toml
+[[groups]]
+name = "Engineering"
+agent_ids = ["research", "engineering"]
+color = "#6366f1"
+```
+
+| Field       | Required | Description                              |
+| ----------- | -------- | ---------------------------------------- |
+| `name`      | Yes      | Group display name.                      |
+| `agent_ids` | No       | List of agent IDs in the group.          |
+| `color`     | No       | Hex color for the group border.          |
+
+Groups can also be created and managed from the dashboard topology editor.
+
+## Topology Graph
+
+The dashboard Overview page renders the full communication graph as an interactive editor:
+
+- **Agents** and **humans** appear as profile cards with display name, role, bio, and stats
+- **Links** render as edges between nodes — vertical for hierarchical, horizontal for peers
+- **Groups** render as labeled regions containing their member agents
+- Drag between node handles to create new links (top/bottom for hierarchical, left/right for peer)
+- Click an edge to configure its kind and direction
+- Click a human node to edit its profile
+- Node positions persist across page reloads
+
+The topology API provides the graph data:
+
+```
+GET /api/topology
+```
+
+Returns agents, humans, links, and groups for rendering.
 
 ## On-Disk Structure
 
 ```
-~/.spacebot/                              # instance root (SPACEBOT_DIR env override)
-├── config.toml                           # instance config
+~/.spacebot/
+├── config.toml                           # instance config (agents, links, humans, groups)
 │
 ├── agents/
-│   ├── main/                             # default agent
+│   ├── research/
 │   │   ├── workspace/
 │   │   │   ├── SOUL.md                   # personality, values, boundaries
 │   │   │   ├── IDENTITY.md               # name, nature, vibe
-│   │   │   └── USER.md                   # info about the human
+│   │   │   ├── USER.md                   # info about the human
+│   │   │   └── ROLE.md                   # responsibilities, scope, escalation rules
 │   │   ├── data/
 │   │   │   ├── spacebot.db              # SQLite (memories, conversations, cron jobs)
 │   │   │   ├── lancedb/                 # LanceDB (embeddings, FTS)
 │   │   │   └── config.redb             # redb (agent-level settings, secrets)
 │   │   └── archives/                    # compaction transcripts
 │   │
-│   └── dev-bot/                          # second agent
+│   └── engineering/
 │       ├── workspace/
-
+│       └── ...
 ```
 
-Identity files are per-agent. System prompts (CHANNEL.md, BRANCH.md, etc.) are shared across all agents by default — they define process behavior, not personality. An agent can override any prompt by placing a file with the same name in its `workspace/prompts/` directory.
+Identity files are per-agent. `ROLE.md` defines what the agent does — responsibilities, scope, what to handle vs what to escalate. In single-agent setups it separates identity from operations. In multi-agent setups it's what differentiates agents operationally.
 
-## Configuration
+## API
 
-### Instance Config
-
-`~/.spacebot/config.toml`:
-
-```toml
-# LLM provider credentials (instance-level, shared by all agents)
-[llm]
-anthropic_key = "env:ANTHROPIC_API_KEY"
-openai_key = "env:OPENAI_API_KEY"
-
-# Defaults for all agents (overridable per-agent)
-[defaults]
-channel_model = "anthropic/claude-sonnet-4-20250514"
-worker_model = "anthropic/claude-sonnet-4-20250514"
-cortex_model = "anthropic/claude-sonnet-4-20250514"
-max_concurrent_branches = 5
-max_turns = 5
-context_window = 128000
-
-[defaults.compaction]
-background_threshold = 0.80
-aggressive_threshold = 0.85
-emergency_threshold = 0.95
-
-[defaults.cortex]
-tick_interval_secs = 30
-worker_timeout_secs = 300
-branch_timeout_secs = 60
-
-# Agent definitions
-[[agents]]
-id = "main"
-default = true
-
-[[agents]]
-id = "dev-bot"
-channel_model = "anthropic/claude-sonnet-4-20250514"
-
-# Messaging platform credentials (instance-level)
-[messaging.discord]
-enabled = true
-token = "env:DISCORD_BOT_TOKEN"
-
-[messaging.webhook]
-enabled = true
-port = 18789
-bind = "127.0.0.1"
-
-# Route messaging channels to agents
-[[bindings]]
-agent_id = "main"
-channel = "discord"
-guild_id = "123456789"
-
-[[bindings]]
-agent_id = "dev-bot"
-channel = "discord"
-guild_id = "987654321"
-
-[[bindings]]
-agent_id = "main"
-channel = "webhook"
-```
-
-The `env:` prefix on credential values reads from environment variables at startup. Credentials are never stored in plaintext — they're either env references or encrypted in redb via the secrets system.
-
-### What's Instance-Level vs Agent-Level
-
-| Setting                  | Level    | Notes                                 |
-| ------------------------ | -------- | ------------------------------------- |
-| LLM API keys             | Instance | Shared credentials for all agents     |
-| Messaging credentials    | Instance | One Discord bot token for all agents  |
-| Messaging bindings       | Instance | Routes conversations to agents        |
-| Default model/thresholds | Instance | Defaults that agents inherit          |
-| Channel model            | Agent    | Which model this agent's channels use |
-| Worker model             | Agent    | Which model this agent's workers use  |
-| Compaction thresholds    | Agent    | Override defaults if needed           |
-| Cortex config            | Agent    | Tick interval, timeouts               |
-| Identity (SOUL, USER)    | Agent    | Unique per agent                      |
-| Memories                 | Agent    | Completely isolated databases         |
-| Conversations            | Agent    | Completely isolated                   |
-| Settings/secrets         | Agent    | Per-agent redb                        |
-
-### Agent Config Resolution
-
-Agent settings resolve as: **agent override > instance defaults > hardcoded defaults**.
-
-```rust
-pub struct ResolvedAgentConfig {
-    pub id: String,
-    pub workspace: PathBuf,
-    pub data_dir: PathBuf,
-    pub channel_model: String,
-    pub worker_model: String,
-    pub cortex_model: String,
-    pub compaction: CompactionConfig,
-    pub channel: ChannelConfig,
-    pub cortex: CortexConfig,
-}
-
-impl AgentConfig {
-    pub fn resolve(&self, defaults: &DefaultsConfig) -> ResolvedAgentConfig {
-        ResolvedAgentConfig {
-            id: self.id.clone(),
-            workspace: self.workspace(),
-            data_dir: self.data_dir(),
-            channel_model: self.channel_model
-                .clone()
-                .unwrap_or_else(|| defaults.channel_model.clone()),
-            // ... etc
-        }
-    }
-}
-```
-
-## Agent IDs
-
-Agent IDs are lowercase alphanumeric with hyphens. Normalized on creation. Must be unique within the instance.
-
-Valid: `main`, `dev-bot`, `research-assistant`
-Invalid: `My Bot`, `agent@1`, `MAIN`
-
-The default agent is whichever entry has `default = true`. If no default is specified, the first agent in the list is the default. There must always be at least one agent.
-
-## Messaging Routing
-
-When a message arrives from a messaging platform, the router determines which agent handles it:
-
-1. Check the `bindings` table for a match on `channel` + platform-specific fields (guild_id, chat_id, etc.)
-2. If matched, route to that agent
-3. If no match, route to the default agent
-
-Bindings are specific — a Discord guild ID maps to exactly one agent. Two agents cannot be bound to the same guild. DMs are routed to the default agent unless a binding explicitly maps a user.
-
-### Conversation ID Scoping
-
-Conversation IDs are scoped to agents: `{agent_id}:{platform}:{platform_id}`. This ensures uniqueness even if two agents somehow see the same platform entity.
+### Agents
 
 ```
-main:discord:123:456
-dev-bot:discord:987:654
-main:webhook:github-ci
+GET    /api/agents                    — list all agents
+POST   /api/agents                    — create a new agent
+PUT    /api/agents                    — update agent display_name/role
+DELETE /api/agents?agent_id=          — delete an agent
 ```
 
-## The Agent Struct
-
-In code, an `Agent` bundles everything needed to run independently:
-
-```rust
-pub struct Agent {
-    pub id: String,
-    pub config: ResolvedAgentConfig,
-    pub db: Db,
-    pub memory_search: Arc<MemorySearch>,
-    pub llm_manager: Arc<LlmManager>,
-    pub cortex: Cortex,
-    pub prompts: Prompts,
-    pub identity: Identity,
-    pub event_tx: mpsc::Sender<ProcessEvent>,
-}
-```
-
-`LlmManager` is shared across agents (same API keys, same provider clients). Everything else is per-agent.
-
-## Startup Flow
+### Links
 
 ```
-1. Load config.toml
-2. Initialize LLM manager (shared)
-3. Initialize messaging adapters (shared, based on [messaging.*] config)
-4. For each agent in config:
-   a. Resolve agent config (merge with defaults)
-   b. Ensure workspace directory exists (create + bootstrap if new)
-   c. Connect databases (agent's data_dir)
-   d. Initialize memory system (agent's SQLite + LanceDB)
-   e. Load identity files (agent's workspace)
-   f. Load prompts (agent workspace overrides, then shared prompts)
-   g. Create agent's event bus (mpsc channel)
-   h. Start agent's cortex
-   i. Register agent in the router
-5. Start messaging adapters (MessagingManager.start())
-6. Run event loop: route inbound messages to agents via bindings
+GET    /api/links                 — list all links
+POST   /api/links                 — create a link
+PUT    /api/links/{from}/{to}     — update a link
+DELETE /api/links/{from}/{to}     — delete a link
+GET    /api/agents/{id}/links     — links for a specific agent
 ```
 
-If an agent's databases don't exist, they're created and migrations run. If its workspace doesn't exist, it's created with template identity files.
-
-## Agent Lifecycle
-
-### Creation
-
-```bash
-spacebot agents create dev-bot
-```
-
-Or via config: add an `[[agents]]` entry to config.toml and restart. On next startup, the directories and databases are bootstrapped.
-
-Creation does:
-
-1. Validate ID (lowercase alphanumeric + hyphens, unique)
-2. Create `agents/{id}/workspace/` with template SOUL.md, IDENTITY.md, USER.md
-3. Create `agents/{id}/data/` with empty databases
-4. Add entry to config.toml
-
-### Deletion
-
-```bash
-spacebot agents delete dev-bot
-```
-
-Deletion does:
-
-1. Stop the agent's cortex and drain in-flight work
-2. Remove bindings referencing this agent
-3. Optionally trash the agent's directories (workspace, data, archives)
-4. Remove the config entry
-
-Deletion of the default agent is rejected.
-
-## Prompt Resolution
-
-System prompts load with a fallback chain:
+### Humans
 
 ```
-agent workspace/prompts/CHANNEL.md   →  found? use it
-         ↓ not found
-shared prompts/CHANNEL.md            →  found? use it
-         ↓ not found
-error: missing prompt
+GET    /api/humans           — list all humans
+POST   /api/humans           — create a human
+PUT    /api/humans/{id}      — update a human
+DELETE /api/humans/{id}      — delete a human (also removes their links)
 ```
 
-This lets agents customize behavior without copying every prompt file. Most agents will use the shared defaults. An agent that needs different channel behavior (more aggressive delegation, different tool usage patterns) can override just CHANNEL.md.
+### Channels
 
-Identity files (SOUL.md, IDENTITY.md, USER.md) always load from the agent's workspace. There is no shared fallback — every agent must have its own identity.
-
-## Cortex Per Agent
-
-Each agent runs its own cortex. The cortex monitors that agent's workers, branches, channels, and memory graph. It has no awareness of other agents.
-
-Cross-agent coordination (one agent spawning work on another, shared observations, identity coherence across agents) is a future concern. For now, agents are islands.
-
-## What OpenClaw Does Differently
-
-OpenClaw uses a single JSON5 config file with all agents defined inline. File-based workspaces with markdown memory files. A shared gateway process with WebSocket RPC for agent management. Bindings route platform channels to agents.
-
-Spacebot takes the same conceptual model but adapts it:
-
-| Concern            | OpenClaw                      | Spacebot                                      |
-| ------------------ | ----------------------------- | --------------------------------------------- |
-| Config format      | JSON5                         | TOML                                          |
-| Memory storage     | Markdown files + SQLite index | SQLite + LanceDB (per agent)                  |
-| Database isolation | File-based (separate dirs)    | Database-level (separate SQLite/LanceDB/redb) |
-| Agent management   | WebSocket RPC + CLI           | CLI + config file                             |
-| Cortex             | N/A                           | Per-agent cortex                              |
-| Identity files     | Same set                      | Same set (SOUL, IDENTITY, USER)               |
-| Prompt overrides   | Skills system                 | Per-agent prompt directory                    |
-| Bindings           | Config array with match rules | Config array with platform filters            |
-| Subagent spawning  | Cross-agent tool calls        | Future concern                                |
-
-## CLI Commands
-
-```bash
-# List configured agents
-spacebot agents list
-
-# Create a new agent (interactive)
-spacebot agents create
-
-# Create a new agent (non-interactive)
-spacebot agents create dev-bot --model anthropic/claude-sonnet-4-20250514
-
-# Delete an agent
-spacebot agents delete dev-bot
-
-# Run a one-shot message on a specific agent
-spacebot run --agent dev-bot --message "what's your name?"
-
-# Default agent (no --agent flag needed)
-spacebot run --message "hello"
+```
+GET    /api/channels                              — list all active channels
+DELETE /api/channels?agent_id=&channel_id=        — delete a channel and its history
 ```
 
-## Future Considerations
+### Topology
 
-- **Cross-agent communication** — one agent spawning work on another agent, or sending messages to another agent's conversation. Requires a routing layer between agents.
-- **System-level supervisor** — a process that monitors all agents (restarts crashed agents, tracks resource usage). Distinct from the per-agent cortex.
-- **Agent templates** — pre-built agent configurations for common use cases (dev assistant, research bot, community manager).
-- **Hot reload agent topology** — adding/removing agents without restarting the process. Currently requires restart. (Config values, prompts, identity, and skills already hot-reload — see [Configuration](/docs/config).)
-- **Agent-level secrets** — per-agent API keys for third-party services (separate from instance-level LLM keys).
+```
+GET    /api/topology         — full graph (agents, humans, links, groups)
+```
+
+### Groups
+
+```
+GET    /api/groups           — list all groups
+POST   /api/groups           — create a group
+PUT    /api/groups/{name}    — update a group
+DELETE /api/groups/{name}    — delete a group
+```
+
+All write operations persist to `config.toml` and update in-memory state immediately. The file watcher triggers hot reload for other subsystems that read from config.

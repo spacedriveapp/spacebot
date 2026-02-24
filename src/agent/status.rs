@@ -12,6 +12,8 @@ pub struct StatusBlock {
     pub active_workers: Vec<WorkerStatus>,
     /// Recently completed work.
     pub completed_items: Vec<CompletedItem>,
+    /// Active link conversations with other agents.
+    pub active_link_conversations: Vec<LinkConversationStatus>,
 }
 
 /// Status of an active branch.
@@ -41,6 +43,14 @@ pub struct CompletedItem {
     pub description: String,
     pub completed_at: DateTime<Utc>,
     pub result_summary: String,
+}
+
+/// Status of an active link conversation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct LinkConversationStatus {
+    pub peer_agent: String,
+    pub started_at: DateTime<Utc>,
+    pub turn_count: u32,
 }
 
 /// Type of completed item.
@@ -118,6 +128,9 @@ impl StatusBlock {
                     self.completed_items.remove(0);
                 }
             }
+            ProcessEvent::AgentMessageSent { to_agent_id, .. } => {
+                self.track_link_conversation(to_agent_id.as_ref());
+            }
             _ => {}
         }
     }
@@ -182,6 +195,20 @@ impl StatusBlock {
             output.push('\n');
         }
 
+        // Active link conversations
+        if !self.active_link_conversations.is_empty() {
+            output.push_str("## Active Link Conversations\n");
+            for link in &self.active_link_conversations {
+                output.push_str(&format!(
+                    "- **{}** ({} turns, started {})\n",
+                    link.peer_agent,
+                    link.turn_count,
+                    link.started_at.format("%H:%M"),
+                ));
+            }
+            output.push('\n');
+        }
+
         // Recently completed
         if !self.completed_items.is_empty() {
             output.push_str("## Recently Completed\n");
@@ -216,5 +243,29 @@ impl StatusBlock {
     /// Get the number of active branches.
     pub fn active_branch_count(&self) -> usize {
         self.active_branches.len()
+    }
+
+    /// Track a new link conversation or increment turn count.
+    pub fn track_link_conversation(&mut self, peer_agent: impl Into<String>) {
+        let peer = peer_agent.into();
+        if let Some(existing) = self
+            .active_link_conversations
+            .iter_mut()
+            .find(|l| l.peer_agent == peer)
+        {
+            existing.turn_count += 1;
+        } else {
+            self.active_link_conversations.push(LinkConversationStatus {
+                peer_agent: peer,
+                started_at: Utc::now(),
+                turn_count: 1,
+            });
+        }
+    }
+
+    /// Remove a link conversation (concluded or timed out).
+    pub fn remove_link_conversation(&mut self, peer_agent: &str) {
+        self.active_link_conversations
+            .retain(|l| l.peer_agent != peer_agent);
     }
 }

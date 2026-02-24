@@ -475,6 +475,8 @@ async fn process_chunk(
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
+        crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
+        &deps.agent_id,
     );
 
     let agent = AgentBuilder::new(model)
