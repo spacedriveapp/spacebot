@@ -5,7 +5,7 @@ use anyhow::Context as _;
 use sqlx::SqlitePool;
 use std::path::Path;
 
-/// Database connections bundle.
+/// Database connections bundle for per-agent databases.
 pub struct Db {
     /// SQLite pool for relational data.
     pub sqlite: SqlitePool,

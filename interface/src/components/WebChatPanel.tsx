@@ -1,14 +1,18 @@
-import { useEffect, useRef, useState } from "react";
-import { useWebChat, getPortalChatSessionId, type ToolActivity } from "@/hooks/useWebChat";
-import type { ActiveWorker } from "@/hooks/useChannelLiveState";
-import { useLiveContext } from "@/hooks/useLiveContext";
-import { Markdown } from "@/components/Markdown";
+import {useEffect, useRef, useState} from "react";
+import {
+	useWebChat,
+	getPortalChatSessionId,
+	type ToolActivity,
+} from "@/hooks/useWebChat";
+import type {ActiveWorker} from "@/hooks/useChannelLiveState";
+import {useLiveContext} from "@/hooks/useLiveContext";
+import {Markdown} from "@/components/Markdown";
 
 interface WebChatPanelProps {
 	agentId: string;
 }
 
-function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
+function ToolActivityIndicator({activity}: {activity: ToolActivity[]}) {
 	if (activity.length === 0) return null;
 
 	return (
@@ -23,7 +27,9 @@ function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 					) : (
 						<span className="h-1.5 w-1.5 rounded-full bg-green-400" />
 					)}
-					<span className="font-mono text-tiny text-ink-faint">{tool.tool}</span>
+					<span className="font-mono text-tiny text-ink-faint">
+						{tool.tool}
+					</span>
 				</span>
 			))}
 		</div>
@@ -40,7 +46,7 @@ function ThinkingIndicator() {
 	);
 }
 
-function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
+function ActiveWorkersPanel({workers}: {workers: ActiveWorker[]}) {
 	if (workers.length === 0) return null;
 
 	return (
@@ -53,12 +59,19 @@ function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 			</div>
 			<div className="flex flex-col gap-1.5">
 				{workers.map((worker) => (
-					<div key={worker.id} className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny">
+					<div
+						key={worker.id}
+						className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny"
+					>
 						<span className="font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-ink-dull">{worker.task}</span>
+						<span className="min-w-0 flex-1 truncate text-ink-dull">
+							{worker.task}
+						</span>
 						<span className="shrink-0 text-ink-faint">{worker.status}</span>
 						{worker.currentTool && (
-							<span className="max-w-40 shrink-0 truncate text-amber-400/80">{worker.currentTool}</span>
+							<span className="max-w-40 shrink-0 truncate text-amber-400/80">
+								{worker.currentTool}
+							</span>
 						)}
 					</div>
 				))}
@@ -120,11 +133,15 @@ function FloatingChatInput({
 							value={value}
 							onChange={(event) => onChange(event.target.value)}
 							onKeyDown={handleKeyDown}
-							placeholder={isStreaming ? "Waiting for response..." : `Message ${agentId}...`}
+							placeholder={
+								isStreaming
+									? "Waiting for response..."
+									: `Message ${agentId}...`
+							}
 							disabled={isStreaming}
 							rows={1}
 							className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
-							style={{ maxHeight: "200px" }}
+							style={{maxHeight: "200px"}}
 						/>
 						<button
 							type="button"
@@ -152,9 +169,10 @@ function FloatingChatInput({
 	);
 }
 
-export function WebChatPanel({ agentId }: WebChatPanelProps) {
-	const { messages, isStreaming, error, toolActivity, sendMessage } = useWebChat(agentId);
-	const { liveStates } = useLiveContext();
+export function WebChatPanel({agentId}: WebChatPanelProps) {
+	const {messages, isStreaming, error, toolActivity, sendMessage} =
+		useWebChat(agentId);
+	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const sessionId = getPortalChatSessionId(agentId);
@@ -162,7 +180,7 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 	const hasActiveWorkers = activeWorkers.length > 0;
 
 	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
 	}, [messages.length, isStreaming, toolActivity.length, activeWorkers.length]);
 
 	const handleSubmit = () => {
@@ -208,17 +226,20 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 					))}
 
 					{/* Streaming state */}
-					{isStreaming && messages[messages.length - 1]?.role !== "assistant" && (
-						<div>
-							<ToolActivityIndicator activity={toolActivity} />
-							{toolActivity.length === 0 && <ThinkingIndicator />}
-						</div>
-					)}
+					{isStreaming &&
+						messages[messages.length - 1]?.role !== "assistant" && (
+							<div>
+								<ToolActivityIndicator activity={toolActivity} />
+								{toolActivity.length === 0 && <ThinkingIndicator />}
+							</div>
+						)}
 
 					{/* Inline tool activity during streaming assistant message */}
-					{isStreaming && messages[messages.length - 1]?.role === "assistant" && toolActivity.length > 0 && (
-						<ToolActivityIndicator activity={toolActivity} />
-					)}
+					{isStreaming &&
+						messages[messages.length - 1]?.role === "assistant" &&
+						toolActivity.length > 0 && (
+							<ToolActivityIndicator activity={toolActivity} />
+						)}
 
 					{error && (
 						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">

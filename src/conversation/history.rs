@@ -71,18 +71,30 @@ impl ConversationLogger {
 
     /// Log a bot (assistant) message. Fire-and-forget.
     pub fn log_bot_message(&self, channel_id: &ChannelId, content: &str) {
+        self.log_bot_message_with_name(channel_id, content, None);
+    }
+
+    /// Log a bot (assistant) message with an agent display name. Fire-and-forget.
+    pub fn log_bot_message_with_name(
+        &self,
+        channel_id: &ChannelId,
+        content: &str,
+        sender_name: Option<&str>,
+    ) {
         let pool = self.pool.clone();
         let id = uuid::Uuid::new_v4().to_string();
         let channel_id = channel_id.to_string();
         let content = content.to_string();
+        let sender_name = sender_name.map(String::from);
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT INTO conversation_messages (id, channel_id, role, content) \
-                 VALUES (?, ?, 'assistant', ?)",
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'assistant', ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
+            .bind(&sender_name)
             .bind(&content)
             .execute(&pool)
             .await

@@ -719,6 +719,14 @@ async fn run(
     let prompt_engine = spacebot::prompts::PromptEngine::new("en")
         .with_context(|| "failed to initialize prompt engine")?;
 
+    // Parse config links into shared agent links (hot-reloadable via ArcSwap)
+    let agent_links = Arc::new(ArcSwap::from_pointee(
+        spacebot::links::AgentLink::from_config(&config.links)?,
+    ));
+    if !config.links.is_empty() {
+        tracing::info!(count = config.links.len(), "loaded agent links from config");
+    }
+
     // These hold the initialized subsystems. Empty until agents are initialized.
     let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
     let mut messaging_manager: Arc<spacebot::messaging::MessagingManager> =
@@ -743,6 +751,9 @@ async fn run(
     api_state.set_embedding_model(embedding_model.clone()).await;
     api_state.set_prompt_engine(prompt_engine.clone()).await;
     api_state.set_defaults_config(config.defaults.clone()).await;
+    api_state.set_agent_links((**agent_links.load()).clone());
+    api_state.set_agent_groups(config.groups.clone());
+    api_state.set_agent_humans(config.humans.clone());
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;
@@ -774,6 +785,7 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            agent_links.clone(),
         )
         .await?;
         agents_initialized = true;
@@ -790,6 +802,7 @@ async fn run(
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
+            agent_links.clone(),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -804,6 +817,7 @@ async fn run(
             bindings.clone(),
             None,
             llm_manager.clone(),
+            agent_links.clone(),
         );
     }
 
@@ -934,6 +948,7 @@ async fn run(
                     let api_event_tx = api_state.event_tx.clone();
                     let sse_agent_id = agent_id.to_string();
                     let sse_channel_id = conversation_id.clone();
+                    let outbound_agent_names = agent.deps.agent_names.clone();
                     let outbound_handle = tokio::spawn(async move {
                         while let Some(response) = response_rx.recv().await {
                             // Forward relevant events to SSE clients
@@ -977,6 +992,101 @@ async fn run(
                             }
 
                             let current_message = outbound_message.read().await.clone();
+
+                            // Internal link channels: route replies back to the sender's link channel
+                            if current_message.source == "internal" {
+                                let reply_text = match &response {
+                                    spacebot::OutboundResponse::Text(t) => Some(t.clone()),
+                                    spacebot::OutboundResponse::RichMessage { text, .. } => Some(text.clone()),
+                                    spacebot::OutboundResponse::ThreadReply { text, .. } => Some(text.clone()),
+                                    spacebot::OutboundResponse::Status(_) => None,
+                                    _ => None,
+                                };
+
+                                if let Some(text) = reply_text {
+                                    let reply_to_agent = current_message.metadata
+                                        .get("reply_to_agent")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+                                    let reply_to_channel = current_message.metadata
+                                        .get("reply_to_channel")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from);
+
+                                    if let (Some(target_agent), Some(target_channel)) = (reply_to_agent, reply_to_channel) {
+                                        let agent_display = outbound_agent_names
+                                            .get(&sse_agent_id)
+                                            .cloned()
+                                            .unwrap_or_else(|| sse_agent_id.clone());
+
+                                        // Include the original sent message so the receiving
+                                        // agent's link channel can seed its history with context
+                                        let original_text = match &current_message.content {
+                                            spacebot::MessageContent::Text(t) => Some(t.clone()),
+                                            spacebot::MessageContent::Media { text, .. } => text.clone(),
+                                            _ => None,
+                                        };
+
+                                        let mut metadata = std::collections::HashMap::from([
+                                            ("from_agent_id".into(), serde_json::json!(&sse_agent_id)),
+                                            ("reply_to_agent".into(), serde_json::json!(&sse_agent_id)),
+                                            ("reply_to_channel".into(), serde_json::json!(&outbound_conversation_id)),
+                                        ]);
+                                        if let Some(original) = original_text {
+                                            metadata.insert("original_sent_message".into(), serde_json::json!(original));
+                                        }
+                                        // Propagate originating_channel and originating_source so both sides
+                                        // know where to route conclusions and which adapter to use.
+                                        if let Some(originating) = current_message.metadata.get("originating_channel") {
+                                            metadata.insert("originating_channel".into(), originating.clone());
+                                        }
+                                        if let Some(source) = current_message.metadata.get("originating_source") {
+                                            metadata.insert("originating_source".into(), source.clone());
+                                        }
+
+                                        let reply_message = spacebot::InboundMessage {
+                                            id: uuid::Uuid::new_v4().to_string(),
+                                            source: "internal".into(),
+                                            conversation_id: target_channel.clone(),
+                                            sender_id: sse_agent_id.clone(),
+                                            agent_id: Some(Arc::from(target_agent.as_str())),
+                                            content: spacebot::MessageContent::Text(text),
+                                            timestamp: chrono::Utc::now(),
+                                            metadata,
+                                            formatted_author: Some(format!("[{agent_display}]")),
+                                        };
+
+                                        if let Err(error) = messaging_for_outbound
+                                            .inject_message(reply_message)
+                                            .await
+                                        {
+                                            tracing::error!(
+                                                %error,
+                                                from = %sse_agent_id,
+                                                to = %target_agent,
+                                                "failed to route link channel reply"
+                                            );
+                                        } else {
+                                            // Emit SSE event so the dashboard animates the edge
+                                            api_event_tx.send(spacebot::api::ApiEvent::AgentMessageSent {
+                                                from_agent_id: sse_agent_id.clone(),
+                                                to_agent_id: target_agent.clone(),
+                                                link_id: target_channel.clone(),
+                                                channel_id: target_channel.clone(),
+                                            }).ok();
+
+                                            tracing::info!(
+                                                from = %sse_agent_id,
+                                                to = %target_agent,
+                                                channel = %target_channel,
+                                                "routed link channel reply"
+                                            );
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+
                             match response {
                                 spacebot::OutboundResponse::Status(status) => {
                                     if let Err(error) = messaging_for_outbound
@@ -1108,6 +1218,7 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    agent_links.clone(),
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -1123,6 +1234,7 @@ async fn run(
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
+                                            agent_links.clone(),
                                         );
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -1215,8 +1327,20 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
+
+    // Build agent name map for inter-agent message routing
+    let agent_name_map: Arc<std::collections::HashMap<String, String>> = Arc::new(
+        resolved_agents
+            .iter()
+            .map(|a| {
+                let name = a.display_name.clone().unwrap_or_else(|| a.id.clone());
+                (a.id.clone(), name)
+            })
+            .collect(),
+    );
 
     for agent_config in &resolved_agents {
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
@@ -1350,6 +1474,8 @@ async fn initialize_agents(
             event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
+            links: agent_links.clone(),
+            agent_names: agent_name_map.clone(),
         };
 
         let agent = spacebot::Agent {
@@ -1383,6 +1509,8 @@ async fn initialize_agents(
             runtime_configs.insert(agent_id.to_string(), agent.deps.runtime_config.clone());
             agent_configs.push(spacebot::api::AgentInfo {
                 id: agent.config.id.clone(),
+                display_name: agent.config.display_name.clone(),
+                role: agent.config.role.clone(),
                 workspace: agent.config.workspace.clone(),
                 context_window: agent.config.context_window,
                 max_turns: agent.config.max_turns,

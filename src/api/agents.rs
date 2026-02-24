@@ -127,6 +127,15 @@ pub(super) struct AgentOverviewQuery {
 #[derive(Deserialize)]
 pub(super) struct CreateAgentRequest {
     agent_id: String,
+    display_name: Option<String>,
+    role: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct UpdateAgentRequest {
+    agent_id: String,
+    display_name: Option<String>,
+    role: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -394,6 +403,8 @@ pub(super) async fn trigger_warmup(
                 event_tx,
                 sqlite_pool: sqlite_pool.clone(),
                 messaging_manager: None,
+                links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+                agent_names: Arc::new(std::collections::HashMap::new()),
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -467,6 +478,16 @@ pub(super) async fn create_agent(
 
     let mut new_table = toml_edit::Table::new();
     new_table["id"] = toml_edit::value(&agent_id);
+    if let Some(display_name) = &request.display_name
+        && !display_name.is_empty()
+    {
+        new_table["display_name"] = toml_edit::value(display_name.as_str());
+    }
+    if let Some(role) = &request.role
+        && !role.is_empty()
+    {
+        new_table["role"] = toml_edit::value(role.as_str());
+    }
     agents_array.push(new_table);
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -485,6 +506,8 @@ pub(super) async fn create_agent(
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
         default: false,
+        display_name: request.display_name.clone().filter(|s| !s.is_empty()),
+        role: request.role.clone().filter(|s| !s.is_empty()),
         workspace: None,
         routing: None,
         max_concurrent_branches: None,
@@ -638,6 +661,29 @@ pub(super) async fn create_agent(
             let guard = state.messaging_manager.read().await;
             guard.as_ref().cloned()
         },
+        links: Arc::new(arc_swap::ArcSwap::from_pointee(
+            (**state.agent_links.load()).clone(),
+        )),
+        agent_names: {
+            let configs = state.agent_configs.load();
+            let mut names: std::collections::HashMap<String, String> = configs
+                .iter()
+                .map(|c| {
+                    (
+                        c.id.clone(),
+                        c.display_name.clone().unwrap_or_else(|| c.id.clone()),
+                    )
+                })
+                .collect();
+            names.entry(agent_id.clone()).or_insert_with(|| {
+                request
+                    .display_name
+                    .clone()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| agent_id.clone())
+            });
+            Arc::new(names)
+        },
     };
 
     let event_rx = event_tx.subscribe();
@@ -735,6 +781,8 @@ pub(super) async fn create_agent(
         let mut agent_infos = (**state.agent_configs.load()).clone();
         agent_infos.push(AgentInfo {
             id: agent_config.id.clone(),
+            display_name: agent_config.display_name.clone(),
+            role: agent_config.role.clone(),
             workspace: agent_config.workspace.clone(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
@@ -766,6 +814,97 @@ pub(super) async fn create_agent(
         "success": true,
         "agent_id": agent_id,
         "message": format!("Agent '{agent_id}' created and running")
+    })))
+}
+
+/// Update an agent's display_name and role in config.toml.
+pub(super) async fn update_agent(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<UpdateAgentRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let agent_id = request.agent_id.trim().to_string();
+    if agent_id.is_empty() {
+        return Ok(Json(serde_json::json!({
+            "success": false,
+            "message": "Agent ID cannot be empty"
+        })));
+    }
+
+    let existing = state.agent_configs.load();
+    let index = existing
+        .iter()
+        .position(|a| a.id == agent_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let config_path = state.config_path.read().await.clone();
+    let content = tokio::fs::read_to_string(&config_path)
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to read config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::warn!(%error, "failed to parse config.toml");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if let Some(agents_array) = doc
+        .get_mut("agents")
+        .and_then(|a| a.as_array_of_tables_mut())
+    {
+        for table in agents_array.iter_mut() {
+            let table_id = table.get("id").and_then(|v| v.as_str());
+            if table_id == Some(&agent_id) {
+                if let Some(display_name) = &request.display_name {
+                    if display_name.is_empty() {
+                        table.remove("display_name");
+                    } else {
+                        table["display_name"] = toml_edit::value(display_name.as_str());
+                    }
+                }
+                if let Some(role) = &request.role {
+                    if role.is_empty() {
+                        table.remove("role");
+                    } else {
+                        table["role"] = toml_edit::value(role.as_str());
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, "failed to write config.toml");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+
+    let mut configs = (**existing).clone();
+    let info = &mut configs[index];
+    if let Some(display_name) = &request.display_name {
+        info.display_name = if display_name.is_empty() {
+            None
+        } else {
+            Some(display_name.clone())
+        };
+    }
+    if let Some(role) = &request.role {
+        info.role = if role.is_empty() {
+            None
+        } else {
+            Some(role.clone())
+        };
+    }
+    state.set_agent_configs(configs);
+
+    tracing::info!(agent_id = %agent_id, "agent updated via API");
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "agent_id": agent_id,
+        "message": format!("Agent '{agent_id}' updated")
     })))
 }
 

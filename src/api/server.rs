@@ -2,8 +2,8 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, mcp, memories, messaging, models,
-    providers, settings, skills, system, webchat,
+    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
+    models, providers, settings, skills, system, webchat,
 };
 
 use axum::Json;
@@ -60,6 +60,7 @@ pub async fn start_http_server(
             "/agents",
             get(agents::list_agents)
                 .post(agents::create_agent)
+                .put(agents::update_agent)
                 .delete(agents::delete_agent),
         )
         .route("/agents/mcp", get(agents::list_agent_mcp))
@@ -81,7 +82,10 @@ pub async fn start_http_server(
         )
         .route("/mcp/status", get(mcp::mcp_status))
         .route("/agents/overview", get(agents::agent_overview))
-        .route("/channels", get(channels::list_channels))
+        .route(
+            "/channels",
+            get(channels::list_channels).delete(channels::delete_channel),
+        )
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/memories", get(memories::list_memories))
@@ -167,6 +171,23 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route("/links", get(links::list_links).post(links::create_link))
+        .route(
+            "/links/{from}/{to}",
+            put(links::update_link).delete(links::delete_link),
+        )
+        .route("/agents/{id}/links", get(links::agent_links))
+        .route("/topology", get(links::topology))
+        .route("/groups", get(links::list_groups).post(links::create_group))
+        .route(
+            "/groups/{name}",
+            put(links::update_group).delete(links::delete_group),
+        )
+        .route("/humans", get(links::list_humans).post(links::create_human))
+        .route(
+            "/humans/{id}",
+            put(links::update_human).delete(links::delete_human),
+        )
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
