@@ -1,0 +1,1 @@
+ALTER TABLE worker_runs ADD COLUMN tool_calls INTEGER NOT NULL DEFAULT 0;

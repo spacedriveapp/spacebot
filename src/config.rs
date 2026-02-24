@@ -42,6 +42,12 @@ pub struct Config {
     pub defaults: DefaultsConfig,
     /// Agent definitions.
     pub agents: Vec<AgentConfig>,
+    /// Agent communication graph links.
+    pub links: Vec<LinkDef>,
+    /// Visual grouping of agents in the topology UI.
+    pub groups: Vec<GroupDef>,
+    /// Org-level humans (real people, shown in topology graph).
+    pub humans: Vec<HumanDef>,
     /// Messaging platform credentials.
     pub messaging: MessagingConfig,
     /// Routing bindings (maps platform conversations to agents).
@@ -52,6 +58,36 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+}
+
+/// A link definition from config, connecting two nodes (agents or humans).
+#[derive(Debug, Clone)]
+pub struct LinkDef {
+    pub from: String,
+    pub to: String,
+    pub direction: String,
+    pub kind: String,
+}
+
+/// An org-level human definition.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct HumanDef {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bio: Option<String>,
+}
+
+/// A visual group definition for the topology UI.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct GroupDef {
+    pub name: String,
+    pub agent_ids: Vec<String>,
+    #[serde(default)]
+    pub color: Option<String>,
 }
 
 /// HTTP API server configuration.
@@ -703,6 +739,10 @@ fn evaluate_work_readiness(
 pub struct AgentConfig {
     pub id: String,
     pub default: bool,
+    /// User-defined display name for the agent (shown in UI).
+    pub display_name: Option<String>,
+    /// User-defined role description (e.g. "handles tier 1 support").
+    pub role: Option<String>,
     /// Custom workspace path. If None, resolved to instance_dir/agents/{id}/workspace.
     pub workspace: Option<PathBuf>,
     /// Per-agent routing overrides. None inherits from defaults.
@@ -724,6 +764,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Cron job definitions for this agent.
     pub cron: Vec<CronDef>,
 }
@@ -749,6 +791,8 @@ pub struct CronDef {
 #[derive(Debug, Clone)]
 pub struct ResolvedAgentConfig {
     pub id: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
     pub workspace: PathBuf,
     pub data_dir: PathBuf,
     pub archives_dir: PathBuf,
@@ -768,6 +812,8 @@ pub struct ResolvedAgentConfig {
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: crate::sandbox::SandboxConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
@@ -807,6 +853,8 @@ impl AgentConfig {
 
         ResolvedAgentConfig {
             id: self.id.clone(),
+            display_name: self.display_name.clone(),
+            role: self.role.clone(),
             workspace: self
                 .workspace
                 .clone()
@@ -848,6 +896,7 @@ impl AgentConfig {
                 self.cron_timezone.as_deref(),
                 defaults.cron_timezone.as_deref(),
             ),
+            sandbox: self.sandbox.clone().unwrap_or_default(),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
         }
@@ -1407,6 +1456,12 @@ struct TomlConfig {
     #[serde(default)]
     agents: Vec<TomlAgentConfig>,
     #[serde(default)]
+    links: Vec<TomlLinkDef>,
+    #[serde(default)]
+    groups: Vec<TomlGroupDef>,
+    #[serde(default)]
+    humans: Vec<TomlHumanDef>,
+    #[serde(default)]
     messaging: TomlMessagingConfig,
     #[serde(default)]
     bindings: Vec<TomlBinding>,
@@ -1416,6 +1471,43 @@ struct TomlConfig {
     metrics: TomlMetricsConfig,
     #[serde(default)]
     telemetry: TomlTelemetryConfig,
+}
+
+#[derive(Deserialize)]
+struct TomlLinkDef {
+    from: String,
+    to: String,
+    #[serde(default = "default_link_direction")]
+    direction: String,
+    #[serde(default = "default_link_kind")]
+    kind: String,
+    /// Backward compat: old configs use `relationship` instead of `kind`
+    #[serde(default)]
+    relationship: Option<String>,
+}
+
+fn default_link_direction() -> String {
+    "two_way".into()
+}
+
+fn default_link_kind() -> String {
+    "peer".into()
+}
+
+#[derive(Deserialize)]
+struct TomlGroupDef {
+    name: String,
+    #[serde(default)]
+    agent_ids: Vec<String>,
+    color: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct TomlHumanDef {
+    id: String,
+    display_name: Option<String>,
+    role: Option<String>,
+    bio: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -1753,6 +1845,8 @@ struct TomlAgentConfig {
     id: String,
     #[serde(default)]
     default: bool,
+    display_name: Option<String>,
+    role: Option<String>,
     workspace: Option<String>,
     routing: Option<TomlRoutingConfig>,
     max_concurrent_branches: Option<usize>,
@@ -1770,6 +1864,7 @@ struct TomlAgentConfig {
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    sandbox: Option<crate::sandbox::SandboxConfig>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
 }
@@ -2431,6 +2526,8 @@ impl Config {
         let agents = vec![AgentConfig {
             id: "main".into(),
             default: true,
+            display_name: None,
+            role: None,
             workspace: None,
             routing: Some(routing),
             max_concurrent_branches: None,
@@ -2448,6 +2545,7 @@ impl Config {
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
+            sandbox: None,
             cron: Vec::new(),
         }];
 
@@ -2459,6 +2557,14 @@ impl Config {
             llm,
             defaults: DefaultsConfig::default(),
             agents,
+            links: Vec::new(),
+            groups: Vec::new(),
+            humans: vec![HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+                bio: None,
+            }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api,
@@ -3089,6 +3195,8 @@ impl Config {
                 Ok(AgentConfig {
                     id: a.id,
                     default: a.default,
+                    display_name: a.display_name,
+                    role: a.role,
                     workspace: a.workspace.map(PathBuf::from),
                     routing: agent_routing,
                     max_concurrent_branches: a.max_concurrent_branches,
@@ -3199,6 +3307,7 @@ impl Config {
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
+                    sandbox: a.sandbox,
                     cron,
                 })
             })
@@ -3208,6 +3317,8 @@ impl Config {
             agents.push(AgentConfig {
                 id: "main".into(),
                 default: true,
+                display_name: None,
+                role: None,
                 workspace: None,
                 routing: None,
                 max_concurrent_branches: None,
@@ -3225,6 +3336,7 @@ impl Config {
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
+                sandbox: None,
                 cron: Vec::new(),
             });
         }
@@ -3384,11 +3496,64 @@ impl Config {
             }
         };
 
+        let links = toml
+            .links
+            .into_iter()
+            .map(|l| {
+                // Backward compat: use `relationship` field if `kind` is default and `relationship` is set
+                let kind = if l.kind == "peer" {
+                    l.relationship.unwrap_or(l.kind)
+                } else {
+                    l.kind
+                };
+                LinkDef {
+                    from: l.from,
+                    to: l.to,
+                    direction: l.direction,
+                    kind,
+                }
+            })
+            .collect();
+
+        let groups = toml
+            .groups
+            .into_iter()
+            .map(|g| GroupDef {
+                name: g.name,
+                agent_ids: g.agent_ids,
+                color: g.color,
+            })
+            .collect();
+
+        let mut humans: Vec<HumanDef> = toml
+            .humans
+            .into_iter()
+            .map(|h| HumanDef {
+                id: h.id,
+                display_name: h.display_name,
+                role: h.role,
+                bio: h.bio,
+            })
+            .collect();
+
+        // Default admin human if none defined
+        if humans.is_empty() {
+            humans.push(HumanDef {
+                id: "admin".into(),
+                display_name: None,
+                role: None,
+                bio: None,
+            });
+        }
+
         Ok(Config {
             instance_dir,
             llm,
             defaults,
             agents,
+            links,
+            groups,
+            humans,
             messaging,
             bindings,
             api,
@@ -3466,6 +3631,8 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Sandbox configuration for process containment.
+    pub sandbox: ArcSwap<crate::sandbox::SandboxConfig>,
 }
 
 impl RuntimeConfig {
@@ -3516,6 +3683,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            sandbox: ArcSwap::from_pointee(agent_config.sandbox.clone()),
         }
     }
 
@@ -3591,6 +3759,9 @@ impl RuntimeConfig {
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
+        // sandbox config is not hot-reloaded here because the Sandbox instance
+        // is constructed once at startup and shared via Arc. Changing sandbox
+        // settings requires an agent restart.
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -3639,6 +3810,7 @@ pub fn spawn_file_watcher(
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
+    agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
@@ -3728,7 +3900,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md" | "ROLE.md")
             });
             let skills_changed = changed_paths
                 .iter()
@@ -3793,6 +3965,16 @@ pub fn spawn_file_watcher(
 
                 bindings.store(Arc::new(config.bindings.clone()));
                 tracing::info!("bindings reloaded ({} entries)", config.bindings.len());
+
+                match crate::links::AgentLink::from_config(&config.links) {
+                    Ok(links) => {
+                        agent_links.store(Arc::new(links));
+                        tracing::info!("agent links reloaded ({} entries)", config.links.len());
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to parse links from reloaded config");
+                    }
+                }
 
                 if let Some(ref perms) = discord_permissions
                     && let Some(discord_config) = &config.messaging.discord

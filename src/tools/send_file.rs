@@ -13,14 +13,41 @@ use tokio::sync::mpsc;
 /// Reads a file from the local filesystem and sends it as an attachment
 /// in the conversation. The channel process creates a response sender per
 /// conversation turn and this tool routes file responses through it.
+/// File access is restricted to the agent's workspace boundary.
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
     response_tx: mpsc::Sender<OutboundResponse>,
+    workspace: PathBuf,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>) -> Self {
-        Self { response_tx }
+    pub fn new(response_tx: mpsc::Sender<OutboundResponse>, workspace: PathBuf) -> Self {
+        Self {
+            response_tx,
+            workspace,
+        }
+    }
+
+    /// Validate that a path falls within the workspace boundary.
+    fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
+        let workspace = &self.workspace;
+
+        let canonical = path.canonicalize().map_err(|error| {
+            SendFileError(format!("can't resolve path '{}': {error}", path.display()))
+        })?;
+        let workspace_canonical = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
+        if !canonical.starts_with(&workspace_canonical) {
+            return Err(SendFileError(format!(
+                "ACCESS DENIED: Path is outside the workspace boundary. \
+                 File operations are restricted to {}.",
+                workspace.display()
+            )));
+        }
+
+        Ok(canonical)
     }
 }
 
@@ -79,11 +106,13 @@ impl Tool for SendFileTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = PathBuf::from(&args.file_path);
+        let raw_path = PathBuf::from(&args.file_path);
 
-        if !path.is_absolute() {
+        if !raw_path.is_absolute() {
             return Err(SendFileError("file_path must be an absolute path".into()));
         }
+
+        let path = self.validate_workspace_path(&raw_path)?;
 
         let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
             SendFileError(format!("can't read file '{}': {error}", path.display()))
