@@ -173,6 +173,13 @@ fn cmd_start(
     // Validate config loads successfully before forking
     let config = load_config(&resolved_config_path)?;
 
+    #[cfg(not(unix))]
+    if !foreground {
+        return Err(anyhow::anyhow!(
+            "background daemon mode is only supported on Unix targets; rerun with --foreground"
+        ));
+    }
+
     if !foreground {
         // Fork the process before creating any Tokio runtime. After daemonize()
         // returns, we are in the child process — the parent has exited. Any

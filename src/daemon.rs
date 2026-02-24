@@ -2,12 +2,16 @@
 
 use crate::config::{Config, TelemetryConfig};
 
-use anyhow::{Context as _, anyhow};
+#[cfg(unix)]
+use anyhow::Context as _;
+use anyhow::anyhow;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithHttpConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::watch;
 use tracing_subscriber::fmt::format;
@@ -15,6 +19,7 @@ use tracing_subscriber::layer::SubscriberExt as _;
 use tracing_subscriber::util::SubscriberInitExt as _;
 
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::time::Instant;
 
 /// Commands sent from CLI client to the running daemon.
@@ -57,6 +62,7 @@ impl DaemonPaths {
 
 /// Check whether a daemon is already running by testing PID file liveness
 /// and socket connectivity.
+#[cfg(unix)]
 pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
     let pid = read_pid_file(&paths.pid_file)?;
 
@@ -82,8 +88,14 @@ pub fn is_running(paths: &DaemonPaths) -> Option<u32> {
     Some(pid)
 }
 
+#[cfg(not(unix))]
+pub fn is_running(_paths: &DaemonPaths) -> Option<u32> {
+    None
+}
+
 /// Daemonize the current process. Returns in the child; the parent prints
 /// a message and exits.
+#[cfg(unix)]
 pub fn daemonize(paths: &DaemonPaths) -> anyhow::Result<()> {
     std::fs::create_dir_all(&paths.log_dir).with_context(|| {
         format!(
@@ -115,6 +127,13 @@ pub fn daemonize(paths: &DaemonPaths) -> anyhow::Result<()> {
         .map_err(|error| anyhow!("failed to daemonize: {error}"))?;
 
     Ok(())
+}
+
+#[cfg(not(unix))]
+pub fn daemonize(_paths: &DaemonPaths) -> anyhow::Result<()> {
+    Err(anyhow!(
+        "background daemon mode is only supported on Unix targets; rerun with --foreground"
+    ))
 }
 
 /// Initialize tracing for background (daemon) mode.
@@ -309,6 +328,7 @@ fn build_otlp_provider(telemetry: &TelemetryConfig) -> Option<SdkTracerProvider>
 
 /// Start the IPC server. Returns a shutdown receiver that the main event
 /// loop should select on.
+#[cfg(unix)]
 pub async fn start_ipc_server(
     paths: &DaemonPaths,
 ) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
@@ -366,6 +386,7 @@ pub async fn start_ipc_server(
 }
 
 /// Handle a single IPC client connection.
+#[cfg(unix)]
 async fn handle_ipc_connection(
     stream: UnixStream,
     shutdown_tx: &watch::Sender<bool>,
@@ -400,6 +421,7 @@ async fn handle_ipc_connection(
 }
 
 /// Send a command to the running daemon and return the response.
+#[cfg(unix)]
 pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::Result<IpcResponse> {
     let stream = UnixStream::connect(&paths.socket)
         .await
@@ -422,6 +444,28 @@ pub async fn send_command(paths: &DaemonPaths, command: IpcCommand) -> anyhow::R
     Ok(response)
 }
 
+#[cfg(not(unix))]
+pub async fn start_ipc_server(
+    _paths: &DaemonPaths,
+) -> anyhow::Result<(watch::Receiver<bool>, tokio::task::JoinHandle<()>)> {
+    let (shutdown_tx, shutdown_rx) = watch::channel(false);
+    let handle = tokio::spawn(async move {
+        let _shutdown_tx = shutdown_tx;
+        std::future::pending::<()>().await;
+    });
+    Ok((shutdown_rx, handle))
+}
+
+#[cfg(not(unix))]
+pub async fn send_command(
+    _paths: &DaemonPaths,
+    _command: IpcCommand,
+) -> anyhow::Result<IpcResponse> {
+    Err(anyhow!(
+        "daemon IPC commands are only supported on Unix targets"
+    ))
+}
+
 /// Clean up PID and socket files on shutdown.
 pub fn cleanup(paths: &DaemonPaths) {
     if let Err(error) = std::fs::remove_file(&paths.pid_file)
@@ -436,16 +480,24 @@ pub fn cleanup(paths: &DaemonPaths) {
     }
 }
 
+#[cfg(unix)]
 fn read_pid_file(path: &std::path::Path) -> Option<u32> {
     let content = std::fs::read_to_string(path).ok()?;
     content.trim().parse::<u32>().ok()
 }
 
+#[cfg(unix)]
 fn is_process_alive(pid: u32) -> bool {
     // kill(pid, 0) checks if the process exists without sending a signal
     unsafe { libc::kill(pid as libc::pid_t, 0) == 0 }
 }
 
+#[cfg(not(unix))]
+fn is_process_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn cleanup_stale_files(paths: &DaemonPaths) {
     let _ = std::fs::remove_file(&paths.pid_file);
     let _ = std::fs::remove_file(&paths.socket);
