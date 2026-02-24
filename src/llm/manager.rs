@@ -292,7 +292,11 @@ impl LlmManager {
         } else {
             // Default to openai for voice models (most common for Whisper/vision)
             // rather than anthropic, since anthropic doesn't support input_audio
-            tracing::warn!(
+            tracing::debug!(
+                model = %model_name,
+                "no provider prefix specified in model name, defaulting to 'openai'. \
+                 Specify as 'provider/model' (e.g., 'openai/whisper-1') to use a different provider."
+            );
                 model = %model_name,
                 "no provider prefix specified in model name, defaulting to 'openai'. \
                  Specify as 'provider/model' (e.g., 'openai/whisper-1') to use a different provider."
