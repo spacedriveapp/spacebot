@@ -701,7 +701,8 @@ export interface ProviderModelTestResponse {
 export interface OpenAiOAuthBrowserStartResponse {
 	success: boolean;
 	message: string;
-	authorization_url: string | null;
+	user_code: string | null;
+	verification_url: string | null;
 	state: string | null;
 }
 

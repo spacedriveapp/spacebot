@@ -136,12 +136,15 @@ impl PromptEngine {
     /// * `context` - MiniJinja Value containing template variables
     ///
     /// # Example
-    /// ```rust
+    /// ```rust,no_run
+    /// use minijinja::context;
+    /// # let engine = spacebot::prompts::engine::PromptEngine::new("en")?;
     /// let ctx = context! {
     ///     identity_context => "Some identity text",
     ///     browser_enabled => true,
     /// };
     /// let rendered = engine.render("channel", ctx)?;
+    /// # Ok::<(), anyhow::Error>(())
     /// ```
     pub fn render(&self, template_name: &str, context: Value) -> Result<String> {
         let template = self

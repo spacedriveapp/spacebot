@@ -10,6 +10,10 @@ interface/dist/
 list/
 agents/
 
+# Nix
+result/
+.direnv/
+
 # Claude Code - Fichiers propriétaires (auto-généré)
 .claude/
 CLAUDE.md
