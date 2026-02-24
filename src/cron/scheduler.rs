@@ -519,9 +519,48 @@ fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool
     }
 }
 
+fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
+    let readiness = context.deps.runtime_config.work_readiness();
+    if readiness.ready {
+        return;
+    }
+
+    let reason = readiness
+        .reason
+        .map(|value| value.as_str())
+        .unwrap_or("unknown");
+    tracing::warn!(
+        agent_id = %context.deps.agent_id,
+        cron_id,
+        dispatch_type = "cron",
+        reason,
+        warmup_state = ?readiness.warmup_state,
+        embedding_ready = readiness.embedding_ready,
+        bulletin_age_secs = ?readiness.bulletin_age_secs,
+        stale_after_secs = readiness.stale_after_secs,
+        "cron dispatch requested before readiness contract was satisfied"
+    );
+
+    #[cfg(feature = "metrics")]
+    crate::telemetry::Metrics::global()
+        .dispatch_while_cold_count
+        .with_label_values(&[&*context.deps.agent_id, "cron", reason])
+        .inc();
+
+    let warmup_config = **context.deps.runtime_config.warmup.load();
+    let should_trigger = readiness.warmup_state != crate::config::WarmupState::Warming
+        && (readiness.reason != Some(crate::config::WorkReadinessReason::EmbeddingNotReady)
+            || warmup_config.eager_embedding_load);
+
+    if should_trigger {
+        crate::agent::cortex::trigger_forced_warmup(context.deps.clone(), "cron");
+    }
+}
+
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
 async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
+    ensure_cron_dispatch_readiness(context, &job.id);
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces

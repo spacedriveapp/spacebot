@@ -65,6 +65,10 @@ pub async fn start_http_server(
         .route("/agents/mcp", get(agents::list_agent_mcp))
         .route("/agents/mcp/reconnect", post(agents::reconnect_agent_mcp))
         .route(
+            "/agents/warmup",
+            get(agents::get_warmup_status).post(agents::trigger_warmup),
+        )
+        .route(
             "/mcp/servers",
             get(mcp::list_mcp_servers)
                 .post(mcp::create_mcp_server)

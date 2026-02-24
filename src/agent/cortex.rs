@@ -25,6 +25,30 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+fn update_warmup_status<F>(deps: &AgentDeps, update: F)
+where
+    F: FnOnce(&mut crate::config::WarmupStatus),
+{
+    let mut status = deps.runtime_config.warmup_status.load().as_ref().clone();
+    update(&mut status);
+    deps.runtime_config.warmup_status.store(Arc::new(status));
+}
+
+fn bulletin_age_secs(last_refresh_unix_ms: Option<i64>) -> Option<u64> {
+    let now = chrono::Utc::now().timestamp_millis();
+    last_refresh_unix_ms.map(|refresh_ms| {
+        if now > refresh_ms {
+            ((now - refresh_ms) / 1000) as u64
+        } else {
+            0
+        }
+    })
+}
+
+fn should_execute_warmup(warmup_config: crate::config::WarmupConfig, force: bool) -> bool {
+    warmup_config.enabled || force
+}
+
 /// The cortex observes system-wide activity and maintains the memory bulletin.
 pub struct Cortex {
     pub deps: AgentDeps,
@@ -254,6 +278,148 @@ pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task
     })
 }
 
+/// Spawn the warmup loop for an agent.
+///
+/// Warmup runs asynchronously and never blocks channel responsiveness.
+pub fn spawn_warmup_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        tracing::info!("warmup loop started");
+        let mut completed_initial_pass = false;
+
+        loop {
+            let warmup_config = **deps.runtime_config.warmup.load();
+
+            if !warmup_config.enabled {
+                update_warmup_status(&deps, |status| {
+                    status.state = crate::config::WarmupState::Cold;
+                    status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+                });
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                completed_initial_pass = false;
+                continue;
+            }
+
+            let sleep_secs = if completed_initial_pass {
+                warmup_config.refresh_secs.max(1)
+            } else {
+                warmup_config.startup_delay_secs.max(1)
+            };
+            tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+
+            let reason = if completed_initial_pass {
+                "scheduled"
+            } else {
+                "startup"
+            };
+            run_warmup_once(&deps, &logger, reason, false).await;
+            completed_initial_pass = true;
+        }
+    })
+}
+
+/// Execute a single warmup pass.
+///
+/// This is used by the background warmup loop and the manual warmup API.
+pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &str, force: bool) {
+    let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
+    let warmup_config = **deps.runtime_config.warmup.load();
+
+    if !should_execute_warmup(warmup_config, force) {
+        update_warmup_status(deps, |status| {
+            status.state = crate::config::WarmupState::Cold;
+            status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+        });
+        return;
+    }
+
+    update_warmup_status(deps, |status| {
+        status.state = crate::config::WarmupState::Warming;
+        status.last_error = None;
+        status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+    });
+
+    let mut errors = Vec::new();
+    let mut embedding_ready = false;
+
+    if warmup_config.eager_embedding_load {
+        match deps
+            .memory_search
+            .embedding_model_arc()
+            .embed_one("warmup")
+            .await
+        {
+            Ok(_) => embedding_ready = true,
+            Err(error) => {
+                errors.push(format!("embedding warmup failed: {error}"));
+            }
+        }
+    }
+
+    let bulletin_ok = generate_bulletin(deps, logger).await;
+    if !bulletin_ok {
+        errors.push("bulletin generation failed".to_string());
+    }
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    if errors.is_empty() {
+        update_warmup_status(deps, |status| {
+            status.state = crate::config::WarmupState::Warm;
+            status.embedding_ready = embedding_ready || status.embedding_ready;
+            status.last_refresh_unix_ms = Some(now_ms);
+            status.last_error = None;
+            status.bulletin_age_secs = Some(0);
+        });
+        logger.log(
+            "warmup_succeeded",
+            "Warmup pass completed",
+            Some(serde_json::json!({
+                "reason": reason,
+                "embedding_ready": embedding_ready,
+                "forced": force,
+            })),
+        );
+    } else {
+        let last_error = errors.join("; ");
+        update_warmup_status(deps, |status| {
+            status.state = crate::config::WarmupState::Degraded;
+            status.embedding_ready = embedding_ready || status.embedding_ready;
+            status.last_error = Some(last_error.clone());
+            status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+        });
+        logger.log(
+            "warmup_failed",
+            "Warmup pass failed",
+            Some(serde_json::json!({
+                "reason": reason,
+                "errors": errors,
+                "forced": force,
+            })),
+        );
+    }
+}
+
+/// Trigger a forced warmup pass in the background from a dispatch path.
+///
+/// This helper never blocks the caller. It is intended for readiness guards on
+/// worker/branch/cron dispatch when the system is cold or degraded.
+pub fn trigger_forced_warmup(deps: AgentDeps, dispatch_type: &'static str) {
+    tokio::spawn(async move {
+        #[cfg(feature = "metrics")]
+        let started = Instant::now();
+        let logger = CortexLogger::new(deps.sqlite_pool.clone());
+        let reason = format!("dispatch_{dispatch_type}");
+        run_warmup_once(&deps, &logger, &reason, true).await;
+
+        #[cfg(feature = "metrics")]
+        if deps.runtime_config.ready_for_work() {
+            crate::telemetry::Metrics::global()
+                .warmup_recovery_latency_ms
+                .with_label_values(&[&*deps.agent_id, dispatch_type])
+                .observe(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    });
+}
+
 async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
     tracing::info!("cortex bulletin loop started");
 
@@ -262,7 +428,11 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
     // Run immediately on startup, with retries
     for attempt in 0..=MAX_RETRIES {
-        if generate_bulletin(deps, logger).await {
+        let bulletin_ok = {
+            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
+            generate_bulletin(deps, logger).await
+        };
+        if bulletin_ok {
             break;
         }
         if attempt < MAX_RETRIES {
@@ -293,7 +463,10 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
         tokio::time::sleep(Duration::from_secs(interval)).await;
 
-        generate_bulletin(deps, logger).await;
+        {
+            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
+            generate_bulletin(deps, logger).await;
+        }
         generate_profile(deps, logger).await;
     }
 }
@@ -491,6 +664,15 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
             deps.runtime_config
                 .memory_bulletin
                 .store(Arc::new(bulletin));
+            let refresh_ms = chrono::Utc::now().timestamp_millis();
+            update_warmup_status(deps, |status| {
+                status.last_refresh_unix_ms = Some(refresh_ms);
+                status.bulletin_age_secs = Some(0);
+                if status.state != crate::config::WarmupState::Warming {
+                    status.state = crate::config::WarmupState::Warm;
+                    status.last_error = None;
+                }
+            });
             logger.log(
                 "bulletin_generated",
                 &format!("Bulletin generated: {word_count} words, {section_count} sections, {duration_ms}ms"),
@@ -506,6 +688,15 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         Err(error) => {
             let duration_ms = started.elapsed().as_millis() as u64;
             tracing::error!(%error, "cortex bulletin synthesis failed, keeping previous bulletin");
+            let error_message = error.to_string();
+            update_warmup_status(deps, |status| {
+                status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+                if status.state != crate::config::WarmupState::Warming {
+                    status.state = crate::config::WarmupState::Degraded;
+                    status.last_error =
+                        Some(format!("bulletin generation failed: {error_message}"));
+                }
+            });
             logger.log(
                 "bulletin_failed",
                 &format!("Bulletin synthesis failed after {duration_ms}ms: {error}"),
@@ -902,4 +1093,39 @@ async fn fetch_memories_for_association(
     };
 
     Ok(rows.iter().map(|row| row.get("id")).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_execute_warmup;
+
+    #[test]
+    fn run_warmup_once_semantics_skip_when_disabled_without_force() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        assert!(!should_execute_warmup(warmup_config, false));
+    }
+
+    #[test]
+    fn run_warmup_once_semantics_force_overrides_disabled_config() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: false,
+            ..Default::default()
+        };
+
+        assert!(should_execute_warmup(warmup_config, true));
+    }
+
+    #[test]
+    fn run_warmup_once_semantics_enabled_runs_without_force() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: true,
+            ..Default::default()
+        };
+
+        assert!(should_execute_warmup(warmup_config, false));
+    }
 }

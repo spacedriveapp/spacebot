@@ -161,6 +161,81 @@ branch_timeout_secs = 60
 circuit_breaker_threshold = 3
 ```
 
+## Warmup API
+
+Warmup is exposed via the agent API so you can inspect cold/warm state and trigger a re-warm pass on demand.
+
+### `GET /api/agents/warmup?agent_id=...`
+
+Returns warmup status for one agent. If `agent_id` is omitted, returns statuses for all agents.
+
+```json
+{
+  "statuses": [
+    {
+      "agent_id": "main",
+      "status": {
+        "state": "warm",
+        "embedding_ready": true,
+        "last_refresh_unix_ms": 1763935800123,
+        "last_error": null,
+        "bulletin_age_secs": 42
+      }
+    }
+  ]
+}
+```
+
+### `POST /api/agents/warmup`
+
+Triggers a one-shot warmup pass for one agent or all agents.
+
+```json
+{
+  "agent_id": "main",
+  "force": false
+}
+```
+
+- `agent_id` optional: omit to trigger all agents.
+- `force` optional: when `true`, runs the warmup pass even if warmup is disabled in config.
+
+Response:
+
+```json
+{
+  "status": "warming",
+  "forced": false,
+  "accepted_agents": ["main"]
+}
+```
+
+### Warmup States
+
+- `cold` — warmup is disabled or has not run yet.
+- `warming` — a warmup pass is currently in progress.
+- `warm` — latest warmup pass succeeded.
+- `degraded` — last warmup pass failed; `last_error` contains the reason.
+
+### Readiness Contract
+
+Branch, worker, and cron dispatch paths consult a derived `ready_for_work` signal:
+
+- warmup state is `warm`
+- embedding model is ready
+- bulletin age is fresh (<= `max(60s, refresh_secs * 2)`)
+
+If dispatch arrives while not ready, Spacebot does **not** block the channel or scheduler:
+
+- dispatch continues in degraded-safe mode
+- a forced warmup pass is queued in the background
+- readiness telemetry is emitted
+
+Metrics:
+
+- `spacebot_dispatch_while_cold_count{agent_id,dispatch_type,reason}`
+- `spacebot_warmup_recovery_latency_ms{agent_id,dispatch_type}`
+
 ## Failure Modes
 
 **What if the cortex bulletin fails?**

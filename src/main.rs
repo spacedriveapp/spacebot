@@ -1603,9 +1603,14 @@ async fn initialize_agents(
         }
     }
 
-    // Start cortex bulletin loops and association loops for each agent
+    // Start cortex warmup, bulletin loops, and association loops for each agent
     for (agent_id, agent) in agents.iter() {
         let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
+        let warmup_handle =
+            spacebot::agent::cortex::spawn_warmup_loop(agent.deps.clone(), cortex_logger.clone());
+        cortex_handles.push(warmup_handle);
+        tracing::info!(agent_id = %agent_id, "warmup loop started");
+
         let bulletin_handle =
             spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger.clone());
         cortex_handles.push(bulletin_handle);

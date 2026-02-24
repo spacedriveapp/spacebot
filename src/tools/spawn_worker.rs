@@ -145,6 +145,7 @@ impl Tool for SpawnWorkerTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let readiness = self.state.deps.runtime_config.work_readiness();
         let is_opencode = args.worker_type.as_deref() == Some("opencode");
 
         let worker_id = if is_opencode {
@@ -182,12 +183,24 @@ impl Tool for SpawnWorkerTool {
                 args.task
             )
         };
+        let readiness_note = if readiness.ready {
+            String::new()
+        } else {
+            let reason = readiness
+                .reason
+                .map(|value| value.as_str())
+                .unwrap_or("unknown");
+            format!(
+                " Readiness note: warmup is not fully ready ({reason}, state: {:?}); a warmup pass may already be running or was queued in the background.",
+                readiness.warmup_state
+            )
+        };
 
         Ok(SpawnWorkerOutput {
             worker_id,
             spawned: true,
             interactive: args.interactive,
-            message,
+            message: format!("{message}{readiness_note}"),
         })
     }
 }
