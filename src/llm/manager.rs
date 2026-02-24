@@ -195,6 +195,11 @@ impl LlmManager {
         *self.openai_oauth_credentials.write().await = Some(creds);
     }
 
+    /// Clear OpenAI OAuth credentials from memory.
+    pub async fn clear_openai_oauth_credentials(&self) {
+        *self.openai_oauth_credentials.write().await = None;
+    }
+
     /// Get OpenAI OAuth access token if available, refreshing when needed.
     pub async fn get_openai_token(&self) -> Result<Option<String>> {
         let mut creds_guard = self.openai_oauth_credentials.write().await;
