@@ -1699,7 +1699,7 @@ function UpdatesSection() {
 									<pre className="overflow-x-auto text-xs text-ink"><code>{dockerRunCommands.join("\n")}</code></pre>
 								</div>
 								<p className="text-xs text-ink-faint">
-									Podman users can use the same flow with `podman compose` and `podman run`.
+									Podman users can use the same flow with <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">podman compose</code> and <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">podman run</code>.
 								</p>
 							</div>
 						)}

@@ -825,7 +825,10 @@ impl SpacebotModel {
     fn remap_model_name_for_api(&self) -> String {
         if self.provider == "zai-coding-plan" {
             // Z.AI Coding Plan API expects "zai/glm-5" not "glm-5"
-            let model_name = self.model_name.strip_prefix("zai/").unwrap_or(&self.model_name);
+            let model_name = self
+                .model_name
+                .strip_prefix("zai/")
+                .unwrap_or(&self.model_name);
             format!("zai/{model_name}")
         } else {
             self.model_name.clone()

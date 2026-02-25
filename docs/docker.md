@@ -201,7 +201,7 @@ healthcheck:
 
 Spacebot checks for new releases on startup and every hour. When a new version is available, a banner appears in the web UI.
 
-The web dashboard also includes **Settings → Updates** with status details, one-click controls (Docker), and manual command snippets.
+The web dashboard also includes **Settings → Updates** with status details, one-click controls (Docker / Podman), and manual command snippets.
 
 `latest` is supported and continues to receive updates (it tracks the rolling `full` image). Use explicit version tags only when you want controlled rollouts.
 

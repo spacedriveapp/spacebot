@@ -21,6 +21,12 @@ const CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 const DOCKER_ROOTFUL_SOCKET: &str = "/var/run/docker.sock";
 const PODMAN_ROOTFUL_SOCKET: &str = "/run/podman/podman.sock";
 
+fn container_runtime_socket_hint() -> String {
+    format!(
+        "Mount a container runtime socket to enable one-click updates (Docker: {DOCKER_ROOTFUL_SOCKET}, Podman: {PODMAN_ROOTFUL_SOCKET}, Podman rootless: $XDG_RUNTIME_DIR/podman/podman.sock -> {PODMAN_ROOTFUL_SOCKET})."
+    )
+}
+
 /// Deployment environment, detected from SPACEBOT_DEPLOYMENT env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -118,9 +124,7 @@ pub fn new_shared_status() -> SharedUpdateStatus {
         Deployment::Docker => {
             status.can_apply = resolve_container_socket().is_some();
             if !status.can_apply {
-                status.cannot_apply_reason = Some(
-                    "Mount a container runtime socket to enable one-click updates.".to_string(),
-                );
+                status.cannot_apply_reason = Some(container_runtime_socket_hint());
             }
         }
         Deployment::Native => {
@@ -289,8 +293,9 @@ fn connect_container_runtime(socket_path: &str) -> anyhow::Result<bollard::Docke
         minor_version: 40,
     };
 
-    bollard::Docker::connect_with_socket(socket_path, 120, &client_version)
-        .map_err(|error| anyhow::anyhow!("failed to connect to container runtime: {error}"))
+    bollard::Docker::connect_with_socket(socket_path, 120, &client_version).map_err(|error| {
+        anyhow::anyhow!("failed to connect to container runtime at {socket_path}: {error}")
+    })
 }
 
 #[derive(Debug, Clone)]
@@ -323,9 +328,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
             let Some(socket_path) = resolve_container_socket() else {
                 return ApplyCapability {
                     can_apply: false,
-                    cannot_apply_reason: Some(format!(
-                        "Mount a container runtime socket to enable one-click updates (Docker: {DOCKER_ROOTFUL_SOCKET}, Podman: {PODMAN_ROOTFUL_SOCKET})."
-                    )),
+                    cannot_apply_reason: Some(container_runtime_socket_hint()),
                     docker_image: None,
                     socket_path: None,
                 };
@@ -430,7 +433,7 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
     let container_info = docker
         .inspect_container(&container_id, None)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to inspect container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to inspect container: {}", error))?;
 
     let current_image = container_info
         .config
@@ -536,7 +539,7 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
     let new_container = docker
         .create_container(Some(create_options), create_config)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to create new container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to create new container: {}", error))?;
 
     tracing::info!(new_id = %new_container.id, "new container created");
 
@@ -553,7 +556,7 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
             bollard::container::RenameContainerOptions { name: &old_name },
         )
         .await
-        .map_err(|e| anyhow::anyhow!("failed to rename old container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to rename old container: {}", error))?;
 
     // Rename new container to the original name
     docker
@@ -564,13 +567,13 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
             },
         )
         .await
-        .map_err(|e| anyhow::anyhow!("failed to rename new container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to rename new container: {}", error))?;
 
     // Start the new container
     docker
         .start_container::<String>(&new_container.id, None)
         .await
-        .map_err(|e| anyhow::anyhow!("failed to start new container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to start new container: {}", error))?;
 
     tracing::info!("new container started, stopping old container");
 
@@ -581,10 +584,10 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
             Some(bollard::container::StopContainerOptions { t: 10 }),
         )
         .await
-        .map_err(|e| anyhow::anyhow!("failed to stop old container: {}", e))?;
+        .map_err(|error| anyhow::anyhow!("failed to stop old container: {}", error))?;
 
     // Remove the old container after stop
-    docker
+    let remove_result = docker
         .remove_container(
             &container_id,
             Some(bollard::container::RemoveContainerOptions {
@@ -592,8 +595,14 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
                 ..Default::default()
             }),
         )
-        .await
-        .ok(); // Best effort — we're shutting down
+        .await;
+    if let Err(error) = remove_result {
+        tracing::warn!(
+            container_id = %container_id,
+            %error,
+            "best-effort removal of old container failed during shutdown"
+        );
+    }
 
     // We shouldn't reach here since stop_container kills us,
     // but just in case:
@@ -621,13 +630,10 @@ fn get_own_container_id() -> anyhow::Result<String> {
 }
 
 fn parse_container_id_from_mountinfo(content: &str) -> Option<String> {
-    for (marker, offset) in [
-        ("/docker/containers/", 19usize),
-        ("/overlay-containers/", 20usize),
-    ] {
+    for marker in ["/docker/containers/", "/overlay-containers/"] {
         for line in content.lines() {
             if let Some(position) = line.find(marker) {
-                let after_marker = &line[position + offset..];
+                let after_marker = &line[position + marker.len()..];
                 if let Some(end_index) = after_marker.find('/') {
                     let id = &after_marker[..end_index];
                     if id.len() == 64 && id.chars().all(|character| character.is_ascii_hexdigit()) {
