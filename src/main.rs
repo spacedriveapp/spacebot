@@ -637,31 +637,6 @@ async fn cmd_stop() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::unsurfaced_status_failure_reason;
-
-    #[test]
-    fn unsurfaced_status_failure_reason_uses_adapter_error_when_present() {
-        let result: spacebot::Result<()> = Err(spacebot::Error::from(anyhow::anyhow!(
-            "discord adapter rejected update"
-        )));
-        assert_eq!(
-            unsurfaced_status_failure_reason(&result),
-            "discord adapter rejected update"
-        );
-    }
-
-    #[test]
-    fn unsurfaced_status_failure_reason_falls_back_for_non_error_result() {
-        let result: spacebot::Result<()> = Ok(());
-        assert_eq!(
-            unsurfaced_status_failure_reason(&result),
-            "status update not surfaced by adapter"
-        );
-    }
-}
-
 fn spawn_worker_receipt_dispatch_loop(
     agent_id: String,
     process_run_logger: spacebot::conversation::history::ProcessRunLogger,
@@ -2392,4 +2367,29 @@ async fn initialize_agents(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unsurfaced_status_failure_reason;
+
+    #[test]
+    fn unsurfaced_status_failure_reason_uses_adapter_error_when_present() {
+        let result: spacebot::Result<()> = Err(spacebot::Error::from(anyhow::anyhow!(
+            "discord adapter rejected update"
+        )));
+        assert_eq!(
+            unsurfaced_status_failure_reason(&result),
+            "discord adapter rejected update"
+        );
+    }
+
+    #[test]
+    fn unsurfaced_status_failure_reason_falls_back_for_non_error_result() {
+        let result: spacebot::Result<()> = Ok(());
+        assert_eq!(
+            unsurfaced_status_failure_reason(&result),
+            "status update not surfaced by adapter"
+        );
+    }
 }
