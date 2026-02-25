@@ -86,9 +86,9 @@ emergency_threshold = 0.95     # drop oldest 50%, no LLM
 
 # Deterministic worker task contract timing.
 [defaults.worker_contract]
-ack_secs = 5
-progress_secs = 45
-tick_secs = 2
+ack_secs = 5         # seconds before first ack checkpoint
+progress_secs = 45   # seconds between progress heartbeat nudges
+tick_secs = 2        # scheduler tick interval for contract deadline checks
 
 # Cortex (system observer) settings.
 [defaults.cortex]

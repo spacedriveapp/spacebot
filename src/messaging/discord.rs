@@ -141,6 +141,28 @@ impl DiscordAdapter {
             .await
             .remove(&Self::progress_message_key(message, worker_id));
     }
+
+    async fn handle_worker_progress(
+        &self,
+        message: &InboundMessage,
+        worker_id: crate::WorkerId,
+        text: String,
+        clear_on_success: bool,
+    ) -> bool {
+        self.stop_typing(message).await;
+        if let Err(error) = self
+            .upsert_progress_message(message, worker_id, &text)
+            .await
+        {
+            tracing::debug!(%error, "failed to update discord progress message");
+            false
+        } else {
+            if clear_on_success {
+                self.clear_progress_message(message, worker_id).await;
+            }
+            true
+        }
+    }
 }
 
 impl Messaging for DiscordAdapter {
@@ -429,56 +451,31 @@ impl Messaging for DiscordAdapter {
                 true
             }
             StatusUpdate::WorkerStarted { worker_id, task } => {
-                self.stop_typing(message).await;
                 let text = format!(
                     "Background task `{}` started: {}",
                     short_worker_id(worker_id),
                     task
                 );
-                if let Err(error) = self
-                    .upsert_progress_message(message, worker_id, &text)
+                self.handle_worker_progress(message, worker_id, text, false)
                     .await
-                {
-                    tracing::debug!(%error, "failed to update discord progress message");
-                    false
-                } else {
-                    true
-                }
             }
             StatusUpdate::WorkerCheckpoint { worker_id, status } => {
-                self.stop_typing(message).await;
                 let text = format!(
                     "Background task `{}`: {}",
                     short_worker_id(worker_id),
                     status
                 );
-                if let Err(error) = self
-                    .upsert_progress_message(message, worker_id, &text)
+                self.handle_worker_progress(message, worker_id, text, false)
                     .await
-                {
-                    tracing::debug!(%error, "failed to update discord progress message");
-                    false
-                } else {
-                    true
-                }
             }
             StatusUpdate::WorkerCompleted { worker_id, result } => {
-                self.stop_typing(message).await;
                 let text = format!(
                     "Background task `{}` completed: {}",
                     short_worker_id(worker_id),
                     result
                 );
-                if let Err(error) = self
-                    .upsert_progress_message(message, worker_id, &text)
+                self.handle_worker_progress(message, worker_id, text, true)
                     .await
-                {
-                    tracing::debug!(%error, "failed to update discord progress message");
-                    false
-                } else {
-                    self.clear_progress_message(message, worker_id).await;
-                    true
-                }
             }
             StatusUpdate::StopTyping
             | StatusUpdate::ToolStarted { .. }

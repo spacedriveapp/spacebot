@@ -130,6 +130,373 @@ const WORKER_RECEIPT_GLOBAL_DISPATCH_INTERVAL_SECS: u64 = 5;
 const WORKER_RECEIPT_GLOBAL_DISPATCH_BATCH_SIZE: i64 = 32;
 const WORKER_RECEIPT_PRUNE_INTERVAL_SECS: u64 = 60 * 60;
 
+struct OutboundRouteContext<'a> {
+    messaging_for_outbound: &'a spacebot::messaging::MessagingManager,
+    current_message: &'a spacebot::InboundMessage,
+    outbound_conversation_id: &'a str,
+    outbound_agent_names: &'a HashMap<String, String>,
+    sse_agent_id: &'a str,
+    api_event_tx: &'a tokio::sync::broadcast::Sender<spacebot::api::ApiEvent>,
+}
+
+struct RoutedOutboundResponse {
+    delivery_result: spacebot::Result<()>,
+    delivery_outcome: spacebot::messaging::traits::DeliveryOutcome,
+    status_surfaced: bool,
+    is_status_update: bool,
+    acknowledged_worker_id: Option<spacebot::WorkerId>,
+}
+
+struct ReceiptDeliveryContext<'a> {
+    outbound_process_logger: &'a spacebot::conversation::history::ProcessRunLogger,
+    outbound_conversation_logger: &'a spacebot::conversation::history::ConversationLogger,
+    outbound_channel_id: &'a spacebot::ChannelId,
+    outbound_conversation_id: &'a str,
+}
+
+fn outbound_response_text(response: &spacebot::OutboundResponse) -> Option<String> {
+    match response {
+        spacebot::OutboundResponse::Text(text)
+        | spacebot::OutboundResponse::StreamChunk(text)
+        | spacebot::OutboundResponse::Ephemeral { text, .. }
+        | spacebot::OutboundResponse::ScheduledMessage { text, .. }
+        | spacebot::OutboundResponse::RichMessage { text, .. }
+        | spacebot::OutboundResponse::ThreadReply { text, .. } => Some(text.clone()),
+        _ => None,
+    }
+}
+
+fn acknowledged_worker_id_from_response(
+    response: &spacebot::OutboundResponse,
+) -> Option<spacebot::WorkerId> {
+    match response {
+        spacebot::OutboundResponse::Status(spacebot::StatusUpdate::WorkerStarted {
+            worker_id,
+            ..
+        })
+        | spacebot::OutboundResponse::Status(spacebot::StatusUpdate::WorkerCheckpoint {
+            worker_id,
+            ..
+        })
+        | spacebot::OutboundResponse::Status(spacebot::StatusUpdate::WorkerCompleted {
+            worker_id,
+            ..
+        }) => Some(*worker_id),
+        _ => None,
+    }
+}
+
+fn emit_outbound_sse_event(
+    api_event_tx: &tokio::sync::broadcast::Sender<spacebot::api::ApiEvent>,
+    sse_agent_id: &str,
+    sse_channel_id: &str,
+    response: &spacebot::OutboundResponse,
+) {
+    match response {
+        spacebot::OutboundResponse::Text(text)
+        | spacebot::OutboundResponse::RichMessage { text, .. }
+        | spacebot::OutboundResponse::ThreadReply { text, .. } => {
+            api_event_tx
+                .send(spacebot::api::ApiEvent::OutboundMessage {
+                    agent_id: sse_agent_id.to_string(),
+                    channel_id: sse_channel_id.to_string(),
+                    text: text.clone(),
+                })
+                .ok();
+        }
+        spacebot::OutboundResponse::Status(spacebot::StatusUpdate::Thinking) => {
+            api_event_tx
+                .send(spacebot::api::ApiEvent::TypingState {
+                    agent_id: sse_agent_id.to_string(),
+                    channel_id: sse_channel_id.to_string(),
+                    is_typing: true,
+                })
+                .ok();
+        }
+        spacebot::OutboundResponse::Status(spacebot::StatusUpdate::StopTyping) => {
+            api_event_tx
+                .send(spacebot::api::ApiEvent::TypingState {
+                    agent_id: sse_agent_id.to_string(),
+                    channel_id: sse_channel_id.to_string(),
+                    is_typing: false,
+                })
+                .ok();
+        }
+        _ => {}
+    }
+}
+
+async fn route_internal_link_reply(
+    context: &OutboundRouteContext<'_>,
+    response: &spacebot::OutboundResponse,
+) -> spacebot::Result<spacebot::messaging::traits::DeliveryOutcome> {
+    let Some(text) = outbound_response_text(response) else {
+        return Ok(spacebot::messaging::traits::DeliveryOutcome::NotSurfaced);
+    };
+
+    let reply_to_agent = context
+        .current_message
+        .metadata
+        .get("reply_to_agent")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+    let reply_to_channel = context
+        .current_message
+        .metadata
+        .get("reply_to_channel")
+        .and_then(|value| value.as_str())
+        .map(str::to_owned);
+
+    let (Some(target_agent), Some(target_channel)) = (reply_to_agent, reply_to_channel) else {
+        return Err(spacebot::Error::Other(anyhow::anyhow!(
+            "internal link reply missing reply_to_agent/reply_to_channel metadata"
+        )));
+    };
+
+    let agent_display = context
+        .outbound_agent_names
+        .get(context.sse_agent_id)
+        .cloned()
+        .unwrap_or_else(|| context.sse_agent_id.to_string());
+
+    let original_text = match &context.current_message.content {
+        spacebot::MessageContent::Text(text) => Some(text.clone()),
+        spacebot::MessageContent::Media { text, .. } => text.clone(),
+        _ => None,
+    };
+
+    let mut metadata = HashMap::new();
+    metadata.insert(
+        "from_agent_id".to_string(),
+        serde_json::json!(context.sse_agent_id),
+    );
+    metadata.insert(
+        "reply_to_agent".to_string(),
+        serde_json::json!(context.sse_agent_id),
+    );
+    metadata.insert(
+        "reply_to_channel".to_string(),
+        serde_json::json!(context.outbound_conversation_id),
+    );
+    if let Some(original) = original_text {
+        metadata.insert(
+            "original_sent_message".to_string(),
+            serde_json::json!(original),
+        );
+    }
+    if let Some(originating) = context.current_message.metadata.get("originating_channel") {
+        metadata.insert("originating_channel".to_string(), originating.clone());
+    }
+    if let Some(source) = context.current_message.metadata.get("originating_source") {
+        metadata.insert("originating_source".to_string(), source.clone());
+    }
+
+    let reply_message = spacebot::InboundMessage {
+        id: uuid::Uuid::new_v4().to_string(),
+        source: "internal".to_string(),
+        conversation_id: target_channel.clone(),
+        sender_id: context.sse_agent_id.to_string(),
+        agent_id: Some(Arc::from(target_agent.as_str())),
+        content: spacebot::MessageContent::Text(text),
+        timestamp: chrono::Utc::now(),
+        metadata,
+        formatted_author: Some(format!("[{agent_display}]")),
+    };
+
+    context
+        .messaging_for_outbound
+        .inject_message(reply_message)
+        .await?;
+
+    context
+        .api_event_tx
+        .send(spacebot::api::ApiEvent::AgentMessageSent {
+            from_agent_id: context.sse_agent_id.to_string(),
+            to_agent_id: target_agent.clone(),
+            link_id: target_channel.clone(),
+            channel_id: target_channel.clone(),
+        })
+        .ok();
+
+    tracing::info!(
+        from = %context.sse_agent_id,
+        to = %target_agent,
+        channel = %target_channel,
+        "routed link channel reply"
+    );
+
+    Ok(spacebot::messaging::traits::DeliveryOutcome::Surfaced)
+}
+
+async fn route_outbound_response(
+    context: &OutboundRouteContext<'_>,
+    response: spacebot::OutboundResponse,
+) -> RoutedOutboundResponse {
+    if context.current_message.source == "internal" {
+        let acknowledged_worker_id = acknowledged_worker_id_from_response(&response);
+        if matches!(response, spacebot::OutboundResponse::Status(_)) {
+            return RoutedOutboundResponse {
+                delivery_result: Ok(()),
+                delivery_outcome: spacebot::messaging::traits::DeliveryOutcome::Surfaced,
+                status_surfaced: true,
+                is_status_update: true,
+                acknowledged_worker_id,
+            };
+        }
+
+        let (delivery_result, delivery_outcome) =
+            match route_internal_link_reply(context, &response).await {
+                Ok(outcome) => (Ok(()), outcome),
+                Err(error) => (
+                    Err(error),
+                    spacebot::messaging::traits::DeliveryOutcome::NotSurfaced,
+                ),
+            };
+        let status_surfaced = delivery_outcome.is_surfaced();
+        return RoutedOutboundResponse {
+            delivery_result,
+            delivery_outcome,
+            status_surfaced,
+            is_status_update: false,
+            acknowledged_worker_id,
+        };
+    }
+
+    let acknowledged_worker_id = acknowledged_worker_id_from_response(&response);
+    match response {
+        spacebot::OutboundResponse::Status(status) => {
+            let (delivery_result, delivery_outcome) = match context
+                .messaging_for_outbound
+                .send_status(context.current_message, status)
+                .await
+            {
+                Ok(outcome) => (Ok(()), outcome),
+                Err(error) => (
+                    Err(error),
+                    spacebot::messaging::traits::DeliveryOutcome::NotSurfaced,
+                ),
+            };
+            let status_surfaced = delivery_outcome.is_surfaced();
+            RoutedOutboundResponse {
+                delivery_result,
+                delivery_outcome,
+                status_surfaced,
+                is_status_update: true,
+                acknowledged_worker_id,
+            }
+        }
+        response => {
+            tracing::info!(
+                conversation_id = %context.outbound_conversation_id,
+                "routing outbound response to messaging adapter"
+            );
+            RoutedOutboundResponse {
+                delivery_result: context
+                    .messaging_for_outbound
+                    .respond(context.current_message, response)
+                    .await,
+                delivery_outcome: spacebot::messaging::traits::DeliveryOutcome::Surfaced,
+                status_surfaced: true,
+                is_status_update: false,
+                acknowledged_worker_id,
+            }
+        }
+    }
+}
+
+async fn handle_delivery_receipt(
+    context: &ReceiptDeliveryContext<'_>,
+    receipt_id: &str,
+    routed: &RoutedOutboundResponse,
+    receipt_log_text: Option<&str>,
+) {
+    if routed.is_status_update && !routed.status_surfaced {
+        match context
+            .outbound_process_logger
+            .fail_worker_delivery_receipt_attempt(
+                receipt_id,
+                "status update not surfaced by adapter",
+            )
+            .await
+        {
+            Ok(outcome) => {
+                tracing::warn!(
+                    channel_id = %context.outbound_conversation_id,
+                    receipt_id = %receipt_id,
+                    attempt_count = outcome.attempt_count,
+                    status = %outcome.status,
+                    next_attempt_at = ?outcome.next_attempt_at,
+                    "worker terminal receipt was not surfaced; scheduled retry"
+                );
+            }
+            Err(update_error) => {
+                tracing::warn!(
+                    %update_error,
+                    channel_id = %context.outbound_conversation_id,
+                    receipt_id = %receipt_id,
+                    "failed to record unsurfaced worker terminal receipt"
+                );
+            }
+        }
+        return;
+    }
+
+    match &routed.delivery_result {
+        Ok(()) => match context
+            .outbound_process_logger
+            .ack_worker_delivery_receipt(receipt_id)
+            .await
+        {
+            Ok(acked_now) => {
+                if acked_now {
+                    if let Some(text) = receipt_log_text {
+                        context
+                            .outbound_conversation_logger
+                            .log_bot_message(context.outbound_channel_id, text);
+                    }
+                    tracing::info!(
+                        channel_id = %context.outbound_conversation_id,
+                        receipt_id = %receipt_id,
+                        "worker terminal receipt delivered"
+                    );
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %context.outbound_conversation_id,
+                    receipt_id = %receipt_id,
+                    "failed to ack worker terminal receipt"
+                );
+            }
+        },
+        Err(error) => match context
+            .outbound_process_logger
+            .fail_worker_delivery_receipt_attempt(receipt_id, &error.to_string())
+            .await
+        {
+            Ok(outcome) => {
+                tracing::warn!(
+                    channel_id = %context.outbound_conversation_id,
+                    receipt_id = %receipt_id,
+                    attempt_count = outcome.attempt_count,
+                    status = %outcome.status,
+                    next_attempt_at = ?outcome.next_attempt_at,
+                    "worker terminal receipt delivery failed"
+                );
+            }
+            Err(update_error) => {
+                tracing::warn!(
+                    %update_error,
+                    channel_id = %context.outbound_conversation_id,
+                    receipt_id = %receipt_id,
+                    "failed to record worker terminal receipt delivery failure"
+                );
+            }
+        },
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -1098,110 +1465,37 @@ async fn run(
                         spacebot::conversation::history::ConversationLogger::new(
                             agent.db.sqlite.clone(),
                         );
+                    let outbound_agent_names = agent.deps.agent_names.clone();
                     let api_event_tx = api_state.event_tx.clone();
                     let sse_agent_id = agent_id.to_string();
                     let sse_channel_id = conversation_id.clone();
                     let outbound_handle = tokio::spawn(async move {
                         while let Some(envelope) = response_rx.recv().await {
-                            let receipt_id = envelope.receipt_id.clone();
+                            let receipt_id = envelope.receipt_id;
                             let response = envelope.response;
-                            let receipt_log_text = match &response {
-                                spacebot::OutboundResponse::Text(text) => Some(text.clone()),
-                                spacebot::OutboundResponse::RichMessage { text, .. } => {
-                                    Some(text.clone())
-                                }
-                                spacebot::OutboundResponse::ThreadReply { text, .. } => {
-                                    Some(text.clone())
-                                }
-                                _ => None,
-                            };
+                            let receipt_log_text = outbound_response_text(&response);
 
-                            // Forward relevant events to SSE clients
-                            match &response {
-                                spacebot::OutboundResponse::Text(text) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::RichMessage { text, .. } => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::ThreadReply { text, .. } => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::Status(spacebot::StatusUpdate::Thinking) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::TypingState {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        is_typing: true,
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::Status(spacebot::StatusUpdate::StopTyping) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::TypingState {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        is_typing: false,
-                                    }).ok();
-                                }
-                                _ => {}
-                            }
+                            emit_outbound_sse_event(
+                                &api_event_tx,
+                                &sse_agent_id,
+                                &sse_channel_id,
+                                &response,
+                            );
 
                             let current_message = outbound_message.read().await.clone();
-                            let acknowledged_worker_id = match &response {
-                                spacebot::OutboundResponse::Status(
-                                    spacebot::StatusUpdate::WorkerStarted { worker_id, .. },
-                                )
-                                | spacebot::OutboundResponse::Status(
-                                    spacebot::StatusUpdate::WorkerCheckpoint { worker_id, .. },
-                                )
-                                | spacebot::OutboundResponse::Status(
-                                    spacebot::StatusUpdate::WorkerCompleted { worker_id, .. },
-                                ) => Some(*worker_id),
-                                _ => None,
+                            let route_context = OutboundRouteContext {
+                                messaging_for_outbound: &messaging_for_outbound,
+                                current_message: &current_message,
+                                outbound_conversation_id: &outbound_conversation_id,
+                                outbound_agent_names: &outbound_agent_names,
+                                sse_agent_id: &sse_agent_id,
+                                api_event_tx: &api_event_tx,
                             };
-                            let is_status_update =
-                                matches!(response, spacebot::OutboundResponse::Status(_));
-                            let (delivery_result, delivery_outcome) = match response {
-                                spacebot::OutboundResponse::Status(status) => {
-                                    match messaging_for_outbound
-                                        .send_status(&current_message, status)
-                                        .await
-                                    {
-                                        Ok(outcome) => (Ok(()), outcome),
-                                        Err(error) => (
-                                            Err(error),
-                                            spacebot::messaging::traits::DeliveryOutcome::NotSurfaced,
-                                        ),
-                                    }
-                                }
-                                response => {
-                                    tracing::info!(
-                                        conversation_id = %outbound_conversation_id,
-                                        "routing outbound response to messaging adapter"
-                                    );
-                                    (
-                                        messaging_for_outbound
-                                            .respond(&current_message, response)
-                                            .await,
-                                        spacebot::messaging::traits::DeliveryOutcome::Surfaced,
-                                    )
-                                }
-                            };
-                            let status_surfaced = delivery_outcome.is_surfaced();
+                            let routed = route_outbound_response(&route_context, response).await;
 
                             if let (Ok(()), Some(worker_id)) =
-                                (&delivery_result, acknowledged_worker_id)
-                                && status_surfaced
+                                (&routed.delivery_result, routed.acknowledged_worker_id)
+                                && routed.status_surfaced
                                 && let Err(error) = outbound_process_logger
                                     .mark_worker_task_contract_acknowledged(worker_id)
                                     .await
@@ -1214,106 +1508,32 @@ async fn run(
                                 );
                             }
 
-                            if let Some(receipt_id) = receipt_id {
-                                if is_status_update && !status_surfaced {
-                                    match outbound_process_logger
-                                        .fail_worker_delivery_receipt_attempt(
-                                            &receipt_id,
-                                            "status update not surfaced by adapter",
-                                        )
-                                        .await
-                                    {
-                                        Ok(outcome) => {
-                                            tracing::warn!(
-                                                channel_id = %outbound_conversation_id,
-                                                receipt_id = %receipt_id,
-                                                attempt_count = outcome.attempt_count,
-                                                status = %outcome.status,
-                                                next_attempt_at = ?outcome.next_attempt_at,
-                                                "worker terminal receipt was not surfaced; scheduled retry"
-                                            );
-                                        }
-                                        Err(update_error) => {
-                                            tracing::warn!(
-                                                %update_error,
-                                                channel_id = %outbound_conversation_id,
-                                                receipt_id = %receipt_id,
-                                                "failed to record unsurfaced worker terminal receipt"
-                                            );
-                                        }
-                                    }
-                                } else {
-                                    match &delivery_result {
-                                        Ok(()) => {
-                                        match outbound_process_logger
-                                            .ack_worker_delivery_receipt(&receipt_id)
-                                            .await
-                                        {
-                                            Ok(acked_now) => {
-                                                if acked_now {
-                                                    if let Some(text) = receipt_log_text.as_deref() {
-                                                        outbound_conversation_logger
-                                                            .log_bot_message(&outbound_channel_id, text);
-                                                    }
-                                                    tracing::info!(
-                                                        channel_id = %outbound_conversation_id,
-                                                        receipt_id = %receipt_id,
-                                                        "worker terminal receipt delivered"
-                                                    );
-                                                }
-                                            }
-                                            Err(error) => {
-                                                tracing::warn!(
-                                                    %error,
-                                                    channel_id = %outbound_conversation_id,
-                                                    receipt_id = %receipt_id,
-                                                    "failed to ack worker terminal receipt"
-                                                );
-                                            }
-                                        }
-                                    },
-                                        Err(error) => {
-                                        match outbound_process_logger
-                                            .fail_worker_delivery_receipt_attempt(
-                                                &receipt_id,
-                                                &error.to_string(),
-                                            )
-                                            .await
-                                        {
-                                            Ok(outcome) => {
-                                                tracing::warn!(
-                                                    channel_id = %outbound_conversation_id,
-                                                    receipt_id = %receipt_id,
-                                                    attempt_count = outcome.attempt_count,
-                                                    status = %outcome.status,
-                                                    next_attempt_at = ?outcome.next_attempt_at,
-                                                    "worker terminal receipt delivery failed"
-                                                );
-                                            }
-                                            Err(update_error) => {
-                                                tracing::warn!(
-                                                    %update_error,
-                                                    channel_id = %outbound_conversation_id,
-                                                    receipt_id = %receipt_id,
-                                                    "failed to record worker terminal receipt delivery failure"
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            if let Some(receipt_id) = receipt_id.as_deref() {
+                                let receipt_context = ReceiptDeliveryContext {
+                                    outbound_process_logger: &outbound_process_logger,
+                                    outbound_conversation_logger: &outbound_conversation_logger,
+                                    outbound_channel_id: &outbound_channel_id,
+                                    outbound_conversation_id: &outbound_conversation_id,
+                                };
+                                handle_delivery_receipt(
+                                    &receipt_context,
+                                    receipt_id,
+                                    &routed,
+                                    receipt_log_text.as_deref(),
+                                )
+                                .await;
                             }
 
-                            if let Err(error) = delivery_result {
-                                if is_status_update {
+                            if let Err(error) = &routed.delivery_result {
+                                if routed.is_status_update {
                                     tracing::warn!(%error, "failed to send status update");
                                 } else {
                                     tracing::error!(%error, "failed to send outbound response");
                                 }
-                            } else if is_status_update && !status_surfaced {
+                            } else if routed.is_status_update && !routed.status_surfaced {
                                 tracing::warn!(
                                     channel_id = %outbound_conversation_id,
-                                    delivery_outcome = ?delivery_outcome,
+                                    delivery_outcome = ?routed.delivery_outcome,
                                     "status update was accepted by adapter but not surfaced"
                                 );
                             }
