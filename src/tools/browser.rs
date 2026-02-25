@@ -131,6 +131,11 @@ fn is_v4_mapped_blocked(ip: Ipv6Addr) -> bool {
 /// Tool for browser automation (worker-only).
 #[derive(Debug, Clone)]
 pub struct BrowserTool {
+    /// Shared browser session state for this worker.
+    ///
+    /// Operations intentionally hold this mutex across long awaits (including
+    /// `with_action_timeout(...)` and `Browser::launch`) so actions are
+    /// serialized per worker and cannot interleave unpredictably.
     state: Arc<Mutex<BrowserState>>,
     config: BrowserConfig,
     screenshot_dir: PathBuf,
@@ -783,8 +788,11 @@ impl BrowserTool {
                     return Err(BrowserError::new("text is required for act:type"));
                 };
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act focus", element.click()).await?;
-                Self::with_action_timeout("act type", element.type_str(&text)).await?;
+                Self::with_action_timeout("act type", async {
+                    element.click().await?;
+                    element.type_str(&text).await
+                })
+                .await?;
                 Ok(BrowserOutput::success(format!(
                     "Typed '{}' into element",
                     truncate_for_display(&text, 50)
@@ -922,9 +930,10 @@ impl BrowserTool {
 
         // Truncate very large pages for LLM consumption
         let truncated = if html.len() > 100_000 {
+            let end = html.floor_char_boundary(100_000);
             format!(
                 "{}... [truncated, {} bytes total]",
-                &html[..100_000],
+                &html[..end],
                 html.len()
             )
         } else {
@@ -947,10 +956,12 @@ impl BrowserTool {
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
-        if let Some(mut browser) = state.browser.take()
-            && let Err(error) = browser.close().await
-        {
-            tracing::warn!(%error, "browser close returned error");
+        if let Some(mut browser) = state.browser.take() {
+            let close_result =
+                Self::with_action_timeout("browser close", async { browser.close().await }).await;
+            if let Err(error) = close_result {
+                tracing::warn!(%error, "browser close returned error");
+            }
         }
 
         state.pages.clear();
@@ -1094,6 +1105,7 @@ fn truncate_for_display(text: &str, max_len: usize) -> String {
     if text.len() <= max_len {
         text.to_string()
     } else {
-        format!("{}...", &text[..max_len])
+        let end = text.floor_char_boundary(max_len);
+        format!("{}...", &text[..end])
     }
 }
