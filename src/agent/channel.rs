@@ -163,37 +163,38 @@ impl ChannelState {
 
         if let Some(handle) = handle {
             handle.abort();
-
-            match handle.await {
-                Err(join_error) if join_error.is_cancelled() => {
-                    self.send_worker_terminal_events(
-                        worker_id,
-                        "cancelled",
-                        format!("{WORKER_CANCELLED_PREFIX} {reason}."),
-                        false,
-                    );
-                    Ok(())
+            let state = self.clone();
+            let reason = reason.to_string();
+            tokio::spawn(async move {
+                match handle.await {
+                    Err(join_error) if join_error.is_cancelled() => {
+                        state.send_worker_terminal_events(
+                            worker_id,
+                            "cancelled",
+                            format!("{WORKER_CANCELLED_PREFIX} {reason}."),
+                            false,
+                        );
+                    }
+                    Err(join_error) => {
+                        let failure = format!("Worker failed during cancellation: {join_error}");
+                        tracing::warn!(
+                            %join_error,
+                            worker_id = %worker_id,
+                            channel_id = %state.channel_id,
+                            "worker join failed after cancellation request"
+                        );
+                        state.send_worker_terminal_events(worker_id, "failed", failure, false);
+                    }
+                    Ok(()) => {
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            channel_id = %state.channel_id,
+                            "worker finished before cancellation took effect"
+                        );
+                    }
                 }
-                Err(join_error) => {
-                    let failure = format!("Worker failed during cancellation: {join_error}");
-                    tracing::warn!(
-                        %join_error,
-                        worker_id = %worker_id,
-                        channel_id = %self.channel_id,
-                        "worker join failed after cancellation request"
-                    );
-                    self.send_worker_terminal_events(worker_id, "failed", failure, false);
-                    Ok(())
-                }
-                Ok(()) => {
-                    tracing::debug!(
-                        worker_id = %worker_id,
-                        channel_id = %self.channel_id,
-                        "worker finished before cancellation took effect"
-                    );
-                    Ok(())
-                }
-            }
+            });
+            Ok(())
         } else if removed {
             // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
             tracing::warn!(

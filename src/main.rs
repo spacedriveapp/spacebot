@@ -620,6 +620,7 @@ fn spawn_worker_receipt_dispatch_loop(
     channel_store: spacebot::conversation::ChannelStore,
     conversation_logger: spacebot::conversation::history::ConversationLogger,
     messaging_manager: Arc<spacebot::messaging::MessagingManager>,
+    api_event_tx: tokio::sync::broadcast::Sender<spacebot::api::ApiEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut next_prune_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -706,6 +707,13 @@ fn spawn_worker_receipt_dispatch_loop(
                                     Arc::from(receipt.channel_id.as_str());
                                 conversation_logger
                                     .log_bot_message(&channel_id, &receipt.payload_text);
+                                api_event_tx
+                                    .send(spacebot::api::ApiEvent::OutboundMessage {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: receipt.channel_id.clone(),
+                                        text: receipt.payload_text.clone(),
+                                    })
+                                    .ok();
                                 tracing::info!(
                                     agent_id = %agent_id,
                                     channel_id = %receipt.channel_id,
@@ -2136,6 +2144,7 @@ async fn initialize_agents(
             spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone()),
             spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone()),
             messaging_manager.clone(),
+            api_state.event_tx.clone(),
         );
         cortex_handles.push(handle);
         tracing::info!(agent_id = %agent_id, "worker receipt dispatcher loop started");
