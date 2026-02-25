@@ -698,12 +698,12 @@ impl Channel {
         );
     }
 
-    fn queue_worker_terminal_delivery(
+    async fn upsert_worker_terminal_delivery_receipt(
         &mut self,
         worker_id: WorkerId,
         terminal_state: &str,
         result_text: &str,
-    ) {
+    ) -> Option<String> {
         let terminal_secs = self
             .deps
             .runtime_config
@@ -714,57 +714,46 @@ impl Channel {
         self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
         let run_logger = self.state.process_run_logger.clone();
         let channel_id = self.id.clone();
-        let terminal_state = terminal_state.to_string();
-        let result_text = result_text.to_string();
-        tokio::spawn(async move {
-            if let Err(error) = run_logger
-                .mark_worker_task_contract_terminal_pending(
-                    worker_id,
-                    &terminal_state,
-                    terminal_secs,
-                )
-                .await
-            {
+        if let Err(error) = run_logger
+            .mark_worker_task_contract_terminal_pending(worker_id, terminal_state, terminal_secs)
+            .await
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %channel_id,
+                worker_id = %worker_id,
+                terminal_state = %terminal_state,
+                "failed to mark worker contract terminal pending"
+            );
+            return None;
+        }
+
+        let payload_text = build_worker_terminal_receipt_payload(terminal_state, result_text);
+        match run_logger
+            .upsert_worker_terminal_receipt(&channel_id, worker_id, terminal_state, &payload_text)
+            .await
+        {
+            Ok(receipt_id) => {
+                tracing::info!(
+                    channel_id = %channel_id,
+                    worker_id = %worker_id,
+                    receipt_id = %receipt_id,
+                    terminal_state = %terminal_state,
+                    "queued worker terminal receipt"
+                );
+                Some(receipt_id)
+            }
+            Err(error) => {
                 tracing::warn!(
                     %error,
                     channel_id = %channel_id,
                     worker_id = %worker_id,
                     terminal_state = %terminal_state,
-                    "failed to mark worker contract terminal pending"
+                    "failed to queue worker terminal receipt"
                 );
-                return;
+                None
             }
-
-            let payload_text = build_worker_terminal_receipt_payload(&terminal_state, &result_text);
-            match run_logger
-                .upsert_worker_terminal_receipt(
-                    &channel_id,
-                    worker_id,
-                    &terminal_state,
-                    &payload_text,
-                )
-                .await
-            {
-                Ok(receipt_id) => {
-                    tracing::info!(
-                        channel_id = %channel_id,
-                        worker_id = %worker_id,
-                        receipt_id = %receipt_id,
-                        terminal_state = %terminal_state,
-                        "queued worker terminal receipt"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %channel_id,
-                        worker_id = %worker_id,
-                        terminal_state = %terminal_state,
-                        "failed to queue worker terminal receipt"
-                    );
-                }
-            }
-        });
+        }
     }
 
     async fn apply_worker_completion_side_effects(
@@ -779,13 +768,18 @@ impl Channel {
         self.worker_checkpoints.remove(&worker_id);
 
         if notify {
-            self.send_status_update(crate::StatusUpdate::WorkerCompleted {
-                worker_id,
-                result: summarize_worker_result_for_status(result),
-            })
-            .await;
             let terminal_state = classify_worker_terminal_state(result);
-            self.queue_worker_terminal_delivery(worker_id, terminal_state, result);
+            let terminal_receipt_id = self
+                .upsert_worker_terminal_delivery_receipt(worker_id, terminal_state, result)
+                .await;
+            self.send_status_update_with_receipt(
+                crate::StatusUpdate::WorkerCompleted {
+                    worker_id,
+                    result: summarize_worker_result_for_status(result),
+                },
+                terminal_receipt_id,
+            )
+            .await;
         }
 
         let mut workers = self.state.active_workers.write().await;
@@ -2296,9 +2290,22 @@ impl Channel {
     }
 
     async fn send_status_update(&self, status: crate::StatusUpdate) {
+        self.send_status_update_with_receipt(status, None).await;
+    }
+
+    async fn send_status_update_with_receipt(
+        &self,
+        status: crate::StatusUpdate,
+        receipt_id: Option<String>,
+    ) {
+        let response = OutboundResponse::Status(status);
+        let envelope = match receipt_id {
+            Some(receipt_id) => OutboundEnvelope::tracked(response, receipt_id),
+            None => OutboundEnvelope::from(response),
+        };
         if let Err(error) = self
             .response_tx
-            .send(OutboundEnvelope::from(OutboundResponse::Status(status)))
+            .send(envelope)
             .await
         {
             tracing::debug!(
