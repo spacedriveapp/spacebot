@@ -831,12 +831,24 @@ impl Channel {
                         .map(String::from);
                 }
 
-                // Log to conversation history so the dashboard shows the sent message
                 let text = match &message.content {
                     crate::MessageContent::Text(t) => t.as_str(),
                     _ => "",
                 };
                 if !text.is_empty() {
+                    // Add to LLM conversation history so the agent has context
+                    // when the peer replies (without this, the reply arrives on
+                    // an empty history and the LLM has no idea what it asked for).
+                    let mut history = self.state.history.write().await;
+                    history.push(rig::message::Message::Assistant {
+                        id: None,
+                        content: rig::one_or_many::OneOrMany::one(
+                            rig::message::AssistantContent::text(text),
+                        ),
+                    });
+                    drop(history);
+
+                    // Log to DB so the dashboard shows the sent message
                     self.state.conversation_logger.log_bot_message_with_name(
                         &self.state.channel_id,
                         text,
@@ -864,19 +876,34 @@ impl Channel {
                 .get("link_conclusion_summary")
                 .and_then(|v| v.as_str())
                 .unwrap_or(raw_text.as_str());
-            // When a bridge conclusion arrives on an already-concluded channel
-            // (e.g. a downstream result bubbling up after the intermediary already
-            // concluded upstream), tag the peer mirror as a bridge so it passes
-            // through the peer's concluded check and reaches their bridge_to_initiator.
-            let cascade_as_bridge = self.link_concluded && is_bridge_conclusion;
-            tracing::info!(
-                channel_id = %self.id,
-                cascade_as_bridge,
-                "auto-concluding link channel"
-            );
-            self.handle_link_conclusion(summary, cascade_as_bridge)
-                .await;
-            self.link_concluded = true;
+
+            if self.link_concluded && is_bridge_conclusion {
+                // Late result bubbling up through an already-concluded channel.
+                // If this side has initiated_from, bridge directly to the
+                // initiator without mirroring to peer (which would loop).
+                // If not, forward the bridge to the peer side (which holds
+                // initiated_from) so they can cascade it upward.
+                if self.initiated_from.is_some() {
+                    tracing::info!(
+                        channel_id = %self.id,
+                        "cascading bridge conclusion to initiator"
+                    );
+                    self.bridge_to_initiator(summary).await;
+                } else {
+                    tracing::info!(
+                        channel_id = %self.id,
+                        "forwarding bridge conclusion to peer (they hold initiated_from)"
+                    );
+                    self.forward_bridge_to_peer(summary).await;
+                }
+            } else {
+                tracing::info!(
+                    channel_id = %self.id,
+                    "auto-concluding link channel"
+                );
+                self.handle_link_conclusion(summary).await;
+                self.link_concluded = true;
+            }
             return Ok(());
         }
 
@@ -922,7 +949,7 @@ impl Channel {
                 turns = self.link_turn_count,
                 "link conversation hit safety cap, force-concluding"
             );
-            self.handle_link_conclusion("Link conversation ended (turn limit reached).", false)
+            self.handle_link_conclusion("Link conversation ended (turn limit reached).")
                 .await;
             self.link_concluded = true;
             return Ok(());
@@ -953,7 +980,7 @@ impl Channel {
         let concluded = conclude_flag.load(std::sync::atomic::Ordering::Relaxed);
         if concluded {
             let summary = conclude_summary.read().await.clone().unwrap_or_default();
-            self.handle_link_conclusion(&summary, false).await;
+            self.handle_link_conclusion(&summary).await;
             self.link_concluded = true;
         }
 
@@ -1117,11 +1144,9 @@ impl Channel {
     /// Handle link channel conclusion: mirror the summary to the peer and
     /// bridge results back to the channel that initiated this link conversation.
     /// Mirror the conclusion to the peer channel and bridge results to the
-    /// initiating channel. When `cascade_as_bridge` is true, the peer mirror
-    /// is tagged as a bridge conclusion so it passes through already-concluded
-    /// peers — this happens when a downstream result bubbles up through an
-    /// intermediary that already concluded its upstream link.
-    async fn handle_link_conclusion(&self, summary: &str, cascade_as_bridge: bool) {
+    /// initiating channel. Only called for initial conclusions — bridge cascades
+    /// on already-concluded channels are handled inline in `handle_message`.
+    async fn handle_link_conclusion(&self, summary: &str) {
         let Some(mm) = &self.deps.messaging_manager else {
             return;
         };
@@ -1146,9 +1171,6 @@ impl Channel {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("link_conclusion".into(), serde_json::json!(true));
             metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
-            if cascade_as_bridge {
-                metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
-            }
 
             let conclusion_message = crate::InboundMessage {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1175,7 +1197,6 @@ impl Channel {
             } else {
                 tracing::info!(
                     peer = %peer_display,
-                    cascade_as_bridge,
                     "mirrored conclusion to peer"
                 );
             }
@@ -1183,6 +1204,60 @@ impl Channel {
 
         // Bridge results back to the channel that started this link conversation
         self.bridge_to_initiator(summary).await;
+    }
+
+    /// Forward a bridge conclusion to the peer channel. Used when a late result
+    /// arrives on the receiver side of an already-concluded link (which has no
+    /// `initiated_from`). The peer side holds `initiated_from` and can cascade
+    /// the result upward.
+    async fn forward_bridge_to_peer(&self, summary: &str) {
+        let Some(mm) = &self.deps.messaging_manager else {
+            return;
+        };
+        let Some((_, peer_id)) = self
+            .conversation_id
+            .as_deref()
+            .and_then(|cid| cid.strip_prefix("link:"))
+            .and_then(|rest| rest.split_once(':'))
+        else {
+            return;
+        };
+
+        let peer_channel = format!("link:{}:{}", peer_id, self.deps.agent_id);
+
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert("link_conclusion".into(), serde_json::json!(true));
+        metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
+        metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
+
+        let bridge_message = crate::InboundMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "internal".into(),
+            conversation_id: peer_channel.clone(),
+            sender_id: self.deps.agent_id.to_string(),
+            agent_id: Some(Arc::from(peer_id)),
+            content: crate::MessageContent::Text(format!(
+                "[Link conversation with {} concluded]\n{}",
+                self.agent_display_name(),
+                summary
+            )),
+            timestamp: chrono::Utc::now(),
+            metadata,
+            formatted_author: Some(format!("[{}]", self.agent_display_name())),
+        };
+
+        if let Err(error) = mm.inject_message(bridge_message).await {
+            tracing::error!(
+                %error,
+                peer_channel = %peer_channel,
+                "failed to forward bridge conclusion to peer"
+            );
+        } else {
+            tracing::info!(
+                peer_channel = %peer_channel,
+                "forwarded bridge conclusion to peer"
+            );
+        }
     }
 
     /// Retrigger the channel that called send_agent_message to start this

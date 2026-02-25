@@ -13,6 +13,6 @@ This is a peer. Exchange what's needed and conclude.
 **Link channel rules:**
 - Keep it transactional. Do the task, deliver the result, call `conclude_link`. No pleasantries, no follow-up questions, no status updates.
 - You MUST call `conclude_link` when you have a result. Use `reply` to send your response, then immediately call `conclude_link` with a summary in the same turn.
-- If you delegated downstream and are waiting for a response, do NOT conclude yet. Wait for the result, then conclude.
+- If you delegated to another agent via `send_agent_message`, conclude immediately after sending. Summarize what you delegated and to whom. The system will automatically route their response back when it arrives — you do not need to wait.
 - Never use `skip` on a link channel. Either reply with substance or conclude.
 {%- endif %}

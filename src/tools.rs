@@ -302,9 +302,11 @@ pub async fn add_channel_tools(
         ))
         .await?;
     handle.add_tool(CancelTool::new(state)).await?;
-    handle
-        .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
-        .await?;
+    if !is_link_channel {
+        handle
+            .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
+            .await?;
+    }
     handle.add_tool(ReactTool::new(response_tx.clone())).await?;
     if let Some(cron) = cron_tool {
         handle.add_tool(cron).await?;
@@ -344,10 +346,11 @@ pub async fn remove_channel_tools(
     handle.remove_tool(SpawnWorkerTool::NAME).await?;
     handle.remove_tool(RouteTool::NAME).await?;
     handle.remove_tool(CancelTool::NAME).await?;
-    handle.remove_tool(SkipTool::NAME).await?;
     handle.remove_tool(SendFileTool::NAME).await?;
     handle.remove_tool(ReactTool::NAME).await?;
-    // Cron, send_message, send_agent_message, and conclude_link removal is best-effort since not all channels have them
+    // Skip, cron, send_message, send_agent_message, and conclude_link removal
+    // is best-effort since not all channels have them
+    let _ = handle.remove_tool(SkipTool::NAME).await;
     let _ = handle.remove_tool(CronTool::NAME).await;
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;

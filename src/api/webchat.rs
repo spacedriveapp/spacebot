@@ -148,6 +148,7 @@ pub(super) async fn webchat_history(
 
     let result: Vec<WebChatHistoryMessage> = messages
         .into_iter()
+        .filter(|m| m.sender_id.as_deref() != Some("system"))
         .map(|m| WebChatHistoryMessage {
             id: m.id,
             role: m.role,
