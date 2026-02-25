@@ -291,7 +291,7 @@ Workers are pluggable. Any process that accepts a task and reports status can be
 
 **Built-in workers** come with shell, file, exec, and browser tools out of the box. They can write code, run commands, manage files, browse the web — enough to build a whole project from scratch.
 
-**Code workers** provide two external coding backends: **[OpenCode](https://opencode.ai)** (persistent OpenCode subprocess with codebase-aware sessions) and **[ACP workers](https://agentclientprotocol.com/)** Code workers bring their own codebase exploration, LSP awareness, and context management — purpose-built for deep coding sessions. When a user asks for a complex refactor or a new feature, the channel can spawn a code worker that maintains a rich understanding of the codebase across the entire session. Both built-in and code workers support interactive follow-ups.
+**Code workers** provide two external coding backends: **[OpenCode](https://opencode.ai)** (persistent OpenCode subprocess with codebase-aware sessions) and **[ACP workers](https://agentclientprotocol.com/)** (communication via stdio with a variety of coding agents). Code workers bring their own codebase exploration, LSP awareness, and context management — purpose-built for deep coding sessions. When a user asks for a complex refactor or a new feature, the channel can spawn a code worker that maintains a rich understanding of the codebase across the entire session. Both built-in and code workers support interactive follow-ups.
 
 ### The Compactor
 

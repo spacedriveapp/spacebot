@@ -16,9 +16,9 @@ Most setups use one or the other, but it is possible to use both at the same tim
 
 - Use **ACP** if you already run (or have a subscription to) a [CLI coding agent with ACP support](https://agentclientprotocol.com/get-started/agents).
 - Use **OpenCode** if you want Spacebot-managed OpenCode sessions with server pooling and richer OpenCode-native behavior.
-- Keep using **builtin** workers for quick shell/file/exec tasks and non-coding operations.
+- Keep using **built-in** workers for quick shell/file/exec tasks and non-coding operations.
 
-Both ACP and OpenCode workers are invoked through `spawn_worker`, support interactive follow-ups via `route`, and publish status updates into the channel status block. When neither external backend is selected, Spacebot uses the builtin worker.
+Both ACP and OpenCode workers are invoked through `spawn_worker`, support interactive follow-ups via `route`, and publish status updates into the channel status block. When neither external backend is selected, Spacebot uses the built-in worker.
 
 ## ACP (Agent Client Protocol)
 

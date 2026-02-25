@@ -405,27 +405,39 @@ pub(super) async fn update_global_settings(
         }
 
         if let Some(acp_table) = doc["defaults"]["acp"].as_table_mut() {
-            acp_table.clear();
-
             for (id, config) in acp_configs {
                 if id.trim().is_empty() {
                     continue;
                 }
 
-                acp_table.insert(&id, toml_edit::Item::Table(toml_edit::Table::new()));
+                if acp_table.get(&id).is_none() {
+                    acp_table.insert(&id, toml_edit::Item::Table(toml_edit::Table::new()));
+                }
 
                 if let Some(agent_table) =
                     acp_table.get_mut(&id).and_then(|item| item.as_table_mut())
                 {
-                    agent_table["enabled"] = toml_edit::value(config.enabled.unwrap_or(true));
-                    agent_table["command"] = toml_edit::value(config.command.unwrap_or_default());
-
-                    let mut array = toml_edit::Array::new();
-                    for argument in config.args.unwrap_or_default() {
-                        array.push(argument);
+                    if let Some(enabled) = config.enabled {
+                        agent_table["enabled"] = toml_edit::value(enabled);
                     }
-                    agent_table["args"] = toml_edit::Item::Value(toml_edit::Value::Array(array));
-                    agent_table["timeout"] = toml_edit::value(config.timeout.unwrap_or(300) as i64);
+
+                    if let Some(command) = config.command {
+                        agent_table["command"] = toml_edit::value(command);
+                    }
+
+                    if let Some(args) = config.args {
+                        let mut array = toml_edit::Array::new();
+                        for argument in args {
+                            array.push(argument);
+                        }
+                        agent_table["args"] =
+                            toml_edit::Item::Value(toml_edit::Value::Array(array));
+                    }
+
+                    if let Some(timeout) = config.timeout {
+                        let timeout = i64::try_from(timeout).unwrap_or(i64::MAX);
+                        agent_table["timeout"] = toml_edit::value(timeout);
+                    }
                 }
             }
         }

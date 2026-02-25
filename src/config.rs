@@ -580,7 +580,7 @@ impl Default for OpenCodeConfig {
 /// Configured under `[defaults.acp.<id>]` in config.toml. Each entry
 /// represents a separate ACP-compatible coding agent that Spacebot can spawn
 /// and communicate with over stdio.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AcpAgentConfig {
     /// Unique identifier for this ACP agent (the TOML table key).
     pub id: String,
@@ -594,6 +594,20 @@ pub struct AcpAgentConfig {
     pub env: HashMap<String, String>,
     /// Session timeout in seconds. `None` uses a default of 300s.
     pub timeout: u64,
+}
+
+impl std::fmt::Debug for AcpAgentConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AcpAgentConfig")
+            .field("id", &self.id)
+            .field("enabled", &self.enabled)
+            .field("command", &self.command)
+            .field("args", &self.args)
+            .field("env", &"<redacted>")
+            .field("env_keys", &self.env.len())
+            .field("timeout", &self.timeout)
+            .finish()
+    }
 }
 
 impl Default for AcpAgentConfig {
@@ -1871,8 +1885,7 @@ struct TomlOpenCodePermissions {
 
 #[derive(Deserialize, Clone, Default)]
 struct TomlAcpAgentConfig {
-    #[serde(default = "default_enabled")]
-    enabled: bool,
+    enabled: Option<bool>,
     command: Option<String>,
     #[serde(default)]
     args: Vec<String>,
@@ -2243,8 +2256,8 @@ fn resolve_acp_configs(
 ) -> HashMap<String, AcpAgentConfig> {
     let mut merged = default_configs.clone();
     if let Some(overrides) = agent_configs {
-        for (id, cfg) in overrides {
-            merged.insert(id.clone(), cfg.clone());
+        for (id, config) in overrides {
+            merged.insert(id.clone(), config.clone());
         }
     }
     merged
@@ -3318,7 +3331,9 @@ impl Config {
                         id.clone(),
                         AcpAgentConfig {
                             id: id.clone(),
-                            enabled: toml_acp.enabled,
+                            enabled: toml_acp
+                                .enabled
+                                .unwrap_or_else(|| base_entry.map(|b| b.enabled).unwrap_or(true)),
                             command: resolved_command,
                             args: if toml_acp.args.is_empty() {
                                 base_entry.map(|b| b.args.clone()).unwrap_or_default()
@@ -3493,21 +3508,39 @@ impl Config {
                         acp_map
                             .into_iter()
                             .map(|(id, toml_acp)| {
+                                let base_entry = defaults.acp.get(&id);
                                 let resolved_command = toml_acp
                                     .command
                                     .as_deref()
                                     .and_then(resolve_env_value)
                                     .or_else(|| toml_acp.command.clone())
+                                    .or_else(|| base_entry.map(|entry| entry.command.clone()))
                                     .unwrap_or_default();
                                 (
                                     id.clone(),
                                     AcpAgentConfig {
                                         id,
-                                        enabled: toml_acp.enabled,
+                                        enabled: toml_acp.enabled.unwrap_or_else(|| {
+                                            base_entry.map(|entry| entry.enabled).unwrap_or(true)
+                                        }),
                                         command: resolved_command,
-                                        args: toml_acp.args,
-                                        env: toml_acp.env,
-                                        timeout: toml_acp.timeout.unwrap_or(300),
+                                        args: if toml_acp.args.is_empty() {
+                                            base_entry
+                                                .map(|entry| entry.args.clone())
+                                                .unwrap_or_default()
+                                        } else {
+                                            toml_acp.args
+                                        },
+                                        env: if toml_acp.env.is_empty() {
+                                            base_entry
+                                                .map(|entry| entry.env.clone())
+                                                .unwrap_or_default()
+                                        } else {
+                                            toml_acp.env
+                                        },
+                                        timeout: toml_acp.timeout.unwrap_or_else(|| {
+                                            base_entry.map(|entry| entry.timeout).unwrap_or(300)
+                                        }),
                                     },
                                 )
                             })
@@ -3968,6 +4001,7 @@ impl RuntimeConfig {
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
+        self.acp.store(Arc::new(resolved.acp));
         // sandbox config is not hot-reloaded here because the Sandbox instance
         // is constructed once at startup and shared via Arc. Changing sandbox
         // settings requires an agent restart.

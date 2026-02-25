@@ -125,6 +125,8 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         status: String,
     },
+    /// Intermediate worker output that can be emitted multiple times during
+    /// long-running or interactive work; does not imply completion.
     WorkerResult {
         agent_id: AgentId,
         worker_id: WorkerId,
@@ -133,6 +135,8 @@ pub enum ProcessEvent {
         notify: bool,
         success: bool,
     },
+    /// Terminal worker lifecycle event emitted once when work is finished,
+    /// used for finalization and completion notifications.
     WorkerComplete {
         agent_id: AgentId,
         worker_id: WorkerId,

@@ -27,7 +27,11 @@ use tokio::io::AsyncReadExt as _;
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, broadcast, mpsc};
 use tokio_util::compat::{TokioAsyncReadCompatExt as _, TokioAsyncWriteCompatExt as _};
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+const MAX_STDERR_LOG_BYTES: usize = 64 * 1024;
+const DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES: usize = 64 * 1024;
 
 /// ACP-backed worker.
 pub struct AcpWorker {
@@ -39,6 +43,7 @@ pub struct AcpWorker {
     pub acp: AcpAgentConfig,
     pub event_tx: broadcast::Sender<ProcessEvent>,
     pub input_rx: Option<mpsc::Receiver<String>>,
+    pub cancellation_token: Option<CancellationToken>,
 }
 
 /// Result of an ACP worker run.
@@ -65,6 +70,7 @@ impl AcpWorker {
             acp,
             event_tx,
             input_rx: None,
+            cancellation_token: None,
         }
     }
 
@@ -82,211 +88,281 @@ impl AcpWorker {
         (worker, input_tx)
     }
 
+    pub fn with_cancellation_token(mut self, cancellation_token: CancellationToken) -> Self {
+        self.cancellation_token = Some(cancellation_token);
+        self
+    }
+
+    fn ensure_not_cancelled(&self) -> anyhow::Result<()> {
+        if self
+            .cancellation_token
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            anyhow::bail!("ACP worker cancelled")
+        }
+
+        Ok(())
+    }
+
     pub async fn run(mut self) -> anyhow::Result<AcpWorkerResult> {
-        if self.acp.command.trim().is_empty() {
-            anyhow::bail!("ACP command is empty for worker config '{}'", self.acp.id);
-        }
+        let run_result = async {
+            self.ensure_not_cancelled()?;
 
-        self.send_status(&format!("starting ACP agent '{}'", self.acp.id));
+            if self.acp.command.trim().is_empty() {
+                anyhow::bail!("ACP command is empty for worker config '{}'", self.acp.id);
+            }
 
-        let mut command = Command::new(&self.acp.command);
-        command
-            .args(&self.acp.args)
-            .current_dir(&self.directory)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            self.send_status(&format!("starting ACP agent '{}'", self.acp.id));
 
-        for (name, value) in &self.acp.env {
-            command.env(name, value);
-        }
+            let mut command = Command::new(&self.acp.command);
+            command
+                .args(&self.acp.args)
+                .current_dir(&self.directory)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
 
-        let mut child = command.spawn().with_context(|| {
-            format!(
-                "failed to spawn ACP agent '{}' with command '{}'",
-                self.acp.id, self.acp.command
-            )
-        })?;
+            for (name, value) in &self.acp.env {
+                command.env(name, value);
+            }
 
-        let child_stdin = child
-            .stdin
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("failed to capture ACP child stdin"))?;
-        let child_stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| anyhow::anyhow!("failed to capture ACP child stdout"))?;
+            let mut child = command.spawn().with_context(|| {
+                format!(
+                    "failed to spawn ACP agent '{}' with command '{}'",
+                    self.acp.id, self.acp.command
+                )
+            })?;
 
-        if let Some(stderr) = child.stderr.take() {
-            let worker_id = self.id;
-            tokio::spawn(async move {
-                let mut reader = tokio::io::BufReader::new(stderr);
-                let mut buffer = Vec::new();
-                if let Err(error) =
-                    tokio::io::AsyncReadExt::read_to_end(&mut reader, &mut buffer).await
-                {
-                    tracing::debug!(worker_id = %worker_id, %error, "failed to read ACP stderr");
-                    return;
-                }
-                if !buffer.is_empty() {
-                    let output = String::from_utf8_lossy(&buffer);
-                    tracing::debug!(worker_id = %worker_id, stderr = %output, "ACP stderr");
-                }
-            });
-        }
+            let child_stdin = child
+                .stdin
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("failed to capture ACP child stdin"))?;
+            let child_stdout = child
+                .stdout
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("failed to capture ACP child stdout"))?;
 
-        let workspace_root = self
-            .directory
-            .canonicalize()
-            .unwrap_or_else(|_| self.directory.clone());
+            if let Some(stderr) = child.stderr.take() {
+                let worker_id = self.id;
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stderr);
+                    let mut chunk = [0u8; 2048];
+                    let mut buffer = Vec::new();
 
-        let acp_client = Arc::new(SpacebotAcpClient::new(
-            self.agent_id.clone(),
-            self.id,
-            self.channel_id.clone(),
-            self.event_tx.clone(),
-            workspace_root,
-        ));
+                    loop {
+                        let read = match reader.read(&mut chunk).await {
+                            Ok(0) => break,
+                            Ok(size) => size,
+                            Err(error) => {
+                                tracing::debug!(worker_id = %worker_id, %error, "failed to read ACP stderr");
+                                return;
+                            }
+                        };
 
-        let timeout = self.acp.timeout.max(1);
-        let run_result = tokio::task::LocalSet::new()
-            .run_until(async {
-                let (connection, io_task) = ClientSideConnection::new(
-                    acp_client.clone(),
-                    child_stdin.compat_write(),
-                    child_stdout.compat(),
-                    |future| {
-                        tokio::task::spawn_local(future);
-                    },
-                );
+                        let remaining = MAX_STDERR_LOG_BYTES.saturating_sub(buffer.len());
+                        if remaining == 0 {
+                            break;
+                        }
 
-                tokio::task::spawn_local(async move {
-                    if let Err(error) = io_task.await {
-                        tracing::debug!(%error, "ACP IO task ended with error");
+                        let to_copy = read.min(remaining);
+                        buffer.extend_from_slice(&chunk[..to_copy]);
+
+                        if buffer.len() >= MAX_STDERR_LOG_BYTES {
+                            break;
+                        }
+                    }
+
+                    if !buffer.is_empty() {
+                        let mut output = String::from_utf8_lossy(&buffer).to_string();
+                        if buffer.len() >= MAX_STDERR_LOG_BYTES {
+                            output.push_str("\n...[truncated]");
+                        }
+                        tracing::debug!(worker_id = %worker_id, stderr = %output, "ACP stderr");
                     }
                 });
+            }
 
-                let initialize = InitializeRequest::new(ProtocolVersion::LATEST)
-                    .client_capabilities(
-                        ClientCapabilities::new()
-                            .fs(FileSystemCapability::new()
-                                .read_text_file(true)
-                                .write_text_file(true))
-                            .terminal(true),
+            let workspace_root = self
+                .directory
+                .canonicalize()
+                .unwrap_or_else(|_| self.directory.clone());
+
+            let acp_client = Arc::new(SpacebotAcpClient::new(
+                self.agent_id.clone(),
+                self.id,
+                self.channel_id.clone(),
+                self.event_tx.clone(),
+                workspace_root,
+            ));
+
+            let timeout = self.acp.timeout.max(1);
+            let prompt_result = tokio::task::LocalSet::new()
+                .run_until(async {
+                    let (connection, io_task) = ClientSideConnection::new(
+                        acp_client.clone(),
+                        child_stdin.compat_write(),
+                        child_stdout.compat(),
+                        |future| {
+                            tokio::task::spawn_local(future);
+                        },
                     );
 
-                let initialize_response = connection
-                    .initialize(initialize)
-                    .await
-                    .context("ACP initialize failed")?;
-
-                tracing::debug!(
-                    worker_id = %self.id,
-                    negotiated_protocol = ?initialize_response.protocol_version,
-                    "ACP initialized"
-                );
-
-                let session = connection
-                    .new_session(agent_client_protocol::NewSessionRequest::new(
-                        self.directory.clone(),
-                    ))
-                    .await
-                    .context("ACP session/new failed")?;
-
-                let session_id = session.session_id.0.to_string();
-
-                self.send_status("running ACP task");
-
-                acp_client.reset_text().await;
-                let prompt_response =
-                    prompt_once(&connection, &session.session_id, &self.task, timeout).await?;
-
-                let mut result_text = acp_client.take_text().await;
-                if result_text.trim().is_empty() {
-                    result_text = format!(
-                        "ACP worker completed with stop reason: {:?}",
-                        prompt_response.stop_reason
-                    );
-                }
-
-                self.send_result(&result_text, true, true);
-
-                if let Some(mut input_rx) = self.input_rx.take() {
-                    self.send_status("waiting for follow-up");
-                    while let Some(message) = input_rx.recv().await {
-                        self.send_status("processing follow-up");
-                        acp_client.reset_text().await;
-                        let follow_up_response =
-                            prompt_once(&connection, &session.session_id, &message, timeout)
-                                .await?;
-                        let follow_up_text = acp_client.take_text().await;
-                        if !follow_up_text.trim().is_empty() {
-                            result_text = follow_up_text;
-                        } else {
-                            result_text = format!(
-                                "ACP follow-up completed with stop reason: {:?}",
-                                follow_up_response.stop_reason
-                            );
+                    tokio::task::spawn_local(async move {
+                        if let Err(error) = io_task.await {
+                            tracing::debug!(%error, "ACP IO task ended with error");
                         }
-                        self.send_result(&result_text, true, true);
-                        self.send_status("waiting for follow-up");
+                    });
+
+                    let initialize = InitializeRequest::new(ProtocolVersion::LATEST)
+                        .client_capabilities(
+                            ClientCapabilities::new()
+                                .fs(FileSystemCapability::new()
+                                    .read_text_file(true)
+                                    .write_text_file(true))
+                                .terminal(true),
+                        );
+
+                    let initialize_response = connection
+                        .initialize(initialize)
+                        .await
+                        .context("ACP initialize failed")?;
+
+                    tracing::debug!(
+                        worker_id = %self.id,
+                        negotiated_protocol = ?initialize_response.protocol_version,
+                        "ACP initialized"
+                    );
+
+                    let session = connection
+                        .new_session(agent_client_protocol::NewSessionRequest::new(
+                            self.directory.clone(),
+                        ))
+                        .await
+                        .context("ACP session/new failed")?;
+
+                    let session_id = session.session_id.0.to_string();
+
+                    self.send_status("running ACP task");
+
+                    self.ensure_not_cancelled()?;
+                    let prompt_response = prompt_once(
+                        &connection,
+                        &session.session_id,
+                        &self.task,
+                        timeout,
+                        self.cancellation_token.as_ref(),
+                    )
+                    .await?;
+
+                    let mut result_text = acp_client.take_text().await;
+                    if result_text.trim().is_empty() {
+                        result_text = format!(
+                            "ACP worker completed with stop reason: {:?}",
+                            prompt_response.stop_reason
+                        );
                     }
-                }
 
-                Ok::<(String, String), anyhow::Error>((result_text, session_id))
+                    self.send_result(&result_text, true, true);
+
+                    if let Some(mut input_rx) = self.input_rx.take() {
+                        self.send_status("waiting for follow-up");
+                        while let Some(message) = input_rx.recv().await {
+                            self.ensure_not_cancelled()?;
+                            self.send_status("processing follow-up");
+                            // Discard any accumulated text from the previous prompt
+                            drop(acp_client.take_text().await);
+                            let follow_up_response = prompt_once(
+                                &connection,
+                                &session.session_id,
+                                &message,
+                                timeout,
+                                self.cancellation_token.as_ref(),
+                            )
+                            .await?;
+                            let follow_up_text = acp_client.take_text().await;
+                            if !follow_up_text.trim().is_empty() {
+                                result_text = follow_up_text;
+                            } else {
+                                result_text = format!(
+                                    "ACP follow-up completed with stop reason: {:?}",
+                                    follow_up_response.stop_reason
+                                );
+                            }
+                            self.send_result(&result_text, true, true);
+                            self.send_status("waiting for follow-up");
+                        }
+                    }
+
+                    Ok::<(String, String), anyhow::Error>((result_text, session_id))
+                })
+                .await;
+
+            shutdown_child(&mut child, self.id).await;
+
+            let (result, session_id) = prompt_result?;
+            Ok::<AcpWorkerResult, anyhow::Error>(AcpWorkerResult {
+                session_id,
+                result_text: result,
             })
-            .await;
-
-        shutdown_child(&mut child, self.id).await;
+        }
+        .await;
 
         match run_result {
-            Ok((result, session_id)) => {
+            Ok(result) => {
                 self.send_status("completed");
-                self.send_complete(&result, false, true);
-
-                Ok(AcpWorkerResult {
-                    session_id,
-                    result_text: result,
-                })
+                self.send_complete(&result.result_text, false, true);
+                Ok(result)
             }
             Err(error) => {
-                self.send_status("failed");
-                self.send_complete(&format!("ACP worker failed: {error}"), true, false);
+                if error.to_string().contains("cancelled") {
+                    self.send_status("cancelled");
+                    self.send_complete("ACP worker cancelled", false, false);
+                } else {
+                    self.send_status("failed");
+                    self.send_complete(&format!("ACP worker failed: {error}"), true, false);
+                }
                 Err(error)
             }
         }
     }
 
     fn send_status(&self, status: &str) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerStatus {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.id,
-            channel_id: self.channel_id.clone(),
-            status: status.to_string(),
-        });
+        self.event_tx
+            .send(ProcessEvent::WorkerStatus {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                channel_id: self.channel_id.clone(),
+                status: status.to_string(),
+            })
+            .ok();
     }
 
     fn send_result(&self, result: &str, notify: bool, success: bool) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerResult {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.id,
-            channel_id: self.channel_id.clone(),
-            result: result.to_string(),
-            notify,
-            success,
-        });
+        self.event_tx
+            .send(ProcessEvent::WorkerResult {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                channel_id: self.channel_id.clone(),
+                result: result.to_string(),
+                notify,
+                success,
+            })
+            .ok();
     }
 
     fn send_complete(&self, result: &str, notify: bool, success: bool) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerComplete {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.id,
-            channel_id: self.channel_id.clone(),
-            result: result.to_string(),
-            notify,
-            success,
-        });
+        self.event_tx
+            .send(ProcessEvent::WorkerComplete {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                channel_id: self.channel_id.clone(),
+                result: result.to_string(),
+                notify,
+                success,
+            })
+            .ok();
     }
 }
 
@@ -312,34 +388,73 @@ async fn prompt_once(
     session_id: &agent_client_protocol::SessionId,
     message: &str,
     timeout_seconds: u64,
+    cancellation_token: Option<&CancellationToken>,
 ) -> anyhow::Result<PromptResponse> {
     let request = PromptRequest::new(session_id.clone(), vec![ContentBlock::from(message)]);
-    tokio::time::timeout(
-        std::time::Duration::from_secs(timeout_seconds),
-        connection.prompt(request),
-    )
-    .await
-    .context("ACP prompt timed out")?
-    .context("ACP prompt failed")
+    if let Some(token) = cancellation_token {
+        tokio::select! {
+            _ = token.cancelled() => {
+                anyhow::bail!("ACP worker cancelled")
+            }
+            response = tokio::time::timeout(
+                std::time::Duration::from_secs(timeout_seconds),
+                connection.prompt(request),
+            ) => {
+                response
+                    .context("ACP prompt timed out")?
+                    .context("ACP prompt failed")
+            }
+        }
+    } else {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(timeout_seconds),
+            connection.prompt(request),
+        )
+        .await
+        .context("ACP prompt timed out")?
+        .context("ACP prompt failed")
+    }
 }
 
 struct TerminalEntry {
-    child: Arc<Mutex<Child>>,
-    output: Arc<Mutex<Vec<u8>>>,
-    output_limit: Option<usize>,
+    child: Mutex<Child>,
+    output: Mutex<Vec<u8>>,
+    output_limit: usize,
     truncated: AtomicBool,
-    exit_status: Arc<Mutex<Option<std::process::ExitStatus>>>,
+    exit_status: Mutex<Option<std::process::ExitStatus>>,
 }
 
 impl TerminalEntry {
-    fn new(child: Child, output_limit: Option<usize>) -> Arc<Self> {
+    fn new(child: Child, output_limit: usize) -> Arc<Self> {
         Arc::new(Self {
-            child: Arc::new(Mutex::new(child)),
-            output: Arc::new(Mutex::new(Vec::new())),
+            child: Mutex::new(child),
+            output: Mutex::new(Vec::new()),
             output_limit,
             truncated: AtomicBool::new(false),
-            exit_status: Arc::new(Mutex::new(None)),
+            exit_status: Mutex::new(None),
         })
+    }
+
+    /// Check and cache exit status, returning it if the process has exited.
+    async fn poll_exit_status(&self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        let mut stored = self.exit_status.lock().await;
+        if stored.is_none()
+            && let Some(status) = self.child.lock().await.try_wait()?
+        {
+            *stored = Some(status);
+        }
+        Ok(*stored)
+    }
+
+    /// Wait for the process to exit, caching and returning the status.
+    async fn wait_for_exit(&self) -> std::io::Result<std::process::ExitStatus> {
+        let mut stored = self.exit_status.lock().await;
+        if let Some(status) = *stored {
+            return Ok(status);
+        }
+        let status = self.child.lock().await.wait().await?;
+        *stored = Some(status);
+        Ok(status)
     }
 }
 
@@ -374,27 +489,34 @@ impl SpacebotAcpClient {
         }
     }
 
-    async fn reset_text(&self) {
-        *self.collected_text.lock().await = String::new();
-    }
-
     async fn take_text(&self) -> String {
-        self.collected_text.lock().await.clone()
+        std::mem::take(&mut *self.collected_text.lock().await)
     }
 
     async fn flush_thoughts(&self) {
         let mut buffer = self.thought_buffer.lock().await;
-        self.send_status(buffer.as_str());
-        buffer.clear();
+        if !buffer.is_empty() {
+            self.send_status(buffer.as_str());
+            buffer.clear();
+        }
+    }
+
+    fn is_protected_write_path(path: &Path) -> bool {
+        const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| PROTECTED_FILES.iter().any(|p| name.eq_ignore_ascii_case(p)))
     }
 
     fn send_status(&self, status: impl Into<String>) {
-        let _ = self.event_tx.send(ProcessEvent::WorkerStatus {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.worker_id,
-            channel_id: self.channel_id.clone(),
-            status: status.into(),
-        });
+        self.event_tx
+            .send(ProcessEvent::WorkerStatus {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.worker_id,
+                channel_id: self.channel_id.clone(),
+                status: status.into(),
+            })
+            .ok();
     }
 
     fn resolve_path(&self, path: &Path) -> agent_client_protocol::Result<PathBuf> {
@@ -463,23 +585,25 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
             .clone()
             .unwrap_or_else(|| "permission requested".to_string());
 
-        let _ = self.event_tx.send(ProcessEvent::WorkerPermission {
-            agent_id: self.agent_id.clone(),
-            worker_id: self.worker_id,
-            channel_id: self.channel_id.clone(),
-            permission_id: args.tool_call.tool_call_id.0.to_string(),
-            description: title,
-            patterns: Vec::new(),
-        });
+        self.event_tx
+            .send(ProcessEvent::WorkerPermission {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.worker_id,
+                channel_id: self.channel_id.clone(),
+                permission_id: args.tool_call.tool_call_id.0.to_string(),
+                description: title,
+                patterns: Vec::new(),
+            })
+            .ok();
 
         let selected = args
             .options
             .iter()
-            .find(|option| {
-                matches!(
-                    option.kind,
-                    PermissionOptionKind::AllowAlways | PermissionOptionKind::AllowOnce
-                )
+            .find(|option| matches!(option.kind, PermissionOptionKind::AllowOnce))
+            .or_else(|| {
+                args.options
+                    .iter()
+                    .find(|option| matches!(option.kind, PermissionOptionKind::AllowAlways))
             })
             .or_else(|| args.options.first())
             .ok_or_else(|| AcpError::invalid_params().data("permission request has no options"))?;
@@ -538,6 +662,12 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
     ) -> agent_client_protocol::Result<WriteTextFileResponse> {
         let path = self.resolve_path(&args.path)?;
 
+        if Self::is_protected_write_path(&path) {
+            return Err(AcpError::invalid_params().data(
+                "ACCESS DENIED: Identity files are protected and cannot be modified through ACP file operations. Use the identity management API instead.",
+            ));
+        }
+
         if let Some(parent) = path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
@@ -560,30 +690,16 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
             .await
             .map_err(AcpError::into_internal_error)?;
 
-        let limited_content = match (args.line, args.limit) {
-            (Some(line), Some(limit)) => {
-                let start_index = line.saturating_sub(1) as usize;
-                content
-                    .lines()
-                    .skip(start_index)
-                    .take(limit as usize)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            (Some(line), None) => {
-                let start_index = line.saturating_sub(1) as usize;
-                content
-                    .lines()
-                    .skip(start_index)
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            }
-            (None, Some(limit)) => content
+        let skip = args.line.map(|l| l.saturating_sub(1) as usize).unwrap_or(0);
+        let limited_content = match args.limit {
+            Some(limit) => content
                 .lines()
+                .skip(skip)
                 .take(limit as usize)
                 .collect::<Vec<_>>()
                 .join("\n"),
-            (None, None) => content,
+            None if skip > 0 => content.lines().skip(skip).collect::<Vec<_>>().join("\n"),
+            None => content,
         };
 
         Ok(ReadTextFileResponse::new(limited_content))
@@ -615,7 +731,11 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
-        let output_limit = args.output_byte_limit.and_then(|v| usize::try_from(v).ok());
+        let output_limit = args
+            .output_byte_limit
+            .and_then(|value| usize::try_from(value).ok())
+            .filter(|limit| *limit > 0)
+            .unwrap_or(DEFAULT_TERMINAL_OUTPUT_LIMIT_BYTES);
         let entry = TerminalEntry::new(child, output_limit);
 
         if let Some(stdout_reader) = stdout {
@@ -639,20 +759,11 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
         args: TerminalOutputRequest,
     ) -> agent_client_protocol::Result<TerminalOutputResponse> {
         let entry = self.terminal_entry(&args.terminal_id).await?;
-
-        let exit_status = {
-            let mut stored = entry.exit_status.lock().await;
-            if stored.is_none() {
-                let mut child = entry.child.lock().await;
-                if let Some(status) = child.try_wait().map_err(AcpError::into_internal_error)? {
-                    *stored = Some(status);
-                }
-            }
-            *stored
-        };
-
-        let output_bytes = entry.output.lock().await.clone();
-        let output = String::from_utf8_lossy(&output_bytes).to_string();
+        let exit_status = entry
+            .poll_exit_status()
+            .await
+            .map_err(AcpError::into_internal_error)?;
+        let output = String::from_utf8_lossy(&entry.output.lock().await).into_owned();
 
         Ok(
             TerminalOutputResponse::new(output, entry.truncated.load(Ordering::Relaxed))
@@ -675,8 +786,9 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
                 .try_wait()
                 .map_err(AcpError::into_internal_error)?
                 .is_none()
+                && let Err(error) = child.kill().await
             {
-                let _ = child.kill().await;
+                tracing::debug!(%error, "failed to kill ACP terminal on release");
             }
         }
 
@@ -688,18 +800,10 @@ impl agent_client_protocol::Client for SpacebotAcpClient {
         args: WaitForTerminalExitRequest,
     ) -> agent_client_protocol::Result<WaitForTerminalExitResponse> {
         let entry = self.terminal_entry(&args.terminal_id).await?;
-
-        let status = {
-            let mut stored = entry.exit_status.lock().await;
-            if let Some(status) = *stored {
-                status
-            } else {
-                let mut child = entry.child.lock().await;
-                let status = child.wait().await.map_err(AcpError::into_internal_error)?;
-                *stored = Some(status);
-                status
-            }
-        };
+        let status = entry
+            .wait_for_exit()
+            .await
+            .map_err(AcpError::into_internal_error)?;
 
         Ok(WaitForTerminalExitResponse::new(to_terminal_exit_status(
             status,
@@ -742,10 +846,8 @@ fn spawn_output_reader(
 
             let mut output = entry.output.lock().await;
             output.extend_from_slice(&chunk[..read]);
-            if let Some(limit) = entry.output_limit
-                && output.len() > limit
-            {
-                let overflow = output.len() - limit;
+            if output.len() > entry.output_limit {
+                let overflow = output.len() - entry.output_limit;
                 output.drain(0..overflow);
                 entry.truncated.store(true, Ordering::Relaxed);
             }

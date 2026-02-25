@@ -1224,6 +1224,9 @@ const PERMISSION_OPTIONS = [
 ];
 
 function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps) {
+	const createWorkerUid = () =>
+		globalThis.crypto?.randomUUID?.() ?? `acp-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.opencode?.enabled ?? false);
 	const [path, setPath] = useState(settings?.opencode?.path ?? "opencode");
@@ -1234,6 +1237,7 @@ function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps)
 	const [bashPerm, setBashPerm] = useState(settings?.opencode?.permissions?.bash ?? "allow");
 	const [webfetchPerm, setWebfetchPerm] = useState(settings?.opencode?.permissions?.webfetch ?? "allow");
 	const [acpWorkers, setAcpWorkers] = useState<Array<{
+		uid: string;
 		id: string;
 		enabled: boolean;
 		command: string;
@@ -1257,6 +1261,7 @@ function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps)
 		const rows = Object.entries(settings?.acp ?? {})
 			.sort(([a], [b]) => a.localeCompare(b))
 			.map(([id, config]) => ({
+				uid: createWorkerUid(),
 				id,
 				enabled: config.enabled,
 				command: config.command,
@@ -1318,9 +1323,15 @@ function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps)
 				return;
 			}
 
+			const command = worker.command.trim();
+			if (!command) {
+				setMessage({ text: `ACP command cannot be empty for ${id}`, type: "error" });
+				return;
+			}
+
 			acpPayload[id] = {
 				enabled: worker.enabled,
-				command: worker.command.trim(),
+				command,
 				args: worker.args
 					.split(",")
 					.map((value) => value.trim())
@@ -1356,7 +1367,14 @@ function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps)
 
 		setAcpWorkers([
 			...acpWorkers,
-			{ id: candidateId, enabled: true, command: "", args: "", timeout: "300" },
+			{
+				uid: createWorkerUid(),
+				id: candidateId,
+				enabled: true,
+				command: "",
+				args: "",
+				timeout: "300",
+			},
 		]);
 	};
 
@@ -1521,7 +1539,7 @@ function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps)
 								<p className="text-sm text-ink-dull">No ACP workers configured.</p>
 							) : (
 								acpWorkers.map((worker, index) => (
-									<div key={`${worker.id}-${index}`} className="rounded-md border border-app-line bg-app p-3">
+									<div key={worker.uid} className="rounded-md border border-app-line bg-app p-3">
 										<div className="grid grid-cols-2 gap-3">
 											<label className="block">
 												<span className="text-tiny font-medium text-ink-dull">ID</span>

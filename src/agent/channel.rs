@@ -23,6 +23,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
+use tokio_util::sync::CancellationToken;
 use tracing::Instrument as _;
 
 /// Debounce window for retriggers: coalesce rapid branch/worker completions
@@ -45,6 +46,8 @@ pub struct ChannelState {
     pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
     /// Tokio task handles for running workers, used for cancellation via abort().
     pub worker_handles: Arc<RwLock<HashMap<WorkerId, tokio::task::JoinHandle<()>>>>,
+    /// Cooperative cancellation tokens for workers that support graceful shutdown.
+    pub worker_cancellations: Arc<RwLock<HashMap<WorkerId, CancellationToken>>>,
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
@@ -64,6 +67,10 @@ impl ChannelState {
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
         let handle = self.worker_handles.write().await.remove(&worker_id);
+        if let Some(cancellation_token) = self.worker_cancellations.write().await.remove(&worker_id)
+        {
+            cancellation_token.cancel();
+        }
         let removed = self
             .active_workers
             .write()
@@ -204,6 +211,7 @@ impl Channel {
             active_branches: active_branches.clone(),
             active_workers: active_workers.clone(),
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
+            worker_cancellations: Arc::new(RwLock::new(HashMap::new())),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
@@ -1722,6 +1730,11 @@ impl Channel {
                 drop(workers);
 
                 self.state.worker_handles.write().await.remove(worker_id);
+                self.state
+                    .worker_cancellations
+                    .write()
+                    .await
+                    .remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
 
                 if *notify {
@@ -2329,6 +2342,7 @@ pub async fn spawn_acp_worker_from_state(
     }
 
     let acp_label = selected.id.clone();
+    let cancellation_token = CancellationToken::new();
     let worker = if interactive {
         let (worker, input_tx) = crate::acp::AcpWorker::new_interactive(
             Some(state.channel_id.clone()),
@@ -2338,6 +2352,7 @@ pub async fn spawn_acp_worker_from_state(
             selected,
             state.deps.event_tx.clone(),
         );
+        let worker = worker.with_cancellation_token(cancellation_token.clone());
         let worker_id = worker.id;
         state
             .worker_inputs
@@ -2354,9 +2369,15 @@ pub async fn spawn_acp_worker_from_state(
             selected,
             state.deps.event_tx.clone(),
         )
+        .with_cancellation_token(cancellation_token.clone())
     };
 
     let worker_id = worker.id;
+    state
+        .worker_cancellations
+        .write()
+        .await
+        .insert(worker_id, cancellation_token);
 
     let worker_span = tracing::info_span!(
         "worker.run",
@@ -2464,7 +2485,7 @@ where
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 
-        if emit_completion_event || !success {
+        if emit_completion_event {
             let _ = event_tx.send(ProcessEvent::WorkerComplete {
                 agent_id,
                 worker_id,

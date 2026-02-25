@@ -179,34 +179,39 @@ impl Tool for SpawnWorkerTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let readiness = self.state.deps.runtime_config.work_readiness();
-        let is_opencode = args.worker_type.as_deref() == Some("opencode");
-        let is_acp = args.worker_type.as_deref() == Some("acp");
+        let worker_type = args.worker_type.as_deref().unwrap_or("builtin");
 
-        let worker_id = if is_opencode {
-            let directory = args.directory.as_deref().ok_or_else(|| {
-                SpawnWorkerError("directory is required for opencode workers".into())
-            })?;
+        let worker_id = match worker_type {
+            "opencode" => {
+                let directory = args.directory.as_deref().ok_or_else(|| {
+                    SpawnWorkerError("directory is required for opencode workers".into())
+                })?;
 
-            spawn_opencode_worker_from_state(&self.state, &args.task, directory, args.interactive)
+                spawn_opencode_worker_from_state(
+                    &self.state,
+                    &args.task,
+                    directory,
+                    args.interactive,
+                )
                 .await
                 .map_err(|e| SpawnWorkerError(format!("{e}")))?
-        } else if is_acp {
-            let directory = args
-                .directory
-                .as_deref()
-                .ok_or_else(|| SpawnWorkerError("directory is required for acp workers".into()))?;
+            }
+            "acp" => {
+                let directory = args.directory.as_deref().ok_or_else(|| {
+                    SpawnWorkerError("directory is required for acp workers".into())
+                })?;
 
-            spawn_acp_worker_from_state(
-                &self.state,
-                &args.task,
-                directory,
-                args.acp_id.as_deref(),
-                args.interactive,
-            )
-            .await
-            .map_err(|e| SpawnWorkerError(format!("{e}")))?
-        } else {
-            spawn_worker_from_state(
+                spawn_acp_worker_from_state(
+                    &self.state,
+                    &args.task,
+                    directory,
+                    args.acp_id.as_deref(),
+                    args.interactive,
+                )
+                .await
+                .map_err(|e| SpawnWorkerError(format!("{e}")))?
+            }
+            "builtin" => spawn_worker_from_state(
                 &self.state,
                 &args.task,
                 args.interactive,
@@ -217,12 +222,17 @@ impl Tool for SpawnWorkerTool {
                     .collect::<Vec<_>>(),
             )
             .await
-            .map_err(|e| SpawnWorkerError(format!("{e}")))?
+            .map_err(|e| SpawnWorkerError(format!("{e}")))?,
+            other => {
+                return Err(SpawnWorkerError(format!(
+                    "unsupported worker_type '{other}'"
+                )));
+            }
         };
 
-        let worker_type_label = if is_opencode {
+        let worker_type_label = if worker_type == "opencode" {
             "OpenCode"
-        } else if is_acp {
+        } else if worker_type == "acp" {
             "ACP"
         } else {
             "builtin"
