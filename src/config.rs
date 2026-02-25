@@ -1804,6 +1804,23 @@ struct TomlWorkerContractConfig {
     tick_secs: Option<u64>,
 }
 
+fn resolve_nonzero_secs(value: Option<u64>, fallback: u64) -> u64 {
+    value
+        .and_then(|configured| (configured > 0).then_some(configured))
+        .unwrap_or(fallback)
+}
+
+fn normalize_worker_contract_config(
+    contract: TomlWorkerContractConfig,
+    base: WorkerContractConfig,
+) -> WorkerContractConfig {
+    WorkerContractConfig {
+        ack_secs: resolve_nonzero_secs(contract.ack_secs, base.ack_secs),
+        progress_secs: resolve_nonzero_secs(contract.progress_secs, base.progress_secs),
+        tick_secs: resolve_nonzero_secs(contract.tick_secs, base.tick_secs),
+    }
+}
+
 #[derive(Deserialize)]
 struct TomlCompactionConfig {
     background_threshold: Option<f32>,
@@ -3080,11 +3097,6 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
-        let resolve_nonzero_secs = |value: Option<u64>, fallback: u64| {
-            value
-                .and_then(|configured| (configured > 0).then_some(configured))
-                .unwrap_or(fallback)
-        };
         let defaults = DefaultsConfig {
             routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
             max_concurrent_branches: toml
@@ -3160,19 +3172,8 @@ impl Config {
             worker_contract: toml
                 .defaults
                 .worker_contract
-                .map(|contract| WorkerContractConfig {
-                    ack_secs: resolve_nonzero_secs(
-                        contract.ack_secs,
-                        base_defaults.worker_contract.ack_secs,
-                    ),
-                    progress_secs: resolve_nonzero_secs(
-                        contract.progress_secs,
-                        base_defaults.worker_contract.progress_secs,
-                    ),
-                    tick_secs: resolve_nonzero_secs(
-                        contract.tick_secs,
-                        base_defaults.worker_contract.tick_secs,
-                    ),
+                .map(|contract| {
+                    normalize_worker_contract_config(contract, base_defaults.worker_contract)
                 })
                 .unwrap_or(base_defaults.worker_contract),
             cortex: toml
@@ -3370,19 +3371,8 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
-                    worker_contract: a.worker_contract.map(|contract| WorkerContractConfig {
-                        ack_secs: resolve_nonzero_secs(
-                            contract.ack_secs,
-                            defaults.worker_contract.ack_secs,
-                        ),
-                        progress_secs: resolve_nonzero_secs(
-                            contract.progress_secs,
-                            defaults.worker_contract.progress_secs,
-                        ),
-                        tick_secs: resolve_nonzero_secs(
-                            contract.tick_secs,
-                            defaults.worker_contract.tick_secs,
-                        ),
+                    worker_contract: a.worker_contract.map(|contract| {
+                        normalize_worker_contract_config(contract, defaults.worker_contract)
                     }),
                     cortex: a.cortex.map(|c| CortexConfig {
                         tick_interval_secs: c

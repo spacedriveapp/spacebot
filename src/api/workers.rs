@@ -169,28 +169,34 @@ pub(super) async fn worker_detail(
     });
 
     let timeline = if query.include_timeline {
-        let contract = logger
-            .get_worker_task_contract_snapshot(&query.worker_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    %error,
-                    worker_id = %query.worker_id,
-                    "failed to load worker task contract snapshot"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-        let receipt = logger
-            .get_worker_terminal_receipt_snapshot(&query.worker_id)
-            .await
-            .map_err(|error| {
-                tracing::warn!(
-                    %error,
-                    worker_id = %query.worker_id,
-                    "failed to load worker receipt snapshot"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+        let (contract, receipt) = tokio::try_join!(
+            async {
+                logger
+                    .get_worker_task_contract_snapshot(&query.worker_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            worker_id = %query.worker_id,
+                            "failed to load worker task contract snapshot"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            },
+            async {
+                logger
+                    .get_worker_terminal_receipt_snapshot(&query.worker_id)
+                    .await
+                    .map_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            worker_id = %query.worker_id,
+                            "failed to load worker receipt snapshot"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })
+            }
+        )?;
         let steps = transcript.as_deref().unwrap_or(&[]);
         Some(
             crate::conversation::history::build_worker_timeline_projection(

@@ -1574,7 +1574,7 @@ mod tests {
     }
 
     #[test]
-    fn positive_max_tokens_omits_zero() {
+    fn positive_max_tokens_omits_none_and_zero() {
         assert_eq!(positive_max_tokens(None), None);
         assert_eq!(positive_max_tokens(Some(0)), None);
     }

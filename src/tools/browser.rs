@@ -970,7 +970,9 @@ impl BrowserTool {
         state.active_target = None;
         state.element_refs.clear();
         state.next_ref = 0;
-        state._handler_task = None;
+        if let Some(handler_task) = state._handler_task.take() {
+            handler_task.abort();
+        }
 
         if let Some(error) = close_error {
             return Err(error);

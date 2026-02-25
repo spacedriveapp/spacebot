@@ -801,7 +801,16 @@ impl Messaging for SlackAdapter {
         };
         let channel_id = match extract_channel_id(message) {
             Ok(id) => id,
-            Err(_) => return Ok(DeliveryOutcome::NotSurfaced),
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    message_id = %message.id,
+                    conversation_id = %message.conversation_id,
+                    source = %message.source,
+                    "skipping assistant.threads.setStatus — failed to extract channel id"
+                );
+                return Ok(DeliveryOutcome::NotSurfaced);
+            }
         };
 
         let status_text = match &status {

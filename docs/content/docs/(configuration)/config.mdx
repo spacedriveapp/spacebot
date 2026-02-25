@@ -125,6 +125,12 @@ cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone overri
 [agents.routing]
 channel = "anthropic/claude-opus-4-20250514"
 
+# Per-agent worker contract overrides (inherits defaults when omitted).
+[agents.worker_contract]
+ack_secs = 8
+progress_secs = 60
+tick_secs = 3
+
 # Per-agent sandbox configuration.
 [agents.sandbox]
 mode = "enabled"                               # "enabled" (default) or "disabled"
@@ -535,8 +541,27 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `max_concurrent_branches` | integer | inherits | Override instance default |
 | `max_turns` | integer | inherits | Override instance default |
 | `context_window` | integer | inherits | Override instance default |
+| `worker_contract` | table | inherits | Per-agent worker contract override (`AgentConfig.worker_contract`) |
 
 Agent-specific routing is set via `[agents.routing]` with the same keys as `[defaults.routing]`.
+
+### `[agents.worker_contract]`
+
+Per-agent worker contract override for `AgentConfig.worker_contract`.
+Unset keys inherit from `[defaults.worker_contract]`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `ack_secs` | integer | inherits | Seconds before first worker acknowledgement checkpoint |
+| `progress_secs` | integer | inherits | Seconds between worker progress deadline checks |
+| `tick_secs` | integer | inherits | Scheduler tick interval for contract scans |
+
+```toml
+[agents.worker_contract]
+ack_secs = 8
+progress_secs = 60
+tick_secs = 3
+```
 
 ### `[agents.sandbox]`
 

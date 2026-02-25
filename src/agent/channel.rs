@@ -21,6 +21,7 @@ use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 use tracing::Instrument as _;
@@ -290,8 +291,12 @@ pub struct Channel {
     worker_checkpoints: HashMap<WorkerId, WorkerCheckpointState>,
     /// Periodic deadline for checking due worker terminal delivery receipts.
     worker_receipt_dispatch_deadline: tokio::time::Instant,
+    /// True while a worker terminal receipt flush task is running.
+    worker_receipt_flush_in_progress: Arc<AtomicBool>,
     /// Periodic deadline for deterministic worker task contract checks.
     worker_contract_tick_deadline: tokio::time::Instant,
+    /// True while a worker task-contract deadline flush task is running.
+    worker_contract_flush_in_progress: Arc<AtomicBool>,
 }
 
 impl Channel {
@@ -404,8 +409,10 @@ impl Channel {
             worker_checkpoints: HashMap::new(),
             worker_receipt_dispatch_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(WORKER_RECEIPT_DISPATCH_INTERVAL_SECS),
+            worker_receipt_flush_in_progress: Arc::new(AtomicBool::new(false)),
             worker_contract_tick_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(worker_contract_tick_secs),
+            worker_contract_flush_in_progress: Arc::new(AtomicBool::new(false)),
         };
 
         (channel, message_tx)
@@ -479,6 +486,7 @@ impl Channel {
                                 skipped,
                                 "channel event stream lagged; continuing after dropping stale events"
                             );
+                            self.reconcile_finished_workers_after_lag(skipped).await;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                             tracing::warn!(channel_id = %self.id, "channel event stream closed");
@@ -531,6 +539,53 @@ impl Channel {
 
         tracing::info!(channel_id = %self.id, "channel stopped");
         Ok(())
+    }
+
+    async fn reconcile_finished_workers_after_lag(&self, skipped: u64) {
+        // Lagged event streams can drop WorkerComplete events, leaving finished
+        // handles behind and causing check_worker_limit() to overcount workers.
+        let finished_worker_ids: Vec<WorkerId> = {
+            let worker_handles = self.state.worker_handles.read().await;
+            worker_handles
+                .iter()
+                .filter_map(|(worker_id, handle)| handle.is_finished().then_some(*worker_id))
+                .collect()
+        };
+
+        if finished_worker_ids.is_empty() {
+            return;
+        }
+
+        let mut removed_handles = 0usize;
+        {
+            let mut worker_handles = self.state.worker_handles.write().await;
+            for worker_id in &finished_worker_ids {
+                if worker_handles.remove(worker_id).is_some() {
+                    removed_handles += 1;
+                }
+            }
+        }
+
+        {
+            let mut workers = self.state.active_workers.write().await;
+            for worker_id in &finished_worker_ids {
+                workers.remove(worker_id);
+            }
+        }
+
+        {
+            let mut worker_inputs = self.state.worker_inputs.write().await;
+            for worker_id in &finished_worker_ids {
+                worker_inputs.remove(worker_id);
+            }
+        }
+
+        tracing::warn!(
+            channel_id = %self.id,
+            skipped,
+            removed_handles,
+            "reconciled finished workers after lagged channel events"
+        );
     }
 
     /// Determine if a message should be coalesced (batched with other messages).
@@ -2170,12 +2225,25 @@ impl Channel {
     }
 
     fn flush_due_worker_delivery_receipts(&self) {
+        if self
+            .worker_receipt_flush_in_progress
+            .swap(true, Ordering::AcqRel)
+        {
+            tracing::debug!(
+                channel_id = %self.id,
+                "worker terminal receipt flush already in progress; skipping tick"
+            );
+            return;
+        }
+
         let run_logger = self.state.process_run_logger.clone();
         let response_tx = self.response_tx.clone();
         let channel_id = self.id.clone();
+        let in_progress = self.worker_receipt_flush_in_progress.clone();
         tokio::spawn(async move {
             Self::flush_due_worker_delivery_receipts_task(run_logger, response_tx, channel_id)
                 .await;
+            in_progress.store(false, Ordering::Release);
         });
     }
 
@@ -2233,10 +2301,22 @@ impl Channel {
     }
 
     fn flush_due_worker_task_contract_deadlines(&self) {
+        if self
+            .worker_contract_flush_in_progress
+            .swap(true, Ordering::AcqRel)
+        {
+            tracing::debug!(
+                channel_id = %self.id,
+                "worker task-contract flush already in progress; skipping tick"
+            );
+            return;
+        }
+
         let run_logger = self.state.process_run_logger.clone();
         let response_tx = self.response_tx.clone();
         let channel_id = self.id.clone();
         let status_block = self.state.status_block.clone();
+        let in_progress = self.worker_contract_flush_in_progress.clone();
         let ack_secs = self
             .deps
             .runtime_config
@@ -2253,6 +2333,7 @@ impl Channel {
                 ack_secs,
             )
             .await;
+            in_progress.store(false, Ordering::Release);
         });
     }
 
@@ -2987,7 +3068,6 @@ where
                                     skipped,
                                     "worker timeout watcher lagged on event stream"
                                 );
-                                deadline = tokio::time::Instant::now() + timeout_duration;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 tracing::warn!(

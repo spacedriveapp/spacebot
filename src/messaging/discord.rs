@@ -109,15 +109,18 @@ impl DiscordAdapter {
         } else {
             content.to_string()
         };
-        let mut progress_messages = self.progress_messages.write().await;
+        let existing_message_id = {
+            let progress_messages = self.progress_messages.read().await;
+            progress_messages.get(&key).copied()
+        };
 
-        if let Some(message_id) = progress_messages.get(&key).copied() {
+        if let Some(message_id) = existing_message_id {
             let builder = EditMessage::new().content(display_text.clone());
             match channel_id.edit_message(&*http, message_id, builder).await {
                 Ok(_) => return Ok(()),
                 Err(error) => {
                     tracing::warn!(%error, "failed to edit progress message; creating a new one");
-                    progress_messages.remove(&key);
+                    self.progress_messages.write().await.remove(&key);
                 }
             }
         }
@@ -131,7 +134,7 @@ impl DiscordAdapter {
             .send_message(&*http, builder)
             .await
             .context("failed to send worker progress message")?;
-        progress_messages.insert(key, sent.id);
+        self.progress_messages.write().await.insert(key, sent.id);
         Ok(())
     }
 

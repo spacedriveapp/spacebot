@@ -226,6 +226,16 @@ fn emit_outbound_sse_event(
     }
 }
 
+fn should_emit_outbound_sse_event(routed: &RoutedOutboundResponse) -> bool {
+    if routed.delivery_result.is_err() {
+        return false;
+    }
+    if routed.is_status_update {
+        return routed.status_surfaced;
+    }
+    true
+}
+
 async fn route_internal_link_reply(
     context: &OutboundRouteContext<'_>,
     response: &spacebot::OutboundResponse,
@@ -1482,13 +1492,7 @@ async fn run(
                             let receipt_id = envelope.receipt_id;
                             let response = envelope.response;
                             let receipt_log_text = outbound_response_text(&response);
-
-                            emit_outbound_sse_event(
-                                &api_event_tx,
-                                &sse_agent_id,
-                                &sse_channel_id,
-                                &response,
-                            );
+                            let response_for_sse = response.clone();
 
                             let current_message = outbound_message.read().await.clone();
                             let route_context = OutboundRouteContext {
@@ -1500,6 +1504,14 @@ async fn run(
                                 api_event_tx: &api_event_tx,
                             };
                             let routed = route_outbound_response(&route_context, response).await;
+                            if should_emit_outbound_sse_event(&routed) {
+                                emit_outbound_sse_event(
+                                    &api_event_tx,
+                                    &sse_agent_id,
+                                    &sse_channel_id,
+                                    &response_for_sse,
+                                );
+                            }
 
                             if let (Ok(()), Some(worker_id)) =
                                 (&routed.delivery_result, routed.acknowledged_worker_id)
