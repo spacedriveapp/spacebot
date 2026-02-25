@@ -594,7 +594,6 @@ impl ProcessRunLogger {
         sqlx::query(
             "UPDATE worker_task_contracts \
              SET task_summary = ?, \
-                 state = ?, \
                  ack_deadline_at = datetime('now', '+' || ? || ' seconds'), \
                  progress_deadline_at = datetime('now', '+' || ? || ' seconds'), \
                  terminal_deadline_at = datetime('now', '+' || ? || ' seconds'), \
@@ -605,7 +604,6 @@ impl ProcessRunLogger {
                AND state NOT IN (?, ?)",
         )
         .bind(task_summary)
-        .bind(WORKER_CONTRACT_STATE_CREATED)
         .bind(timing.ack_secs as i64)
         .bind(timing.progress_secs as i64)
         .bind(timing.terminal_secs as i64)
@@ -978,59 +976,60 @@ impl ProcessRunLogger {
     ) -> crate::error::Result<String> {
         let worker_id = worker_id.to_string();
         let channel_id = channel_id.to_string();
+        let candidate_receipt_id = uuid::Uuid::new_v4().to_string();
 
-        let existing = sqlx::query(
-            "SELECT id, status \
-             FROM worker_delivery_receipts \
-             WHERE worker_id = ? AND kind = ?",
-        )
-        .bind(&worker_id)
-        .bind(WORKER_TERMINAL_RECEIPT_KIND)
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))?;
-
-        if let Some(row) = existing {
-            let receipt_id: String = row.try_get("id").unwrap_or_default();
-            let status: String = row.try_get("status").unwrap_or_default();
-
-            if status != "acked" {
-                sqlx::query(
-                    "UPDATE worker_delivery_receipts \
-                     SET channel_id = ?, \
-                         terminal_state = ?, \
-                         payload_text = ?, \
-                         status = 'pending', \
-                         last_error = NULL, \
-                         next_attempt_at = CURRENT_TIMESTAMP, \
-                         updated_at = CURRENT_TIMESTAMP \
-                     WHERE id = ?",
-                )
-                .bind(&channel_id)
-                .bind(terminal_state)
-                .bind(payload_text)
-                .bind(&receipt_id)
-                .execute(&self.pool)
-                .await
-                .map_err(|error| anyhow::anyhow!(error))?;
-            }
-
-            return Ok(receipt_id);
-        }
-
-        let receipt_id = uuid::Uuid::new_v4().to_string();
         sqlx::query(
             "INSERT INTO worker_delivery_receipts \
              (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at) \
-             VALUES (?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP)",
+             VALUES (?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP) \
+             ON CONFLICT(worker_id, kind) DO UPDATE SET \
+                 channel_id = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.channel_id \
+                     ELSE excluded.channel_id \
+                 END, \
+                 terminal_state = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.terminal_state \
+                     ELSE excluded.terminal_state \
+                 END, \
+                 payload_text = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.payload_text \
+                     ELSE excluded.payload_text \
+                 END, \
+                 status = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.status \
+                     ELSE 'pending' \
+                 END, \
+                 last_error = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.last_error \
+                     ELSE NULL \
+                 END, \
+                 next_attempt_at = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.next_attempt_at \
+                     ELSE CURRENT_TIMESTAMP \
+                 END, \
+                 updated_at = CASE \
+                     WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.updated_at \
+                     ELSE CURRENT_TIMESTAMP \
+                 END",
         )
-        .bind(&receipt_id)
+        .bind(&candidate_receipt_id)
         .bind(&worker_id)
         .bind(&channel_id)
         .bind(WORKER_TERMINAL_RECEIPT_KIND)
         .bind(terminal_state)
         .bind(payload_text)
         .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let receipt_id: String = sqlx::query_scalar(
+            "SELECT id \
+             FROM worker_delivery_receipts \
+             WHERE worker_id = ? AND kind = ?",
+        )
+        .bind(&worker_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .fetch_one(&self.pool)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
@@ -1170,6 +1169,11 @@ impl ProcessRunLogger {
         &self,
         receipt_id: &str,
     ) -> crate::error::Result<bool> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
         let updated = sqlx::query(
             "UPDATE worker_delivery_receipts \
              SET status = 'acked', \
@@ -1179,7 +1183,7 @@ impl ProcessRunLogger {
              WHERE id = ? AND status != 'acked'",
         )
         .bind(receipt_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| anyhow::anyhow!(error))?
         .rows_affected();
@@ -1201,10 +1205,11 @@ impl ProcessRunLogger {
             .bind(WORKER_CONTRACT_STATE_PROGRESSING)
             .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
             .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
         }
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
 
         Ok(updated > 0)
     }
@@ -1215,13 +1220,18 @@ impl ProcessRunLogger {
         receipt_id: &str,
         error: &str,
     ) -> crate::error::Result<WorkerDeliveryRetryOutcome> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|db_error| anyhow::anyhow!(db_error))?;
         let row = sqlx::query(
             "SELECT status, attempt_count \
              FROM worker_delivery_receipts \
              WHERE id = ?",
         )
         .bind(receipt_id)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(|db_error| anyhow::anyhow!(db_error))?
         .ok_or_else(|| anyhow::anyhow!("worker delivery receipt not found: {receipt_id}"))?;
@@ -1230,6 +1240,9 @@ impl ProcessRunLogger {
         let current_attempts: i64 = row.try_get("attempt_count").unwrap_or_default();
 
         if current_status == "acked" {
+            tx.commit()
+                .await
+                .map_err(|db_error| anyhow::anyhow!(db_error))?;
             return Ok(WorkerDeliveryRetryOutcome {
                 status: "acked".to_string(),
                 attempt_count: current_attempts,
@@ -1250,7 +1263,7 @@ impl ProcessRunLogger {
             .bind(attempt_count)
             .bind(error)
             .bind(receipt_id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|db_error| anyhow::anyhow!(db_error))?;
 
@@ -1270,9 +1283,12 @@ impl ProcessRunLogger {
             .bind(WORKER_CONTRACT_STATE_PROGRESSING)
             .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
             .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(|db_error| anyhow::anyhow!(db_error))?;
+            tx.commit()
+                .await
+                .map_err(|db_error| anyhow::anyhow!(db_error))?;
 
             return Ok(WorkerDeliveryRetryOutcome {
                 status: "failed".to_string(),
@@ -1295,9 +1311,12 @@ impl ProcessRunLogger {
         .bind(error)
         .bind(delay_secs)
         .bind(receipt_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|db_error| anyhow::anyhow!(db_error))?;
+        tx.commit()
+            .await
+            .map_err(|db_error| anyhow::anyhow!(db_error))?;
 
         let next_attempt_at = chrono::Utc::now()
             .checked_add_signed(chrono::TimeDelta::seconds(delay_secs))
@@ -1397,7 +1416,13 @@ impl ProcessRunLogger {
              SET state = ?, \
                  terminal_state = COALESCE(terminal_state, 'failed'), \
                  updated_at = CURRENT_TIMESTAMP \
-             WHERE state NOT IN (?, ?)",
+             WHERE state NOT IN (?, ?) \
+               AND NOT EXISTS ( \
+                   SELECT 1 \
+                   FROM worker_delivery_receipts \
+                   WHERE worker_delivery_receipts.worker_id = worker_task_contracts.worker_id \
+                     AND worker_delivery_receipts.status = 'acked' \
+               )",
         )
         .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
@@ -1646,6 +1671,11 @@ impl ProcessRunLogger {
         worker_id: &str,
         limit: i64,
     ) -> crate::error::Result<Vec<WorkerEventRow>> {
+        if limit <= 0 {
+            return Err(anyhow::anyhow!("invalid limit: must be > 0").into());
+        }
+        let limit = limit.min(500);
+
         let rows = sqlx::query(
             "SELECT id, worker_id, channel_id, agent_id, event_type, payload_json, created_at \
              FROM worker_events \
@@ -1654,7 +1684,7 @@ impl ProcessRunLogger {
              LIMIT ?",
         )
         .bind(worker_id)
-        .bind(limit.clamp(1, 500))
+        .bind(limit)
         .fetch_all(&self.pool)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -1810,6 +1840,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_worker_events_rejects_non_positive_limit() {
+        let logger = connect_logger().await;
+        let error = logger
+            .list_worker_events("worker:test", 0)
+            .await
+            .expect_err("non-positive limit should fail");
+        assert!(error.to_string().contains("invalid limit"));
+    }
+
+    #[tokio::test]
     async fn worker_terminal_receipt_claim_ack_and_stats() {
         let logger = connect_logger().await;
         let channel_id: ChannelId = Arc::from("channel:test");
@@ -1859,6 +1899,63 @@ mod tests {
             .expect("load final stats");
         assert_eq!(final_stats.pending, 0);
         assert_eq!(final_stats.failed, 0);
+    }
+
+    #[tokio::test]
+    async fn worker_terminal_receipt_upsert_preserves_acked_rows() {
+        let logger = connect_logger().await;
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "done",
+                "Background task completed: first payload",
+            )
+            .await
+            .expect("upsert initial receipt");
+
+        sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET status = 'acked', \
+                 acked_at = CURRENT_TIMESTAMP, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE id = ?",
+        )
+        .bind(&receipt_id)
+        .execute(&logger.pool)
+        .await
+        .expect("mark receipt acked");
+
+        let second_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "failed",
+                "Background task failed: should not overwrite acked receipt",
+            )
+            .await
+            .expect("upsert should preserve acked row");
+        assert_eq!(second_id, receipt_id);
+
+        let row = sqlx::query(
+            "SELECT status, terminal_state, payload_text \
+             FROM worker_delivery_receipts \
+             WHERE id = ?",
+        )
+        .bind(&receipt_id)
+        .fetch_one(&logger.pool)
+        .await
+        .expect("load receipt row");
+        let status: String = row.try_get("status").unwrap_or_default();
+        let terminal_state: String = row.try_get("terminal_state").unwrap_or_default();
+        let payload_text: String = row.try_get("payload_text").unwrap_or_default();
+
+        assert_eq!(status, "acked");
+        assert_eq!(terminal_state, "done");
+        assert_eq!(payload_text, "Background task completed: first payload");
     }
 
     #[tokio::test]
@@ -2056,6 +2153,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn upsert_worker_task_contract_preserves_existing_state() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "first summary",
+                WorkerTaskContractTiming {
+                    ack_secs: 5,
+                    progress_secs: 45,
+                    terminal_secs: 60,
+                },
+            )
+            .await
+            .expect("upsert initial contract");
+        logger
+            .touch_worker_task_contract_progress(worker_id, Some("indexing"), 45)
+            .await
+            .expect("mark contract progressing");
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "updated summary",
+                WorkerTaskContractTiming {
+                    ack_secs: 10,
+                    progress_secs: 30,
+                    terminal_secs: 120,
+                },
+            )
+            .await
+            .expect("refresh contract");
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM worker_task_contracts WHERE worker_id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load contract state");
+        assert_eq!(state, WORKER_CONTRACT_STATE_PROGRESSING);
+    }
+
+    #[tokio::test]
     async fn worker_task_contract_moves_to_terminal_failed_on_receipt_exhaustion() {
         let logger = connect_logger().await;
         let agent_id: crate::AgentId = Arc::from("agent:test");
@@ -2164,6 +2311,58 @@ mod tests {
                 .await
                 .expect("load receipt status");
         assert_eq!(receipt_status, "failed");
+    }
+
+    #[tokio::test]
+    async fn close_orphaned_runs_does_not_fail_contract_with_acked_receipt() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "orphaned contract",
+                WorkerTaskContractTiming {
+                    ack_secs: 5,
+                    progress_secs: 45,
+                    terminal_secs: 60,
+                },
+            )
+            .await
+            .expect("upsert contract");
+
+        sqlx::query(
+            "INSERT INTO worker_delivery_receipts \
+             (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at, acked_at) \
+             VALUES (?, ?, ?, ?, 'acked', ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(worker_id.to_string())
+        .bind(channel_id.as_ref())
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .bind("done")
+        .bind("Background task completed: already delivered")
+        .execute(&logger.pool)
+        .await
+        .expect("insert acked receipt");
+
+        let (_, _, _, recovered_contracts) = logger
+            .close_orphaned_runs()
+            .await
+            .expect("close orphaned runs");
+        assert_eq!(recovered_contracts, 0);
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM worker_task_contracts WHERE worker_id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load contract state");
+        assert_eq!(state, WORKER_CONTRACT_STATE_CREATED);
     }
 
     #[tokio::test]

@@ -80,7 +80,7 @@ mod tests {
         for entry in entries {
             let entry = entry.expect("read migration directory entry");
             let path = entry.path();
-            if path.extension().and_then(|ext| ext.to_str()) != Some("sql") {
+            if path.extension().and_then(|extension| extension.to_str()) != Some("sql") {
                 continue;
             }
 
@@ -91,6 +91,10 @@ mod tests {
             let (version, _) = file_name
                 .split_once('_')
                 .expect("migration filename should contain version prefix");
+            assert!(
+                !version.is_empty(),
+                "migration version should not be empty: {file_name}"
+            );
             assert!(
                 version.chars().all(|character| character.is_ascii_digit()),
                 "migration version should be numeric: {file_name}"

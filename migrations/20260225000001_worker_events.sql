@@ -14,11 +14,11 @@ CREATE TABLE IF NOT EXISTS worker_events (
     FOREIGN KEY (worker_id) REFERENCES worker_runs(id) ON DELETE CASCADE
 );
 
-CREATE INDEX idx_worker_events_worker
+CREATE INDEX IF NOT EXISTS idx_worker_events_worker
     ON worker_events(worker_id, created_at);
 
-CREATE INDEX idx_worker_events_channel
+CREATE INDEX IF NOT EXISTS idx_worker_events_channel
     ON worker_events(channel_id, created_at);
 
-CREATE INDEX idx_worker_events_agent
+CREATE INDEX IF NOT EXISTS idx_worker_events_agent
     ON worker_events(agent_id, created_at);

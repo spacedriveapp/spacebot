@@ -78,6 +78,49 @@ pub struct ChannelState {
 }
 
 impl ChannelState {
+    fn send_worker_terminal_events(
+        &self,
+        worker_id: WorkerId,
+        status: &str,
+        result: String,
+        success: bool,
+    ) {
+        if let Err(error) = self.deps.event_tx.send(crate::ProcessEvent::WorkerStatus {
+            agent_id: self.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(self.channel_id.clone()),
+            status: status.to_string(),
+        }) {
+            tracing::warn!(
+                %error,
+                channel_id = %self.channel_id,
+                worker_id = %worker_id,
+                status,
+                "failed to emit worker terminal status event"
+            );
+        }
+        if let Err(error) = self
+            .deps
+            .event_tx
+            .send(crate::ProcessEvent::WorkerComplete {
+                agent_id: self.deps.agent_id.clone(),
+                worker_id,
+                channel_id: Some(self.channel_id.clone()),
+                result,
+                notify: true,
+                success,
+            })
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %self.channel_id,
+                worker_id = %worker_id,
+                success,
+                "failed to emit worker terminal completion event"
+            );
+        }
+    }
+
     /// Cancel a running worker by aborting its tokio task and cleaning up state.
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(
@@ -100,47 +143,42 @@ impl ChannelState {
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .unwrap_or("cancelled by request");
-            let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStatus {
-                agent_id: self.deps.agent_id.clone(),
-                worker_id,
-                channel_id: Some(self.channel_id.clone()),
-                status: "cancelled".to_string(),
-            });
-            let _ = self
-                .deps
-                .event_tx
-                .send(crate::ProcessEvent::WorkerComplete {
-                    agent_id: self.deps.agent_id.clone(),
-                    worker_id,
-                    channel_id: Some(self.channel_id.clone()),
-                    result: format!("Worker cancelled: {reason}."),
-                    notify: true,
-                    success: false,
-                });
+
+            match handle.await {
+                Err(join_error) if join_error.is_cancelled() => {
+                    self.send_worker_terminal_events(
+                        worker_id,
+                        "cancelled",
+                        format!("Worker cancelled: {reason}."),
+                        false,
+                    );
+                }
+                Err(join_error) => {
+                    let failure = format!("Worker failed during cancellation: {join_error}");
+                    tracing::warn!(
+                        %join_error,
+                        worker_id = %worker_id,
+                        channel_id = %self.channel_id,
+                        "worker join failed after cancellation request"
+                    );
+                    self.send_worker_terminal_events(worker_id, "failed", failure, false);
+                }
+                Ok(()) => {
+                    tracing::debug!(
+                        worker_id = %worker_id,
+                        channel_id = %self.channel_id,
+                        "worker finished before cancellation took effect"
+                    );
+                }
+            }
             Ok(())
         } else if removed {
             // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
-            let reason = reason
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("cancelled by request");
-            let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStatus {
-                agent_id: self.deps.agent_id.clone(),
-                worker_id,
-                channel_id: Some(self.channel_id.clone()),
-                status: "cancelled".to_string(),
-            });
-            let _ = self
-                .deps
-                .event_tx
-                .send(crate::ProcessEvent::WorkerComplete {
-                    agent_id: self.deps.agent_id.clone(),
-                    worker_id,
-                    channel_id: Some(self.channel_id.clone()),
-                    result: format!("Worker cancelled: {reason}."),
-                    notify: true,
-                    success: false,
-                });
+            tracing::warn!(
+                worker_id = %worker_id,
+                channel_id = %self.channel_id,
+                "worker cancellation requested but no join handle was present"
+            );
             Ok(())
         } else {
             Err(format!("Worker {worker_id} not found"))
@@ -1692,7 +1730,7 @@ impl Channel {
 
         let mut should_retrigger = false;
         let mut retrigger_metadata = std::collections::HashMap::new();
-        let run_logger = &self.state.process_run_logger;
+        let run_logger = self.state.process_run_logger.clone();
 
         match &event {
             ProcessEvent::BranchStarted {
@@ -1761,7 +1799,7 @@ impl Channel {
                     worker_type,
                     &self.deps.agent_id,
                 );
-                let worker_contract_config = **self.deps.runtime_config.worker_contract.load();
+                let worker_contract_config = self.deps.runtime_config.worker_contract.load();
                 let terminal_secs = self
                     .deps
                     .runtime_config
@@ -1770,27 +1808,35 @@ impl Channel {
                     .worker_timeout_secs
                     .max(1);
                 let public_task_summary = summarize_worker_start_for_status(task);
-                if let Err(error) = run_logger
-                    .upsert_worker_task_contract(
-                        &self.deps.agent_id,
-                        &self.id,
-                        *worker_id,
-                        &public_task_summary,
-                        crate::conversation::history::WorkerTaskContractTiming {
-                            ack_secs: worker_contract_config.ack_secs.max(1),
-                            progress_secs: worker_contract_config.progress_secs.max(1),
-                            terminal_secs,
-                        },
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to upsert worker task contract"
-                    );
-                }
+                let timing = crate::conversation::history::WorkerTaskContractTiming {
+                    ack_secs: worker_contract_config.ack_secs.max(1),
+                    progress_secs: worker_contract_config.progress_secs.max(1),
+                    terminal_secs,
+                };
+                let run_logger = run_logger.clone();
+                let agent_id = self.deps.agent_id.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                let task_summary = public_task_summary.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .upsert_worker_task_contract(
+                            &agent_id,
+                            &channel_id,
+                            event_worker_id,
+                            &task_summary,
+                            timing,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to upsert worker task contract"
+                        );
+                    }
+                });
                 self.worker_contract_tick_deadline = tokio::time::Instant::now();
                 if self.worker_is_user_visible(*worker_id).await {
                     self.send_status_update(crate::StatusUpdate::WorkerStarted {
@@ -1820,17 +1866,27 @@ impl Channel {
                     .load()
                     .progress_secs
                     .max(1);
-                if let Err(error) = run_logger
-                    .touch_worker_task_contract_progress(*worker_id, Some(status), progress_secs)
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to refresh worker task contract progress"
-                    );
-                }
+                let run_logger = run_logger.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                let status_text = status.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .touch_worker_task_contract_progress(
+                            event_worker_id,
+                            Some(status_text.as_str()),
+                            progress_secs,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to refresh worker task contract progress"
+                        );
+                    }
+                });
                 if self.worker_is_user_visible(*worker_id).await {
                     self.maybe_send_worker_checkpoint(*worker_id, status).await;
                 }
@@ -1853,21 +1909,27 @@ impl Channel {
                     .load()
                     .progress_secs
                     .max(1);
-                if let Err(error) = run_logger
-                    .touch_worker_task_contract_progress(
-                        *worker_id,
-                        Some(tool_name.as_str()),
-                        progress_secs,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to refresh worker task contract progress from tool event"
-                    );
-                }
+                let run_logger = run_logger.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                let tool_name = tool_name.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .touch_worker_task_contract_progress(
+                            event_worker_id,
+                            Some(tool_name.as_str()),
+                            progress_secs,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to refresh worker task contract progress from tool event"
+                        );
+                    }
+                });
             }
             ProcessEvent::ToolCompleted {
                 process_id: ProcessId::Worker(worker_id),
@@ -1887,21 +1949,27 @@ impl Channel {
                     .load()
                     .progress_secs
                     .max(1);
-                if let Err(error) = run_logger
-                    .touch_worker_task_contract_progress(
-                        *worker_id,
-                        Some(tool_name.as_str()),
-                        progress_secs,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to refresh worker task contract progress from tool event"
-                    );
-                }
+                let run_logger = run_logger.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                let tool_name = tool_name.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .touch_worker_task_contract_progress(
+                            event_worker_id,
+                            Some(tool_name.as_str()),
+                            progress_secs,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to refresh worker task contract progress from tool event"
+                        );
+                    }
+                });
             }
             ProcessEvent::WorkerPermission {
                 worker_id,
@@ -1925,21 +1993,27 @@ impl Channel {
                     .load()
                     .progress_secs
                     .max(1);
-                if let Err(error) = run_logger
-                    .touch_worker_task_contract_progress(
-                        *worker_id,
-                        Some(description.as_str()),
-                        progress_secs,
-                    )
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to refresh worker task contract progress from permission event"
-                    );
-                }
+                let run_logger = run_logger.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                let description = description.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .touch_worker_task_contract_progress(
+                            event_worker_id,
+                            Some(description.as_str()),
+                            progress_secs,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to refresh worker task contract progress from permission event"
+                        );
+                    }
+                });
             }
             ProcessEvent::WorkerQuestion {
                 worker_id,
@@ -1961,17 +2035,22 @@ impl Channel {
                     .load()
                     .progress_secs
                     .max(1);
-                if let Err(error) = run_logger
-                    .touch_worker_task_contract_progress(*worker_id, None, progress_secs)
-                    .await
-                {
-                    tracing::warn!(
-                        %error,
-                        channel_id = %self.id,
-                        worker_id = %worker_id,
-                        "failed to refresh worker task contract progress from question event"
-                    );
-                }
+                let run_logger = run_logger.clone();
+                let channel_id = self.id.clone();
+                let event_worker_id = *worker_id;
+                tokio::spawn(async move {
+                    if let Err(error) = run_logger
+                        .touch_worker_task_contract_progress(event_worker_id, None, progress_secs)
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %channel_id,
+                            worker_id = %event_worker_id,
+                            "failed to refresh worker task contract progress from question event"
+                        );
+                    }
+                });
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -1997,56 +2076,62 @@ impl Channel {
                         .load()
                         .worker_timeout_secs
                         .max(1);
-                    if let Err(error) = self
-                        .state
-                        .process_run_logger
-                        .mark_worker_task_contract_terminal_pending(
-                            *worker_id,
-                            terminal_state,
-                            terminal_secs,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %self.id,
-                            worker_id = %worker_id,
-                            "failed to mark worker contract terminal pending"
-                        );
-                    }
-                    let payload_text =
-                        build_worker_terminal_receipt_payload(terminal_state, result);
-                    match self
-                        .state
-                        .process_run_logger
-                        .upsert_worker_terminal_receipt(
-                            &self.id,
-                            *worker_id,
-                            terminal_state,
-                            &payload_text,
-                        )
-                        .await
-                    {
-                        Ok(receipt_id) => {
-                            tracing::info!(
-                                channel_id = %self.id,
-                                worker_id = %worker_id,
-                                receipt_id = %receipt_id,
-                                terminal_state,
-                                "queued worker terminal receipt"
-                            );
-                            self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
-                        }
-                        Err(error) => {
+                    self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
+                    let run_logger = self.state.process_run_logger.clone();
+                    let channel_id = self.id.clone();
+                    let worker_id = *worker_id;
+                    let terminal_state = terminal_state.to_string();
+                    let result_text = result.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = run_logger
+                            .mark_worker_task_contract_terminal_pending(
+                                worker_id,
+                                &terminal_state,
+                                terminal_secs,
+                            )
+                            .await
+                        {
                             tracing::warn!(
                                 %error,
-                                channel_id = %self.id,
+                                channel_id = %channel_id,
                                 worker_id = %worker_id,
-                                terminal_state,
-                                "failed to queue worker terminal receipt"
+                                terminal_state = %terminal_state,
+                                "failed to mark worker contract terminal pending"
                             );
+                            return;
                         }
-                    }
+
+                        let payload_text =
+                            build_worker_terminal_receipt_payload(&terminal_state, &result_text);
+                        match run_logger
+                            .upsert_worker_terminal_receipt(
+                                &channel_id,
+                                worker_id,
+                                &terminal_state,
+                                &payload_text,
+                            )
+                            .await
+                        {
+                            Ok(receipt_id) => {
+                                tracing::info!(
+                                    channel_id = %channel_id,
+                                    worker_id = %worker_id,
+                                    receipt_id = %receipt_id,
+                                    terminal_state = %terminal_state,
+                                    "queued worker terminal receipt"
+                                );
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    channel_id = %channel_id,
+                                    worker_id = %worker_id,
+                                    terminal_state = %terminal_state,
+                                    "failed to queue worker terminal receipt"
+                                );
+                            }
+                        }
+                    });
                 }
 
                 let mut workers = self.state.active_workers.write().await;
@@ -2924,21 +3009,42 @@ where
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 
-        let _ = event_tx.send(ProcessEvent::WorkerStatus {
+        if let Err(error) = event_tx.send(ProcessEvent::WorkerStatus {
             agent_id: agent_id.clone(),
             worker_id,
             channel_id: channel_id.clone(),
             status: terminal_status.to_string(),
-        });
+        }) {
+            tracing::warn!(
+                %error,
+                agent_id = %agent_id,
+                worker_id = %worker_id,
+                channel_id = ?channel_id,
+                terminal_status,
+                "failed to send terminal worker status event"
+            );
+        }
 
-        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+        let result_len = result_text.len();
+        let completion_channel_id = channel_id.clone();
+        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,
             worker_id,
             channel_id,
             result: result_text,
             notify,
             success,
-        });
+        }) {
+            tracing::warn!(
+                %error,
+                worker_id = %worker_id,
+                channel_id = ?completion_channel_id,
+                result_len,
+                notify,
+                success,
+                "failed to send worker completion event"
+            );
+        }
     })
 }
 

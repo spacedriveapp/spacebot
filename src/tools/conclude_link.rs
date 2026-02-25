@@ -94,10 +94,10 @@ impl Tool for ConcludeLinkTool {
         let summary_len = args.summary.len();
         *self.summary.write().await = Some(args.summary);
 
-        let _ = self
-            .response_tx
+        self.response_tx
             .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping).into())
-            .await;
+            .await
+            .ok();
 
         tracing::info!(
             summary_len,

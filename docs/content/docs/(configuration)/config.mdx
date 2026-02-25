@@ -233,6 +233,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
+| `[defaults.worker_contract]` (`ack_secs`, `progress_secs`, `tick_secs`) | Yes | Runtime contract deadlines and polling update without restart |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |

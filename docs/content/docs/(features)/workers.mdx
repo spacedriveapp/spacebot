@@ -62,13 +62,15 @@ Workers don't get memory tools, channel tools, or branch tools. They can't talk 
 
 ```
 Running ──→ Done              (fire-and-forget completed)
-Running ──→ Failed            (error or cancellation)
+Running ──→ Failed            (error)
+Running ──→ Cancelled         (cancelled by channel/system)
 Running ──→ WaitingForInput   (interactive worker finished initial task)
 WaitingForInput ──→ Running   (follow-up message received via route)
 WaitingForInput ──→ Failed    (follow-up processing failed)
+WaitingForInput ──→ Cancelled (cancelled by channel/system)
 ```
 
-`Done` and `Failed` are terminal. Illegal transitions are runtime errors.
+`Done`, `Failed`, and `Cancelled` are terminal. Illegal transitions are runtime errors.
 
 ## Context and History
 

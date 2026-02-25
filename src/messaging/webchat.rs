@@ -117,7 +117,10 @@ impl Messaging for WebChatAdapter {
             StatusUpdate::StopTyping => WebChatEvent::StopTyping,
             StatusUpdate::ToolStarted { tool_name } => WebChatEvent::ToolStarted { tool_name },
             StatusUpdate::ToolCompleted { tool_name } => WebChatEvent::ToolCompleted { tool_name },
-            _ => return Ok(DeliveryOutcome::NotSurfaced),
+            StatusUpdate::BranchStarted { .. } => return Ok(DeliveryOutcome::NotSurfaced),
+            StatusUpdate::WorkerStarted { .. } => return Ok(DeliveryOutcome::NotSurfaced),
+            StatusUpdate::WorkerCompleted { .. } => return Ok(DeliveryOutcome::NotSurfaced),
+            StatusUpdate::WorkerCheckpoint { .. } => return Ok(DeliveryOutcome::NotSurfaced),
         };
 
         Ok(if tx.send(event).await.is_ok() {

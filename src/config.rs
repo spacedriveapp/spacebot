@@ -3007,6 +3007,11 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
+        let resolve_nonzero_secs = |value: Option<u64>, fallback: u64| {
+            value
+                .and_then(|configured| (configured > 0).then_some(configured))
+                .unwrap_or(fallback)
+        };
         let defaults = DefaultsConfig {
             routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
             max_concurrent_branches: toml
@@ -3083,15 +3088,18 @@ impl Config {
                 .defaults
                 .worker_contract
                 .map(|contract| WorkerContractConfig {
-                    ack_secs: contract
-                        .ack_secs
-                        .unwrap_or(base_defaults.worker_contract.ack_secs),
-                    progress_secs: contract
-                        .progress_secs
-                        .unwrap_or(base_defaults.worker_contract.progress_secs),
-                    tick_secs: contract
-                        .tick_secs
-                        .unwrap_or(base_defaults.worker_contract.tick_secs),
+                    ack_secs: resolve_nonzero_secs(
+                        contract.ack_secs,
+                        base_defaults.worker_contract.ack_secs,
+                    ),
+                    progress_secs: resolve_nonzero_secs(
+                        contract.progress_secs,
+                        base_defaults.worker_contract.progress_secs,
+                    ),
+                    tick_secs: resolve_nonzero_secs(
+                        contract.tick_secs,
+                        base_defaults.worker_contract.tick_secs,
+                    ),
                 })
                 .unwrap_or(base_defaults.worker_contract),
             cortex: toml
@@ -3290,15 +3298,18 @@ impl Config {
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
                     worker_contract: a.worker_contract.map(|contract| WorkerContractConfig {
-                        ack_secs: contract
-                            .ack_secs
-                            .unwrap_or(defaults.worker_contract.ack_secs),
-                        progress_secs: contract
-                            .progress_secs
-                            .unwrap_or(defaults.worker_contract.progress_secs),
-                        tick_secs: contract
-                            .tick_secs
-                            .unwrap_or(defaults.worker_contract.tick_secs),
+                        ack_secs: resolve_nonzero_secs(
+                            contract.ack_secs,
+                            defaults.worker_contract.ack_secs,
+                        ),
+                        progress_secs: resolve_nonzero_secs(
+                            contract.progress_secs,
+                            defaults.worker_contract.progress_secs,
+                        ),
+                        tick_secs: resolve_nonzero_secs(
+                            contract.tick_secs,
+                            defaults.worker_contract.tick_secs,
+                        ),
                     }),
                     cortex: a.cortex.map(|c| CortexConfig {
                         tick_interval_secs: c
@@ -5163,6 +5174,57 @@ id = "main"
             .get("ollama")
             .expect("ollama provider should be registered");
         assert_eq!(provider.base_url, "http://remote-ollama:11434");
+    }
+
+    #[test]
+    fn worker_contract_zero_defaults_fallback_to_safe_defaults() {
+        let toml = r#"
+[defaults.worker_contract]
+ack_secs = 0
+progress_secs = 0
+tick_secs = 0
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let defaults = WorkerContractConfig::default();
+
+        assert_eq!(config.defaults.worker_contract.ack_secs, defaults.ack_secs);
+        assert_eq!(
+            config.defaults.worker_contract.progress_secs,
+            defaults.progress_secs
+        );
+        assert_eq!(
+            config.defaults.worker_contract.tick_secs,
+            defaults.tick_secs
+        );
+    }
+
+    #[test]
+    fn worker_contract_zero_agent_override_falls_back_to_instance_defaults() {
+        let toml = r#"
+[defaults.worker_contract]
+ack_secs = 9
+progress_secs = 27
+tick_secs = 3
+
+[[agents]]
+id = "main"
+
+[agents.worker_contract]
+ack_secs = 0
+progress_secs = 0
+tick_secs = 0
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert_eq!(resolved.worker_contract.ack_secs, 9);
+        assert_eq!(resolved.worker_contract.progress_secs, 27);
+        assert_eq!(resolved.worker_contract.tick_secs, 3);
     }
 
     #[test]
