@@ -148,6 +148,10 @@ impl ChannelState {
         worker_id: WorkerId,
         reason: Option<&str>,
     ) -> std::result::Result<(), String> {
+        let reason = reason
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("cancelled by request");
         let handle = self.worker_handles.write().await.remove(&worker_id);
         let removed = self
             .active_workers
@@ -159,10 +163,6 @@ impl ChannelState {
 
         if let Some(handle) = handle {
             handle.abort();
-            let reason = reason
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or("cancelled by request");
 
             match handle.await {
                 Err(join_error) if join_error.is_cancelled() => {
@@ -191,9 +191,7 @@ impl ChannelState {
                         channel_id = %self.channel_id,
                         "worker finished before cancellation took effect"
                     );
-                    Err(format!(
-                        "Worker {worker_id} finished before cancellation took effect"
-                    ))
+                    Ok(())
                 }
             }
         } else if removed {
@@ -202,6 +200,12 @@ impl ChannelState {
                 worker_id = %worker_id,
                 channel_id = %self.channel_id,
                 "worker cancellation requested but no join handle was present"
+            );
+            self.send_worker_terminal_events(
+                worker_id,
+                "cancelled",
+                format!("{WORKER_CANCELLED_PREFIX} {reason}."),
+                false,
             );
             Ok(())
         } else {
