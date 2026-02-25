@@ -1112,8 +1112,12 @@ async fn run(
                 // Forward the message to the channel
                 if let Some(active) = active_channels.get(&conversation_id) {
                     // Update the shared message reference so outbound routing
-                    // (typing indicators, reactions) targets this message
-                    *active.latest_message.write().await = message.clone();
+                    // (typing indicators, reactions) targets this message.
+                    // Skip for system retriggers so the outbound handler keeps
+                    // the real adapter source for routing replies.
+                    if message.source != "system" {
+                        *active.latest_message.write().await = message.clone();
+                    }
 
                     // Emit inbound message to SSE clients
                     let sender_name = message.formatted_author.clone().or_else(|| {

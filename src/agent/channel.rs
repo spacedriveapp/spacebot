@@ -850,8 +850,56 @@ impl Channel {
             }
         }
 
-        // Drop messages on concluded link channels
         let is_link_channel = message.conversation_id.starts_with("link:");
+
+        // Auto-conclude link channels when a conclusion message arrives.
+        // Skip the LLM — conclusions are control signals, not conversation.
+        // Bridge conclusions (from downstream links) pass through even on
+        // already-concluded channels so late results still cascade upward.
+        // Peer mirrors are blocked once concluded to prevent ping-pong.
+        let is_bridge_conclusion = message.metadata.contains_key("bridge_conclusion");
+        if is_link_conclusion && is_link_channel && (!self.link_concluded || is_bridge_conclusion) {
+            let summary = message
+                .metadata
+                .get("link_conclusion_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or(raw_text.as_str());
+            // When a bridge conclusion arrives on an already-concluded channel
+            // (e.g. a downstream result bubbling up after the intermediary already
+            // concluded upstream), tag the peer mirror as a bridge so it passes
+            // through the peer's concluded check and reaches their bridge_to_initiator.
+            let cascade_as_bridge = self.link_concluded && is_bridge_conclusion;
+            tracing::info!(
+                channel_id = %self.id,
+                cascade_as_bridge,
+                "auto-concluding link channel"
+            );
+            self.handle_link_conclusion(summary, cascade_as_bridge)
+                .await;
+            self.link_concluded = true;
+            return Ok(());
+        }
+
+        // Log conclusion retriggers on non-link channels to conversation history
+        // and let the LLM process them. Each conclusion from a different link
+        // conversation may carry distinct results (e.g. an intermediary concludes
+        // early with "delegated", then the actual result arrives later).
+        if is_link_conclusion && !is_link_channel {
+            self.state.conversation_logger.log_user_message(
+                &self.state.channel_id,
+                "system",
+                "system",
+                &raw_text,
+                &message.metadata,
+            );
+
+            tracing::info!(
+                channel_id = %self.id,
+                "processing link conclusion retrigger"
+            );
+        }
+
+        // Drop non-conclusion messages on concluded link channels
         if is_link_channel && self.link_concluded {
             tracing::debug!(
                 channel_id = %self.id,
@@ -865,14 +913,18 @@ impl Channel {
             self.link_turn_count += 1;
         }
 
-        // Safety cap: force-conclude link conversations at 20 turns
-        const LINK_MAX_TURNS: u32 = 20;
+        // Safety cap: force-conclude link conversations that run too long.
+        // Link channels are transactional — 6 turns is generous.
+        const LINK_MAX_TURNS: u32 = 6;
         if is_link_channel && self.link_turn_count > LINK_MAX_TURNS {
             tracing::warn!(
                 channel_id = %self.id,
                 turns = self.link_turn_count,
-                "link conversation hit safety cap, dropping message"
+                "link conversation hit safety cap, force-concluding"
             );
+            self.handle_link_conclusion("Link conversation ended (turn limit reached).", false)
+                .await;
+            self.link_concluded = true;
             return Ok(());
         }
 
@@ -901,22 +953,12 @@ impl Channel {
         let concluded = conclude_flag.load(std::sync::atomic::Ordering::Relaxed);
         if concluded {
             let summary = conclude_summary.read().await.clone().unwrap_or_default();
-            self.handle_link_conclusion(&summary).await;
+            self.handle_link_conclusion(&summary, false).await;
             self.link_concluded = true;
         }
 
-        // Handle incoming peer conclusion: if a link_conclusion message arrived
-        // and the LLM has processed it, mark this side as concluded too and
-        // bridge results back.
-        if is_link_conclusion && !self.link_concluded {
-            let summary = message
-                .metadata
-                .get("link_conclusion_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or(raw_text.as_str());
-            self.bridge_to_initiator(summary).await;
-            self.link_concluded = true;
-        }
+        // Note: link conclusion messages on link channels are handled by the
+        // early-return auto-conclude above and never reach this point.
 
         // Check context size and trigger compaction if needed
         if let Err(error) = self.compactor.check_and_compact().await {
@@ -1074,7 +1116,12 @@ impl Channel {
 
     /// Handle link channel conclusion: mirror the summary to the peer and
     /// bridge results back to the channel that initiated this link conversation.
-    async fn handle_link_conclusion(&self, summary: &str) {
+    /// Mirror the conclusion to the peer channel and bridge results to the
+    /// initiating channel. When `cascade_as_bridge` is true, the peer mirror
+    /// is tagged as a bridge conclusion so it passes through already-concluded
+    /// peers — this happens when a downstream result bubbles up through an
+    /// intermediary that already concluded its upstream link.
+    async fn handle_link_conclusion(&self, summary: &str, cascade_as_bridge: bool) {
         let Some(mm) = &self.deps.messaging_manager else {
             return;
         };
@@ -1099,6 +1146,9 @@ impl Channel {
             let mut metadata = std::collections::HashMap::new();
             metadata.insert("link_conclusion".into(), serde_json::json!(true));
             metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
+            if cascade_as_bridge {
+                metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
+            }
 
             let conclusion_message = crate::InboundMessage {
                 id: uuid::Uuid::new_v4().to_string(),
@@ -1125,6 +1175,7 @@ impl Channel {
             } else {
                 tracing::info!(
                     peer = %peer_display,
+                    cascade_as_bridge,
                     "mirrored conclusion to peer"
                 );
             }
@@ -1162,22 +1213,22 @@ impl Channel {
             })
             .unwrap_or_else(|| "agent".to_string());
 
-        // Determine the correct source and agent_id for the retrigger.
-        // If initiated_from is a link channel, keep source as "internal".
-        // Otherwise derive the adapter source from the channel ID prefix.
+        // Use "internal" for link channel targets so the mirror handler picks
+        // them up. Use "system" for non-link channels so the retrigger doesn't
+        // overwrite the outbound routing source (the outbound handler preserves
+        // the real adapter source for system messages).
         let source = if initiated_from.starts_with("link:") {
             "internal".to_string()
         } else {
-            initiated_from
-                .split(':')
-                .next()
-                .unwrap_or("webchat")
-                .to_string()
+            "system".to_string()
         };
 
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("link_conclusion".into(), serde_json::json!(true));
         metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
+        // Distinguish bridge conclusions from peer mirrors so the receiver
+        // can let bridges through even on already-concluded channels.
+        metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
 
         let retrigger = crate::InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1302,7 +1353,13 @@ impl Channel {
 
         let rc = &self.deps.runtime_config;
         let routing = rc.routing.load();
-        let max_turns = **rc.max_turns.load();
+        let configured_max_turns = **rc.max_turns.load();
+        // Link channels are transactional: cap depth to prevent chatty loops
+        let max_turns = if conversation_id.starts_with("link:") {
+            configured_max_turns.min(3)
+        } else {
+            configured_max_turns
+        };
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
