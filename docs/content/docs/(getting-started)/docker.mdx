@@ -206,11 +206,23 @@ healthcheck:
 
 Spacebot checks for new releases on startup and every hour. When a new version is available, a banner appears in the web UI.
 
+You can also open **Settings → Updates** for update status, one-click apply controls (Docker), and manual command snippets.
+
+`latest` is supported and continues to receive updates (it tracks the rolling `full` image). Use explicit version tags only when you want controlled rollouts.
+
 ### Manual Update
 
 ```bash
-docker pull ghcr.io/spacedriveapp/spacebot:slim
-docker compose up -d
+docker compose pull spacebot
+docker compose up -d --force-recreate spacebot
+```
+
+If you're not using Compose:
+
+```bash
+docker pull ghcr.io/spacedriveapp/spacebot:latest
+docker stop spacebot && docker rm spacebot
+# re-run your original docker run command with the new image tag
 ```
 
 ### One-Click Update
@@ -235,6 +247,18 @@ services:
 When the socket is mounted, the update banner shows an **Update now** button that pulls the new image and recreates the container automatically. Your `/data` volume is preserved across updates.
 
 Without the socket mount, the banner still notifies you of new versions but you'll need to update manually.
+
+One-click updates are intended for containers running Spacebot release tags. If you're running a custom/self-built image, update by rebuilding your image and recreating the container.
+
+### Native / Source Builds
+
+If Spacebot is installed from source (`cargo install --path .` or a local release build), updates are manual:
+
+1. Pull latest source
+2. Rebuild/reinstall the binary
+3. Restart Spacebot
+
+The web UI still shows update availability, but it cannot rebuild binaries for native installs.
 
 ### Update API
 

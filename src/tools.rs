@@ -181,6 +181,43 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     )
 }
 
+/// Returns true when text looks like structured/tool payloads that should never
+/// be sent to end users as plain chat output.
+pub fn should_block_user_visible_text(value: &str) -> bool {
+    const TOOL_PREFIXES: &[&str] = &[
+        "[reply]",
+        "(reply)",
+        "[react]",
+        "(react)",
+        "[skip]",
+        "(skip)",
+        "[branch]",
+        "(branch)",
+        "[spawn_worker]",
+        "(spawn_worker)",
+        "[route]",
+        "(route)",
+        "[cancel]",
+        "(cancel)",
+    ];
+
+    let trimmed = value.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if TOOL_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+
+    lower.starts_with("<system-reminder>") || lower.starts_with("<path>")
+}
+
 /// Add per-turn tools to a channel's ToolServer.
 ///
 /// Called when a conversation turn begins. These tools hold per-turn state
@@ -492,5 +529,23 @@ mod tests {
         let args: exec::ExecArgs =
             serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
         assert_eq!(args.timeout_seconds, 90);
+    }
+
+    #[test]
+    fn blocks_json_bracket_and_tool_syntax_output() {
+        assert!(should_block_user_visible_text("{\"content\":\"hello\"}"));
+        assert!(should_block_user_visible_text("[\"one\",\"two\"]"));
+        assert!(should_block_user_visible_text(
+            "[reply]\n{\"content\":\"hello\"}"
+        ));
+        assert!(should_block_user_visible_text(
+            "<system-reminder>hidden</system-reminder>"
+        ));
+    }
+
+    #[test]
+    fn allows_normal_plaintext_output() {
+        assert!(!should_block_user_visible_text("hello team"));
+        assert!(!should_block_user_visible_text("- first\n- second"));
     }
 }

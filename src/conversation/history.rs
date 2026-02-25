@@ -353,7 +353,7 @@ impl ProcessRunLogger {
         before: Option<&str>,
     ) -> crate::error::Result<Vec<TimelineItem>> {
         let before_clause = if before.is_some() {
-            "AND timestamp < ?3"
+            "AND datetime(timestamp) < datetime(?3)"
         } else {
             ""
         };

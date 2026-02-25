@@ -11,6 +11,7 @@ import {
 	type NodeProps,
 	type EdgeProps,
 	type NodeChange,
+	type EdgeChange,
 	useNodesState,
 	useEdgesState,
 	useReactFlow,
@@ -74,6 +75,39 @@ function savePositions(nodes: Node[]) {
 	}
 	try {
 		localStorage.setItem(POSITIONS_KEY, JSON.stringify(positions));
+	} catch {
+		// ignore
+	}
+}
+
+// -- Handle persistence --
+
+const HANDLES_KEY = "spacebot:topology:handles";
+
+type SavedHandles = Record<string, { sourceHandle: string; targetHandle: string }>;
+
+function loadHandles(): SavedHandles {
+	try {
+		const raw = localStorage.getItem(HANDLES_KEY);
+		if (raw) return JSON.parse(raw);
+	} catch {
+		// ignore
+	}
+	return {};
+}
+
+function saveHandles(edges: Edge[]) {
+	const handles: SavedHandles = {};
+	for (const edge of edges) {
+		if (edge.sourceHandle && edge.targetHandle) {
+			handles[edge.id] = {
+				sourceHandle: edge.sourceHandle,
+				targetHandle: edge.targetHandle,
+			};
+		}
+	}
+	try {
+		localStorage.setItem(HANDLES_KEY, JSON.stringify(handles));
 	} catch {
 		// ignore
 	}
@@ -368,23 +402,23 @@ function getHandlesForKind(
 	kind: string,
 	sourcePos?: { x: number; y: number },
 	targetPos?: { x: number; y: number },
+	savedHandles?: { sourceHandle: string; targetHandle: string },
 ): {
 	sourceHandle: string;
 	targetHandle: string;
 } {
+	// Use saved handles if available (user's explicit choice)
+	if (savedHandles) {
+		return savedHandles;
+	}
+	
 	if (kind === "hierarchical") {
 		// from is above to: connect bottom of superior to top of subordinate
 		return { sourceHandle: "bottom", targetHandle: "top" };
 	}
-	// Peer: pick the side facing the other node
+	// Peer: always use left/right handles (horizontal connections)
 	if (sourcePos && targetPos) {
 		const dx = targetPos.x - sourcePos.x;
-		const dy = targetPos.y - sourcePos.y;
-		if (Math.abs(dy) > Math.abs(dx)) {
-			return dy > 0
-				? { sourceHandle: "bottom", targetHandle: "top" }
-				: { sourceHandle: "top", targetHandle: "bottom" };
-		}
 		return dx > 0
 			? { sourceHandle: "right", targetHandle: "left" }
 			: { sourceHandle: "left", targetHandle: "right" };
@@ -912,7 +946,16 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const deleteLink = useMutation({
 		mutationFn: (params: { from: string; to: string }) =>
 			api.deleteLink(params.from, params.to),
-		onSuccess: () => {
+		onSuccess: (_, params) => {
+			// Clean up saved handles
+			const edgeId = `${params.from}->${params.to}`;
+			const currentHandles = loadHandles();
+			delete currentHandles[edgeId];
+			try {
+				localStorage.setItem(HANDLES_KEY, JSON.stringify(currentHandles));
+			} catch {
+				// ignore
+			}
 			queryClient.invalidateQueries({ queryKey: ["topology"] });
 			setSelectedEdge(null);
 		},
@@ -1008,6 +1051,26 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 			const from = (kind === "hierarchical" && isFromTop) ? connection.target : connection.source;
 			const to = (kind === "hierarchical" && isFromTop) ? connection.source : connection.target;
 
+			// Save handle information to localStorage
+			// Handles need to be stored relative to the final from/to, not the connection source/target
+			const edgeId = `${from}->${to}`;
+			if (connection.sourceHandle && connection.targetHandle) {
+				const currentHandles = loadHandles();
+				currentHandles[edgeId] = {
+					sourceHandle: (kind === "hierarchical" && isFromTop) 
+						? connection.targetHandle 
+						: connection.sourceHandle,
+					targetHandle: (kind === "hierarchical" && isFromTop) 
+						? connection.sourceHandle 
+						: connection.targetHandle,
+				};
+				try {
+					localStorage.setItem(HANDLES_KEY, JSON.stringify(currentHandles));
+				} catch {
+					// ignore
+				}
+			}
+
 			createLink.mutate({
 				from,
 				to,
@@ -1016,6 +1079,27 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 			});
 		},
 		[edges, createLink],
+	);
+
+	const handleEdgesChange = useCallback(
+		(changes: EdgeChange[]) => {
+			// Intercept edge removal (Delete/Backspace key)
+			for (const change of changes) {
+				if (change.type === "remove") {
+					const edge = edges.find((e) => e.id === change.id);
+					if (edge) {
+						// Parse edge ID format: "from->to"
+						const [from, to] = edge.id.split("->");
+						if (from && to) {
+							deleteLink.mutate({ from, to });
+						}
+					}
+				}
+			}
+			// Apply the changes to local state
+			onEdgesChange(changes);
+		},
+		[edges, deleteLink, onEdgesChange],
 	);
 
 	const onEdgeClick = useCallback(
@@ -1223,7 +1307,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 				nodes={nodes}
 				edges={edges}
 				onNodesChange={handleNodesChange}
-				onEdgesChange={onEdgesChange}
+				onEdgesChange={handleEdgesChange}
 				onConnect={onConnect}
 				onEdgeClick={onEdgeClick}
 				onNodeClick={onNodeClick}
@@ -1392,6 +1476,7 @@ function buildGraph(
 	agentProfiles: Map<string, AgentSummary>,
 ): { initialNodes: Node[]; initialEdges: Edge[] } {
 	const saved = loadPositions();
+	const savedHandles = loadHandles();
 	const allNodes: Node[] = [];
 
 	// Topology agent lookup for display_name / role
@@ -1574,10 +1659,12 @@ function buildGraph(
 	// Compute connected handles using actual positions
 	const connectedHandles = new Set<string>();
 	for (const link of links) {
+		const edgeId = `${link.from}->${link.to}`;
 		const { sourceHandle, targetHandle } = getHandlesForKind(
 			link.kind,
 			nodePositionMap.get(link.from),
 			nodePositionMap.get(link.to),
+			savedHandles[edgeId],
 		);
 		connectedHandles.add(`${link.from}:${sourceHandle}`);
 		connectedHandles.add(`${link.to}:${targetHandle}`);
@@ -1605,6 +1692,7 @@ function buildGraph(
 			link.kind,
 			nodePositionMap.get(link.from),
 			nodePositionMap.get(link.to),
+			savedHandles[edgeId],
 		);
 		return {
 			id: edgeId,

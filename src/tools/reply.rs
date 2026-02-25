@@ -354,6 +354,16 @@ impl Tool for ReplyTool {
         )
         .await;
 
+        if crate::tools::should_block_user_visible_text(&converted_content) {
+            tracing::warn!(
+                conversation_id = %self.conversation_id,
+                "reply tool blocked structured or tool-like output"
+            );
+            return Err(ReplyError(
+                "blocked reply content: looks like tool syntax or structured payload".into(),
+            ));
+        }
+
         self.conversation_logger.log_bot_message_with_name(
             &self.channel_id,
             &converted_content,
