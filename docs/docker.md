@@ -214,9 +214,17 @@ docker compose up -d --force-recreate spacebot
 
 ### One-Click Update
 
-Mount `/var/run/docker.sock` into the Spacebot container to enable the **Update now** button in the UI. Without the socket mount, update checks still work but apply is manual.
+Mount a container runtime socket into the Spacebot container to enable the **Update now** button in the UI. Without the socket mount, update checks still work but apply is manual.
+
+- Docker: `/var/run/docker.sock:/var/run/docker.sock`
+- Podman (rootful): `/run/podman/podman.sock:/run/podman/podman.sock`
+- Podman (rootless): `${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock`
 
 One-click updates are intended for containers running Spacebot release tags. If you're running a custom/self-built image, rebuild your image and recreate the container.
+
+For Podman one-click updates, set `SPACEBOT_DEPLOYMENT=docker` and ensure the Podman socket service is enabled (`systemctl --user enable --now podman.socket` for rootless, `sudo systemctl enable --now podman.socket` for rootful).
+
+On Fedora/RHEL with SELinux enforcing, include `--security-opt label=disable` when mounting the Podman socket.
 
 ### Native / Source Builds
 

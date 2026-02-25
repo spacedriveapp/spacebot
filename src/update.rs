@@ -1,7 +1,7 @@
-//! Update checking and Docker self-update.
+//! Update checking and container self-update.
 //!
 //! Checks GitHub releases for new versions and optionally performs
-//! in-place container updates when the Docker socket is available.
+//! in-place container updates when a runtime socket is available.
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,9 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Default check interval (1 hour).
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600);
+
+const DOCKER_ROOTFUL_SOCKET: &str = "/var/run/docker.sock";
+const PODMAN_ROOTFUL_SOCKET: &str = "/run/podman/podman.sock";
 
 /// Deployment environment, detected from SPACEBOT_DEPLOYMENT env var.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,7 +81,7 @@ pub struct UpdateStatus {
     pub release_url: Option<String>,
     pub release_notes: Option<String>,
     pub deployment: Deployment,
-    /// Whether the Docker socket is accessible (enables one-click update).
+    /// Whether a container runtime socket is accessible (enables one-click update).
     pub can_apply: bool,
     /// Human-readable reason when one-click apply is unavailable.
     pub cannot_apply_reason: Option<String>,
@@ -113,10 +116,11 @@ pub fn new_shared_status() -> SharedUpdateStatus {
     let mut status = UpdateStatus::default();
     match status.deployment {
         Deployment::Docker => {
-            status.can_apply = docker_socket_available();
+            status.can_apply = resolve_container_socket().is_some();
             if !status.can_apply {
-                status.cannot_apply_reason =
-                    Some("Mount /var/run/docker.sock to enable one-click updates.".to_string());
+                status.cannot_apply_reason = Some(
+                    "Mount a container runtime socket to enable one-click updates.".to_string(),
+                );
             }
         }
         Deployment::Native => {
@@ -232,9 +236,61 @@ fn is_newer_version(latest: &str, current: &str) -> bool {
     latest > current
 }
 
-/// Check if the Docker socket is accessible.
-fn docker_socket_available() -> bool {
-    std::path::Path::new("/var/run/docker.sock").exists()
+/// Probe for a usable container runtime socket.
+///
+/// Checks in order:
+/// 1. `DOCKER_HOST` env var (`unix://` only)
+/// 2. Docker rootful socket (`/var/run/docker.sock`)
+/// 3. Podman rootful socket (`/run/podman/podman.sock`)
+/// 4. Podman rootless socket (`$XDG_RUNTIME_DIR/podman/podman.sock`)
+fn resolve_container_socket() -> Option<String> {
+    resolve_container_socket_with(
+        std::env::var("DOCKER_HOST").ok().as_deref(),
+        DOCKER_ROOTFUL_SOCKET,
+        PODMAN_ROOTFUL_SOCKET,
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+    )
+}
+
+fn resolve_container_socket_with(
+    docker_host: Option<&str>,
+    docker_rootful: &str,
+    podman_rootful: &str,
+    xdg_runtime_dir: Option<&str>,
+) -> Option<String> {
+    if let Some(host) = docker_host
+        && let Some(path) = host.strip_prefix("unix://")
+        && std::path::Path::new(path).exists()
+    {
+        return Some(path.to_string());
+    }
+
+    if std::path::Path::new(docker_rootful).exists() {
+        return Some(docker_rootful.to_string());
+    }
+
+    if std::path::Path::new(podman_rootful).exists() {
+        return Some(podman_rootful.to_string());
+    }
+
+    if let Some(runtime_dir) = xdg_runtime_dir {
+        let rootless_socket = format!("{runtime_dir}/podman/podman.sock");
+        if std::path::Path::new(&rootless_socket).exists() {
+            return Some(rootless_socket);
+        }
+    }
+
+    None
+}
+
+fn connect_container_runtime(socket_path: &str) -> anyhow::Result<bollard::Docker> {
+    let client_version = bollard::ClientVersion {
+        major_version: 1,
+        minor_version: 40,
+    };
+
+    bollard::Docker::connect_with_socket(socket_path, 120, &client_version)
+        .map_err(|error| anyhow::anyhow!("failed to connect to container runtime: {error}"))
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +298,7 @@ struct ApplyCapability {
     can_apply: bool,
     cannot_apply_reason: Option<String>,
     docker_image: Option<String>,
+    socket_path: Option<String>,
 }
 
 async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
@@ -252,6 +309,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 "Native/source installs update manually (rebuild + restart).".to_string(),
             ),
             docker_image: None,
+            socket_path: None,
         },
         Deployment::Hosted => ApplyCapability {
             can_apply: false,
@@ -259,27 +317,30 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 "Hosted instances are updated by platform rollout, not self-service.".to_string(),
             ),
             docker_image: None,
+            socket_path: None,
         },
         Deployment::Docker => {
-            if !docker_socket_available() {
+            let Some(socket_path) = resolve_container_socket() else {
                 return ApplyCapability {
                     can_apply: false,
-                    cannot_apply_reason: Some(
-                        "Mount /var/run/docker.sock to enable one-click updates.".to_string(),
-                    ),
+                    cannot_apply_reason: Some(format!(
+                        "Mount a container runtime socket to enable one-click updates (Docker: {DOCKER_ROOTFUL_SOCKET}, Podman: {PODMAN_ROOTFUL_SOCKET})."
+                    )),
                     docker_image: None,
+                    socket_path: None,
                 };
-            }
+            };
 
-            let docker = match bollard::Docker::connect_with_local_defaults() {
+            let docker = match connect_container_runtime(&socket_path) {
                 Ok(client) => client,
                 Err(error) => {
                     return ApplyCapability {
                         can_apply: false,
                         cannot_apply_reason: Some(format!(
-                            "Docker socket is present but cannot be opened: {error}"
+                            "Container runtime socket is present but cannot be opened: {error}"
                         )),
                         docker_image: None,
+                        socket_path: Some(socket_path),
                     };
                 }
             };
@@ -288,9 +349,10 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 return ApplyCapability {
                     can_apply: false,
                     cannot_apply_reason: Some(format!(
-                        "Docker socket is mounted but engine is not reachable: {error}"
+                        "Container runtime socket is mounted but engine is not reachable: {error}"
                     )),
                     docker_image: None,
+                    socket_path: Some(socket_path),
                 };
             }
 
@@ -300,6 +362,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 can_apply: true,
                 cannot_apply_reason: None,
                 docker_image,
+                socket_path: Some(socket_path),
             }
         }
     }
@@ -340,9 +403,14 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
             "{}",
             capability
                 .cannot_apply_reason
-                .unwrap_or_else(|| "Docker socket not available".to_string())
+                .unwrap_or_else(|| "Container runtime socket not available".to_string())
         );
     }
+
+    let socket_path = capability
+        .socket_path
+        .as_deref()
+        .ok_or_else(|| anyhow::anyhow!("container runtime socket path not available"))?;
 
     let latest_version = current
         .latest_version
@@ -355,8 +423,7 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
         "applying Docker update"
     );
 
-    let docker = bollard::Docker::connect_with_local_defaults()
-        .map_err(|e| anyhow::anyhow!("failed to connect to Docker: {}", e))?;
+    let docker = connect_container_runtime(socket_path)?;
 
     // Determine which image tag this container is running
     let container_id = get_own_container_id()?;
@@ -533,9 +600,16 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
     std::process::exit(0);
 }
 
-/// Read this container's ID from /proc/self/cgroup or the hostname.
+/// Read this container's ID from /proc/self/mountinfo or the hostname.
 fn get_own_container_id() -> anyhow::Result<String> {
-    // In Docker, the hostname is typically the short container ID
+    // /proc/self/mountinfo includes full IDs for both Docker and Podman.
+    if let Ok(content) = std::fs::read_to_string("/proc/self/mountinfo") {
+        if let Some(id) = parse_container_id_from_mountinfo(&content) {
+            return Ok(id);
+        }
+    }
+
+    // Docker commonly sets hostname to the short container ID.
     if let Ok(hostname) = std::fs::read_to_string("/etc/hostname") {
         let hostname = hostname.trim();
         if hostname.len() >= 12 && hostname.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -543,23 +617,28 @@ fn get_own_container_id() -> anyhow::Result<String> {
         }
     }
 
-    // Fall back to /proc/self/mountinfo parsing
-    if let Ok(content) = std::fs::read_to_string("/proc/self/mountinfo") {
+    anyhow::bail!("could not determine own container ID")
+}
+
+fn parse_container_id_from_mountinfo(content: &str) -> Option<String> {
+    for (marker, offset) in [
+        ("/docker/containers/", 19usize),
+        ("/overlay-containers/", 20usize),
+    ] {
         for line in content.lines() {
-            // Look for docker container ID pattern in mount paths
-            if let Some(pos) = line.find("/docker/containers/") {
-                let after = &line[pos + 19..];
-                if let Some(end) = after.find('/') {
-                    let id = &after[..end];
-                    if id.len() >= 12 {
-                        return Ok(id.to_string());
+            if let Some(position) = line.find(marker) {
+                let after_marker = &line[position + offset..];
+                if let Some(end_index) = after_marker.find('/') {
+                    let id = &after_marker[..end_index];
+                    if id.len() == 64 && id.chars().all(|character| character.is_ascii_hexdigit()) {
+                        return Some(id.to_string());
                     }
                 }
             }
         }
     }
 
-    anyhow::bail!("could not determine own container ID")
+    None
 }
 
 /// Given a current image reference and a new version, produce the target image tag.
@@ -701,5 +780,128 @@ mod tests {
             ),
             "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
         );
+    }
+
+    fn create_fake_socket(temp_dir: &tempfile::TempDir, name: &str) -> String {
+        let path = temp_dir.path().join(name);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create parent directories for fake socket");
+        }
+        std::fs::File::create(&path).expect("create fake socket file");
+        path.to_string_lossy().to_string()
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_docker_rootful() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let docker_socket = create_fake_socket(&temp_dir, "docker.sock");
+
+        let resolved =
+            resolve_container_socket_with(None, &docker_socket, "/tmp/missing-podman.sock", None);
+        assert_eq!(resolved.as_deref(), Some(docker_socket.as_str()));
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_podman_rootful() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let podman_socket = create_fake_socket(&temp_dir, "podman.sock");
+
+        let resolved =
+            resolve_container_socket_with(None, "/tmp/missing-docker.sock", &podman_socket, None);
+        assert_eq!(resolved.as_deref(), Some(podman_socket.as_str()));
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_podman_rootless() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let runtime_dir = temp_dir.path().to_string_lossy().to_string();
+        let podman_socket = create_fake_socket(&temp_dir, "podman/podman.sock");
+
+        let resolved = resolve_container_socket_with(
+            None,
+            "/tmp/missing-docker.sock",
+            "/tmp/missing-podman.sock",
+            Some(&runtime_dir),
+        );
+        assert_eq!(resolved, Some(podman_socket));
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_docker_host_unix() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let custom_socket = create_fake_socket(&temp_dir, "custom.sock");
+        let docker_host = format!("unix://{custom_socket}");
+
+        let resolved = resolve_container_socket_with(
+            Some(&docker_host),
+            "/tmp/missing-docker.sock",
+            "/tmp/missing-podman.sock",
+            None,
+        );
+        assert_eq!(resolved.as_deref(), Some(custom_socket.as_str()));
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_tcp_docker_host_falls_back() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir");
+        let docker_socket = create_fake_socket(&temp_dir, "docker.sock");
+
+        let resolved = resolve_container_socket_with(
+            Some("tcp://127.0.0.1:2376"),
+            &docker_socket,
+            "/tmp/missing-podman.sock",
+            None,
+        );
+        assert_eq!(resolved.as_deref(), Some(docker_socket.as_str()));
+    }
+
+    #[test]
+    fn test_resolve_container_socket_with_none() {
+        let resolved = resolve_container_socket_with(
+            None,
+            "/tmp/missing-docker.sock",
+            "/tmp/missing-podman.sock",
+            None,
+        );
+        assert_eq!(resolved, None);
+    }
+
+    const DOCKER_ID: &str = "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2";
+    const PODMAN_ID: &str = "0011223344556677889900112233445566778899001122334455667788990011";
+
+    #[test]
+    fn test_parse_container_id_from_mountinfo_docker() {
+        let mountinfo = format!(
+            "123 0 0:1 / / rw - ext4 /dev/sda rw\n456 123 0:2 / /var/lib/docker/containers/{DOCKER_ID}/shm rw\n"
+        );
+
+        assert_eq!(
+            parse_container_id_from_mountinfo(&mountinfo).as_deref(),
+            Some(DOCKER_ID)
+        );
+    }
+
+    #[test]
+    fn test_parse_container_id_from_mountinfo_podman() {
+        let mountinfo = format!(
+            "123 0 0:1 / / rw - ext4 /dev/sda rw\n456 123 0:2 / /var/lib/containers/storage/overlay-containers/{PODMAN_ID}/userdata rw\n"
+        );
+
+        assert_eq!(
+            parse_container_id_from_mountinfo(&mountinfo).as_deref(),
+            Some(PODMAN_ID)
+        );
+    }
+
+    #[test]
+    fn test_parse_container_id_from_mountinfo_missing() {
+        let mountinfo = "123 0 0:1 / / rw - ext4 /dev/sda rw\n";
+        assert_eq!(parse_container_id_from_mountinfo(mountinfo), None);
+    }
+
+    #[test]
+    fn test_parse_container_id_from_mountinfo_short_id_ignored() {
+        let mountinfo = "456 123 0:2 / /docker/containers/abc123/shm rw\n";
+        assert_eq!(parse_container_id_from_mountinfo(mountinfo), None);
     }
 }
