@@ -814,6 +814,7 @@ fn spawn_worker_receipt_dispatch_loop(
                             .await
                         {
                             Ok(outcome) => {
+                                consecutive_failures = 0;
                                 tracing::warn!(
                                     agent_id = %agent_id,
                                     channel_id = %receipt.channel_id,

@@ -66,6 +66,8 @@ const WORKER_FLUSH_FAILURE_THRESHOLD: usize = 3;
 const WORKER_FAILED_PREFIX: &str = "Worker failed:";
 const WORKER_TIMED_OUT_PREFIX: &str = "Worker timed out after ";
 const WORKER_CANCELLED_PREFIX: &str = "Worker cancelled:";
+const WORKER_LAG_RECONCILE_FAILURE_RESULT: &str =
+    "Worker failed: completion event dropped after channel lag; final result unavailable.";
 
 #[derive(Debug, Clone)]
 struct WorkerCheckpointState {
@@ -80,6 +82,22 @@ enum FallbackReplyOutcome {
     EmptyNormalized,
     SuppressedLowValue,
     SendFailed,
+}
+
+struct ResetFlag {
+    flag: Arc<AtomicBool>,
+}
+
+impl ResetFlag {
+    fn new(flag: Arc<AtomicBool>) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for ResetFlag {
+    fn drop(&mut self) {
+        self.flag.store(false, Ordering::Release);
+    }
 }
 
 fn apply_periodic_flush_circuit(
@@ -594,7 +612,7 @@ impl Channel {
         Ok(())
     }
 
-    async fn reconcile_finished_workers_after_lag(&self, skipped: u64) {
+    async fn reconcile_finished_workers_after_lag(&mut self, skipped: u64) {
         // Lagged event streams can drop WorkerComplete events, leaving finished
         // handles behind and causing check_worker_limit() to overcount workers.
         let finished_worker_ids: Vec<WorkerId> = {
@@ -609,6 +627,20 @@ impl Channel {
             return;
         }
 
+        let notify_by_worker: HashMap<WorkerId, bool> = {
+            let status_block = self.state.status_block.read().await;
+            finished_worker_ids
+                .iter()
+                .map(|worker_id| {
+                    let notify = status_block
+                        .active_workers
+                        .iter()
+                        .any(|worker| worker.id == *worker_id && worker.notify_on_complete);
+                    (*worker_id, notify)
+                })
+                .collect()
+        };
+
         let mut removed_handles = 0usize;
         {
             let mut worker_handles = self.state.worker_handles.write().await;
@@ -620,16 +652,40 @@ impl Channel {
         }
 
         {
-            let mut workers = self.state.active_workers.write().await;
+            // Replay status-block convergence for dropped WorkerComplete events.
+            let mut status_block = self.state.status_block.write().await;
             for worker_id in &finished_worker_ids {
-                workers.remove(worker_id);
+                let notify = *notify_by_worker.get(worker_id).unwrap_or(&false);
+                let synthetic = ProcessEvent::WorkerComplete {
+                    agent_id: self.deps.agent_id.clone(),
+                    worker_id: *worker_id,
+                    channel_id: Some(self.id.clone()),
+                    result: WORKER_LAG_RECONCILE_FAILURE_RESULT.to_string(),
+                    notify,
+                    success: false,
+                };
+                status_block.update(&synthetic);
             }
         }
 
-        {
-            let mut worker_inputs = self.state.worker_inputs.write().await;
-            for worker_id in &finished_worker_ids {
-                worker_inputs.remove(worker_id);
+        for worker_id in &finished_worker_ids {
+            let notify = *notify_by_worker.get(worker_id).unwrap_or(&false);
+            self.apply_worker_completion_side_effects(
+                *worker_id,
+                WORKER_LAG_RECONCILE_FAILURE_RESULT,
+                notify,
+                false,
+            )
+            .await;
+        }
+
+        if self.pending_retrigger {
+            // Ensure reconciling lagged completions does not stall retrigger dispatch.
+            if self.retrigger_deadline.is_none() {
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
             }
         }
 
@@ -637,8 +693,118 @@ impl Channel {
             channel_id = %self.id,
             skipped,
             removed_handles,
+            reconciled_workers = finished_worker_ids.len(),
             "reconciled finished workers after lagged channel events"
         );
+    }
+
+    fn queue_worker_terminal_delivery(
+        &mut self,
+        worker_id: WorkerId,
+        terminal_state: &str,
+        result_text: &str,
+    ) {
+        let terminal_secs = self
+            .deps
+            .runtime_config
+            .cortex
+            .load()
+            .worker_timeout_secs
+            .max(1);
+        self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
+        let run_logger = self.state.process_run_logger.clone();
+        let channel_id = self.id.clone();
+        let terminal_state = terminal_state.to_string();
+        let result_text = result_text.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = run_logger
+                .mark_worker_task_contract_terminal_pending(
+                    worker_id,
+                    &terminal_state,
+                    terminal_secs,
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    channel_id = %channel_id,
+                    worker_id = %worker_id,
+                    terminal_state = %terminal_state,
+                    "failed to mark worker contract terminal pending"
+                );
+                return;
+            }
+
+            let payload_text = build_worker_terminal_receipt_payload(&terminal_state, &result_text);
+            match run_logger
+                .upsert_worker_terminal_receipt(
+                    &channel_id,
+                    worker_id,
+                    &terminal_state,
+                    &payload_text,
+                )
+                .await
+            {
+                Ok(receipt_id) => {
+                    tracing::info!(
+                        channel_id = %channel_id,
+                        worker_id = %worker_id,
+                        receipt_id = %receipt_id,
+                        terminal_state = %terminal_state,
+                        "queued worker terminal receipt"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        worker_id = %worker_id,
+                        terminal_state = %terminal_state,
+                        "failed to queue worker terminal receipt"
+                    );
+                }
+            }
+        });
+    }
+
+    async fn apply_worker_completion_side_effects(
+        &mut self,
+        worker_id: WorkerId,
+        result: &str,
+        notify: bool,
+        success: bool,
+    ) {
+        let run_logger = self.state.process_run_logger.clone();
+        run_logger.log_worker_completed(worker_id, result, success);
+        self.worker_checkpoints.remove(&worker_id);
+
+        if notify {
+            self.send_status_update(crate::StatusUpdate::WorkerCompleted {
+                worker_id,
+                result: summarize_worker_result_for_status(result),
+            })
+            .await;
+            let terminal_state = classify_worker_terminal_state(result);
+            self.queue_worker_terminal_delivery(worker_id, terminal_state, result);
+        }
+
+        let mut workers = self.state.active_workers.write().await;
+        workers.remove(&worker_id);
+        drop(workers);
+
+        self.state.worker_handles.write().await.remove(&worker_id);
+        self.state.worker_inputs.write().await.remove(&worker_id);
+
+        if notify && !is_worker_terminal_failure(result) {
+            let mut history = self.state.history.write().await;
+            let worker_message = format!("[Worker {worker_id} completed]: {result}");
+            history.push(rig::message::Message::from(worker_message));
+            self.pending_retrigger = true;
+            self.retrigger_deadline = Some(
+                tokio::time::Instant::now()
+                    + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+            );
+        }
     }
 
     pub fn reset_worker_receipt_circuit(&mut self) {
@@ -2092,95 +2258,11 @@ impl Channel {
                 success,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result, *success);
-                self.worker_checkpoints.remove(worker_id);
-                if *notify {
-                    self.send_status_update(crate::StatusUpdate::WorkerCompleted {
-                        worker_id: *worker_id,
-                        result: summarize_worker_result_for_status(result),
-                    })
+                let retrigger_before = self.pending_retrigger;
+                self.apply_worker_completion_side_effects(*worker_id, result, *notify, *success)
                     .await;
-
-                    let terminal_state = classify_worker_terminal_state(result);
-                    let terminal_secs = self
-                        .deps
-                        .runtime_config
-                        .cortex
-                        .load()
-                        .worker_timeout_secs
-                        .max(1);
-                    self.worker_receipt_dispatch_deadline = tokio::time::Instant::now();
-                    let run_logger = self.state.process_run_logger.clone();
-                    let channel_id = self.id.clone();
-                    let worker_id = *worker_id;
-                    let terminal_state = terminal_state.to_string();
-                    let result_text = result.clone();
-                    tokio::spawn(async move {
-                        if let Err(error) = run_logger
-                            .mark_worker_task_contract_terminal_pending(
-                                worker_id,
-                                &terminal_state,
-                                terminal_secs,
-                            )
-                            .await
-                        {
-                            tracing::warn!(
-                                %error,
-                                channel_id = %channel_id,
-                                worker_id = %worker_id,
-                                terminal_state = %terminal_state,
-                                "failed to mark worker contract terminal pending"
-                            );
-                            return;
-                        }
-
-                        let payload_text =
-                            build_worker_terminal_receipt_payload(&terminal_state, &result_text);
-                        match run_logger
-                            .upsert_worker_terminal_receipt(
-                                &channel_id,
-                                worker_id,
-                                &terminal_state,
-                                &payload_text,
-                            )
-                            .await
-                        {
-                            Ok(receipt_id) => {
-                                tracing::info!(
-                                    channel_id = %channel_id,
-                                    worker_id = %worker_id,
-                                    receipt_id = %receipt_id,
-                                    terminal_state = %terminal_state,
-                                    "queued worker terminal receipt"
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    %error,
-                                    channel_id = %channel_id,
-                                    worker_id = %worker_id,
-                                    terminal_state = %terminal_state,
-                                    "failed to queue worker terminal receipt"
-                                );
-                            }
-                        }
-                    });
-                }
-
-                let mut workers = self.state.active_workers.write().await;
-                workers.remove(worker_id);
-                drop(workers);
-
-                self.state.worker_handles.write().await.remove(worker_id);
-                self.state.worker_inputs.write().await.remove(worker_id);
-
-                if *notify && !is_worker_terminal_failure(result) {
-                    let mut history = self.state.history.write().await;
-                    let worker_message = format!("[Worker {worker_id} completed]: {result}");
-                    history.push(rig::message::Message::from(worker_message));
-                    should_retrigger = true;
-                }
-
+                should_retrigger =
+                    should_retrigger || (!retrigger_before && self.pending_retrigger);
                 tracing::info!(worker_id = %worker_id, "worker completed");
             }
             _ => {}
@@ -2308,6 +2390,7 @@ impl Channel {
         let failure_count = self.worker_receipt_failure_count.clone();
         let circuit_open = self.worker_receipt_circuit_open.clone();
         tokio::spawn(async move {
+            let _reset_flag = ResetFlag::new(in_progress);
             let task_result = Self::flush_due_worker_delivery_receipts_task(
                 run_logger,
                 response_tx,
@@ -2333,7 +2416,6 @@ impl Channel {
                     );
                 }
             }
-            in_progress.store(false, Ordering::Release);
         });
     }
 
@@ -2426,6 +2508,7 @@ impl Channel {
             .ack_secs
             .max(1);
         tokio::spawn(async move {
+            let _reset_flag = ResetFlag::new(in_progress);
             let task_result = Self::flush_due_worker_task_contract_deadlines_task(
                 run_logger,
                 response_tx,
@@ -2453,7 +2536,6 @@ impl Channel {
                     );
                 }
             }
-            in_progress.store(false, Ordering::Release);
         });
     }
 
@@ -2584,7 +2666,7 @@ impl Channel {
             tracing::warn!(
                 channel_id = %channel_id,
                 worker_id = %due.worker_id,
-                "worker terminal deadline elapsed before adapter acknowledgement"
+                "worker terminal deadline elapsed before adapter acknowledgement; contract transitioned to terminal_failed and pending receipts were marked failed"
             );
         }
 
@@ -2603,8 +2685,7 @@ impl Channel {
         status_block
             .active_workers
             .iter()
-            .find(|worker| worker.id == worker_id)
-            .is_some_and(|worker| worker.notify_on_complete)
+            .any(|worker| worker.id == worker_id && worker.notify_on_complete)
     }
 
     async fn worker_is_user_visible(&self, worker_id: WorkerId) -> bool {
@@ -2612,8 +2693,7 @@ impl Channel {
         status_block
             .active_workers
             .iter()
-            .find(|worker| worker.id == worker_id)
-            .is_some_and(|worker| worker.notify_on_complete)
+            .any(|worker| worker.id == worker_id && worker.notify_on_complete)
     }
 
     /// Flush the pending retrigger: send a synthetic system message to re-trigger
