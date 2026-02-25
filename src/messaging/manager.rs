@@ -1,6 +1,8 @@
 //! MessagingManager: Fan-in and routing for all adapters.
 
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging, MessagingDyn};
+use crate::messaging::traits::{
+    DeliveryOutcome, HistoryMessage, InboundStream, Messaging, MessagingDyn,
+};
 use crate::{InboundMessage, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -217,7 +219,7 @@ impl MessagingManager {
         &self,
         message: &InboundMessage,
         status: StatusUpdate,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<DeliveryOutcome> {
         let adapters = self.adapters.read().await;
         let adapter = adapters
             .get(&message.source)

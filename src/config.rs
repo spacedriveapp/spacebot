@@ -337,6 +337,7 @@ pub struct DefaultsConfig {
     pub memory_persistence: MemoryPersistenceConfig,
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
+    pub worker_contract: WorkerContractConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
@@ -365,6 +366,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("memory_persistence", &self.memory_persistence)
             .field("coalesce", &self.coalesce)
             .field("ingestion", &self.ingestion)
+            .field("worker_contract", &self.worker_contract)
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
             .field("browser", &self.browser)
@@ -567,6 +569,27 @@ impl Default for OpenCodeConfig {
     }
 }
 
+/// Worker task contract timing configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerContractConfig {
+    /// Deadline (seconds) to confirm a spawned worker has been acknowledged.
+    pub ack_secs: u64,
+    /// Deadline (seconds) between meaningful progress updates.
+    pub progress_secs: u64,
+    /// Polling interval (seconds) for contract deadline checks.
+    pub tick_secs: u64,
+}
+
+impl Default for WorkerContractConfig {
+    fn default() -> Self {
+        Self {
+            ack_secs: 5,
+            progress_secs: 45,
+            tick_secs: 2,
+        }
+    }
+}
+
 /// Cortex configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct CortexConfig {
@@ -756,6 +779,7 @@ pub struct AgentConfig {
     pub memory_persistence: Option<MemoryPersistenceConfig>,
     pub coalesce: Option<CoalesceConfig>,
     pub ingestion: Option<IngestionConfig>,
+    pub worker_contract: Option<WorkerContractConfig>,
     pub cortex: Option<CortexConfig>,
     pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
@@ -806,6 +830,7 @@ pub struct ResolvedAgentConfig {
     pub memory_persistence: MemoryPersistenceConfig,
     pub coalesce: CoalesceConfig,
     pub ingestion: IngestionConfig,
+    pub worker_contract: WorkerContractConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
@@ -832,6 +857,7 @@ impl Default for DefaultsConfig {
             memory_persistence: MemoryPersistenceConfig::default(),
             coalesce: CoalesceConfig::default(),
             ingestion: IngestionConfig::default(),
+            worker_contract: WorkerContractConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
             browser: BrowserConfig::default(),
@@ -880,6 +906,7 @@ impl AgentConfig {
                 .unwrap_or(defaults.memory_persistence),
             coalesce: self.coalesce.unwrap_or(defaults.coalesce),
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
+            worker_contract: self.worker_contract.unwrap_or(defaults.worker_contract),
             cortex: self.cortex.unwrap_or(defaults.cortex),
             warmup: self.warmup.unwrap_or(defaults.warmup),
             browser: self
@@ -1712,6 +1739,7 @@ struct TomlDefaultsConfig {
     memory_persistence: Option<TomlMemoryPersistenceConfig>,
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
+    worker_contract: Option<TomlWorkerContractConfig>,
     cortex: Option<TomlCortexConfig>,
     warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
@@ -1762,6 +1790,13 @@ struct TomlIngestionConfig {
     enabled: Option<bool>,
     poll_interval_secs: Option<u64>,
     chunk_size: Option<usize>,
+}
+
+#[derive(Deserialize)]
+struct TomlWorkerContractConfig {
+    ack_secs: Option<u64>,
+    progress_secs: Option<u64>,
+    tick_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -1858,6 +1893,7 @@ struct TomlAgentConfig {
     memory_persistence: Option<TomlMemoryPersistenceConfig>,
     coalesce: Option<TomlCoalesceConfig>,
     ingestion: Option<TomlIngestionConfig>,
+    worker_contract: Option<TomlWorkerContractConfig>,
     cortex: Option<TomlCortexConfig>,
     warmup: Option<TomlWarmupConfig>,
     browser: Option<TomlBrowserConfig>,
@@ -2539,6 +2575,7 @@ impl Config {
             memory_persistence: None,
             coalesce: None,
             ingestion: None,
+            worker_contract: None,
             cortex: None,
             warmup: None,
             browser: None,
@@ -3042,6 +3079,21 @@ impl Config {
                     chunk_size: ig.chunk_size.unwrap_or(base_defaults.ingestion.chunk_size),
                 })
                 .unwrap_or(base_defaults.ingestion),
+            worker_contract: toml
+                .defaults
+                .worker_contract
+                .map(|contract| WorkerContractConfig {
+                    ack_secs: contract
+                        .ack_secs
+                        .unwrap_or(base_defaults.worker_contract.ack_secs),
+                    progress_secs: contract
+                        .progress_secs
+                        .unwrap_or(base_defaults.worker_contract.progress_secs),
+                    tick_secs: contract
+                        .tick_secs
+                        .unwrap_or(base_defaults.worker_contract.tick_secs),
+                })
+                .unwrap_or(base_defaults.worker_contract),
             cortex: toml
                 .defaults
                 .cortex
@@ -3237,6 +3289,17 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
+                    worker_contract: a.worker_contract.map(|contract| WorkerContractConfig {
+                        ack_secs: contract
+                            .ack_secs
+                            .unwrap_or(defaults.worker_contract.ack_secs),
+                        progress_secs: contract
+                            .progress_secs
+                            .unwrap_or(defaults.worker_contract.progress_secs),
+                        tick_secs: contract
+                            .tick_secs
+                            .unwrap_or(defaults.worker_contract.tick_secs),
+                    }),
                     cortex: a.cortex.map(|c| CortexConfig {
                         tick_interval_secs: c
                             .tick_interval_secs
@@ -3330,6 +3393,7 @@ impl Config {
                 memory_persistence: None,
                 coalesce: None,
                 ingestion: None,
+                worker_contract: None,
                 cortex: None,
                 warmup: None,
                 browser: None,
@@ -3600,6 +3664,7 @@ pub struct RuntimeConfig {
     pub memory_persistence: ArcSwap<MemoryPersistenceConfig>,
     pub coalesce: ArcSwap<CoalesceConfig>,
     pub ingestion: ArcSwap<IngestionConfig>,
+    pub worker_contract: ArcSwap<WorkerContractConfig>,
     pub max_turns: ArcSwap<usize>,
     pub branch_max_turns: ArcSwap<usize>,
     pub context_window: ArcSwap<usize>,
@@ -3660,6 +3725,7 @@ impl RuntimeConfig {
             memory_persistence: ArcSwap::from_pointee(agent_config.memory_persistence),
             coalesce: ArcSwap::from_pointee(agent_config.coalesce),
             ingestion: ArcSwap::from_pointee(agent_config.ingestion),
+            worker_contract: ArcSwap::from_pointee(agent_config.worker_contract),
             max_turns: ArcSwap::from_pointee(agent_config.max_turns),
             branch_max_turns: ArcSwap::from_pointee(agent_config.branch_max_turns),
             context_window: ArcSwap::from_pointee(agent_config.context_window),
@@ -3742,6 +3808,8 @@ impl RuntimeConfig {
             .store(Arc::new(resolved.memory_persistence));
         self.coalesce.store(Arc::new(resolved.coalesce));
         self.ingestion.store(Arc::new(resolved.ingestion));
+        self.worker_contract
+            .store(Arc::new(resolved.worker_contract));
         self.max_turns.store(Arc::new(resolved.max_turns));
         self.branch_max_turns
             .store(Arc::new(resolved.branch_max_turns));

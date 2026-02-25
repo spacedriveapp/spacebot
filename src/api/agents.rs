@@ -524,6 +524,7 @@ pub(super) async fn create_agent(
         memory_persistence: None,
         coalesce: None,
         ingestion: None,
+        worker_contract: None,
         cortex: None,
         warmup: None,
         browser: None,

@@ -4,7 +4,7 @@
 //! tool with a summary. The channel checks the flag after the LLM turn and
 //! routes the summary back to the originating channel as a system message.
 
-use crate::OutboundResponse;
+use crate::{OutboundEnvelope, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -32,14 +32,14 @@ pub fn new_conclude_link() -> (ConcludeLinkFlag, ConcludeLinkSummary) {
 pub struct ConcludeLinkTool {
     flag: ConcludeLinkFlag,
     summary: ConcludeLinkSummary,
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: mpsc::Sender<OutboundEnvelope>,
 }
 
 impl ConcludeLinkTool {
     pub fn new(
         flag: ConcludeLinkFlag,
         summary: ConcludeLinkSummary,
-        response_tx: mpsc::Sender<OutboundResponse>,
+        response_tx: mpsc::Sender<OutboundEnvelope>,
     ) -> Self {
         Self {
             flag,
@@ -96,7 +96,7 @@ impl Tool for ConcludeLinkTool {
 
         let _ = self
             .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping).into())
             .await;
 
         tracing::info!(

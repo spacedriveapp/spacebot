@@ -127,6 +127,16 @@ Worker runs are bounded by `worker_timeout_secs` (default `300`) as an inactivit
 
 If no progress arrives within the timeout window, Spacebot marks the worker as `timed_out`, records a terminal result, and removes it from active worker state so the channel can continue delegating work.
 
+## Deterministic Task Contracts
+
+Each worker run now gets an internal task contract with three deadlines:
+
+- **Acknowledge deadline** — confirms the worker start was surfaced to the user-facing adapter.
+- **Progress deadline** — expects a meaningful heartbeat before the deadline.
+- **Terminal deadline** — tracks terminal delivery lifecycle until receipt ack/failure.
+
+If the acknowledge deadline is missed, Spacebot emits a synthesized "running" checkpoint. If the progress deadline is missed, it emits one synthesized "still working" nudge (one-time, no spam loop). Terminal receipt ack/failure then closes the contract as `terminal_acked` or `terminal_failed`.
+
 ## Terminal Delivery Reliability
 
 Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued as durable delivery receipts before they are sent to the messaging adapter.
@@ -135,6 +145,18 @@ Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued 
 - Successful delivery marks the receipt as acknowledged.
 - On process restart, in-flight (`sending`) receipts are re-queued so completion notices are not silently dropped.
 - Old terminal receipts (`acked`, `failed`) are pruned periodically to keep storage bounded.
+
+## Worker Event Journal
+
+Worker lifecycle updates are also written to an append-only `worker_events` table:
+
+- `started` with task + worker type
+- `status` checkpoints
+- `tool_started` / `tool_completed`
+- `permission` / `question`
+- `completed` with terminal summary
+
+This gives us durable debugging context even after in-memory status blocks are gone. The workers API and `worker_inspect` surface this timeline so long-running task behavior can be audited post-run.
 
 ## Model Routing
 

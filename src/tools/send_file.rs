@@ -17,11 +17,37 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
     response_tx: mpsc::Sender<OutboundEnvelope>,
+    workspace: PathBuf,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundEnvelope>) -> Self {
-        Self { response_tx }
+    pub fn new(response_tx: mpsc::Sender<OutboundEnvelope>, workspace: PathBuf) -> Self {
+        Self {
+            response_tx,
+            workspace,
+        }
+    }
+
+    /// Validate that a path falls within the workspace boundary.
+    fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
+        let workspace = &self.workspace;
+
+        let canonical = path.canonicalize().map_err(|error| {
+            SendFileError(format!("can't resolve path '{}': {error}", path.display()))
+        })?;
+        let workspace_canonical = workspace
+            .canonicalize()
+            .unwrap_or_else(|_| workspace.clone());
+
+        if !canonical.starts_with(&workspace_canonical) {
+            return Err(SendFileError(format!(
+                "ACCESS DENIED: Path is outside the workspace boundary. \
+                 File operations are restricted to {}.",
+                workspace.display()
+            )));
+        }
+
+        Ok(canonical)
     }
 }
 

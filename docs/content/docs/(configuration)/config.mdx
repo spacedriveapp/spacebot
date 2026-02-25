@@ -84,6 +84,12 @@ background_threshold = 0.80    # background summarization
 aggressive_threshold = 0.85    # aggressive summarization
 emergency_threshold = 0.95     # drop oldest 50%, no LLM
 
+# Deterministic worker task contract timing.
+[defaults.worker_contract]
+ack_secs = 5
+progress_secs = 45
+tick_secs = 2
+
 # Cortex (system observer) settings.
 [defaults.cortex]
 tick_interval_secs = 30
@@ -470,6 +476,14 @@ Map of model names to ordered fallback chains. Used when the primary model retur
 | `emergency_threshold` | float | 0.95 | Emergency truncation (no LLM, drop oldest 50%) |
 
 Thresholds are fractions of `context_window`.
+
+### `[defaults.worker_contract]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `ack_secs` | integer | 5 | Deadline to confirm a worker start was surfaced |
+| `progress_secs` | integer | 45 | Deadline between meaningful worker progress updates |
+| `tick_secs` | integer | 2 | Poll interval for worker contract deadline checks |
 
 ### `[defaults.cortex]`
 

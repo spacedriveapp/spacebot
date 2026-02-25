@@ -5,6 +5,7 @@ use crate::{BranchId, ChannelId, WorkerId};
 use serde::Serialize;
 use sqlx::{Row as _, SqlitePool};
 use std::collections::HashMap;
+use std::hash::{Hash as _, Hasher as _};
 
 /// Persists conversation messages (user and assistant) to SQLite.
 ///
@@ -218,6 +219,13 @@ const WORKER_TERMINAL_RECEIPT_KIND: &str = "worker_terminal";
 const WORKER_RECEIPT_MAX_ATTEMPTS: i64 = 6;
 const WORKER_RECEIPT_BACKOFF_SECS: [i64; 5] = [5, 15, 45, 120, 300];
 const WORKER_RECEIPT_RETENTION_DAYS: i64 = 30;
+const WORKER_CONTRACT_STATE_CREATED: &str = "created";
+const WORKER_CONTRACT_STATE_ACKED: &str = "acked";
+const WORKER_CONTRACT_STATE_PROGRESSING: &str = "progressing";
+const WORKER_CONTRACT_STATE_SLA_MISSED: &str = "sla_missed";
+const WORKER_CONTRACT_STATE_TERMINAL_PENDING: &str = "terminal_pending";
+const WORKER_CONTRACT_STATE_TERMINAL_ACKED: &str = "terminal_acked";
+const WORKER_CONTRACT_STATE_TERMINAL_FAILED: &str = "terminal_failed";
 
 fn worker_receipt_backoff_secs(attempt_count: i64) -> Option<i64> {
     if attempt_count <= 0 {
@@ -226,6 +234,12 @@ fn worker_receipt_backoff_secs(attempt_count: i64) -> Option<i64> {
     WORKER_RECEIPT_BACKOFF_SECS
         .get((attempt_count - 1) as usize)
         .copied()
+}
+
+fn status_fingerprint(status: &str) -> String {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    status.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 #[derive(Debug, Clone)]
@@ -251,6 +265,24 @@ pub struct WorkerDeliveryRetryOutcome {
     pub next_attempt_at: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct DueWorkerTaskContractAck {
+    pub worker_id: WorkerId,
+    pub task_summary: String,
+    pub attempt_count: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct DueWorkerTaskContractProgress {
+    pub worker_id: WorkerId,
+    pub task_summary: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct DueWorkerTaskContractTerminal {
+    pub worker_id: WorkerId,
+}
+
 /// Persists branch and worker run records for channel timeline history.
 ///
 /// All write methods are fire-and-forget, same pattern as ConversationLogger.
@@ -262,6 +294,67 @@ pub struct ProcessRunLogger {
 impl ProcessRunLogger {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    fn log_worker_event_with_context(
+        &self,
+        worker_id: String,
+        channel_id: Option<String>,
+        agent_id: Option<String>,
+        event_type: String,
+        payload_json: Option<String>,
+    ) {
+        let pool = self.pool.clone();
+
+        tokio::spawn(async move {
+            let event_id = uuid::Uuid::new_v4().to_string();
+            if let Err(error) = sqlx::query(
+                "INSERT INTO worker_events \
+                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
+                 VALUES ( \
+                     ?, \
+                     ?, \
+                     COALESCE(?, (SELECT channel_id FROM worker_runs WHERE id = ?)), \
+                     COALESCE(?, (SELECT agent_id FROM worker_runs WHERE id = ?)), \
+                     ?, \
+                     ? \
+                 )",
+            )
+            .bind(&event_id)
+            .bind(&worker_id)
+            .bind(&channel_id)
+            .bind(&worker_id)
+            .bind(&agent_id)
+            .bind(&worker_id)
+            .bind(&event_type)
+            .bind(&payload_json)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(
+                    %error,
+                    worker_id = %worker_id,
+                    event_type = %event_type,
+                    "failed to persist worker event"
+                );
+            }
+        });
+    }
+
+    /// Record a worker lifecycle event. Fire-and-forget.
+    pub fn log_worker_event(
+        &self,
+        worker_id: WorkerId,
+        event_type: &str,
+        payload: serde_json::Value,
+    ) {
+        self.log_worker_event_with_context(
+            worker_id.to_string(),
+            None,
+            None,
+            event_type.to_string(),
+            Some(payload.to_string()),
+        );
     }
 
     /// Record a branch starting. Fire-and-forget.
@@ -341,19 +434,45 @@ impl ProcessRunLogger {
             .await
             {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker start");
+                return;
+            }
+
+            let payload_json = serde_json::json!({
+                "task": task,
+                "worker_type": worker_type,
+            })
+            .to_string();
+            let event_id = uuid::Uuid::new_v4().to_string();
+
+            if let Err(error) = sqlx::query(
+                "INSERT INTO worker_events \
+                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
+                 VALUES (?, ?, ?, ?, 'started', ?)",
+            )
+            .bind(&event_id)
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&agent_id)
+            .bind(&payload_json)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, worker_id = %id, "failed to persist worker start event");
             }
         });
     }
 
     /// Update a worker's status. Fire-and-forget.
-    /// Worker status text updates are transient — they're available via the
-    /// in-memory StatusBlock for live workers and don't need to be persisted.
-    /// The `status` column is reserved for the state enum (running/done/failed).
-    pub fn log_worker_status(&self, _worker_id: WorkerId, _status: &str) {
-        // Intentionally a no-op. Status text was previously written to the
-        // `status` column, overwriting the state enum with free-text like
-        // "Searching for weather in Germany" which broke badge rendering
-        // and status filtering.
+    /// Worker status text is kept in a separate append-only event table so the
+    /// worker_runs status enum remains queryable (`running`, `done`, etc.).
+    pub fn log_worker_status(&self, worker_id: WorkerId, status: &str) {
+        self.log_worker_event(
+            worker_id,
+            "status",
+            serde_json::json!({
+                "status": status,
+            }),
+        );
     }
 
     /// Record a worker completing with its result. Fire-and-forget.
@@ -361,7 +480,7 @@ impl ProcessRunLogger {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
-        let status = if success { "done" } else { "failed" };
+        let success_int = if success { 1_i64 } else { 0_i64 };
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
@@ -372,7 +491,8 @@ impl ProcessRunLogger {
                          WHEN ? LIKE 'Worker cancelled:%' THEN 'cancelled' \
                          WHEN ? LIKE 'Worker failed:%' THEN 'failed' \
                          WHEN ? LIKE 'Worker timed out after %' THEN 'timed_out' \
-                         ELSE 'done' \
+                         WHEN ? = 1 THEN 'done' \
+                         ELSE 'failed' \
                      END, \
                      completed_at = CURRENT_TIMESTAMP \
                  WHERE id = ?",
@@ -381,13 +501,462 @@ impl ProcessRunLogger {
             .bind(&result)
             .bind(&result)
             .bind(&result)
+            .bind(success_int)
             .bind(&id)
             .execute(&pool)
             .await
             {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
             }
+
+            let payload_json = serde_json::json!({
+                "result": result,
+                "success": success,
+            })
+            .to_string();
+            let event_id = uuid::Uuid::new_v4().to_string();
+
+            if let Err(error) = sqlx::query(
+                "INSERT INTO worker_events \
+                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
+                 VALUES ( \
+                     ?, \
+                     ?, \
+                     (SELECT channel_id FROM worker_runs WHERE id = ?), \
+                     (SELECT agent_id FROM worker_runs WHERE id = ?), \
+                     'completed', \
+                     ? \
+                 )",
+            )
+            .bind(&event_id)
+            .bind(&id)
+            .bind(&id)
+            .bind(&id)
+            .bind(&payload_json)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(
+                    %error,
+                    worker_id = %id,
+                    "failed to persist worker completion event"
+                );
+            }
         });
+    }
+
+    /// Create or refresh the deterministic task contract for a worker.
+    pub async fn upsert_worker_task_contract(
+        &self,
+        agent_id: &crate::AgentId,
+        channel_id: &ChannelId,
+        worker_id: WorkerId,
+        task_summary: &str,
+        ack_secs: u64,
+        progress_secs: u64,
+        terminal_secs: u64,
+    ) -> crate::error::Result<()> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let worker_id = worker_id.to_string();
+        let channel_id = channel_id.to_string();
+        let status_hash = status_fingerprint(task_summary);
+
+        sqlx::query(
+            "INSERT OR IGNORE INTO worker_task_contracts \
+             (id, agent_id, channel_id, worker_id, task_summary, state, \
+              ack_deadline_at, progress_deadline_at, terminal_deadline_at, \
+              last_status_hash, created_at, updated_at) \
+             VALUES (?, ?, ?, ?, ?, ?, \
+                     datetime('now', '+' || ? || ' seconds'), \
+                     datetime('now', '+' || ? || ' seconds'), \
+                     datetime('now', '+' || ? || ' seconds'), \
+                     ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)",
+        )
+        .bind(&id)
+        .bind(agent_id.as_ref())
+        .bind(&channel_id)
+        .bind(&worker_id)
+        .bind(task_summary)
+        .bind(WORKER_CONTRACT_STATE_CREATED)
+        .bind(ack_secs as i64)
+        .bind(progress_secs as i64)
+        .bind(terminal_secs as i64)
+        .bind(&status_hash)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET task_summary = ?, \
+                 state = ?, \
+                 ack_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                 progress_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                 terminal_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                 last_status_hash = ?, \
+                 sla_nudge_sent = 0, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE worker_id = ? \
+               AND state NOT IN (?, ?)",
+        )
+        .bind(task_summary)
+        .bind(WORKER_CONTRACT_STATE_CREATED)
+        .bind(ack_secs as i64)
+        .bind(progress_secs as i64)
+        .bind(terminal_secs as i64)
+        .bind(&status_hash)
+        .bind(&worker_id)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(())
+    }
+
+    /// Mark that a user-visible acknowledgement has been delivered for a worker.
+    pub async fn mark_worker_task_contract_acknowledged(
+        &self,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<()> {
+        sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET state = CASE \
+                     WHEN state IN (?, ?, ?) THEN state \
+                     ELSE ? \
+                 END, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE worker_id = ?",
+        )
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .bind(WORKER_CONTRACT_STATE_ACKED)
+        .bind(worker_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(())
+    }
+
+    /// Refresh progress heartbeat information for a worker contract.
+    pub async fn touch_worker_task_contract_progress(
+        &self,
+        worker_id: WorkerId,
+        status: Option<&str>,
+        progress_secs: u64,
+    ) -> crate::error::Result<()> {
+        let status_hash = status.map(status_fingerprint);
+
+        sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET state = CASE \
+                     WHEN state IN (?, ?, ?, ?) THEN ? \
+                     ELSE state \
+                 END, \
+                 last_progress_at = CURRENT_TIMESTAMP, \
+                 progress_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                 last_status_hash = COALESCE(?, last_status_hash), \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE worker_id = ? \
+               AND state NOT IN (?, ?)",
+        )
+        .bind(WORKER_CONTRACT_STATE_CREATED)
+        .bind(WORKER_CONTRACT_STATE_ACKED)
+        .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+        .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
+        .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+        .bind(progress_secs as i64)
+        .bind(status_hash)
+        .bind(worker_id.to_string())
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(())
+    }
+
+    /// Mark a worker contract as terminal pending while delivery receipts are in-flight.
+    pub async fn mark_worker_task_contract_terminal_pending(
+        &self,
+        worker_id: WorkerId,
+        terminal_state: &str,
+        terminal_secs: u64,
+    ) -> crate::error::Result<()> {
+        sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET state = ?, \
+                 terminal_state = ?, \
+                 terminal_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE worker_id = ? \
+               AND state NOT IN (?, ?)",
+        )
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
+        .bind(terminal_state)
+        .bind(terminal_secs as i64)
+        .bind(worker_id.to_string())
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(())
+    }
+
+    /// Claim workers whose acknowledgement deadline has expired.
+    pub async fn claim_due_worker_task_contract_ack_deadlines(
+        &self,
+        channel_id: &ChannelId,
+        limit: i64,
+        retry_secs: u64,
+    ) -> crate::error::Result<Vec<DueWorkerTaskContractAck>> {
+        let channel_id = channel_id.to_string();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let rows = sqlx::query(
+            "SELECT id, worker_id, task_summary, attempt_count \
+             FROM worker_task_contracts \
+             WHERE channel_id = ? \
+               AND state = ? \
+               AND ack_deadline_at <= CURRENT_TIMESTAMP \
+             ORDER BY ack_deadline_at ASC, created_at ASC \
+             LIMIT ?",
+        )
+        .bind(&channel_id)
+        .bind(WORKER_CONTRACT_STATE_CREATED)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut due = Vec::with_capacity(rows.len());
+        for row in rows {
+            let contract_id: String = row.try_get("id").unwrap_or_default();
+            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
+            let task_summary: String = row.try_get("task_summary").unwrap_or_default();
+            let attempt_count: i64 = row.try_get("attempt_count").unwrap_or_default();
+
+            let updated = sqlx::query(
+                "UPDATE worker_task_contracts \
+                 SET ack_deadline_at = datetime('now', '+' || ? || ' seconds'), \
+                     attempt_count = attempt_count + 1, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? \
+                   AND state = ? \
+                   AND ack_deadline_at <= CURRENT_TIMESTAMP",
+            )
+            .bind(retry_secs as i64)
+            .bind(&contract_id)
+            .bind(WORKER_CONTRACT_STATE_CREATED)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
+            .rows_affected();
+
+            if updated == 0 {
+                continue;
+            }
+
+            match uuid::Uuid::parse_str(&worker_id_raw) {
+                Ok(worker_id) => due.push(DueWorkerTaskContractAck {
+                    worker_id,
+                    task_summary,
+                    attempt_count: attempt_count + 1,
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id_raw,
+                        "skipping malformed worker task contract id"
+                    );
+                }
+            }
+        }
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(due)
+    }
+
+    /// Claim workers whose progress deadline has expired and have not been nudged yet.
+    pub async fn claim_due_worker_task_contract_progress_deadlines(
+        &self,
+        channel_id: &ChannelId,
+        limit: i64,
+    ) -> crate::error::Result<Vec<DueWorkerTaskContractProgress>> {
+        let channel_id = channel_id.to_string();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let rows = sqlx::query(
+            "SELECT id, worker_id, task_summary \
+             FROM worker_task_contracts \
+             WHERE channel_id = ? \
+               AND state IN (?, ?, ?) \
+               AND sla_nudge_sent = 0 \
+               AND progress_deadline_at <= CURRENT_TIMESTAMP \
+             ORDER BY progress_deadline_at ASC, created_at ASC \
+             LIMIT ?",
+        )
+        .bind(&channel_id)
+        .bind(WORKER_CONTRACT_STATE_CREATED)
+        .bind(WORKER_CONTRACT_STATE_ACKED)
+        .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut due = Vec::with_capacity(rows.len());
+        for row in rows {
+            let contract_id: String = row.try_get("id").unwrap_or_default();
+            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
+            let task_summary: String = row.try_get("task_summary").unwrap_or_default();
+
+            let updated = sqlx::query(
+                "UPDATE worker_task_contracts \
+                 SET state = ?, \
+                     sla_nudge_sent = 1, \
+                     attempt_count = attempt_count + 1, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? \
+                   AND state IN (?, ?, ?) \
+                   AND sla_nudge_sent = 0 \
+                   AND progress_deadline_at <= CURRENT_TIMESTAMP",
+            )
+            .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
+            .bind(&contract_id)
+            .bind(WORKER_CONTRACT_STATE_CREATED)
+            .bind(WORKER_CONTRACT_STATE_ACKED)
+            .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
+            .rows_affected();
+
+            if updated == 0 {
+                continue;
+            }
+
+            match uuid::Uuid::parse_str(&worker_id_raw) {
+                Ok(worker_id) => due.push(DueWorkerTaskContractProgress {
+                    worker_id,
+                    task_summary,
+                }),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id_raw,
+                        "skipping malformed worker task contract id"
+                    );
+                }
+            }
+        }
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(due)
+    }
+
+    /// Claim terminal-pending contracts whose delivery window elapsed.
+    ///
+    /// Overdue contracts are transitioned to `terminal_failed` and any pending
+    /// terminal delivery receipts are marked `failed` to stop retry churn.
+    pub async fn claim_due_worker_task_contract_terminal_deadlines(
+        &self,
+        channel_id: &ChannelId,
+        limit: i64,
+    ) -> crate::error::Result<Vec<DueWorkerTaskContractTerminal>> {
+        let channel_id = channel_id.to_string();
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+        let rows = sqlx::query(
+            "SELECT id, worker_id \
+             FROM worker_task_contracts \
+             WHERE channel_id = ? \
+               AND state = ? \
+               AND terminal_deadline_at <= CURRENT_TIMESTAMP \
+             ORDER BY terminal_deadline_at ASC, created_at ASC \
+             LIMIT ?",
+        )
+        .bind(&channel_id)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
+        .bind(limit)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut due = Vec::with_capacity(rows.len());
+        for row in rows {
+            let contract_id: String = row.try_get("id").unwrap_or_default();
+            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
+
+            let updated = sqlx::query(
+                "UPDATE worker_task_contracts \
+                 SET state = ?, \
+                     terminal_state = COALESCE(terminal_state, 'failed'), \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE id = ? \
+                   AND state = ? \
+                   AND terminal_deadline_at <= CURRENT_TIMESTAMP",
+            )
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+            .bind(&contract_id)
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?
+            .rows_affected();
+
+            if updated == 0 {
+                continue;
+            }
+
+            sqlx::query(
+                "UPDATE worker_delivery_receipts \
+                 SET status = 'failed', \
+                     last_error = ?, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE worker_id = ? \
+                   AND kind = ? \
+                   AND status IN ('pending', 'sending')",
+            )
+            .bind("terminal deadline elapsed before adapter acknowledgement")
+            .bind(&worker_id_raw)
+            .bind(WORKER_TERMINAL_RECEIPT_KIND)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
+            match uuid::Uuid::parse_str(&worker_id_raw) {
+                Ok(worker_id) => due.push(DueWorkerTaskContractTerminal { worker_id }),
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id_raw,
+                        "skipping malformed worker task contract id"
+                    );
+                }
+            }
+        }
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
+        Ok(due)
     }
 
     /// Create (or refresh) the durable terminal delivery receipt for a worker.
@@ -610,6 +1179,28 @@ impl ProcessRunLogger {
         .map_err(|error| anyhow::anyhow!(error))?
         .rows_affected();
 
+        if updated > 0 {
+            sqlx::query(
+                "UPDATE worker_task_contracts \
+                 SET state = ?, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE worker_id = (
+                     SELECT worker_id FROM worker_delivery_receipts WHERE id = ?
+                 ) \
+                   AND state IN (?, ?, ?, ?, ?)",
+            )
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+            .bind(receipt_id)
+            .bind(WORKER_CONTRACT_STATE_CREATED)
+            .bind(WORKER_CONTRACT_STATE_ACKED)
+            .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+            .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
+            .execute(&self.pool)
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        }
+
         Ok(updated > 0)
     }
 
@@ -654,6 +1245,26 @@ impl ProcessRunLogger {
             .bind(attempt_count)
             .bind(error)
             .bind(receipt_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|db_error| anyhow::anyhow!(db_error))?;
+
+            sqlx::query(
+                "UPDATE worker_task_contracts \
+                 SET state = ?, \
+                     updated_at = CURRENT_TIMESTAMP \
+                 WHERE worker_id = (
+                     SELECT worker_id FROM worker_delivery_receipts WHERE id = ?
+                 ) \
+                   AND state IN (?, ?, ?, ?, ?)",
+            )
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+            .bind(receipt_id)
+            .bind(WORKER_CONTRACT_STATE_CREATED)
+            .bind(WORKER_CONTRACT_STATE_ACKED)
+            .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+            .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
+            .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
             .execute(&self.pool)
             .await
             .map_err(|db_error| anyhow::anyhow!(db_error))?;
@@ -743,7 +1354,7 @@ impl ProcessRunLogger {
     /// This is called on startup before channels begin handling messages. Any
     /// rows with NULL `completed_at` cannot be resumed and should be marked
     /// terminal so timelines and analytics stay accurate.
-    pub async fn close_orphaned_runs(&self) -> crate::error::Result<(u64, u64, u64)> {
+    pub async fn close_orphaned_runs(&self) -> crate::error::Result<(u64, u64, u64, u64)> {
         let worker_result = sqlx::query(
             "UPDATE worker_runs \
              SET status = 'failed', \
@@ -776,10 +1387,25 @@ impl ProcessRunLogger {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
+        let contract_result = sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET state = ?, \
+                 terminal_state = COALESCE(terminal_state, 'failed'), \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE state NOT IN (?, ?)",
+        )
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
+        .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
         Ok((
             worker_result.rows_affected(),
             branch_result.rows_affected(),
             receipt_result.rows_affected(),
+            contract_result.rows_affected(),
         ))
     }
 
@@ -1008,6 +1634,45 @@ impl ProcessRunLogger {
             tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
         }))
     }
+
+    /// List recent worker events for a worker, oldest first.
+    pub async fn list_worker_events(
+        &self,
+        worker_id: &str,
+        limit: i64,
+    ) -> crate::error::Result<Vec<WorkerEventRow>> {
+        let rows = sqlx::query(
+            "SELECT id, worker_id, channel_id, agent_id, event_type, payload_json, created_at \
+             FROM worker_events \
+             WHERE worker_id = ? \
+             ORDER BY created_at DESC \
+             LIMIT ?",
+        )
+        .bind(worker_id)
+        .bind(limit.clamp(1, 500))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let mut events = rows
+            .into_iter()
+            .map(|row| WorkerEventRow {
+                id: row.try_get("id").unwrap_or_default(),
+                worker_id: row.try_get("worker_id").unwrap_or_default(),
+                channel_id: row.try_get("channel_id").ok(),
+                agent_id: row.try_get("agent_id").ok(),
+                event_type: row.try_get("event_type").unwrap_or_default(),
+                payload_json: row.try_get("payload_json").ok(),
+                created_at: row
+                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+                    .map(|t| t.to_rfc3339())
+                    .unwrap_or_default(),
+            })
+            .collect::<Vec<_>>();
+
+        events.reverse();
+        Ok(events)
+    }
 }
 
 /// A worker run row without the transcript blob (for list queries).
@@ -1041,6 +1706,18 @@ pub struct WorkerDetailRow {
     pub tool_calls: i64,
 }
 
+/// A worker lifecycle event row.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerEventRow {
+    pub id: String,
+    pub worker_id: String,
+    pub channel_id: Option<String>,
+    pub agent_id: Option<String>,
+    pub event_type: String,
+    pub payload_json: Option<String>,
+    pub created_at: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1061,6 +1738,70 @@ mod tests {
             .await
             .expect("migrations");
         ProcessRunLogger::new(pool)
+    }
+
+    #[tokio::test]
+    async fn worker_event_journal_records_lifecycle_updates() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let worker_id = uuid::Uuid::new_v4();
+        let worker_id_text = worker_id.to_string();
+
+        logger.log_worker_started(None, worker_id, "research task", "builtin", &agent_id);
+
+        let mut started_seen = false;
+        for _ in 0..20 {
+            let events = logger
+                .list_worker_events(&worker_id_text, 20)
+                .await
+                .expect("list worker events");
+            if events.iter().any(|event| event.event_type == "started") {
+                started_seen = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(started_seen, "expected started event");
+
+        logger.log_worker_status(worker_id, "searching source material");
+        logger.log_worker_event(
+            worker_id,
+            "tool_started",
+            serde_json::json!({ "tool_name": "web_search" }),
+        );
+        logger.log_worker_completed(worker_id, "done", true);
+
+        let mut events = Vec::new();
+        for _ in 0..20 {
+            events = logger
+                .list_worker_events(&worker_id_text, 20)
+                .await
+                .expect("list worker events");
+            if events.iter().any(|event| event.event_type == "status")
+                && events
+                    .iter()
+                    .any(|event| event.event_type == "tool_started")
+                && events.iter().any(|event| event.event_type == "completed")
+            {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert!(
+            events.iter().any(|event| event.event_type == "status"),
+            "expected status event"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|event| event.event_type == "tool_started"),
+            "expected tool_started event"
+        );
+        assert!(
+            events.iter().any(|event| event.event_type == "completed"),
+            "expected completed event"
+        );
     }
 
     #[tokio::test]
@@ -1199,11 +1940,12 @@ mod tests {
         .await
         .expect("insert sending receipt");
 
-        let (_, _, recovered_receipts) = logger
+        let (_, _, recovered_receipts, recovered_contracts) = logger
             .close_orphaned_runs()
             .await
             .expect("recover orphaned runs");
         assert_eq!(recovered_receipts, 1);
+        assert_eq!(recovered_contracts, 0);
 
         let status: String =
             sqlx::query_scalar("SELECT status FROM worker_delivery_receipts WHERE id = ?")
@@ -1212,6 +1954,205 @@ mod tests {
                 .await
                 .expect("load receipt status");
         assert_eq!(status, "pending");
+    }
+
+    #[tokio::test]
+    async fn worker_task_contract_deadline_claims_and_terminal_ack_flow() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "research task",
+                0,
+                0,
+                60,
+            )
+            .await
+            .expect("upsert contract");
+
+        let due_ack = logger
+            .claim_due_worker_task_contract_ack_deadlines(&channel_id, 10, 5)
+            .await
+            .expect("claim due ack deadlines");
+        assert_eq!(due_ack.len(), 1);
+        assert_eq!(due_ack[0].worker_id, worker_id);
+        assert_eq!(due_ack[0].attempt_count, 1);
+
+        logger
+            .mark_worker_task_contract_acknowledged(worker_id)
+            .await
+            .expect("mark acknowledged");
+        logger
+            .touch_worker_task_contract_progress(worker_id, Some("indexing source data"), 30)
+            .await
+            .expect("touch progress");
+
+        sqlx::query(
+            "UPDATE worker_task_contracts \
+             SET state = ?, \
+                 progress_deadline_at = CURRENT_TIMESTAMP, \
+                 sla_nudge_sent = 0 \
+             WHERE worker_id = ?",
+        )
+        .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+        .bind(worker_id.to_string())
+        .execute(&logger.pool)
+        .await
+        .expect("force progress deadline");
+
+        let due_progress = logger
+            .claim_due_worker_task_contract_progress_deadlines(&channel_id, 10)
+            .await
+            .expect("claim due progress deadlines");
+        assert_eq!(due_progress.len(), 1);
+        assert_eq!(due_progress[0].worker_id, worker_id);
+
+        let due_progress_again = logger
+            .claim_due_worker_task_contract_progress_deadlines(&channel_id, 10)
+            .await
+            .expect("second progress claim should be empty");
+        assert!(due_progress_again.is_empty());
+
+        logger
+            .mark_worker_task_contract_terminal_pending(worker_id, "done", 60)
+            .await
+            .expect("mark terminal pending");
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "done",
+                "Background task completed: done",
+            )
+            .await
+            .expect("upsert receipt");
+        let acked = logger
+            .ack_worker_delivery_receipt(&receipt_id)
+            .await
+            .expect("ack receipt");
+        assert!(acked);
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM worker_task_contracts WHERE worker_id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load contract state");
+        assert_eq!(state, WORKER_CONTRACT_STATE_TERMINAL_ACKED);
+    }
+
+    #[tokio::test]
+    async fn worker_task_contract_moves_to_terminal_failed_on_receipt_exhaustion() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "analysis task",
+                5,
+                45,
+                60,
+            )
+            .await
+            .expect("upsert contract");
+        logger
+            .mark_worker_task_contract_terminal_pending(worker_id, "failed", 60)
+            .await
+            .expect("mark terminal pending");
+
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "failed",
+                "Background task failed: request error",
+            )
+            .await
+            .expect("upsert receipt");
+
+        for _ in 0..WORKER_RECEIPT_MAX_ATTEMPTS {
+            let _ = logger
+                .fail_worker_delivery_receipt_attempt(&receipt_id, "adapter unavailable")
+                .await
+                .expect("record delivery failure");
+        }
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM worker_task_contracts WHERE worker_id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load contract state");
+        assert_eq!(state, WORKER_CONTRACT_STATE_TERMINAL_FAILED);
+    }
+
+    #[tokio::test]
+    async fn worker_task_contract_terminal_deadline_claim_marks_failed_and_stops_receipts() {
+        let logger = connect_logger().await;
+        let agent_id: crate::AgentId = Arc::from("agent:test");
+        let channel_id: ChannelId = Arc::from("channel:test");
+        let worker_id = uuid::Uuid::new_v4();
+
+        logger
+            .upsert_worker_task_contract(
+                &agent_id,
+                &channel_id,
+                worker_id,
+                "deadline task",
+                5,
+                45,
+                1,
+            )
+            .await
+            .expect("upsert contract");
+        logger
+            .mark_worker_task_contract_terminal_pending(worker_id, "done", 0)
+            .await
+            .expect("mark terminal pending");
+        let receipt_id = logger
+            .upsert_worker_terminal_receipt(
+                &channel_id,
+                worker_id,
+                "done",
+                "Background task completed: done",
+            )
+            .await
+            .expect("upsert receipt");
+
+        let due_terminal = logger
+            .claim_due_worker_task_contract_terminal_deadlines(&channel_id, 10)
+            .await
+            .expect("claim due terminal deadlines");
+        assert_eq!(due_terminal.len(), 1);
+        assert_eq!(due_terminal[0].worker_id, worker_id);
+
+        let state: String =
+            sqlx::query_scalar("SELECT state FROM worker_task_contracts WHERE worker_id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load contract state");
+        assert_eq!(state, WORKER_CONTRACT_STATE_TERMINAL_FAILED);
+
+        let receipt_status: String =
+            sqlx::query_scalar("SELECT status FROM worker_delivery_receipts WHERE id = ?")
+                .bind(receipt_id)
+                .fetch_one(&logger.pool)
+                .await
+                .expect("load receipt status");
+        assert_eq!(receipt_status, "failed");
     }
 
     #[tokio::test]

@@ -1,7 +1,7 @@
 //! Telegram messaging adapter using teloxide.
 
 use crate::config::TelegramPermissions;
-use crate::messaging::traits::{InboundStream, Messaging};
+use crate::messaging::traits::{DeliveryOutcome, InboundStream, Messaging};
 use crate::{Attachment, InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -472,7 +472,7 @@ impl Messaging for TelegramAdapter {
                     .remove(&message.conversation_id);
             }
             OutboundResponse::Status(status) => {
-                self.send_status(message, status).await?;
+                let _ = self.send_status(message, status).await?;
             }
             // Slack-specific variants — graceful fallbacks for Telegram
             OutboundResponse::RemoveReaction(_) => {} // no-op
@@ -493,7 +493,7 @@ impl Messaging for TelegramAdapter {
         &self,
         message: &InboundMessage,
         status: StatusUpdate,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<DeliveryOutcome> {
         match status {
             StatusUpdate::Thinking => {
                 let chat_id = self.extract_chat_id(message)?;
@@ -520,13 +520,22 @@ impl Messaging for TelegramAdapter {
                     .write()
                     .await
                     .insert(conversation_id, handle);
+                Ok(DeliveryOutcome::Surfaced)
             }
-            _ => {
+            StatusUpdate::StopTyping
+            | StatusUpdate::ToolStarted { .. }
+            | StatusUpdate::ToolCompleted { .. }
+            | StatusUpdate::BranchStarted { .. } => {
                 self.stop_typing(&message.conversation_id).await;
+                Ok(DeliveryOutcome::Surfaced)
+            }
+            StatusUpdate::WorkerStarted { .. }
+            | StatusUpdate::WorkerCheckpoint { .. }
+            | StatusUpdate::WorkerCompleted { .. } => {
+                // Telegram adapter does not currently surface worker status updates.
+                Ok(DeliveryOutcome::NotSurfaced)
             }
         }
-
-        Ok(())
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
