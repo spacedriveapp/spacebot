@@ -215,6 +215,14 @@ pub fn should_block_user_visible_text(value: &str) -> bool {
         return true;
     }
 
+    // Block debug-formatted API responses that leak from error handling
+    if lower.starts_with("(empty response:")
+        || lower.contains("'content':")
+        || (lower.contains("\"content\":") && lower.contains("stop_reason"))
+    {
+        return true;
+    }
+
     lower.starts_with("<system-reminder>") || lower.starts_with("<path>")
 }
 
@@ -532,8 +540,28 @@ mod tests {
     }
 
     #[test]
+    fn blocks_debug_formatted_api_responses() {
+        // Block Rig's "(Empty response: ...)" debug output
+        assert!(should_block_user_visible_text(
+            "(Empty response: {'content': [{'type': 'thinking'}], 'stop_reason': 'end_turn'})"
+        ));
+        // Block Python-dict style with 'content':
+        assert!(should_block_user_visible_text(
+            "Error: {'content': [], 'model': 'claude-3-5-sonnet'}"
+        ));
+        // Block JSON style with both "content": and stop_reason
+        assert!(should_block_user_visible_text(
+            r#"{"content": [{"type": "text"}], "stop_reason": "end_turn"}"#
+        ));
+    }
+
+    #[test]
     fn allows_normal_plaintext_output() {
         assert!(!should_block_user_visible_text("hello team"));
         assert!(!should_block_user_visible_text("- first\n- second"));
+        // Allow mentions of "content" in normal conversation
+        assert!(!should_block_user_visible_text(
+            "The content of the message is important"
+        ));
     }
 }

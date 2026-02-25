@@ -1282,6 +1282,7 @@ fn parse_anthropic_response(
         .ok_or_else(|| CompletionError::ResponseError("missing content array".into()))?;
 
     let mut assistant_content = Vec::new();
+    let mut had_thinking_blocks = false;
 
     for block in content_blocks {
         match block["type"].as_str() {
@@ -1300,6 +1301,7 @@ fn parse_anthropic_response(
             Some("thinking") => {
                 // Thinking blocks contain internal reasoning, not actionable output.
                 // We'll skip them but log for debugging.
+                had_thinking_blocks = true;
                 tracing::debug!("skipping thinking block in Anthropic response");
             }
             _ => {
@@ -1318,11 +1320,19 @@ fn parse_anthropic_response(
         // tool call like react/skip). Treat this as a clean empty response rather
         // than an error so the agentic loop terminates gracefully.
         let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
-        tracing::debug!(
-            stop_reason,
-            content_blocks = content_blocks.len(),
-            "empty assistant_content from Anthropic — returning synthetic empty text"
-        );
+        if had_thinking_blocks {
+            tracing::warn!(
+                stop_reason,
+                content_blocks = content_blocks.len(),
+                "Anthropic response contained only thinking blocks (no text or tool calls)"
+            );
+        } else {
+            tracing::debug!(
+                stop_reason,
+                content_blocks = content_blocks.len(),
+                "empty assistant_content from Anthropic — returning synthetic empty text"
+            );
+        }
         OneOrMany::one(AssistantContent::Text(Text {
             text: String::new(),
         }))
@@ -1397,8 +1407,7 @@ fn parse_openai_response(
     let result_choice = OneOrMany::many(assistant_content.clone()).map_err(|_| {
         tracing::warn!(
             provider = %provider_label,
-            choice = ?choice,
-            "empty response from provider"
+            "empty response from provider (no text or tool calls in assistant message)"
         );
         CompletionError::ResponseError(format!("empty response from {provider_label}"))
     })?;
