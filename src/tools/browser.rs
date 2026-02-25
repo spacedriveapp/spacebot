@@ -955,12 +955,14 @@ impl BrowserTool {
 
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
+        let mut close_error: Option<BrowserError> = None;
 
         if let Some(mut browser) = state.browser.take() {
             let close_result =
                 Self::with_action_timeout("browser close", async { browser.close().await }).await;
             if let Err(error) = close_result {
                 tracing::warn!(%error, "browser close returned error");
+                close_error = Some(error);
             }
         }
 
@@ -969,6 +971,10 @@ impl BrowserTool {
         state.element_refs.clear();
         state.next_ref = 0;
         state._handler_task = None;
+
+        if let Some(error) = close_error {
+            return Err(error);
+        }
 
         tracing::info!("browser closed");
         Ok(BrowserOutput::success("Browser closed"))

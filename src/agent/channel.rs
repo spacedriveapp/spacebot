@@ -172,6 +172,7 @@ impl ChannelState {
                         format!("{WORKER_CANCELLED_PREFIX} {reason}."),
                         false,
                     );
+                    Ok(())
                 }
                 Err(join_error) => {
                     let failure = format!("Worker failed during cancellation: {join_error}");
@@ -182,6 +183,7 @@ impl ChannelState {
                         "worker join failed after cancellation request"
                     );
                     self.send_worker_terminal_events(worker_id, "failed", failure, false);
+                    Ok(())
                 }
                 Ok(()) => {
                     tracing::debug!(
@@ -189,9 +191,11 @@ impl ChannelState {
                         channel_id = %self.channel_id,
                         "worker finished before cancellation took effect"
                     );
+                    Err(format!(
+                        "Worker {worker_id} finished before cancellation took effect"
+                    ))
                 }
             }
-            Ok(())
         } else if removed {
             // Worker was in active_workers but had no handle (shouldn't happen, but handle gracefully)
             tracing::warn!(
@@ -1482,12 +1486,19 @@ impl Channel {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let _ = self
+        if let Err(error) = self
             .response_tx
             .send(OutboundEnvelope::from(OutboundResponse::Status(
                 crate::StatusUpdate::Thinking,
             )))
-            .await;
+            .await
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %self.id,
+                "failed to send thinking status update"
+            );
+        }
 
         // Inject attachments as a user message before the text prompt
         if !attachment_content.is_empty() {
@@ -1727,12 +1738,19 @@ impl Channel {
         }
 
         // Ensure typing indicator is always cleaned up, even on error paths
-        let _ = self
+        if let Err(error) = self
             .response_tx
             .send(OutboundEnvelope::from(OutboundResponse::Status(
                 crate::StatusUpdate::StopTyping,
             )))
-            .await;
+            .await
+        {
+            tracing::warn!(
+                %error,
+                channel_id = %self.id,
+                "failed to send stop-typing status update"
+            );
+        }
     }
 
     /// Handle a process event (branch results, worker completions, status updates).

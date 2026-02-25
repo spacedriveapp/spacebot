@@ -421,6 +421,7 @@ impl ProcessRunLogger {
         agent_id: &crate::AgentId,
     ) {
         let pool = self.pool.clone();
+        let logger = self.clone();
         let id = worker_id.to_string();
         let channel_id = channel_id.map(|c| c.to_string());
         let task = task.to_string();
@@ -449,23 +450,13 @@ impl ProcessRunLogger {
                 "worker_type": worker_type,
             })
             .to_string();
-            let event_id = uuid::Uuid::new_v4().to_string();
-
-            if let Err(error) = sqlx::query(
-                "INSERT INTO worker_events \
-                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
-                 VALUES (?, ?, ?, ?, 'started', ?)",
-            )
-            .bind(&event_id)
-            .bind(&id)
-            .bind(&channel_id)
-            .bind(&agent_id)
-            .bind(&payload_json)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(%error, worker_id = %id, "failed to persist worker start event");
-            }
+            logger.log_worker_event_with_context(
+                id.clone(),
+                channel_id.clone(),
+                Some(agent_id.clone()),
+                "started".to_string(),
+                Some(payload_json),
+            );
         });
     }
 
@@ -485,6 +476,7 @@ impl ProcessRunLogger {
     /// Record a worker completing with its result. Fire-and-forget.
     pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str, success: bool) {
         let pool = self.pool.clone();
+        let logger = self.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
         let success_int = if success { 1_i64 } else { 0_i64 };
@@ -514,6 +506,7 @@ impl ProcessRunLogger {
             .await
             {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
+                return;
             }
 
             let payload_json = serde_json::json!({
@@ -521,34 +514,13 @@ impl ProcessRunLogger {
                 "success": success,
             })
             .to_string();
-            let event_id = uuid::Uuid::new_v4().to_string();
-
-            if let Err(error) = sqlx::query(
-                "INSERT INTO worker_events \
-                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
-                 VALUES ( \
-                     ?, \
-                     ?, \
-                     (SELECT channel_id FROM worker_runs WHERE id = ?), \
-                     (SELECT agent_id FROM worker_runs WHERE id = ?), \
-                     'completed', \
-                     ? \
-                 )",
-            )
-            .bind(&event_id)
-            .bind(&id)
-            .bind(&id)
-            .bind(&id)
-            .bind(&payload_json)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(
-                    %error,
-                    worker_id = %id,
-                    "failed to persist worker completion event"
-                );
-            }
+            logger.log_worker_event_with_context(
+                id.clone(),
+                None,
+                None,
+                "completed".to_string(),
+                Some(payload_json),
+            );
         });
     }
 
@@ -1208,6 +1180,12 @@ impl ProcessRunLogger {
                         column = "worker_id",
                         "skipping malformed terminal receipt row"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        &channel_id,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1222,6 +1200,12 @@ impl ProcessRunLogger {
                         column = "channel_id",
                         "skipping malformed terminal receipt row"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        &channel_id,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1236,6 +1220,12 @@ impl ProcessRunLogger {
                         column = "terminal_state",
                         "skipping malformed terminal receipt row"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        &channel_id,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1250,6 +1240,12 @@ impl ProcessRunLogger {
                         column = "payload_text",
                         "skipping malformed terminal receipt row"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        &channel_id,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1264,6 +1260,12 @@ impl ProcessRunLogger {
                         column = "attempt_count",
                         "skipping malformed terminal receipt row"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        &channel_id,
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1348,6 +1350,12 @@ impl ProcessRunLogger {
                         column = "worker_id",
                         "skipping malformed terminal receipt row (global claim)"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        "global",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1361,6 +1369,12 @@ impl ProcessRunLogger {
                         column = "channel_id",
                         "skipping malformed terminal receipt row (global claim)"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        "global",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1374,6 +1388,12 @@ impl ProcessRunLogger {
                         column = "terminal_state",
                         "skipping malformed terminal receipt row (global claim)"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        "global",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1387,6 +1407,12 @@ impl ProcessRunLogger {
                         column = "payload_text",
                         "skipping malformed terminal receipt row (global claim)"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        "global",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1400,6 +1426,12 @@ impl ProcessRunLogger {
                         column = "attempt_count",
                         "skipping malformed terminal receipt row (global claim)"
                     );
+                    Self::revert_claimed_terminal_receipt_to_pending(
+                        &mut tx,
+                        &receipt_id,
+                        "global",
+                    )
+                    .await;
                     continue;
                 }
             };
@@ -1643,6 +1675,12 @@ impl ProcessRunLogger {
     /// rows with NULL `completed_at` cannot be resumed and should be marked
     /// terminal so timelines and analytics stay accurate.
     pub async fn close_orphaned_runs(&self) -> crate::error::Result<(u64, u64, u64, u64)> {
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+
         let worker_result = sqlx::query(
             "UPDATE worker_runs \
              SET status = 'failed', \
@@ -1650,7 +1688,7 @@ impl ProcessRunLogger {
                  completed_at = CURRENT_TIMESTAMP \
              WHERE completed_at IS NULL",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
@@ -1660,7 +1698,7 @@ impl ProcessRunLogger {
                  completed_at = CURRENT_TIMESTAMP \
              WHERE completed_at IS NULL",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
@@ -1671,7 +1709,7 @@ impl ProcessRunLogger {
                  updated_at = CURRENT_TIMESTAMP \
              WHERE status = 'sending'",
         )
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
@@ -1691,9 +1729,11 @@ impl ProcessRunLogger {
         .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
+
+        tx.commit().await.map_err(|error| anyhow::anyhow!(error))?;
 
         Ok((
             worker_result.rows_affected(),
@@ -1701,6 +1741,31 @@ impl ProcessRunLogger {
             receipt_result.rows_affected(),
             contract_result.rows_affected(),
         ))
+    }
+
+    async fn revert_claimed_terminal_receipt_to_pending(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        receipt_id: &str,
+        scope: &str,
+    ) {
+        if let Err(error) = sqlx::query(
+            "UPDATE worker_delivery_receipts \
+             SET status = 'pending', \
+                 next_attempt_at = CURRENT_TIMESTAMP, \
+                 updated_at = CURRENT_TIMESTAMP \
+             WHERE id = ? AND status = 'sending'",
+        )
+        .bind(receipt_id)
+        .execute(&mut **tx)
+        .await
+        {
+            tracing::warn!(
+                %error,
+                receipt_id = %receipt_id,
+                scope,
+                "failed to revert malformed terminal receipt claim"
+            );
+        }
     }
 
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
@@ -1956,21 +2021,60 @@ impl ProcessRunLogger {
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
 
-        let mut events = rows
-            .into_iter()
-            .map(|row| WorkerEventRow {
-                id: row.try_get("id").unwrap_or_default(),
-                worker_id: row.try_get("worker_id").unwrap_or_default(),
+        let mut events = Vec::with_capacity(rows.len());
+        for row in rows {
+            let id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id,
+                        column = "id",
+                        "skipping malformed worker event row"
+                    );
+                    continue;
+                }
+            };
+            let event_worker_id: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id,
+                        event_id = %id,
+                        column = "worker_id",
+                        "skipping malformed worker event row"
+                    );
+                    continue;
+                }
+            };
+            let event_type: String = match row.try_get("event_type") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id,
+                        event_id = %id,
+                        column = "event_type",
+                        "skipping malformed worker event row"
+                    );
+                    continue;
+                }
+            };
+
+            events.push(WorkerEventRow {
+                id,
+                worker_id: event_worker_id,
                 channel_id: row.try_get("channel_id").ok(),
                 agent_id: row.try_get("agent_id").ok(),
-                event_type: row.try_get("event_type").unwrap_or_default(),
+                event_type,
                 payload_json: row.try_get("payload_json").ok(),
                 created_at: row
                     .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
                     .map(|t| t.to_rfc3339())
                     .unwrap_or_default(),
-            })
-            .collect::<Vec<_>>();
+            });
+        }
 
         events.reverse();
         Ok(events)
