@@ -1,9 +1,7 @@
 //! Send message to another agent through the communication graph.
 
-use crate::conversation::ChannelStore;
 use crate::links::AgentLink;
 use crate::messaging::MessagingManager;
-use crate::tools::SkipFlag;
 use crate::{AgentId, InboundMessage, MessageContent, ProcessEvent};
 
 use arc_swap::ArcSwap;
@@ -14,7 +12,6 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use tokio::sync::broadcast;
 
 /// Tool for sending messages to other agents through the agent communication graph.
@@ -29,20 +26,9 @@ pub struct SendAgentMessageTool {
     channel_id: crate::ChannelId,
     links: Arc<ArcSwap<Vec<AgentLink>>>,
     messaging_manager: Arc<MessagingManager>,
-    channel_store: ChannelStore,
     event_tx: broadcast::Sender<ProcessEvent>,
     /// Map of known agent IDs to display names, for resolving targets.
     agent_names: Arc<HashMap<String, String>>,
-    /// Per-turn skip flag. When set after sending, the channel turn ends immediately
-    /// instead of looping back to the LLM (which would burn depth calling skip).
-    skip_flag: Option<SkipFlag>,
-    /// Source of the originating channel's inbound message (e.g. "webchat", "discord").
-    /// Propagated through metadata so conclusion routing uses the correct adapter.
-    originating_source: Option<String>,
-    /// Channel that originated the current link conversation (if any).
-    /// Used for guardrails to prevent re-delegating to the upstream counterparty
-    /// instead of concluding back to them.
-    originating_channel: Option<String>,
 }
 
 impl std::fmt::Debug for SendAgentMessageTool {
@@ -61,7 +47,6 @@ impl SendAgentMessageTool {
         channel_id: crate::ChannelId,
         links: Arc<ArcSwap<Vec<AgentLink>>>,
         messaging_manager: Arc<MessagingManager>,
-        channel_store: ChannelStore,
         event_tx: broadcast::Sender<ProcessEvent>,
         agent_names: Arc<HashMap<String, String>>,
     ) -> Self {
@@ -71,33 +56,9 @@ impl SendAgentMessageTool {
             channel_id,
             links,
             messaging_manager,
-            channel_store,
             event_tx,
             agent_names,
-            skip_flag: None,
-            originating_source: None,
-            originating_channel: None,
         }
-    }
-}
-
-impl SendAgentMessageTool {
-    /// Set the per-turn skip flag so the channel turn ends after sending.
-    pub fn with_skip_flag(mut self, flag: SkipFlag) -> Self {
-        self.skip_flag = Some(flag);
-        self
-    }
-
-    /// Set the originating source (adapter name) for conclusion routing.
-    pub fn with_originating_source(mut self, source: String) -> Self {
-        self.originating_source = Some(source);
-        self
-    }
-
-    /// Set the direct originating channel for this turn.
-    pub fn with_originating_channel(mut self, channel_id: String) -> Self {
-        self.originating_channel = Some(channel_id);
-        self
     }
 }
 
@@ -167,8 +128,7 @@ impl Tool for SendAgentMessageTool {
             ))
         })?;
 
-        // In link channels, responding to the current counterparty should use the reply tool
-        // so metadata and conclusion routing stay on the same conversation chain.
+        // In link channels, responding to the current counterparty should use the reply tool.
         if self
             .current_link_counterparty_id()
             .as_deref()
@@ -176,20 +136,6 @@ impl Tool for SendAgentMessageTool {
         {
             return Err(SendAgentMessageError(
                 "you are already in a direct link conversation with this agent. Use reply to respond in the current link channel. Use send_agent_message to contact a different agent.".to_string(),
-            ));
-        }
-
-        // In nested link flows, if the target is the upstream counterparty
-        // from the parent link channel, the correct action is conclude_link.
-        // Re-sending to that agent creates parallel link threads with incorrect
-        // originating metadata.
-        if self
-            .upstream_counterparty_id()
-            .as_deref()
-            .is_some_and(|counterparty| counterparty == target_agent_id)
-        {
-            return Err(SendAgentMessageError(
-                "this target is the upstream counterparty for this link conversation. Use conclude_link to route the result back up the chain instead of send_agent_message.".to_string(),
             ));
         }
 
@@ -216,7 +162,6 @@ impl Tool for SendAgentMessageTool {
             )));
         }
 
-        // Determine the receiving agent and the relationship from sender's perspective
         let receiving_agent_id = if is_from_agent {
             &link.to_agent_id
         } else {
@@ -224,69 +169,64 @@ impl Tool for SendAgentMessageTool {
         };
 
         let target_agent_arc: AgentId = Arc::from(receiving_agent_id.as_str());
-        // Each agent gets its own side of the link channel
         let receiver_channel = link.channel_id_for(receiving_agent_id);
         let sender_channel = link.channel_id_for(sending_agent_id);
 
-        // Materialize the sender-side link channel immediately so both sides
-        // are visible in their channel lists even before the first reply.
-        let sender_channel_metadata: HashMap<String, serde_json::Value> = HashMap::new();
-        self.channel_store
-            .upsert(&sender_channel, &sender_channel_metadata);
-
-        // Construct the internal message targeting the receiver's link channel.
-        // originating_channel is always the current channel — the direct parent
-        // of this link conversation. Conclusions route one hop back, not to the root.
-        let mut metadata = HashMap::from([
+        let metadata = HashMap::from([
             ("from_agent_id".into(), serde_json::json!(sending_agent_id)),
             ("link_kind".into(), serde_json::json!(link.kind.as_str())),
-            ("reply_to_agent".into(), serde_json::json!(sending_agent_id)),
-            (
-                "reply_to_channel".into(),
-                serde_json::json!(&sender_channel),
-            ),
-            (
-                "originating_channel".into(),
-                serde_json::json!(self.channel_id.as_ref()),
-            ),
-            (
-                "original_sent_message".into(),
-                serde_json::json!(&args.message),
-            ),
         ]);
-        // Propagate the adapter name from the originating channel so conclusion
-        // routing can look up the correct messaging adapter (e.g. "webchat").
-        if let Some(source) = &self.originating_source {
-            metadata.insert("originating_source".into(), serde_json::json!(source));
-        }
 
-        let message = InboundMessage {
+        // 1. Inject into the receiver's link channel (triggers their LLM)
+        let receiver_message = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
             source: "internal".into(),
             conversation_id: receiver_channel.clone(),
             sender_id: sending_agent_id.to_string(),
             agent_id: Some(target_agent_arc),
-            content: MessageContent::Text(args.message),
+            content: MessageContent::Text(args.message.clone()),
             timestamp: Utc::now(),
-            metadata,
+            metadata: metadata.clone(),
             formatted_author: Some(format!("[{}]", self.agent_name)),
         };
 
-        // Inject into the messaging pipeline
         self.messaging_manager
-            .inject_message(message)
+            .inject_message(receiver_message)
             .await
             .map_err(|error| {
                 SendAgentMessageError(format!("failed to deliver message: {error}"))
             })?;
 
-        // End the current turn immediately. Delegating to another agent means
-        // this agent is done — without this, the LLM loops calling skip and
-        // burns through its depth budget while waiting for a response that
-        // arrives asynchronously.
-        if let Some(ref flag) = self.skip_flag {
-            flag.store(true, Ordering::Relaxed);
-        }
+        // 2. Record the sent message on the sender's link channel (history only,
+        //    does not trigger LLM). Marked with sender_record so handle_message
+        //    skips processing.
+        let mut sender_metadata = metadata;
+        sender_metadata.insert("sender_record".into(), serde_json::json!(true));
+        // Track which channel initiated this link conversation for bridging
+        // results back on conclusion.
+        sender_metadata.insert(
+            "initiated_from".into(),
+            serde_json::json!(self.channel_id.as_ref()),
+        );
+
+        let sender_message = InboundMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "internal".into(),
+            conversation_id: sender_channel.clone(),
+            sender_id: sending_agent_id.to_string(),
+            agent_id: Some(self.agent_id.clone()),
+            content: MessageContent::Text(args.message),
+            timestamp: Utc::now(),
+            metadata: sender_metadata,
+            formatted_author: Some(format!("[{}] (sent)", self.agent_name)),
+        };
+
+        self.messaging_manager
+            .inject_message(sender_message)
+            .await
+            .map_err(|error| {
+                SendAgentMessageError(format!("failed to record sender message: {error}"))
+            })?;
 
         // Emit process event for dashboard visibility
         self.event_tx
@@ -334,19 +274,6 @@ impl SendAgentMessageTool {
                     None
                 }
             })
-    }
-
-    /// If this link conversation was initiated from another link channel,
-    /// return that upstream link's counterparty agent ID.
-    fn upstream_counterparty_id(&self) -> Option<String> {
-        let originating = self.originating_channel.as_deref()?;
-        let rest = originating.strip_prefix("link:")?;
-        let (self_id, counterparty_id) = rest.split_once(':')?;
-        if self_id == self.agent_id.as_ref() {
-            Some(counterparty_id.to_string())
-        } else {
-            None
-        }
     }
 
     /// Resolve an agent target string to an agent ID.

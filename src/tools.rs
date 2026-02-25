@@ -234,9 +234,6 @@ pub async fn add_channel_tools(
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     conclude_link: Option<(ConcludeLinkFlag, ConcludeLinkSummary)>,
-    message_source: Option<String>,
-    originating_channel_override: Option<String>,
-    originating_source_override: Option<String>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
     let is_link_channel = conversation_id.starts_with("link:");
@@ -312,21 +309,9 @@ pub async fn add_channel_tools(
     if let Some(cron) = cron_tool {
         handle.add_tool(cron).await?;
     }
-    if let Some(mut agent_msg) = send_agent_message_tool
+    if let Some(agent_msg) = send_agent_message_tool
         && has_other_delegation_targets
     {
-        // Bind per-turn state so the tool auto-ends the turn after sending and
-        // propagates the correct adapter name for conclusion routing.
-        agent_msg = agent_msg.with_skip_flag(skip_flag.clone());
-        if let Some(originating_channel) = originating_channel_override {
-            agent_msg = agent_msg.with_originating_channel(originating_channel);
-        }
-        // Prefer the upstream originating_source (for multi-hop chains) over
-        // the current message source (which is "internal" on link channels).
-        let effective_source = originating_source_override.or(message_source);
-        if let Some(source) = effective_source {
-            agent_msg = agent_msg.with_originating_source(source);
-        }
         handle.add_tool(agent_msg).await?;
     }
     if let Some((flag, summary)) = conclude_link {

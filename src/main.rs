@@ -775,6 +775,30 @@ async fn run(
         .await?;
         agents_initialized = true;
 
+        // Pre-register both sides of every link channel so they appear in
+        // each agent's channel list from boot. The runtime Channel instances
+        // are still spawned on-demand when the first message arrives.
+        {
+            let all_links = agent_links.load();
+            let empty_meta = std::collections::HashMap::new();
+            for link in all_links.iter() {
+                let from_channel = link.channel_id_for(&link.from_agent_id);
+                let to_channel = link.channel_id_for(&link.to_agent_id);
+
+                if let Some(agent) = agents.get(&Arc::from(link.from_agent_id.as_str())) {
+                    let store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
+                    store.upsert(&from_channel, &empty_meta);
+                }
+                if let Some(agent) = agents.get(&Arc::from(link.to_agent_id.as_str())) {
+                    let store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
+                    store.upsert(&to_channel, &empty_meta);
+                }
+            }
+            if !all_links.is_empty() {
+                tracing::info!(link_count = all_links.len(), "pre-registered link channels");
+            }
+        }
+
         // Start file watcher with populated agent data
         _file_watcher = spacebot::config::spawn_file_watcher(
             config_path.clone(),
@@ -978,63 +1002,40 @@ async fn run(
 
                             let current_message = outbound_message.read().await.clone();
 
-                            // Internal link channels: route replies back to the sender's link channel
+                            // Mirror: when an agent replies on a link channel,
+                            // forward the message to the peer's side of the link.
                             if current_message.source == "internal" {
                                 let reply_text = match &response {
                                     spacebot::OutboundResponse::Text(t) => Some(t.clone()),
                                     spacebot::OutboundResponse::RichMessage { text, .. } => Some(text.clone()),
                                     spacebot::OutboundResponse::ThreadReply { text, .. } => Some(text.clone()),
-                                    spacebot::OutboundResponse::Status(_) => None,
                                     _ => None,
                                 };
 
                                 if let Some(text) = reply_text {
-                                    let reply_to_agent = current_message.metadata
-                                        .get("reply_to_agent")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
-                                    let reply_to_channel = current_message.metadata
-                                        .get("reply_to_channel")
-                                        .and_then(|v| v.as_str())
-                                        .map(String::from);
+                                    // Derive peer from link channel ID: "link:{self}:{peer}"
+                                    let peer = outbound_conversation_id
+                                        .strip_prefix("link:")
+                                        .and_then(|rest| rest.split_once(':'))
+                                        .map(|(_, peer_id)| peer_id.to_string());
 
-                                    if let (Some(target_agent), Some(target_channel)) = (reply_to_agent, reply_to_channel) {
+                                    if let Some(peer_agent_id) = peer {
+                                        let peer_channel = format!("link:{}:{}", peer_agent_id, sse_agent_id);
                                         let agent_display = outbound_agent_names
                                             .get(&sse_agent_id)
                                             .cloned()
                                             .unwrap_or_else(|| sse_agent_id.clone());
 
-                                        // Include the original sent message so the receiving
-                                        // agent's link channel can seed its history with context
-                                        let original_text = match &current_message.content {
-                                            spacebot::MessageContent::Text(t) => Some(t.clone()),
-                                            spacebot::MessageContent::Media { text, .. } => text.clone(),
-                                            _ => None,
-                                        };
-
-                                        let mut metadata = std::collections::HashMap::from([
+                                        let metadata = std::collections::HashMap::from([
                                             ("from_agent_id".into(), serde_json::json!(&sse_agent_id)),
-                                            ("reply_to_agent".into(), serde_json::json!(&sse_agent_id)),
-                                            ("reply_to_channel".into(), serde_json::json!(&outbound_conversation_id)),
                                         ]);
-                                        if let Some(original) = original_text {
-                                            metadata.insert("original_sent_message".into(), serde_json::json!(original));
-                                        }
-                                        // Propagate originating_channel and originating_source so both sides
-                                        // know where to route conclusions and which adapter to use.
-                                        if let Some(originating) = current_message.metadata.get("originating_channel") {
-                                            metadata.insert("originating_channel".into(), originating.clone());
-                                        }
-                                        if let Some(source) = current_message.metadata.get("originating_source") {
-                                            metadata.insert("originating_source".into(), source.clone());
-                                        }
 
-                                        let reply_message = spacebot::InboundMessage {
+                                        let mirror_message = spacebot::InboundMessage {
                                             id: uuid::Uuid::new_v4().to_string(),
                                             source: "internal".into(),
-                                            conversation_id: target_channel.clone(),
+                                            conversation_id: peer_channel.clone(),
                                             sender_id: sse_agent_id.clone(),
-                                            agent_id: Some(Arc::from(target_agent.as_str())),
+                                            agent_id: Some(Arc::from(peer_agent_id.as_str())),
                                             content: spacebot::MessageContent::Text(text),
                                             timestamp: chrono::Utc::now(),
                                             metadata,
@@ -1042,29 +1043,27 @@ async fn run(
                                         };
 
                                         if let Err(error) = messaging_for_outbound
-                                            .inject_message(reply_message)
+                                            .inject_message(mirror_message)
                                             .await
                                         {
                                             tracing::error!(
                                                 %error,
                                                 from = %sse_agent_id,
-                                                to = %target_agent,
-                                                "failed to route link channel reply"
+                                                to = %peer_agent_id,
+                                                "failed to mirror link channel reply"
                                             );
                                         } else {
-                                            // Emit SSE event so the dashboard animates the edge
                                             api_event_tx.send(spacebot::api::ApiEvent::AgentMessageSent {
                                                 from_agent_id: sse_agent_id.clone(),
-                                                to_agent_id: target_agent.clone(),
-                                                link_id: target_channel.clone(),
-                                                channel_id: target_channel.clone(),
+                                                to_agent_id: peer_agent_id.clone(),
+                                                link_id: peer_channel.clone(),
+                                                channel_id: peer_channel.clone(),
                                             }).ok();
 
                                             tracing::info!(
                                                 from = %sse_agent_id,
-                                                to = %target_agent,
-                                                channel = %target_channel,
-                                                "routed link channel reply"
+                                                to = %peer_agent_id,
+                                                "mirrored link channel reply"
                                             );
                                         }
                                     }
