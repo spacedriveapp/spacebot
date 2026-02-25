@@ -824,16 +824,7 @@ impl SpacebotModel {
 
     /// Remap model name for providers that require a different format in API calls.
     fn remap_model_name_for_api(&self) -> String {
-        if self.provider == "zai-coding-plan" {
-            // Z.AI Coding Plan API expects "zai/glm-5" not "glm-5"
-            let model_name = self
-                .model_name
-                .strip_prefix("zai/")
-                .unwrap_or(&self.model_name);
-            format!("zai/{model_name}")
-        } else {
-            self.model_name.clone()
-        }
+        remap_model_name_for_api(&self.provider, &self.model_name)
     }
 
     /// Generic OpenAI-compatible API call with optional bearer auth.
@@ -1530,6 +1521,18 @@ fn parse_openai_error_message(response_text: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
+    if provider == "zai-coding-plan" {
+        // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
+        model_name
+            .strip_prefix("zai/")
+            .unwrap_or(model_name)
+            .to_string()
+    } else {
+        model_name.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1583,5 +1586,21 @@ mod tests {
     fn positive_max_tokens_keeps_positive_values() {
         assert_eq!(positive_max_tokens(Some(1)), Some(1));
         assert_eq!(positive_max_tokens(Some(2048)), Some(2048));
+    }
+
+    #[test]
+    fn coding_plan_model_name_uses_plain_glm_id() {
+        assert_eq!(
+            remap_model_name_for_api("zai-coding-plan", "glm-5"),
+            "glm-5"
+        );
+        assert_eq!(
+            remap_model_name_for_api("zai-coding-plan", "zai/glm-5"),
+            "glm-5"
+        );
+        assert_eq!(
+            remap_model_name_for_api("openai", "gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
     }
 }
