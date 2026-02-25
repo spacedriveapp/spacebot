@@ -22,7 +22,7 @@
 //! - DM broadcast via `conversations.open`
 
 use crate::config::{SlackCommandConfig, SlackPermissions};
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::messaging::traits::{DeliveryOutcome, HistoryMessage, InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -787,7 +787,7 @@ impl Messaging for SlackAdapter {
         &self,
         message: &InboundMessage,
         status: StatusUpdate,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<DeliveryOutcome> {
         let thread_ts = match extract_thread_ts(message) {
             Some(ts) => ts,
             None => {
@@ -796,12 +796,12 @@ impl Messaging for SlackAdapter {
                     "skipping assistant.threads.setStatus — message has no thread_ts \
                      (typing indicators only work in Slack Assistant threads)"
                 );
-                return Ok(());
+                return Ok(DeliveryOutcome::NotSurfaced);
             }
         };
         let channel_id = match extract_channel_id(message) {
             Ok(id) => id,
-            Err(_) => return Ok(()),
+            Err(_) => return Ok(DeliveryOutcome::NotSurfaced),
         };
 
         let status_text = match &status {
@@ -830,9 +830,10 @@ impl Messaging for SlackAdapter {
         // Best-effort — don't propagate status errors into the main response pipeline.
         if let Err(err) = session.assistant_threads_set_status(&req).await {
             tracing::debug!(error = %err, "failed to set slack assistant thread status (non-fatal)");
+            return Ok(DeliveryOutcome::NotSurfaced);
         }
 
-        Ok(())
+        Ok(DeliveryOutcome::Surfaced)
     }
 
     async fn respond(

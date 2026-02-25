@@ -96,6 +96,7 @@ pub use worker_inspect::{
 use crate::agent::channel::ChannelState;
 use crate::config::{BrowserConfig, RuntimeConfig};
 use crate::memory::MemorySearch;
+use crate::sandbox::Sandbox;
 use crate::{AgentId, ChannelId, OutboundEnvelope, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};

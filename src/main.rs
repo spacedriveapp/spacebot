@@ -1101,7 +1101,6 @@ async fn run(
                     let api_event_tx = api_state.event_tx.clone();
                     let sse_agent_id = agent_id.to_string();
                     let sse_channel_id = conversation_id.clone();
-                    let outbound_agent_names = agent.deps.agent_names.clone();
                     let outbound_handle = tokio::spawn(async move {
                         while let Some(envelope) = response_rx.recv().await {
                             let receipt_id = envelope.receipt_id.clone();
@@ -1158,24 +1157,94 @@ async fn run(
                             }
 
                             let current_message = outbound_message.read().await.clone();
+                            let acknowledged_worker_id = match &response {
+                                spacebot::OutboundResponse::Status(
+                                    spacebot::StatusUpdate::WorkerStarted { worker_id, .. },
+                                )
+                                | spacebot::OutboundResponse::Status(
+                                    spacebot::StatusUpdate::WorkerCheckpoint { worker_id, .. },
+                                )
+                                | spacebot::OutboundResponse::Status(
+                                    spacebot::StatusUpdate::WorkerCompleted { worker_id, .. },
+                                ) => Some(*worker_id),
+                                _ => None,
+                            };
                             let is_status_update =
                                 matches!(response, spacebot::OutboundResponse::Status(_));
-                            let delivery_result = match response {
+                            let (delivery_result, delivery_outcome) = match response {
                                 spacebot::OutboundResponse::Status(status) => {
-                                    messaging_for_outbound.send_status(&current_message, status).await
+                                    match messaging_for_outbound
+                                        .send_status(&current_message, status)
+                                        .await
+                                    {
+                                        Ok(outcome) => (Ok(()), outcome),
+                                        Err(error) => (
+                                            Err(error),
+                                            spacebot::messaging::traits::DeliveryOutcome::NotSurfaced,
+                                        ),
+                                    }
                                 }
                                 response => {
                                     tracing::info!(
                                         conversation_id = %outbound_conversation_id,
                                         "routing outbound response to messaging adapter"
                                     );
-                                    messaging_for_outbound.respond(&current_message, response).await
+                                    (
+                                        messaging_for_outbound
+                                            .respond(&current_message, response)
+                                            .await,
+                                        spacebot::messaging::traits::DeliveryOutcome::Surfaced,
+                                    )
                                 }
                             };
+                            let status_surfaced = delivery_outcome.is_surfaced();
+
+                            if let (Ok(()), Some(worker_id)) =
+                                (&delivery_result, acknowledged_worker_id)
+                                && status_surfaced
+                                && let Err(error) = outbound_process_logger
+                                    .mark_worker_task_contract_acknowledged(worker_id)
+                                    .await
+                            {
+                                tracing::warn!(
+                                    %error,
+                                    channel_id = %outbound_conversation_id,
+                                    worker_id = %worker_id,
+                                    "failed to mark worker task contract acknowledged"
+                                );
+                            }
 
                             if let Some(receipt_id) = receipt_id {
-                                match &delivery_result {
-                                    Ok(()) => {
+                                if is_status_update && !status_surfaced {
+                                    match outbound_process_logger
+                                        .fail_worker_delivery_receipt_attempt(
+                                            &receipt_id,
+                                            "status update not surfaced by adapter",
+                                        )
+                                        .await
+                                    {
+                                        Ok(outcome) => {
+                                            tracing::warn!(
+                                                channel_id = %outbound_conversation_id,
+                                                receipt_id = %receipt_id,
+                                                attempt_count = outcome.attempt_count,
+                                                status = %outcome.status,
+                                                next_attempt_at = ?outcome.next_attempt_at,
+                                                "worker terminal receipt was not surfaced; scheduled retry"
+                                            );
+                                        }
+                                        Err(update_error) => {
+                                            tracing::warn!(
+                                                %update_error,
+                                                channel_id = %outbound_conversation_id,
+                                                receipt_id = %receipt_id,
+                                                "failed to record unsurfaced worker terminal receipt"
+                                            );
+                                        }
+                                    }
+                                } else {
+                                    match &delivery_result {
+                                        Ok(()) => {
                                         match outbound_process_logger
                                             .ack_worker_delivery_receipt(&receipt_id)
                                             .await
@@ -1202,8 +1271,8 @@ async fn run(
                                                 );
                                             }
                                         }
-                                    }
-                                    Err(error) => {
+                                    },
+                                        Err(error) => {
                                         match outbound_process_logger
                                             .fail_worker_delivery_receipt_attempt(
                                                 &receipt_id,
@@ -1233,6 +1302,7 @@ async fn run(
                                     }
                                 }
                             }
+                            }
 
                             if let Err(error) = delivery_result {
                                 if is_status_update {
@@ -1240,6 +1310,12 @@ async fn run(
                                 } else {
                                     tracing::error!(%error, "failed to send outbound response");
                                 }
+                            } else if is_status_update && !status_surfaced {
+                                tracing::warn!(
+                                    channel_id = %outbound_conversation_id,
+                                    delivery_outcome = ?delivery_outcome,
+                                    "status update was accepted by adapter but not surfaced"
+                                );
                             }
                         }
                     });
@@ -1521,21 +1597,27 @@ async fn initialize_agents(
 
         let process_run_logger =
             spacebot::conversation::history::ProcessRunLogger::new(db.sqlite.clone());
-        let (recovered_workers, recovered_branches, recovered_receipts) = process_run_logger
-            .close_orphaned_runs()
-            .await
-            .with_context(|| {
-                format!(
-                    "failed to recover orphaned runs for agent '{}'",
-                    agent_config.id
-                )
-            })?;
-        if recovered_workers > 0 || recovered_branches > 0 || recovered_receipts > 0 {
+        let (recovered_workers, recovered_branches, recovered_receipts, recovered_contracts) =
+            process_run_logger
+                .close_orphaned_runs()
+                .await
+                .with_context(|| {
+                    format!(
+                        "failed to recover orphaned runs for agent '{}'",
+                        agent_config.id
+                    )
+                })?;
+        if recovered_workers > 0
+            || recovered_branches > 0
+            || recovered_receipts > 0
+            || recovered_contracts > 0
+        {
             tracing::warn!(
                 agent_id = %agent_config.id,
                 recovered_workers,
                 recovered_branches,
                 recovered_receipts,
+                recovered_contracts,
                 "recovered orphaned process runs from previous startup"
             );
         }

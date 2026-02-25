@@ -1,7 +1,7 @@
 //! Discord messaging adapter using serenity.
 
 use crate::config::DiscordPermissions;
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
+use crate::messaging::traits::{DeliveryOutcome, HistoryMessage, InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -380,7 +380,7 @@ impl Messaging for DiscordAdapter {
                 self.active_messages.write().await.remove(&message.id);
             }
             OutboundResponse::Status(status) => {
-                self.send_status(message, status).await?;
+                let _ = self.send_status(message, status).await?;
             }
             // Slack-specific variants — graceful fallbacks for Discord
             OutboundResponse::RemoveReaction(_) => {} // no-op
@@ -413,8 +413,8 @@ impl Messaging for DiscordAdapter {
         &self,
         message: &InboundMessage,
         status: StatusUpdate,
-    ) -> crate::Result<()> {
-        match status {
+    ) -> crate::Result<DeliveryOutcome> {
+        let surfaced = match status {
             StatusUpdate::Thinking => {
                 let http = self.get_http().await?;
                 let channel_id = self.extract_channel_id(message)?;
@@ -424,6 +424,7 @@ impl Messaging for DiscordAdapter {
                     .write()
                     .await
                     .insert(Self::channel_key(message), typing);
+                true
             }
             StatusUpdate::WorkerStarted { worker_id, task } => {
                 self.stop_typing(message).await;
@@ -437,6 +438,9 @@ impl Messaging for DiscordAdapter {
                     .await
                 {
                     tracing::debug!(%error, "failed to update discord progress message");
+                    false
+                } else {
+                    true
                 }
             }
             StatusUpdate::WorkerCheckpoint { worker_id, status } => {
@@ -451,6 +455,9 @@ impl Messaging for DiscordAdapter {
                     .await
                 {
                     tracing::debug!(%error, "failed to update discord progress message");
+                    false
+                } else {
+                    true
                 }
             }
             StatusUpdate::WorkerCompleted { worker_id, result } => {
@@ -465,18 +472,25 @@ impl Messaging for DiscordAdapter {
                     .await
                 {
                     tracing::debug!(%error, "failed to update discord progress message");
+                    false
+                } else {
+                    self.clear_progress_message(message, worker_id).await;
+                    true
                 }
-                self.clear_progress_message(message, worker_id).await;
             }
             StatusUpdate::StopTyping
             | StatusUpdate::ToolStarted { .. }
             | StatusUpdate::ToolCompleted { .. }
             | StatusUpdate::BranchStarted { .. } => {
                 self.stop_typing(message).await;
+                true
             }
-        }
-
-        Ok(())
+        };
+        Ok(if surfaced {
+            DeliveryOutcome::Surfaced
+        } else {
+            DeliveryOutcome::NotSurfaced
+        })
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {

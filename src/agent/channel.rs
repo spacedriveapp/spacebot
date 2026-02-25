@@ -41,6 +41,9 @@ const WORKER_CHECKPOINT_MIN_INTERVAL_SECS: u64 = 20;
 const WORKER_CHECKPOINT_MAX_CHARS: usize = 220;
 const WORKER_RECEIPT_DISPATCH_INTERVAL_SECS: u64 = 5;
 const WORKER_RECEIPT_DISPATCH_BATCH_SIZE: i64 = 8;
+const WORKER_CONTRACT_ACK_BATCH_SIZE: i64 = 8;
+const WORKER_CONTRACT_PROGRESS_BATCH_SIZE: i64 = 8;
+const WORKER_CONTRACT_TERMINAL_BATCH_SIZE: i64 = 8;
 
 #[derive(Debug, Clone)]
 struct WorkerCheckpointState {
@@ -112,6 +115,7 @@ impl ChannelState {
                     channel_id: Some(self.channel_id.clone()),
                     result: format!("Worker cancelled: {reason}."),
                     notify: true,
+                    success: false,
                 });
             Ok(())
         } else if removed {
@@ -135,6 +139,7 @@ impl ChannelState {
                     channel_id: Some(self.channel_id.clone()),
                     result: format!("Worker cancelled: {reason}."),
                     notify: true,
+                    success: false,
                 });
             Ok(())
         } else {
@@ -204,10 +209,22 @@ pub struct Channel {
     pending_retrigger_metadata: HashMap<String, serde_json::Value>,
     /// Deadline for firing the pending retrigger (debounce timer).
     retrigger_deadline: Option<tokio::time::Instant>,
+    /// Optional cross-agent messaging tool for linked agent conversations.
+    send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
+    /// Number of turns processed in a link channel.
+    link_turn_count: u32,
+    /// Originating channel id propagated through link channels.
+    originating_channel: Option<String>,
+    /// Originating adapter source propagated through link channels.
+    originating_source: Option<String>,
+    /// Set once a link conversation has been explicitly concluded.
+    link_concluded: bool,
     /// Per-worker checkpoint state used for status dedupe/throttling.
     worker_checkpoints: HashMap<WorkerId, WorkerCheckpointState>,
     /// Periodic deadline for checking due worker terminal delivery receipts.
     worker_receipt_dispatch_deadline: tokio::time::Instant,
+    /// Periodic deadline for deterministic worker task contract checks.
+    worker_contract_tick_deadline: tokio::time::Instant,
 }
 
 impl Channel {
@@ -288,6 +305,9 @@ impl Channel {
         };
 
         let self_tx = message_tx.clone();
+        let worker_contract_tick_secs = (**deps.runtime_config.worker_contract.load())
+            .tick_secs
+            .max(1);
         let channel = Self {
             id: id.clone(),
             title: None,
@@ -311,9 +331,16 @@ impl Channel {
             pending_retrigger: false,
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
+            send_agent_message_tool,
+            link_turn_count: 0,
+            originating_channel: None,
+            originating_source: None,
+            link_concluded: false,
             worker_checkpoints: HashMap::new(),
             worker_receipt_dispatch_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(WORKER_RECEIPT_DISPATCH_INTERVAL_SECS),
+            worker_contract_tick_deadline: tokio::time::Instant::now()
+                + std::time::Duration::from_secs(worker_contract_tick_secs),
         };
 
         (channel, message_tx)
@@ -338,6 +365,7 @@ impl Channel {
                 self.coalesce_deadline,
                 self.retrigger_deadline,
                 Some(self.worker_receipt_dispatch_deadline),
+                Some(self.worker_contract_tick_deadline),
             ]
             .into_iter()
             .flatten()
@@ -412,6 +440,15 @@ impl Channel {
                             + std::time::Duration::from_secs(
                                 WORKER_RECEIPT_DISPATCH_INTERVAL_SECS,
                             );
+                    }
+                    // Check worker task contract deadline
+                    if self.worker_contract_tick_deadline <= now {
+                        self.flush_due_worker_task_contract_deadlines().await;
+                        let tick_secs = (**self.deps.runtime_config.worker_contract.load())
+                            .tick_secs
+                            .max(1);
+                        self.worker_contract_tick_deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_secs(tick_secs);
                     }
                 }
                 else => break,
@@ -1715,8 +1752,38 @@ impl Channel {
                 worker_type,
                 ..
             } => {
-                run_logger.log_worker_started(channel_id.as_ref(), *worker_id, task);
+                run_logger.log_worker_started(
+                    channel_id.as_ref(),
+                    *worker_id,
+                    task,
+                    worker_type,
+                    &self.deps.agent_id,
+                );
+                let worker_contract_config = **self.deps.runtime_config.worker_contract.load();
+                let terminal_secs = (**self.deps.runtime_config.cortex.load())
+                    .worker_timeout_secs
+                    .max(1);
                 let public_task_summary = summarize_worker_start_for_status(task);
+                if let Err(error) = run_logger
+                    .upsert_worker_task_contract(
+                        &self.deps.agent_id,
+                        &self.id,
+                        *worker_id,
+                        &public_task_summary,
+                        worker_contract_config.ack_secs.max(1),
+                        worker_contract_config.progress_secs.max(1),
+                        terminal_secs,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to upsert worker task contract"
+                    );
+                }
+                self.worker_contract_tick_deadline = tokio::time::Instant::now();
                 if self.worker_is_user_visible(*worker_id).await {
                     self.send_status_update(crate::StatusUpdate::WorkerStarted {
                         worker_id: *worker_id,
@@ -1738,8 +1805,144 @@ impl Channel {
                 worker_id, status, ..
             } => {
                 run_logger.log_worker_status(*worker_id, status);
+                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                    .progress_secs
+                    .max(1);
+                if let Err(error) = run_logger
+                    .touch_worker_task_contract_progress(*worker_id, Some(status), progress_secs)
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to refresh worker task contract progress"
+                    );
+                }
                 if self.worker_is_user_visible(*worker_id).await {
                     self.maybe_send_worker_checkpoint(*worker_id, status).await;
+                }
+            }
+            ProcessEvent::ToolStarted {
+                process_id: ProcessId::Worker(worker_id),
+                channel_id,
+                tool_name,
+                ..
+            } if channel_id.as_ref() == Some(&self.id) => {
+                run_logger.log_worker_event(
+                    *worker_id,
+                    "tool_started",
+                    serde_json::json!({ "tool_name": tool_name }),
+                );
+                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                    .progress_secs
+                    .max(1);
+                if let Err(error) = run_logger
+                    .touch_worker_task_contract_progress(
+                        *worker_id,
+                        Some(tool_name.as_str()),
+                        progress_secs,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to refresh worker task contract progress from tool event"
+                    );
+                }
+            }
+            ProcessEvent::ToolCompleted {
+                process_id: ProcessId::Worker(worker_id),
+                channel_id,
+                tool_name,
+                ..
+            } if channel_id.as_ref() == Some(&self.id) => {
+                run_logger.log_worker_event(
+                    *worker_id,
+                    "tool_completed",
+                    serde_json::json!({ "tool_name": tool_name }),
+                );
+                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                    .progress_secs
+                    .max(1);
+                if let Err(error) = run_logger
+                    .touch_worker_task_contract_progress(
+                        *worker_id,
+                        Some(tool_name.as_str()),
+                        progress_secs,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to refresh worker task contract progress from tool event"
+                    );
+                }
+            }
+            ProcessEvent::WorkerPermission {
+                worker_id,
+                channel_id,
+                permission_id,
+                description,
+                ..
+            } if channel_id.as_ref() == Some(&self.id) => {
+                run_logger.log_worker_event(
+                    *worker_id,
+                    "permission",
+                    serde_json::json!({
+                        "permission_id": permission_id,
+                        "description": description,
+                    }),
+                );
+                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                    .progress_secs
+                    .max(1);
+                if let Err(error) = run_logger
+                    .touch_worker_task_contract_progress(
+                        *worker_id,
+                        Some(description.as_str()),
+                        progress_secs,
+                    )
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to refresh worker task contract progress from permission event"
+                    );
+                }
+            }
+            ProcessEvent::WorkerQuestion {
+                worker_id,
+                channel_id,
+                question_id,
+                ..
+            } if channel_id.as_ref() == Some(&self.id) => {
+                run_logger.log_worker_event(
+                    *worker_id,
+                    "question",
+                    serde_json::json!({
+                        "question_id": question_id,
+                    }),
+                );
+                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                    .progress_secs
+                    .max(1);
+                if let Err(error) = run_logger
+                    .touch_worker_task_contract_progress(*worker_id, None, progress_secs)
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %worker_id,
+                        "failed to refresh worker task contract progress from question event"
+                    );
                 }
             }
             ProcessEvent::WorkerComplete {
@@ -1749,7 +1952,7 @@ impl Channel {
                 success,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result);
+                run_logger.log_worker_completed(*worker_id, result, *success);
                 self.worker_checkpoints.remove(worker_id);
                 if *notify {
                     self.send_status_update(crate::StatusUpdate::WorkerCompleted {
@@ -1759,6 +1962,26 @@ impl Channel {
                     .await;
 
                     let terminal_state = classify_worker_terminal_state(result);
+                    let terminal_secs = (**self.deps.runtime_config.cortex.load())
+                        .worker_timeout_secs
+                        .max(1);
+                    if let Err(error) = self
+                        .state
+                        .process_run_logger
+                        .mark_worker_task_contract_terminal_pending(
+                            *worker_id,
+                            terminal_state,
+                            terminal_secs,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            %error,
+                            channel_id = %self.id,
+                            worker_id = %worker_id,
+                            "failed to mark worker contract terminal pending"
+                        );
+                    }
                     let payload_text =
                         build_worker_terminal_receipt_payload(terminal_state, result);
                     match self
@@ -1930,6 +2153,117 @@ impl Channel {
                     );
                 }
             }
+        }
+    }
+
+    async fn flush_due_worker_task_contract_deadlines(&mut self) {
+        let worker_contract_config = **self.deps.runtime_config.worker_contract.load();
+
+        let due_ack = match self
+            .state
+            .process_run_logger
+            .claim_due_worker_task_contract_ack_deadlines(
+                &self.id,
+                WORKER_CONTRACT_ACK_BATCH_SIZE,
+                worker_contract_config.ack_secs.max(1),
+            )
+            .await
+        {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to claim due worker task contract ack deadlines"
+                );
+                Vec::new()
+            }
+        };
+
+        for due in due_ack {
+            if !self.worker_is_user_visible(due.worker_id).await {
+                if let Err(error) = self
+                    .state
+                    .process_run_logger
+                    .mark_worker_task_contract_acknowledged(due.worker_id)
+                    .await
+                {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %self.id,
+                        worker_id = %due.worker_id,
+                        "failed to auto-ack hidden worker task contract"
+                    );
+                }
+                continue;
+            }
+            let status = build_worker_ack_checkpoint(&due.task_summary, due.attempt_count);
+            self.send_status_update(crate::StatusUpdate::WorkerCheckpoint {
+                worker_id: due.worker_id,
+                status,
+            })
+            .await;
+        }
+
+        let due_progress = match self
+            .state
+            .process_run_logger
+            .claim_due_worker_task_contract_progress_deadlines(
+                &self.id,
+                WORKER_CONTRACT_PROGRESS_BATCH_SIZE,
+            )
+            .await
+        {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to claim due worker task contract progress deadlines"
+                );
+                Vec::new()
+            }
+        };
+
+        for due in due_progress {
+            if !self.worker_is_user_visible(due.worker_id).await {
+                continue;
+            }
+            let status = build_worker_progress_sla_nudge(&due.task_summary);
+            self.send_status_update(crate::StatusUpdate::WorkerCheckpoint {
+                worker_id: due.worker_id,
+                status,
+            })
+            .await;
+        }
+
+        let due_terminal = match self
+            .state
+            .process_run_logger
+            .claim_due_worker_task_contract_terminal_deadlines(
+                &self.id,
+                WORKER_CONTRACT_TERMINAL_BATCH_SIZE,
+            )
+            .await
+        {
+            Ok(due) => due,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to claim due worker task contract terminal deadlines"
+                );
+                Vec::new()
+            }
+        };
+
+        for due in due_terminal {
+            self.worker_checkpoints.remove(&due.worker_id);
+            tracing::warn!(
+                channel_id = %self.id,
+                worker_id = %due.worker_id,
+                "worker terminal deadline elapsed before adapter acknowledgement"
+            );
         }
     }
 
@@ -2478,10 +2812,10 @@ where
 
         let outcome = if timeout_secs == 0 {
             match future.await {
-                Ok(text) => ("done", text, true),
+                Ok(text) => ("done", text, true, true),
                 Err(error) => {
                     tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                    ("failed", format!("Worker failed: {error}"), true)
+                    ("failed", format!("Worker failed: {error}"), true, false)
                 }
             }
         } else {
@@ -2498,10 +2832,10 @@ where
                 tokio::select! {
                     result = &mut future => {
                         let outcome = match result {
-                            Ok(text) => ("done", text, true),
+                            Ok(text) => ("done", text, true, true),
                             Err(error) => {
                                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                                ("failed", format!("Worker failed: {error}"), true)
+                                ("failed", format!("Worker failed: {error}"), true, false)
                             }
                         };
                         break outcome;
@@ -2538,12 +2872,13 @@ where
                             "timed_out",
                             format!("Worker timed out after {timeout_secs} seconds without progress."),
                             true,
+                            false,
                         );
                     }
                 }
             }
         };
-        let (terminal_status, result_text, notify) = outcome;
+        let (terminal_status, result_text, notify, success) = outcome;
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -2801,6 +3136,22 @@ fn summarize_worker_start_for_status(task: &str) -> String {
     } else {
         "background task".to_string()
     }
+}
+
+fn build_worker_ack_checkpoint(task_summary: &str, attempt_count: i64) -> String {
+    let message = if attempt_count <= 1 {
+        format!("Acknowledged {task_summary}; running now.")
+    } else {
+        format!("Still running {task_summary}.")
+    };
+    normalize_worker_checkpoint_status(&message)
+        .unwrap_or_else(|| "background task running".to_string())
+}
+
+fn build_worker_progress_sla_nudge(task_summary: &str) -> String {
+    let message = format!("Still working on {task_summary}. I will report back when complete.");
+    normalize_worker_checkpoint_status(&message)
+        .unwrap_or_else(|| "still working; I will report back when complete.".to_string())
 }
 
 fn is_worker_terminal_failure(result: &str) -> bool {
@@ -3272,6 +3623,8 @@ mod tests {
     use super::WORKER_CHECKPOINT_MIN_INTERVAL_SECS;
     use super::WorkerCheckpointState;
     use super::apply_history_after_turn;
+    use super::build_worker_ack_checkpoint;
+    use super::build_worker_progress_sla_nudge;
     use super::build_worker_terminal_receipt_payload;
     use super::classify_worker_terminal_state;
     use super::is_worker_progress_event;
@@ -3818,6 +4171,26 @@ mod tests {
         assert!(
             !research.contains("http"),
             "public summary should not expose raw task content"
+        );
+    }
+
+    #[test]
+    fn worker_ack_checkpoint_is_deterministic() {
+        assert_eq!(
+            build_worker_ack_checkpoint("research task", 1),
+            "Acknowledged research task; running now."
+        );
+        assert_eq!(
+            build_worker_ack_checkpoint("research task", 2),
+            "Still running research task."
+        );
+    }
+
+    #[test]
+    fn worker_progress_sla_nudge_is_deterministic() {
+        assert_eq!(
+            build_worker_progress_sla_nudge("analysis task"),
+            "Still working on analysis task. I will report back when complete."
         );
     }
 }

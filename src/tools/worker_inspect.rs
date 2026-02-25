@@ -115,6 +115,31 @@ impl Tool for WorkerInspectTool {
             summary.push_str(&format!("\n### Result\n\n{result}\n"));
         }
 
+        let events = self
+            .run_logger
+            .list_worker_events(&worker_id, 50)
+            .await
+            .map_err(|e| WorkerInspectError(format!("Failed to load worker events: {e}")))?;
+        if !events.is_empty() {
+            summary.push_str("\n### Event Timeline\n\n");
+            for event in events {
+                let payload = event
+                    .payload_json
+                    .as_deref()
+                    .map(|json| truncate_utf8(json, 200))
+                    .unwrap_or_default();
+                if payload.is_empty() {
+                    summary.push_str(&format!("- [{}] {}\n", event.created_at, event.event_type));
+                } else {
+                    summary.push_str(&format!(
+                        "- [{}] {} — {}\n",
+                        event.created_at, event.event_type, payload
+                    ));
+                }
+            }
+            summary.push('\n');
+        }
+
         if let Some(blob) = &detail.transcript_blob {
             match worker_transcript::deserialize_transcript(blob) {
                 Ok(steps) => {

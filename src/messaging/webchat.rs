@@ -4,7 +4,7 @@
 //! Inbound messages are injected by the API handler via `MessagingManager::inject_message`,
 //! and outbound responses are routed to per-session channels consumed as SSE streams.
 
-use crate::messaging::traits::{InboundStream, Messaging};
+use crate::messaging::traits::{DeliveryOutcome, InboundStream, Messaging};
 use crate::{InboundMessage, OutboundResponse, StatusUpdate};
 
 use std::collections::HashMap;
@@ -106,10 +106,10 @@ impl Messaging for WebChatAdapter {
         &self,
         message: &InboundMessage,
         status: StatusUpdate,
-    ) -> crate::Result<()> {
+    ) -> crate::Result<DeliveryOutcome> {
         let sessions = self.sessions.read().await;
         let Some(tx) = sessions.get(&message.conversation_id) else {
-            return Ok(());
+            return Ok(DeliveryOutcome::NotSurfaced);
         };
 
         let event = match status {
@@ -117,11 +117,14 @@ impl Messaging for WebChatAdapter {
             StatusUpdate::StopTyping => WebChatEvent::StopTyping,
             StatusUpdate::ToolStarted { tool_name } => WebChatEvent::ToolStarted { tool_name },
             StatusUpdate::ToolCompleted { tool_name } => WebChatEvent::ToolCompleted { tool_name },
-            _ => return Ok(()),
+            _ => return Ok(DeliveryOutcome::NotSurfaced),
         };
 
-        let _ = tx.send(event).await;
-        Ok(())
+        Ok(if tx.send(event).await.is_ok() {
+            DeliveryOutcome::Surfaced
+        } else {
+            DeliveryOutcome::NotSurfaced
+        })
     }
 
     async fn health_check(&self) -> crate::Result<()> {

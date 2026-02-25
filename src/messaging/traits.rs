@@ -8,6 +8,21 @@ use std::pin::Pin;
 /// Message stream type.
 pub type InboundStream = Pin<Box<dyn Stream<Item = InboundMessage> + Send>>;
 
+/// Result of attempting to deliver a status update.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveryOutcome {
+    /// Adapter surfaced the status update to the user.
+    Surfaced,
+    /// Adapter accepted the call but did not surface user-visible output.
+    NotSurfaced,
+}
+
+impl DeliveryOutcome {
+    pub fn is_surfaced(self) -> bool {
+        matches!(self, Self::Surfaced)
+    }
+}
+
 /// A message from platform history used for backfilling channel context.
 #[derive(Debug, Clone)]
 pub struct HistoryMessage {
@@ -37,8 +52,8 @@ pub trait Messaging: Send + Sync + 'static {
         &self,
         _message: &InboundMessage,
         _status: StatusUpdate,
-    ) -> impl std::future::Future<Output = Result<()>> + Send {
-        async { Ok(()) }
+    ) -> impl std::future::Future<Output = Result<DeliveryOutcome>> + Send {
+        async { Ok(DeliveryOutcome::NotSurfaced) }
     }
 
     /// Broadcast a message.
@@ -90,7 +105,7 @@ pub trait MessagingDyn: Send + Sync + 'static {
         &'a self,
         message: &'a InboundMessage,
         status: StatusUpdate,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>>;
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<DeliveryOutcome>> + Send + 'a>>;
 
     fn broadcast<'a>(
         &'a self,
@@ -136,7 +151,7 @@ impl<T: Messaging> MessagingDyn for T {
         &'a self,
         message: &'a InboundMessage,
         status: StatusUpdate,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<DeliveryOutcome>> + Send + 'a>> {
         Box::pin(Messaging::send_status(self, message, status))
     }
 
