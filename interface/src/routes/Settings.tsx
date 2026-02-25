@@ -509,7 +509,7 @@ export function Settings() {
 					</div>
 					{testResult && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${
+							className={`rounded-md border px-3 py-2 text-sm break-all ${
 								testResult.success
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
@@ -523,7 +523,7 @@ export function Settings() {
 					)}
 					{message && (
 						<div
-							className={`rounded-md border px-3 py-2 text-sm ${
+							className={`rounded-md border px-3 py-2 text-sm break-all ${
 								message.type === "success"
 									? "border-green-500/20 bg-green-500/10 text-green-400"
 									: "border-red-500/20 bg-red-500/10 text-red-400"
