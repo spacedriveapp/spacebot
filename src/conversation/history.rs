@@ -303,67 +303,6 @@ impl ProcessRunLogger {
         Self { pool }
     }
 
-    fn log_worker_event_with_context(
-        &self,
-        worker_id: String,
-        channel_id: Option<String>,
-        agent_id: Option<String>,
-        event_type: String,
-        payload_json: Option<String>,
-    ) {
-        let pool = self.pool.clone();
-
-        tokio::spawn(async move {
-            let event_id = uuid::Uuid::new_v4().to_string();
-            if let Err(error) = sqlx::query(
-                "INSERT INTO worker_events \
-                 (id, worker_id, channel_id, agent_id, event_type, payload_json) \
-                 VALUES ( \
-                     ?, \
-                     ?, \
-                     COALESCE(?, (SELECT channel_id FROM worker_runs WHERE id = ?)), \
-                     COALESCE(?, (SELECT agent_id FROM worker_runs WHERE id = ?)), \
-                     ?, \
-                     ? \
-                 )",
-            )
-            .bind(&event_id)
-            .bind(&worker_id)
-            .bind(&channel_id)
-            .bind(&worker_id)
-            .bind(&agent_id)
-            .bind(&worker_id)
-            .bind(&event_type)
-            .bind(&payload_json)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(
-                    %error,
-                    worker_id = %worker_id,
-                    event_type = %event_type,
-                    "failed to persist worker event"
-                );
-            }
-        });
-    }
-
-    /// Record a worker lifecycle event. Fire-and-forget.
-    pub fn log_worker_event(
-        &self,
-        worker_id: WorkerId,
-        event_type: &str,
-        payload: serde_json::Value,
-    ) {
-        self.log_worker_event_with_context(
-            worker_id.to_string(),
-            None,
-            None,
-            event_type.to_string(),
-            Some(payload.to_string()),
-        );
-    }
-
     /// Record a branch starting. Fire-and-forget.
     pub fn log_branch_started(
         &self,
@@ -421,7 +360,6 @@ impl ProcessRunLogger {
         agent_id: &crate::AgentId,
     ) {
         let pool = self.pool.clone();
-        let logger = self.clone();
         let id = worker_id.to_string();
         let channel_id = channel_id.map(|c| c.to_string());
         let task = task.to_string();
@@ -444,39 +382,20 @@ impl ProcessRunLogger {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker start");
                 return;
             }
-
-            let payload_json = serde_json::json!({
-                "task": task,
-                "worker_type": worker_type,
-            })
-            .to_string();
-            logger.log_worker_event_with_context(
-                id.clone(),
-                channel_id.clone(),
-                Some(agent_id.clone()),
-                "started".to_string(),
-                Some(payload_json),
-            );
         });
     }
 
     /// Update a worker's status. Fire-and-forget.
-    /// Worker status text is kept in a separate append-only event table so the
-    /// worker_runs status enum remains queryable (`running`, `done`, etc.).
-    pub fn log_worker_status(&self, worker_id: WorkerId, status: &str) {
-        self.log_worker_event(
-            worker_id,
-            "status",
-            serde_json::json!({
-                "status": status,
-            }),
-        );
+    /// Worker status text updates are transient and read from in-memory status
+    /// blocks while the worker is active.
+    pub fn log_worker_status(&self, _worker_id: WorkerId, _status: &str) {
+        // Intentionally a no-op. The worker_runs `status` column is reserved
+        // for terminal state values (running/done/failed/cancelled/timed_out).
     }
 
     /// Record a worker completing with its result. Fire-and-forget.
     pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str, success: bool) {
         let pool = self.pool.clone();
-        let logger = self.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
         let success_int = if success { 1_i64 } else { 0_i64 };
@@ -508,19 +427,6 @@ impl ProcessRunLogger {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
                 return;
             }
-
-            let payload_json = serde_json::json!({
-                "result": result,
-                "success": success,
-            })
-            .to_string();
-            logger.log_worker_event_with_context(
-                id.clone(),
-                None,
-                None,
-                "completed".to_string(),
-                Some(payload_json),
-            );
         });
     }
 
@@ -1994,91 +1900,6 @@ impl ProcessRunLogger {
         }))
     }
 
-    /// List recent worker events for a worker, oldest first.
-    pub async fn list_worker_events(
-        &self,
-        worker_id: &str,
-        limit: i64,
-    ) -> crate::error::Result<Vec<WorkerEventRow>> {
-        if limit == 0 {
-            return Ok(Vec::new());
-        }
-        if limit < 0 {
-            return Err(anyhow::anyhow!("invalid limit: must be >= 0").into());
-        }
-        let limit = limit.min(500);
-
-        let rows = sqlx::query(
-            "SELECT id, worker_id, channel_id, agent_id, event_type, payload_json, created_at \
-             FROM worker_events \
-             WHERE worker_id = ? \
-             ORDER BY created_at DESC, id DESC \
-             LIMIT ?",
-        )
-        .bind(worker_id)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))?;
-
-        let mut events = Vec::with_capacity(rows.len());
-        for row in rows {
-            let id: String = match row.try_get("id") {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        worker_id = %worker_id,
-                        column = "id",
-                        "skipping malformed worker event row"
-                    );
-                    continue;
-                }
-            };
-            let event_worker_id: String = match row.try_get("worker_id") {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        worker_id = %worker_id,
-                        event_id = %id,
-                        column = "worker_id",
-                        "skipping malformed worker event row"
-                    );
-                    continue;
-                }
-            };
-            let event_type: String = match row.try_get("event_type") {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        worker_id = %worker_id,
-                        event_id = %id,
-                        column = "event_type",
-                        "skipping malformed worker event row"
-                    );
-                    continue;
-                }
-            };
-
-            events.push(WorkerEventRow {
-                id,
-                worker_id: event_worker_id,
-                channel_id: row.try_get("channel_id").ok(),
-                agent_id: row.try_get("agent_id").ok(),
-                event_type,
-                payload_json: row.try_get("payload_json").ok(),
-                created_at: row
-                    .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
-                    .map(|t| t.to_rfc3339())
-                    .unwrap_or_default(),
-            });
-        }
-
-        events.reverse();
-        Ok(events)
-    }
 }
 
 /// A worker run row without the transcript blob (for list queries).
@@ -2112,18 +1933,6 @@ pub struct WorkerDetailRow {
     pub tool_calls: i64,
 }
 
-/// A worker lifecycle event row.
-#[derive(Debug, Clone, Serialize)]
-pub struct WorkerEventRow {
-    pub id: String,
-    pub worker_id: String,
-    pub channel_id: Option<String>,
-    pub agent_id: Option<String>,
-    pub event_type: String,
-    pub payload_json: Option<String>,
-    pub created_at: String,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2144,86 +1953,6 @@ mod tests {
             .await
             .expect("migrations");
         ProcessRunLogger::new(pool)
-    }
-
-    #[tokio::test]
-    async fn worker_event_journal_records_lifecycle_updates() {
-        let logger = connect_logger().await;
-        let agent_id: crate::AgentId = Arc::from("agent:test");
-        let worker_id = uuid::Uuid::new_v4();
-        let worker_id_text = worker_id.to_string();
-
-        logger.log_worker_started(None, worker_id, "research task", "builtin", &agent_id);
-
-        let mut started_seen = false;
-        for _ in 0..20 {
-            let events = logger
-                .list_worker_events(&worker_id_text, 20)
-                .await
-                .expect("list worker events");
-            if events.iter().any(|event| event.event_type == "started") {
-                started_seen = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        assert!(started_seen, "expected started event");
-
-        logger.log_worker_status(worker_id, "searching source material");
-        logger.log_worker_event(
-            worker_id,
-            "tool_started",
-            serde_json::json!({ "tool_name": "web_search" }),
-        );
-        logger.log_worker_completed(worker_id, "done", true);
-
-        let mut events = Vec::new();
-        for _ in 0..20 {
-            events = logger
-                .list_worker_events(&worker_id_text, 20)
-                .await
-                .expect("list worker events");
-            if events.iter().any(|event| event.event_type == "status")
-                && events
-                    .iter()
-                    .any(|event| event.event_type == "tool_started")
-                && events.iter().any(|event| event.event_type == "completed")
-            {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-
-        assert!(
-            events.iter().any(|event| event.event_type == "status"),
-            "expected status event"
-        );
-        assert!(
-            events
-                .iter()
-                .any(|event| event.event_type == "tool_started"),
-            "expected tool_started event"
-        );
-        assert!(
-            events.iter().any(|event| event.event_type == "completed"),
-            "expected completed event"
-        );
-    }
-
-    #[tokio::test]
-    async fn list_worker_events_zero_limit_returns_empty_and_negative_is_invalid() {
-        let logger = connect_logger().await;
-        let events = logger
-            .list_worker_events("worker:test", 0)
-            .await
-            .expect("zero limit should return empty result");
-        assert!(events.is_empty());
-
-        let error = logger
-            .list_worker_events("worker:test", -1)
-            .await
-            .expect_err("negative limit should fail");
-        assert!(error.to_string().contains("invalid limit"));
     }
 
     #[tokio::test]

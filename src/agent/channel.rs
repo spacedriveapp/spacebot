@@ -1913,11 +1913,9 @@ impl Channel {
                 tool_name,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                self.log_worker_event_and_refresh_progress(
+                self.spawn_worker_progress_refresh(
                     run_logger.clone(),
                     *worker_id,
-                    "tool_started",
-                    serde_json::json!({ "tool_name": tool_name }),
                     Some(tool_name.clone()),
                     "tool_started",
                 );
@@ -1928,11 +1926,9 @@ impl Channel {
                 tool_name,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                self.log_worker_event_and_refresh_progress(
+                self.spawn_worker_progress_refresh(
                     run_logger.clone(),
                     *worker_id,
-                    "tool_completed",
-                    serde_json::json!({ "tool_name": tool_name }),
                     Some(tool_name.clone()),
                     "tool_completed",
                 );
@@ -1940,18 +1936,13 @@ impl Channel {
             ProcessEvent::WorkerPermission {
                 worker_id,
                 channel_id,
-                permission_id,
+                permission_id: _,
                 description,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                self.log_worker_event_and_refresh_progress(
+                self.spawn_worker_progress_refresh(
                     run_logger.clone(),
                     *worker_id,
-                    "permission",
-                    serde_json::json!({
-                        "permission_id": permission_id,
-                        "description": description,
-                    }),
                     Some(description.clone()),
                     "permission",
                 );
@@ -1959,19 +1950,10 @@ impl Channel {
             ProcessEvent::WorkerQuestion {
                 worker_id,
                 channel_id,
-                question_id,
+                question_id: _,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                self.log_worker_event_and_refresh_progress(
-                    run_logger.clone(),
-                    *worker_id,
-                    "question",
-                    serde_json::json!({
-                        "question_id": question_id,
-                    }),
-                    None,
-                    "question",
-                );
+                self.spawn_worker_progress_refresh(run_logger.clone(), *worker_id, None, "question");
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -2149,24 +2131,6 @@ impl Channel {
                 );
             }
         });
-    }
-
-    fn log_worker_event_and_refresh_progress(
-        &self,
-        run_logger: ProcessRunLogger,
-        worker_id: WorkerId,
-        event_label: &'static str,
-        payload: serde_json::Value,
-        status_text: Option<String>,
-        progress_event_label: &'static str,
-    ) {
-        run_logger.log_worker_event(worker_id, event_label, payload);
-        self.spawn_worker_progress_refresh(
-            run_logger,
-            worker_id,
-            status_text,
-            progress_event_label,
-        );
     }
 
     async fn maybe_send_worker_checkpoint(&mut self, worker_id: WorkerId, raw_status: &str) {
@@ -4217,7 +4181,7 @@ mod tests {
     }
 
     #[test]
-    fn progress_event_detection_matches_worker_events() {
+    fn progress_event_detection_matches_worker_status_events() {
         let worker_id = Uuid::new_v4();
         let other_worker_id = Uuid::new_v4();
         let agent_id: crate::AgentId = Arc::from("test-agent");

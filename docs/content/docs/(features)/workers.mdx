@@ -150,19 +150,6 @@ Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued 
 - On process restart, in-flight (`sending`) receipts are re-queued so completion notices are not silently dropped.
 - Old terminal receipts (`acked`, `failed`) are pruned periodically to keep storage bounded.
 
-## Worker Event Journal
-
-Worker lifecycle updates are also written to an append-only `worker_events` table:
-
-- `started` with task + worker type
-- `status` checkpoints
-- `tool_started`
-- `tool_completed`
-- `permission` / `question`
-- `completed` with terminal summary
-
-This gives us durable debugging context even after in-memory status blocks are gone. The workers API and `worker_inspect` surface this timeline so long-running task behavior can be audited post-run.
-
 ## Model Routing
 
 Workers default to `anthropic/claude-haiku-4.5-20250514`. Task-type overrides apply — for example, a `coding` task type routes to `anthropic/claude-sonnet-4-20250514`. Fallback chains are supported. All hot-reloadable.

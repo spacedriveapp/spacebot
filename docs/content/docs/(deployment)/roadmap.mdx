@@ -40,7 +40,6 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Workspace containment** — file tool validates paths stay within workspace boundary, shell/exec tools block instance directory traversal, sensitive file access, and secret env var leakage
 - **Conversation persistence** — `ConversationLogger` with fire-and-forget SQLite writes, compaction archiving
 - **Worker task contracts** — deterministic worker ack/progress/terminal deadlines with one-time SLA nudge and durable terminal convergence (`terminal_acked` / `terminal_failed`)
-- **Worker event journal** — append-only `worker_events` persistence for started/status/tool/permission/question/completed lifecycle debugging
 - **Cron** — scheduler with timers, active hours, circuit breaker (3 failures → disable), creates real channels. CronTool wired into channel tool factory.
 - **Message routing** — full event loop with binding resolution, channel lifecycle, outbound routing
 - **Settings store** — redb key-value with WorkerLogMode

@@ -52,7 +52,6 @@ pub(super) struct WorkerListItem {
 pub(super) struct WorkerDetailQuery {
     agent_id: String,
     worker_id: String,
-    limit: Option<usize>,
 }
 
 #[derive(Serialize)]
@@ -68,15 +67,6 @@ pub(super) struct WorkerDetailResponse {
     completed_at: Option<String>,
     transcript: Option<Vec<worker_transcript::TranscriptStep>>,
     tool_calls: i64,
-    events: Vec<WorkerEventItem>,
-}
-
-#[derive(Serialize)]
-pub(super) struct WorkerEventItem {
-    id: String,
-    event_type: String,
-    payload_json: Option<serde_json::Value>,
-    created_at: String,
 }
 
 /// List worker runs for an agent, with live status merged from StatusBlocks.
@@ -166,12 +156,6 @@ pub(super) async fn worker_detail(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let event_limit = match query.limit {
-        Some(0) => return Err(StatusCode::BAD_REQUEST),
-        Some(limit) => limit.min(5_000) as i64,
-        None => 200,
-    };
-
     let transcript = detail.transcript_blob.as_deref().and_then(|blob| {
         worker_transcript::deserialize_transcript(blob)
             .map_err(|error| {
@@ -179,43 +163,6 @@ pub(super) async fn worker_detail(
             })
             .ok()
     });
-    let events = logger
-        .list_worker_events(&query.worker_id, event_limit)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, worker_id = %query.worker_id, "failed to list worker events");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .into_iter()
-        .map(|event| {
-            let payload_json = event.payload_json.as_deref().and_then(|payload| {
-                let trimmed = payload.trim();
-                if trimmed.is_empty() {
-                    return None;
-                }
-
-                match serde_json::from_str::<serde_json::Value>(trimmed) {
-                    Ok(value) => Some(value),
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            worker_id = %query.worker_id,
-                            event_id = %event.id,
-                            "failed to parse worker event payload_json"
-                        );
-                        None
-                    }
-                }
-            });
-
-            WorkerEventItem {
-                id: event.id,
-                event_type: event.event_type,
-                payload_json,
-                created_at: event.created_at,
-            }
-        })
-        .collect();
 
     Ok(Json(WorkerDetailResponse {
         id: detail.id,
@@ -229,6 +176,5 @@ pub(super) async fn worker_detail(
         completed_at: detail.completed_at,
         transcript,
         tool_calls: detail.tool_calls,
-        events,
     }))
 }
