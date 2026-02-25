@@ -9,6 +9,40 @@ Spacebot can spawn [OpenCode](https://opencode.ai) as a worker backend. Instead 
 
 Use OpenCode workers for multi-file coding tasks. Use builtin workers for one-shot commands, file operations, and non-coding work.
 
+## ACP Workers
+
+Spacebot also supports **ACP-backed workers** via [Agent Client Protocol](https://agentclientprotocol.com/). ACP workers run compatible coding agents over stdio and expose them through the same `spawn_worker` tool path.
+
+Configure one or more ACP profiles:
+
+```toml
+[defaults.acp.claude]
+enabled = true
+command = "claude"
+args = ["--acp"]
+timeout = 300
+
+[defaults.acp.qwen]
+enabled = true
+command = "qwen"
+args = ["--acp"]
+timeout = 300
+```
+
+Usage from `spawn_worker`:
+
+```json
+{
+  "task": "Implement the auth flow",
+  "worker_type": "acp",
+  "directory": "/code/myapp",
+  "acp_id": "claude",
+  "interactive": true
+}
+```
+
+If multiple ACP workers are enabled, provide `acp_id`. If only one is enabled, Spacebot auto-selects it.
+
 ## Enabling
 
 OpenCode is disabled by default. Enable it in your config:
@@ -25,7 +59,7 @@ The `path` field supports `env:VAR_NAME` resolution:
 path = "env:OPENCODE_PATH"
 ```
 
-Once enabled, the `spawn_worker` tool gains a `worker_type` parameter. The channel LLM decides whether to use `"builtin"` (default) or `"opencode"` based on the task.
+Once enabled, the `spawn_worker` tool gains a `worker_type` parameter. The channel LLM decides whether to use `"builtin"` (default), `"opencode"`, or `"acp"` based on the task.
 
 ## How It Works
 

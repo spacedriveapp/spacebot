@@ -293,6 +293,8 @@ Workers are pluggable. Any process that accepts a task and reports status can be
 
 **[OpenCode](https://opencode.ai) workers** are a built-in integration that spawns a full OpenCode coding agent as a persistent subprocess. OpenCode brings its own codebase exploration, LSP awareness, and context management — purpose-built for deep coding sessions. When a user asks for a complex refactor or a new feature, the channel can spawn an OpenCode worker that maintains a rich understanding of the codebase across the entire session. Both built-in and OpenCode workers support interactive follow-ups.
 
+**ACP workers** run any Agent Client Protocol-compatible coding agent over stdio, configured by `[defaults.acp.<id>]` entries. The channel can spawn these with `worker_type: "acp"` and optional `acp_id` for backend selection.
+
 ### The Compactor
 
 Not an LLM process. A programmatic monitor per channel that watches context size and triggers compaction before the channel fills up.
@@ -483,6 +485,7 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |
 | [MCP](docs/content/docs/(features)/mcp.mdx)                      | External tool servers via Model Context Protocol         |
 | [OpenCode](docs/content/docs/(features)/opencode.mdx)            | OpenCode as a worker backend                             |
+| [OpenCode](docs/content/docs/(features)/opencode.mdx#acp-workers) | ACP workers and configuration                            |
 | [Philosophy](docs/content/docs/(core)/philosophy.mdx)            | Why Rust                                                 |
 
 ---
