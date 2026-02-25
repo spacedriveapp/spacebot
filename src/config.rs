@@ -339,6 +339,167 @@ const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 
+/// Returns the default ProviderConfig for a provider ID and API key.
+/// Used by API tests and other code that needs provider configs without duplicating metadata.
+pub(crate) fn default_provider_config(
+    provider_id: &str,
+    api_key: impl Into<String>,
+) -> Option<ProviderConfig> {
+    use crate::config::ApiType;
+    let api_key = api_key.into();
+    Some(match provider_id {
+        "anthropic" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openrouter" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "kilo" => ProviderConfig {
+            api_type: ApiType::KiloGateway,
+            base_url: KILO_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
+        },
+        "zhipu" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Z.AI (GLM)".to_string()),
+            use_bearer_auth: false,
+        },
+        "groq" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "together" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "fireworks" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "deepseek" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "xai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: XAI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "mistral" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "gemini" => ProviderConfig {
+            api_type: ApiType::Gemini,
+            base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-zen" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "nvidia" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax-cn" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "moonshot" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "zai-coding-plan" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Z.AI Coding Plan".to_string()),
+            use_bearer_auth: false,
+        },
+        _ => return None,
+    })
+}
+
+fn add_shorthand_provider(
+    providers: &mut std::collections::HashMap<String, ProviderConfig>,
+    provider_id: &str,
+    key: Option<String>,
+    api_type: ApiType,
+    base_url: &str,
+    name: Option<&str>,
+    use_bearer_auth: bool,
+) {
+    if let Some(api_key) = key {
+        providers
+            .entry(provider_id.to_string())
+            .or_insert_with(|| ProviderConfig {
+                api_type,
+                base_url: base_url.to_string(),
+                api_key,
+                name: name.map(str::to_string),
+                use_bearer_auth,
+            });
+    }
+}
+
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Clone)]
 pub struct DefaultsConfig {
@@ -2358,41 +2519,33 @@ impl Config {
                 });
         }
 
-        if let Some(kilo_key) = llm.kilo_key.clone() {
-            llm.providers
-                .entry("kilo".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::KiloGateway,
-                    base_url: KILO_PROVIDER_BASE_URL.to_string(),
-                    api_key: kilo_key,
-                    name: Some("Kilo Gateway".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
-
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiChatCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: Some("Z.AI (GLM)".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
-
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiChatCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: Some("Z.AI Coding Plan".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
         if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
             llm.providers
@@ -2883,41 +3036,33 @@ impl Config {
                 });
         }
 
-        if let Some(kilo_key) = llm.kilo_key.clone() {
-            llm.providers
-                .entry("kilo".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::KiloGateway,
-                    base_url: KILO_PROVIDER_BASE_URL.to_string(),
-                    api_key: kilo_key,
-                    name: Some("Kilo Gateway".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
-
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiChatCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: Some("Z.AI (GLM)".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
-
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiChatCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: Some("Z.AI Coding Plan".to_string()),
-                    use_bearer_auth: false,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
         if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
             llm.providers
@@ -4308,6 +4453,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "DeepSeek",
         "xAI (Grok)",
         "Mistral AI",
+        "Gemini",
         "Ollama",
         "OpenCode Zen",
         "MiniMax",
