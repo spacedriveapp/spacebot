@@ -39,11 +39,31 @@ const WORKER_CHECKPOINT_MIN_INTERVAL_SECS: u64 = 20;
 
 /// Maximum length for user-facing checkpoint text.
 const WORKER_CHECKPOINT_MAX_CHARS: usize = 220;
+/// How often terminal delivery receipts are drained from SQLite.
+///
+/// Keep this small enough for low completion latency, but not so small that
+/// the dispatcher loops too aggressively under idle load.
 const WORKER_RECEIPT_DISPATCH_INTERVAL_SECS: u64 = 5;
+/// Max receipt rows to claim per dispatch pass.
+///
+/// `i64` matches SQL bind/count types; conversion to `usize` only happens when
+/// allocating local vectors from fetched row counts.
 const WORKER_RECEIPT_DISPATCH_BATCH_SIZE: i64 = 8;
+/// Max contract rows to claim per acknowledgement deadline scan.
+///
+/// `i64` is used for direct SQL LIMIT binding.
 const WORKER_CONTRACT_ACK_BATCH_SIZE: i64 = 8;
+/// Max contract rows to claim per progress-SLA scan.
+///
+/// Tune with `WORKER_CONTRACT_ACK_BATCH_SIZE` to avoid large burst writes.
 const WORKER_CONTRACT_PROGRESS_BATCH_SIZE: i64 = 8;
+/// Max contract rows to claim per terminal deadline scan.
+///
+/// Uses `i64` for SQL LIMIT compatibility; callers only cast when needed.
 const WORKER_CONTRACT_TERMINAL_BATCH_SIZE: i64 = 8;
+const WORKER_FAILED_PREFIX: &str = "Worker failed:";
+const WORKER_TIMED_OUT_PREFIX: &str = "Worker timed out after ";
+const WORKER_CANCELLED_PREFIX: &str = "Worker cancelled:";
 
 #[derive(Debug, Clone)]
 struct WorkerCheckpointState {
@@ -149,7 +169,7 @@ impl ChannelState {
                     self.send_worker_terminal_events(
                         worker_id,
                         "cancelled",
-                        format!("Worker cancelled: {reason}."),
+                        format!("{WORKER_CANCELLED_PREFIX} {reason}."),
                         false,
                     );
                 }
@@ -1859,34 +1879,12 @@ impl Channel {
                 worker_id, status, ..
             } => {
                 run_logger.log_worker_status(*worker_id, status);
-                let progress_secs = self
-                    .deps
-                    .runtime_config
-                    .worker_contract
-                    .load()
-                    .progress_secs
-                    .max(1);
-                let run_logger = run_logger.clone();
-                let channel_id = self.id.clone();
-                let event_worker_id = *worker_id;
-                let status_text = status.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = run_logger
-                        .touch_worker_task_contract_progress(
-                            event_worker_id,
-                            Some(status_text.as_str()),
-                            progress_secs,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            worker_id = %event_worker_id,
-                            "failed to refresh worker task contract progress"
-                        );
-                    }
-                });
+                self.spawn_worker_progress_refresh(
+                    run_logger.clone(),
+                    *worker_id,
+                    Some(status.clone()),
+                    "worker status",
+                );
                 if self.worker_is_user_visible(*worker_id).await {
                     self.maybe_send_worker_checkpoint(*worker_id, status).await;
                 }
@@ -1897,39 +1895,14 @@ impl Channel {
                 tool_name,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                run_logger.log_worker_event(
+                self.log_worker_event_and_refresh_progress(
+                    run_logger.clone(),
                     *worker_id,
                     "tool_started",
                     serde_json::json!({ "tool_name": tool_name }),
+                    Some(tool_name.clone()),
+                    "tool_started",
                 );
-                let progress_secs = self
-                    .deps
-                    .runtime_config
-                    .worker_contract
-                    .load()
-                    .progress_secs
-                    .max(1);
-                let run_logger = run_logger.clone();
-                let channel_id = self.id.clone();
-                let event_worker_id = *worker_id;
-                let tool_name = tool_name.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = run_logger
-                        .touch_worker_task_contract_progress(
-                            event_worker_id,
-                            Some(tool_name.as_str()),
-                            progress_secs,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            worker_id = %event_worker_id,
-                            "failed to refresh worker task contract progress from tool event"
-                        );
-                    }
-                });
             }
             ProcessEvent::ToolCompleted {
                 process_id: ProcessId::Worker(worker_id),
@@ -1937,39 +1910,14 @@ impl Channel {
                 tool_name,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                run_logger.log_worker_event(
+                self.log_worker_event_and_refresh_progress(
+                    run_logger.clone(),
                     *worker_id,
                     "tool_completed",
                     serde_json::json!({ "tool_name": tool_name }),
+                    Some(tool_name.clone()),
+                    "tool_completed",
                 );
-                let progress_secs = self
-                    .deps
-                    .runtime_config
-                    .worker_contract
-                    .load()
-                    .progress_secs
-                    .max(1);
-                let run_logger = run_logger.clone();
-                let channel_id = self.id.clone();
-                let event_worker_id = *worker_id;
-                let tool_name = tool_name.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = run_logger
-                        .touch_worker_task_contract_progress(
-                            event_worker_id,
-                            Some(tool_name.as_str()),
-                            progress_secs,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            worker_id = %event_worker_id,
-                            "failed to refresh worker task contract progress from tool event"
-                        );
-                    }
-                });
             }
             ProcessEvent::WorkerPermission {
                 worker_id,
@@ -1978,42 +1926,17 @@ impl Channel {
                 description,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                run_logger.log_worker_event(
+                self.log_worker_event_and_refresh_progress(
+                    run_logger.clone(),
                     *worker_id,
                     "permission",
                     serde_json::json!({
                         "permission_id": permission_id,
                         "description": description,
                     }),
+                    Some(description.clone()),
+                    "permission",
                 );
-                let progress_secs = self
-                    .deps
-                    .runtime_config
-                    .worker_contract
-                    .load()
-                    .progress_secs
-                    .max(1);
-                let run_logger = run_logger.clone();
-                let channel_id = self.id.clone();
-                let event_worker_id = *worker_id;
-                let description = description.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = run_logger
-                        .touch_worker_task_contract_progress(
-                            event_worker_id,
-                            Some(description.as_str()),
-                            progress_secs,
-                        )
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            worker_id = %event_worker_id,
-                            "failed to refresh worker task contract progress from permission event"
-                        );
-                    }
-                });
             }
             ProcessEvent::WorkerQuestion {
                 worker_id,
@@ -2021,36 +1944,16 @@ impl Channel {
                 question_id,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                run_logger.log_worker_event(
+                self.log_worker_event_and_refresh_progress(
+                    run_logger.clone(),
                     *worker_id,
                     "question",
                     serde_json::json!({
                         "question_id": question_id,
                     }),
+                    None,
+                    "question",
                 );
-                let progress_secs = self
-                    .deps
-                    .runtime_config
-                    .worker_contract
-                    .load()
-                    .progress_secs
-                    .max(1);
-                let run_logger = run_logger.clone();
-                let channel_id = self.id.clone();
-                let event_worker_id = *worker_id;
-                tokio::spawn(async move {
-                    if let Err(error) = run_logger
-                        .touch_worker_task_contract_progress(event_worker_id, None, progress_secs)
-                        .await
-                    {
-                        tracing::warn!(
-                            %error,
-                            channel_id = %channel_id,
-                            worker_id = %event_worker_id,
-                            "failed to refresh worker task contract progress from question event"
-                        );
-                    }
-                });
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -2192,6 +2095,60 @@ impl Channel {
                 "failed to route status update to messaging adapter"
             );
         }
+    }
+
+    fn spawn_worker_progress_refresh(
+        &self,
+        run_logger: ProcessRunLogger,
+        worker_id: WorkerId,
+        status_text: Option<String>,
+        event_label: &'static str,
+    ) {
+        let progress_secs = self
+            .deps
+            .runtime_config
+            .worker_contract
+            .load()
+            .progress_secs
+            .max(1);
+        let channel_id = self.id.clone();
+
+        tokio::spawn(async move {
+            if let Err(error) = run_logger
+                .touch_worker_task_contract_progress(
+                    worker_id,
+                    status_text.as_deref(),
+                    progress_secs,
+                )
+                .await
+            {
+                tracing::warn!(
+                    %error,
+                    channel_id = %channel_id,
+                    worker_id = %worker_id,
+                    event_label,
+                    "failed to refresh worker task contract progress"
+                );
+            }
+        });
+    }
+
+    fn log_worker_event_and_refresh_progress(
+        &self,
+        run_logger: ProcessRunLogger,
+        worker_id: WorkerId,
+        event_label: &'static str,
+        payload: serde_json::Value,
+        status_text: Option<String>,
+        progress_event_label: &'static str,
+    ) {
+        run_logger.log_worker_event(worker_id, event_label, payload);
+        self.spawn_worker_progress_refresh(
+            run_logger,
+            worker_id,
+            status_text,
+            progress_event_label,
+        );
     }
 
     async fn maybe_send_worker_checkpoint(&mut self, worker_id: WorkerId, raw_status: &str) {
@@ -2932,7 +2889,12 @@ where
                 Ok(text) => ("done", text, true, true),
                 Err(error) => {
                     tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                    ("failed", format!("Worker failed: {error}"), true, false)
+                    (
+                        "failed",
+                        format!("{WORKER_FAILED_PREFIX} {error}"),
+                        true,
+                        false,
+                    )
                 }
             }
         } else {
@@ -2952,7 +2914,7 @@ where
                             Ok(text) => ("done", text, true, true),
                             Err(error) => {
                                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                                ("failed", format!("Worker failed: {error}"), true, false)
+                                ("failed", format!("{WORKER_FAILED_PREFIX} {error}"), true, false)
                             }
                         };
                         break outcome;
@@ -2987,7 +2949,9 @@ where
                         );
                         break (
                             "timed_out",
-                            format!("Worker timed out after {timeout_secs} seconds without progress."),
+                            format!(
+                                "{WORKER_TIMED_OUT_PREFIX}{timeout_secs} seconds without progress."
+                            ),
                             true,
                             false,
                         );
@@ -3294,18 +3258,18 @@ fn build_worker_progress_sla_nudge(task_summary: &str) -> String {
 
 fn is_worker_terminal_failure(result: &str) -> bool {
     let trimmed = result.trim_start();
-    trimmed.starts_with("Worker failed:")
-        || trimmed.starts_with("Worker timed out after ")
-        || trimmed.starts_with("Worker cancelled:")
+    trimmed.starts_with(WORKER_FAILED_PREFIX)
+        || trimmed.starts_with(WORKER_TIMED_OUT_PREFIX)
+        || trimmed.starts_with(WORKER_CANCELLED_PREFIX)
 }
 
 fn classify_worker_terminal_state(result: &str) -> &'static str {
     let trimmed = result.trim_start();
-    if trimmed.starts_with("Worker failed:") {
+    if trimmed.starts_with(WORKER_FAILED_PREFIX) {
         "failed"
-    } else if trimmed.starts_with("Worker timed out after ") {
+    } else if trimmed.starts_with(WORKER_TIMED_OUT_PREFIX) {
         "timed_out"
-    } else if trimmed.starts_with("Worker cancelled:") {
+    } else if trimmed.starts_with(WORKER_CANCELLED_PREFIX) {
         "cancelled"
     } else {
         "done"

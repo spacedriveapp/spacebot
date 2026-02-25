@@ -8260,6 +8260,7 @@ dependencies = [
  "emojis",
  "fastembed",
  "flate2",
+ "fnv",
  "futures",
  "hex",
  "ignore",
