@@ -400,13 +400,20 @@ async fn route_outbound_response(
                 conversation_id = %context.outbound_conversation_id,
                 "routing outbound response to messaging adapter"
             );
+            let delivery_result = context
+                .messaging_for_outbound
+                .respond(context.current_message, response)
+                .await;
+            let delivery_outcome = if delivery_result.is_ok() {
+                spacebot::messaging::traits::DeliveryOutcome::Surfaced
+            } else {
+                spacebot::messaging::traits::DeliveryOutcome::NotSurfaced
+            };
+            let status_surfaced = delivery_outcome.is_surfaced();
             RoutedOutboundResponse {
-                delivery_result: context
-                    .messaging_for_outbound
-                    .respond(context.current_message, response)
-                    .await,
-                delivery_outcome: spacebot::messaging::traits::DeliveryOutcome::Surfaced,
-                status_surfaced: true,
+                delivery_result,
+                delivery_outcome,
+                status_surfaced,
                 is_status_update: false,
                 acknowledged_worker_id,
             }

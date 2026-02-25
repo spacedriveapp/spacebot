@@ -4389,7 +4389,7 @@ mod tests {
         assert!(saw_complete, "expected WorkerComplete event");
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn worker_timeout_resets_on_progress_events() {
         let (event_tx, mut event_rx) = broadcast::channel(32);
         let worker_id = Uuid::new_v4();
@@ -4418,34 +4418,35 @@ mod tests {
 
         let mut terminal_status = None::<String>;
         let mut complete_result = None::<String>;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        while tokio::time::Instant::now() < deadline
-            && (terminal_status.is_none() || complete_result.is_none())
-        {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let event = tokio::time::timeout(remaining, event_rx.recv())
-                .await
-                .expect("timed out waiting for worker events")
-                .expect("failed to receive worker event");
-            match event {
-                ProcessEvent::WorkerStatus {
-                    worker_id: event_worker_id,
-                    status,
-                    ..
-                } if event_worker_id == worker_id => {
-                    if status == "done" || status == "timed_out" || status == "failed" {
-                        terminal_status = Some(status);
+        for _ in 0..20 {
+            while let Ok(event) = event_rx.try_recv() {
+                match event {
+                    ProcessEvent::WorkerStatus {
+                        worker_id: event_worker_id,
+                        status,
+                        ..
+                    } if event_worker_id == worker_id => {
+                        if status == "done" || status == "timed_out" || status == "failed" {
+                            terminal_status = Some(status);
+                        }
                     }
+                    ProcessEvent::WorkerComplete {
+                        worker_id: event_worker_id,
+                        result,
+                        ..
+                    } if event_worker_id == worker_id => {
+                        complete_result = Some(result);
+                    }
+                    _ => {}
                 }
-                ProcessEvent::WorkerComplete {
-                    worker_id: event_worker_id,
-                    result,
-                    ..
-                } if event_worker_id == worker_id => {
-                    complete_result = Some(result);
-                }
-                _ => {}
             }
+
+            if terminal_status.is_some() && complete_result.is_some() {
+                break;
+            }
+
+            tokio::time::advance(Duration::from_millis(100)).await;
+            tokio::task::yield_now().await;
         }
 
         progress_task.await.expect("progress sender task failed");
