@@ -2327,6 +2327,7 @@ pub async fn spawn_acp_worker_from_state(
             worker_id,
             channel_id: Some(state.channel_id.clone()),
             task: acp_task,
+            worker_type: "acp".into(),
         })
         .ok();
 
