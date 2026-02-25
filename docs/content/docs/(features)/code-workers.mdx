@@ -1,49 +1,69 @@
 ---
-title: OpenCode
-description: Spawn full coding agents as worker processes via the OpenCode integration.
+title: Code Workers
+description: Spawn full coding agents as worker processes via OpenCode or ACP integration.
 ---
 
-# OpenCode
+# Code Workers
 
-Spacebot can spawn [OpenCode](https://opencode.ai) as a worker backend. Instead of running a Rig agent with shell/file/exec tools, an OpenCode worker delegates to a persistent OpenCode subprocess that has its own tool suite, codebase exploration, and context management.
+For multi-file coding tasks, Spacebot can delegate to one of two external worker backends:
 
-Use OpenCode workers for multi-file coding tasks. Use builtin workers for one-shot commands, file operations, and non-coding work.
+- **ACP workers** via [Agent Client Protocol](https://agentclientprotocol.com/) over stdio
+- **OpenCode workers** via a persistent OpenCode HTTP/SSE subprocess
 
-## ACP Workers
+Most setups use one or the other, but it is possible to use both at the same time. Start with the backend that matches your local tooling.
 
-Spacebot also supports **ACP-backed workers** via [Agent Client Protocol](https://agentclientprotocol.com/). ACP workers run compatible coding agents over stdio and expose them through the same `spawn_worker` tool path.
+## Choosing a Backend
 
-Configure one or more ACP profiles:
+- Use **ACP** if you already run (or have a subscription to) a [CLI coding agent with ACP support](https://agentclientprotocol.com/get-started/agents).
+- Use **OpenCode** if you want Spacebot-managed OpenCode sessions with server pooling and richer OpenCode-native behavior.
+- Keep using **builtin** workers for quick shell/file/exec tasks and non-coding operations.
+
+Both ACP and OpenCode workers are invoked through `spawn_worker`, support interactive follow-ups via `route`, and publish status updates into the channel status block. When neither external backend is selected, Spacebot uses the builtin worker.
+
+## ACP (Agent Client Protocol)
+
+Spacebot supports **ACP-backed workers** via [Agent Client Protocol](https://agentclientprotocol.com/). ACP workers run compatible coding agents over stdio and expose them through the same `spawn_worker` tool path.
+
+Use ACP workers for compatibility with pre-existing agent CLIs, such as Claude Code, Codex, or Gemini CLI.
+
+### Enable ACP profiles
+
+Configure one or more profiles under `defaults.acp`:
 
 ```toml
-[defaults.acp.claude]
+[defaults.acp.opencode]
 enabled = true
-command = "claude"
-args = ["--acp"]
+command = "opencode"
+args = ["acp"]
 timeout = 300
 
-[defaults.acp.qwen]
+[defaults.acp.codex]
 enabled = true
-command = "qwen"
-args = ["--acp"]
+command = "codex-acp"
 timeout = 300
 ```
 
-Usage from `spawn_worker`:
+### Use ACP from `spawn_worker`
 
 ```json
 {
   "task": "Implement the auth flow",
   "worker_type": "acp",
   "directory": "/code/myapp",
-  "acp_id": "claude",
+  "acp_id": "codex",
   "interactive": true
 }
 ```
 
 If multiple ACP workers are enabled, provide `acp_id`. If only one is enabled, Spacebot auto-selects it.
 
-## Enabling
+## OpenCode
+
+Spacebot can also spawn [OpenCode](https://opencode.ai) as a worker backend. An OpenCode worker delegates to a persistent OpenCode subprocess that has its own tool suite, codebase exploration, and context management.
+
+Use OpenCode workers for multi-file coding tasks where persistent session context and server reuse are valuable.
+
+### Enable OpenCode
 
 OpenCode is disabled by default. Enable it in your config:
 
@@ -59,9 +79,18 @@ The `path` field supports `env:VAR_NAME` resolution:
 path = "env:OPENCODE_PATH"
 ```
 
-Once enabled, the `spawn_worker` tool gains a `worker_type` parameter. The channel LLM decides whether to use `"builtin"` (default), `"opencode"`, or `"acp"` based on the task.
+### Use OpenCode from `spawn_worker`
 
-## How It Works
+```json
+{
+  "task": "Refactor the auth module",
+  "worker_type": "opencode",
+  "directory": "/code/myapp",
+  "interactive": true
+}
+```
+
+### How It Works
 
 ```
 Channel: "spawn_worker: refactor the auth module, worker_type: opencode, directory: /code/myapp"
@@ -75,7 +104,7 @@ Channel: "spawn_worker: refactor the auth module, worker_type: opencode, directo
 
 The OpenCode worker runs its own agent loop internally. Spacebot monitors it via SSE and translates tool events into status updates visible to the channel.
 
-## Server Pool
+### Server Pool
 
 OpenCode runs as `opencode serve --port <port>` — a persistent HTTP server per working directory. Spacebot manages a pool of these servers.
 
@@ -87,7 +116,7 @@ OpenCode runs as `opencode serve --port <port>` — a persistent HTTP server per
 
 **Auto-restart**: If a server dies, the pool restarts it automatically (up to `max_restart_retries` times, default: 5).
 
-## Communication Protocol
+### Communication Protocol
 
 All communication is localhost HTTP:
 
@@ -114,7 +143,7 @@ Spacebot subscribes to the SSE stream and processes:
 - **Question asked** — auto-selects first option
 - **Retry status** — reports rate limit retries
 
-## OpenCode vs Builtin Workers
+### OpenCode vs Builtin Workers
 
 | | Builtin Worker | OpenCode Worker |
 |---|---|---|
@@ -131,7 +160,7 @@ The channel system prompt includes a decision guide when OpenCode is enabled:
 - Need to read a file? Builtin worker.
 - Need to write or modify code across multiple files? OpenCode worker.
 
-## Permissions
+### Permissions
 
 OpenCode has its own permission system for dangerous operations. Spacebot controls the defaults:
 
@@ -146,7 +175,7 @@ With all permissions set to `"allow"`, OpenCode suppresses most permission promp
 
 These settings are passed to OpenCode via the `OPENCODE_CONFIG_CONTENT` environment variable. LSP and formatter are disabled for headless operation.
 
-## Interactive Sessions
+### Interactive Sessions
 
 OpenCode workers support the same interactive pattern as builtin workers:
 
@@ -161,7 +190,7 @@ route: worker_id=abc, message="now add the database layer"
 
 The OpenCode session accumulates context across follow-ups, so subsequent messages benefit from everything the agent learned during earlier work.
 
-## Model Override
+### Model Override
 
 You can override the model used by OpenCode workers:
 
@@ -175,7 +204,7 @@ coding = "anthropic/claude-sonnet-4-20250514"
 
 When the worker spawns, the routing config determines the model. The model string is split into `provider_id/model_id` and passed to OpenCode's prompt API.
 
-## Full Configuration
+### Full Configuration
 
 ```toml
 [defaults.opencode]
@@ -191,21 +220,21 @@ bash = "allow"
 webfetch = "allow"
 ```
 
-## Architecture
+### Architecture
 
 ```
 ┌─────────────┐     HTTP/SSE      ┌──────────────────┐
-│   Spacebot   │ ←───────────────→ │  OpenCode Server  │
-│  (worker.rs) │                   │  (port 12345)     │
+│  Spacebot   │ ←───────────────→ │ OpenCode Server  │
+│ (worker.rs) │                   │  (port 12345)    │
 └─────────────┘                   └──────────────────┘
       │                                   │
       │ ProcessEvent::WorkerStatus        │ opencode agent loop
       │ ProcessEvent::WorkerComplete      │ (bash, edit, read, etc.)
       ↓                                   ↓
 ┌─────────────┐                   ┌──────────────────┐
-│   Channel    │                   │   Working Dir     │
-│  (status     │                   │   /code/myapp     │
-│   block)     │                   └──────────────────┘
+│   Channel   │                   │   Working Dir    │
+│  (status    │                   │   /code/myapp    │
+│   block)    │                   └──────────────────┘
 └─────────────┘
 ```
 
