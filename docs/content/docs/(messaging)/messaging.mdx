@@ -133,6 +133,8 @@ Responses stream in real-time on platforms that support it. You see the reply be
 
 The webhook adapter is for programmatic access — CI hooks, scripts, monitoring alerts, anything that can make an HTTP request.
 
+By default, webhook is inbound/reply-only. Proactive delivery into webhook conversations (for example cross-channel `send_message_to_another_channel` or cron delivery targets like `webhook:my-target`) is disabled unless you set `allow_input = true` in `[messaging.webhook]`.
+
 ```bash
 curl -X POST http://localhost:18789/webhook \
   -H "Content-Type: application/json" \

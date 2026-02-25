@@ -101,6 +101,20 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 }
             }
         }
+        "webhook" => {
+            if let Some(conversation_id) = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("webhook_conversation_id"))
+                .and_then(json_value_to_string)
+            {
+                conversation_id
+            } else if let Some(conversation_id) = channel.id.strip_prefix("webhook:") {
+                conversation_id.to_string()
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     };
 
@@ -123,6 +137,7 @@ fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "slack" => normalize_slack_target(trimmed),
         "telegram" => normalize_telegram_target(trimmed),
         "twitch" => normalize_twitch_target(trimmed),
+        "webhook" => normalize_webhook_target(trimmed),
         _ => Some(trimmed.to_string()),
     }
 }
@@ -192,6 +207,15 @@ fn normalize_twitch_target(raw_target: &str) -> Option<String> {
         None
     } else {
         Some(channel_login.to_string())
+    }
+}
+
+fn normalize_webhook_target(raw_target: &str) -> Option<String> {
+    let target = strip_repeated_prefix(raw_target, "webhook");
+    if target.is_empty() {
+        None
+    } else {
+        Some(target.to_string())
     }
 }
 
@@ -280,6 +304,38 @@ mod tests {
             Some(super::BroadcastTarget {
                 adapter: "twitch".to_string(),
                 target: "jamiepinelive".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_webhook_target_from_channel_id() {
+        let channel = test_channel_info("webhook:github-ci", "webhook");
+        let resolved = resolve_broadcast_target(&channel);
+
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "webhook".to_string(),
+                target: "github-ci".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_webhook_target_from_platform_meta() {
+        let mut channel = test_channel_info("webhook:ignored", "webhook");
+        channel.platform_meta = Some(serde_json::json!({
+            "webhook_conversation_id": "deploy:alerts"
+        }));
+
+        let resolved = resolve_broadcast_target(&channel);
+
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "webhook".to_string(),
+                target: "deploy:alerts".to_string(),
             })
         );
     }

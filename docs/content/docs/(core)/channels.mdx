@@ -162,6 +162,8 @@ For Slack, targets prefixed with `dm:` trigger `conversations.open` to get a DM 
 
 For Telegram, the chat ID is parsed directly from the channel ID (`telegram:{chat_id}`) and passed to `bot.send_message()`.
 
+For Webhook, proactive delivery is opt-in via `[messaging.webhook].allow_input = true`. When disabled (default), webhook remains inbound/reply-only and proactive sends are ignored.
+
 ### System Prompt Injection
 
 The available channels are rendered into the system prompt via the `fragments/available_channels.md.j2` Jinja template. The rendered output looks like:
