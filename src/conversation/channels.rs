@@ -285,11 +285,6 @@ fn extract_platform_meta(
                 meta.insert("twitch_channel".to_string(), value.clone());
             }
         }
-        "webhook" => {
-            if let Some(value) = metadata.get("webhook_conversation_id") {
-                meta.insert("webhook_conversation_id".to_string(), value.clone());
-            }
-        }
         _ => {}
     }
 

@@ -1606,7 +1606,6 @@ async fn initialize_agents(
             webhook_config.port,
             &webhook_config.bind,
             webhook_config.auth_token.clone(),
-            webhook_config.allow_input,
         );
         new_messaging_manager.register(adapter).await;
     }

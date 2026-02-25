@@ -25,7 +25,6 @@ pub struct WebhookAdapter {
     port: u16,
     bind: String,
     auth_token: Option<String>,
-    allow_input: bool,
     inbound_tx: Arc<RwLock<Option<mpsc::Sender<InboundMessage>>>>,
     /// Buffered responses per conversation_id, waiting to be polled.
     response_buffers: Arc<RwLock<HashMap<String, Vec<WebhookResponse>>>>,
@@ -76,17 +75,11 @@ struct PollResponse {
 }
 
 impl WebhookAdapter {
-    pub fn new(
-        port: u16,
-        bind: impl Into<String>,
-        auth_token: Option<String>,
-        allow_input: bool,
-    ) -> Self {
+    pub fn new(port: u16, bind: impl Into<String>, auth_token: Option<String>) -> Self {
         Self {
             port,
             bind: bind.into(),
             auth_token,
-            allow_input,
             inbound_tx: Arc::new(RwLock::new(None)),
             response_buffers: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
@@ -154,39 +147,74 @@ impl Messaging for WebhookAdapter {
         message: &InboundMessage,
         response: OutboundResponse,
     ) -> crate::Result<()> {
-        let Some(webhook_response) = outbound_to_webhook_response(response) else {
-            return Ok(());
+        let webhook_response = match response {
+            OutboundResponse::Text(text) => WebhookResponse {
+                response_type: "text".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::RichMessage { text, .. } => WebhookResponse {
+                response_type: "text".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::ThreadReply { text, .. } => WebhookResponse {
+                response_type: "text".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::File {
+                filename, caption, ..
+            } => WebhookResponse {
+                response_type: "file".into(),
+                content: None,
+                filename: Some(filename),
+                caption,
+            },
+            OutboundResponse::StreamStart => WebhookResponse {
+                response_type: "stream_start".into(),
+                content: None,
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::StreamChunk(text) => WebhookResponse {
+                response_type: "stream_chunk".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::StreamEnd => WebhookResponse {
+                response_type: "stream_end".into(),
+                content: None,
+                filename: None,
+                caption: None,
+            },
+            // Reactions, status updates, and remove-reaction aren't meaningful over webhook
+            OutboundResponse::Reaction(_)
+            | OutboundResponse::RemoveReaction(_)
+            | OutboundResponse::Status(_) => return Ok(()),
+            // Slack-specific rich variants — fall back to plain text
+            OutboundResponse::Ephemeral { text, .. } => WebhookResponse {
+                response_type: "text".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
+            OutboundResponse::ScheduledMessage { text, .. } => WebhookResponse {
+                response_type: "text".into(),
+                content: Some(text),
+                filename: None,
+                caption: None,
+            },
         };
 
         self.response_buffers
             .write()
             .await
             .entry(message.conversation_id.clone())
-            .or_default()
-            .push(webhook_response);
-
-        Ok(())
-    }
-
-    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
-        if !self.allow_input {
-            return Ok(());
-        }
-
-        let Some(webhook_response) = outbound_to_webhook_response(response) else {
-            return Ok(());
-        };
-
-        let conversation_id = normalize_conversation_target(target);
-        if conversation_id.is_empty() {
-            return Ok(());
-        }
-
-        let key = format!("webhook:{conversation_id}");
-        self.response_buffers
-            .write()
-            .await
-            .entry(key)
             .or_default()
             .push(webhook_response);
 
@@ -298,74 +326,4 @@ fn is_authorized(headers: &HeaderMap, expected_token: Option<&str>) -> bool {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
         .is_some_and(|token| token == expected_token)
-}
-
-fn outbound_to_webhook_response(response: OutboundResponse) -> Option<WebhookResponse> {
-    match response {
-        OutboundResponse::Text(text) => Some(WebhookResponse {
-            response_type: "text".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::RichMessage { text, .. } => Some(WebhookResponse {
-            response_type: "text".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::ThreadReply { text, .. } => Some(WebhookResponse {
-            response_type: "text".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::File {
-            filename, caption, ..
-        } => Some(WebhookResponse {
-            response_type: "file".into(),
-            content: None,
-            filename: Some(filename),
-            caption,
-        }),
-        OutboundResponse::StreamStart => Some(WebhookResponse {
-            response_type: "stream_start".into(),
-            content: None,
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::StreamChunk(text) => Some(WebhookResponse {
-            response_type: "stream_chunk".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::StreamEnd => Some(WebhookResponse {
-            response_type: "stream_end".into(),
-            content: None,
-            filename: None,
-            caption: None,
-        }),
-        // Reactions, status updates, and remove-reaction aren't meaningful over webhook
-        OutboundResponse::Reaction(_)
-        | OutboundResponse::RemoveReaction(_)
-        | OutboundResponse::Status(_) => None,
-        // Slack-specific rich variants — fall back to plain text
-        OutboundResponse::Ephemeral { text, .. } => Some(WebhookResponse {
-            response_type: "text".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-        OutboundResponse::ScheduledMessage { text, .. } => Some(WebhookResponse {
-            response_type: "text".into(),
-            content: Some(text),
-            filename: None,
-            caption: None,
-        }),
-    }
-}
-
-fn normalize_conversation_target(target: &str) -> &str {
-    target.strip_prefix("webhook:").unwrap_or(target).trim()
 }

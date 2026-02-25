@@ -1448,7 +1448,6 @@ pub struct WebhookConfig {
     pub port: u16,
     pub bind: String,
     pub auth_token: Option<String>,
-    pub allow_input: bool,
 }
 
 // -- TOML deserialization types --
@@ -1951,8 +1950,6 @@ struct TomlWebhookConfig {
     #[serde(default = "default_webhook_bind")]
     bind: String,
     auth_token: Option<String>,
-    #[serde(default)]
-    allow_input: bool,
 }
 
 #[derive(Deserialize)]
@@ -3481,7 +3478,6 @@ impl Config {
                 port: w.port,
                 bind: w.bind,
                 auth_token: w.auth_token.as_deref().and_then(resolve_env_value),
-                allow_input: w.allow_input,
             }),
             twitch: toml.messaging.twitch.and_then(|t| {
                 let username = t
