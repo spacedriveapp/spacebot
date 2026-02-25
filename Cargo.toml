@@ -34,6 +34,7 @@ fastembed = "4"
 # Encoding
 base64 = "0.22"
 hex = "0.4"
+fnv = "1.0"
 
 # Compression
 flate2 = "1"

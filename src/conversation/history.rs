@@ -2,6 +2,7 @@
 
 use crate::{BranchId, ChannelId, WorkerId};
 
+use fnv::FnvHasher;
 use serde::Serialize;
 use sqlx::{Row as _, SqlitePool};
 use std::collections::HashMap;
@@ -237,7 +238,7 @@ fn worker_receipt_backoff_secs(attempt_count: i64) -> Option<i64> {
 }
 
 fn status_fingerprint(status: &str) -> String {
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hasher = FnvHasher::default();
     status.hash(&mut hasher);
     format!("{:016x}", hasher.finish())
 }
@@ -626,7 +627,7 @@ impl ProcessRunLogger {
         sqlx::query(
             "UPDATE worker_task_contracts \
              SET state = CASE \
-                     WHEN state IN (?, ?, ?) THEN state \
+                     WHEN state IN (?, ?, ?, ?, ?) THEN state \
                      ELSE ? \
                  END, \
                  updated_at = CURRENT_TIMESTAMP \
@@ -635,6 +636,8 @@ impl ProcessRunLogger {
         .bind(WORKER_CONTRACT_STATE_TERMINAL_PENDING)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+        .bind(WORKER_CONTRACT_STATE_PROGRESSING)
+        .bind(WORKER_CONTRACT_STATE_SLA_MISSED)
         .bind(WORKER_CONTRACT_STATE_ACKED)
         .bind(worker_id.to_string())
         .execute(&self.pool)
@@ -744,10 +747,59 @@ impl ProcessRunLogger {
 
         let mut due = Vec::with_capacity(rows.len());
         for row in rows {
-            let contract_id: String = row.try_get("id").unwrap_or_default();
-            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
-            let task_summary: String = row.try_get("task_summary").unwrap_or_default();
-            let attempt_count: i64 = row.try_get("attempt_count").unwrap_or_default();
+            let contract_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        column = "id",
+                        "skipping malformed ack-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let worker_id_raw: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        column = "worker_id",
+                        "skipping malformed ack-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let task_summary: String = match row.try_get("task_summary") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        worker_id = %worker_id_raw,
+                        column = "task_summary",
+                        "skipping malformed ack-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let attempt_count: i64 = match row.try_get("attempt_count") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        worker_id = %worker_id_raw,
+                        column = "attempt_count",
+                        "skipping malformed ack-deadline contract row"
+                    );
+                    continue;
+                }
+            };
 
             let updated = sqlx::query(
                 "UPDATE worker_task_contracts \
@@ -824,9 +876,45 @@ impl ProcessRunLogger {
 
         let mut due = Vec::with_capacity(rows.len());
         for row in rows {
-            let contract_id: String = row.try_get("id").unwrap_or_default();
-            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
-            let task_summary: String = row.try_get("task_summary").unwrap_or_default();
+            let contract_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        column = "id",
+                        "skipping malformed progress-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let worker_id_raw: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        column = "worker_id",
+                        "skipping malformed progress-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let task_summary: String = match row.try_get("task_summary") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        worker_id = %worker_id_raw,
+                        column = "task_summary",
+                        "skipping malformed progress-deadline contract row"
+                    );
+                    continue;
+                }
+            };
 
             let updated = sqlx::query(
                 "UPDATE worker_task_contracts \
@@ -906,8 +994,31 @@ impl ProcessRunLogger {
 
         let mut due = Vec::with_capacity(rows.len());
         for row in rows {
-            let contract_id: String = row.try_get("id").unwrap_or_default();
-            let worker_id_raw: String = row.try_get("worker_id").unwrap_or_default();
+            let contract_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        column = "id",
+                        "skipping malformed terminal-deadline contract row"
+                    );
+                    continue;
+                }
+            };
+            let worker_id_raw: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        contract_id = %contract_id,
+                        column = "worker_id",
+                        "skipping malformed terminal-deadline contract row"
+                    );
+                    continue;
+                }
+            };
 
             let updated = sqlx::query(
                 "UPDATE worker_task_contracts \
@@ -978,7 +1089,7 @@ impl ProcessRunLogger {
         let channel_id = channel_id.to_string();
         let candidate_receipt_id = uuid::Uuid::new_v4().to_string();
 
-        sqlx::query(
+        let receipt_id: String = sqlx::query_scalar(
             "INSERT INTO worker_delivery_receipts \
              (id, worker_id, channel_id, kind, status, terminal_state, payload_text, next_attempt_at) \
              VALUES (?, ?, ?, ?, 'pending', ?, ?, CURRENT_TIMESTAMP) \
@@ -1010,7 +1121,8 @@ impl ProcessRunLogger {
                  updated_at = CASE \
                      WHEN worker_delivery_receipts.status = 'acked' THEN worker_delivery_receipts.updated_at \
                      ELSE CURRENT_TIMESTAMP \
-                 END",
+                 END \
+             RETURNING id",
         )
         .bind(&candidate_receipt_id)
         .bind(&worker_id)
@@ -1018,17 +1130,6 @@ impl ProcessRunLogger {
         .bind(WORKER_TERMINAL_RECEIPT_KIND)
         .bind(terminal_state)
         .bind(payload_text)
-        .execute(&self.pool)
-        .await
-        .map_err(|error| anyhow::anyhow!(error))?;
-
-        let receipt_id: String = sqlx::query_scalar(
-            "SELECT id \
-             FROM worker_delivery_receipts \
-             WHERE worker_id = ? AND kind = ?",
-        )
-        .bind(&worker_id)
-        .bind(WORKER_TERMINAL_RECEIPT_KIND)
         .fetch_one(&self.pool)
         .await
         .map_err(|error| anyhow::anyhow!(error))?;
@@ -1671,8 +1772,11 @@ impl ProcessRunLogger {
         worker_id: &str,
         limit: i64,
     ) -> crate::error::Result<Vec<WorkerEventRow>> {
-        if limit <= 0 {
-            return Err(anyhow::anyhow!("invalid limit: must be > 0").into());
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        if limit < 0 {
+            return Err(anyhow::anyhow!("invalid limit: must be >= 0").into());
         }
         let limit = limit.min(500);
 
@@ -1680,7 +1784,7 @@ impl ProcessRunLogger {
             "SELECT id, worker_id, channel_id, agent_id, event_type, payload_json, created_at \
              FROM worker_events \
              WHERE worker_id = ? \
-             ORDER BY created_at DESC \
+             ORDER BY created_at DESC, id DESC \
              LIMIT ?",
         )
         .bind(worker_id)
@@ -1840,12 +1944,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn list_worker_events_rejects_non_positive_limit() {
+    async fn list_worker_events_zero_limit_returns_empty_and_negative_is_invalid() {
         let logger = connect_logger().await;
-        let error = logger
+        let events = logger
             .list_worker_events("worker:test", 0)
             .await
-            .expect_err("non-positive limit should fail");
+            .expect("zero limit should return empty result");
+        assert!(events.is_empty());
+
+        let error = logger
+            .list_worker_events("worker:test", -1)
+            .await
+            .expect_err("negative limit should fail");
         assert!(error.to_string().contains("invalid limit"));
     }
 
@@ -2238,11 +2348,20 @@ mod tests {
             .await
             .expect("upsert receipt");
 
-        for _ in 0..WORKER_RECEIPT_MAX_ATTEMPTS {
-            let _ = logger
+        for attempt in 1..=WORKER_RECEIPT_MAX_ATTEMPTS {
+            let outcome = logger
                 .fail_worker_delivery_receipt_attempt(&receipt_id, "adapter unavailable")
                 .await
                 .expect("record delivery failure");
+            if attempt < WORKER_RECEIPT_MAX_ATTEMPTS {
+                assert_eq!(outcome.status, "pending");
+                assert_eq!(outcome.attempt_count, attempt);
+                assert!(outcome.next_attempt_at.is_some());
+            } else {
+                assert_eq!(outcome.status, "failed");
+                assert_eq!(outcome.attempt_count, attempt);
+                assert!(outcome.next_attempt_at.is_none());
+            }
         }
 
         let state: String =
