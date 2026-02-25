@@ -197,6 +197,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             base_url: "https://api.kilo.ai/api/gateway".to_string(),
             api_key: credential.to_string(),
             name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
         }),
         "zhipu" => Some(ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,

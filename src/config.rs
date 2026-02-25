@@ -2366,6 +2366,7 @@ impl Config {
                     base_url: KILO_PROVIDER_BASE_URL.to_string(),
                     api_key: kilo_key,
                     name: Some("Kilo Gateway".to_string()),
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2890,6 +2891,7 @@ impl Config {
                     base_url: KILO_PROVIDER_BASE_URL.to_string(),
                     api_key: kilo_key,
                     name: Some("Kilo Gateway".to_string()),
+                    use_bearer_auth: false,
                 });
         }
 
