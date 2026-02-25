@@ -7,11 +7,11 @@ import { ChannelSettingCard, DisabledChannelCard } from "@/components/ChannelSet
 import { ModelSelect } from "@/components/ModelSelect";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faSearch } from "@fortawesome/free-solid-svg-icons";
+import { faPlus, faSearch } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "config-file";
+type SectionId = "providers" | "channels" | "api-keys" | "server" | "code-workers" | "worker-logs" | "config-file";
 
 const SECTIONS = [
 	{
@@ -39,10 +39,10 @@ const SECTIONS = [
 		description: "API server configuration",
 	},
 	{
-		id: "opencode" as const,
-		label: "OpenCode",
+		id: "code-workers" as const,
+		label: "Code Workers",
 		group: "system" as const,
-		description: "OpenCode worker integration",
+		description: "OpenCode and ACP worker configuration",
 	},
 	{
 		id: "worker-logs" as const,
@@ -262,12 +262,12 @@ export function Settings() {
 		enabled: activeSection === "providers",
 	});
 
-	// Fetch global settings (only when on api-keys, server, or worker-logs tabs)
+	// Fetch global settings (only when on api-keys, server, code-workers, or worker-logs tabs)
 	const { data: globalSettings, isLoading: globalSettingsLoading } = useQuery({
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
-		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs",
+		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "code-workers" || activeSection === "worker-logs",
 	});
 
 	const updateMutation = useMutation({
@@ -654,8 +654,8 @@ export function Settings() {
 						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "server" ? (
 						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
-					) : activeSection === "opencode" ? (
-						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "code-workers" ? (
+						<CodeWorkersSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
 						<WorkerLogsSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "config-file" ? (
@@ -1215,7 +1215,7 @@ const PERMISSION_OPTIONS = [
 	{ value: "deny", label: "Deny", description: "Tool is completely disabled" },
 ];
 
-function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
+function CodeWorkersSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [enabled, setEnabled] = useState(settings?.opencode?.enabled ?? false);
 	const [path, setPath] = useState(settings?.opencode?.path ?? "opencode");
@@ -1371,7 +1371,7 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	return (
 		<div className="mx-auto max-w-2xl px-6 py-6">
 			<div className="mb-6">
-				<h2 className="font-plex text-sm font-semibold text-ink">Coding Workers</h2>
+				<h2 className="font-plex text-sm font-semibold text-ink">Code Workers</h2>
 				<p className="mt-1 text-sm text-ink-dull">
 					Configure coding worker backends available to <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">spawn_worker</code>: OpenCode and ACP profiles.
 				</p>
@@ -1384,135 +1384,128 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 				</div>
 			) : (
 				<div className="flex flex-col gap-4">
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
+					<div className="rounded-lg border border-app-line bg-app-darkBox/20 p-4">
 						<h3 className="text-sm font-medium text-ink">OpenCode</h3>
 						<p className="mt-0.5 text-sm text-ink-dull">
 							Spawn <a href="https://opencode.ai" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">OpenCode</a> coding agents as worker subprocesses.
 						</p>
-					</div>
 
-					{/* Enable toggle */}
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<label className="flex items-center gap-3">
-							<input
-								type="checkbox"
-								checked={enabled}
-								onChange={(e) => setEnabled(e.target.checked)}
-								className="h-4 w-4"
-							/>
-							<div>
-								<span className="text-sm font-medium text-ink">Enable OpenCode Workers</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Allow agents to spawn OpenCode coding sessions
-								</p>
-							</div>
-						</label>
-					</div>
-
-					{enabled && (
-						<>
-							{/* Binary path */}
+						<div className="mt-4 flex flex-col gap-4">
 							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<label className="block">
-									<span className="text-sm font-medium text-ink">Binary Path</span>
-									<p className="mt-0.5 text-sm text-ink-dull">
-										Path to the OpenCode binary, or just the name if it's on PATH
-									</p>
-									<Input
-										type="text"
-										value={path}
-										onChange={(e) => setPath(e.target.value)}
-										placeholder="opencode"
-										className="mt-2"
+								<label className="flex items-center gap-3">
+									<input
+										type="checkbox"
+										checked={enabled}
+										onChange={(e) => setEnabled(e.target.checked)}
+										className="h-4 w-4"
 									/>
+									<div>
+										<span className="text-sm font-medium text-ink">Enable OpenCode Workers</span>
+										<p className="mt-0.5 text-sm text-ink-dull">
+											Allow agents to spawn OpenCode coding sessions
+										</p>
+									</div>
 								</label>
 							</div>
 
-							{/* Pool settings */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Server Pool</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Controls how many OpenCode server processes can run concurrently
-								</p>
-								<div className="mt-3 grid grid-cols-3 gap-3">
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Max Servers</span>
-										<Input
-											type="number"
-											value={maxServers}
-											onChange={(e) => setMaxServers(e.target.value)}
-											min="1"
-											max="20"
-											className="mt-1"
-										/>
-									</label>
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Startup Timeout (s)</span>
-										<Input
-											type="number"
-											value={startupTimeout}
-											onChange={(e) => setStartupTimeout(e.target.value)}
-											min="1"
-											className="mt-1"
-										/>
-									</label>
-									<label className="block">
-										<span className="text-tiny font-medium text-ink-dull">Max Retries</span>
-										<Input
-											type="number"
-											value={maxRetries}
-											onChange={(e) => setMaxRetries(e.target.value)}
-											min="0"
-											className="mt-1"
-										/>
-									</label>
-								</div>
-							</div>
+							{enabled && (
+								<>
+									<div className="rounded-lg border border-app-line bg-app-box p-4">
+										<label className="block">
+											<span className="text-sm font-medium text-ink">Binary Path</span>
+											<p className="mt-0.5 text-sm text-ink-dull">
+												Path to the OpenCode binary, or just the name if it's on PATH
+											</p>
+											<Input
+												type="text"
+												value={path}
+												onChange={(e) => setPath(e.target.value)}
+												placeholder="opencode"
+												className="mt-2"
+											/>
+										</label>
+									</div>
 
-							{/* Permissions */}
-							<div className="rounded-lg border border-app-line bg-app-box p-4">
-								<span className="text-sm font-medium text-ink">Permissions</span>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Control which tools OpenCode workers can use
-								</p>
-								<div className="mt-3 flex flex-col gap-3">
-									{([
-										{ label: "File Edit", value: editPerm, setter: setEditPerm },
-										{ label: "Shell / Bash", value: bashPerm, setter: setBashPerm },
-										{ label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm },
-									] as const).map(({ label, value, setter }) => (
-										<div key={label} className="flex items-center justify-between">
-											<span className="text-sm text-ink">{label}</span>
-											<Select value={value} onValueChange={(v) => setter(v)}>
-												<SelectTrigger className="w-28">
-													<SelectValue />
-												</SelectTrigger>
-												<SelectContent>
-													{PERMISSION_OPTIONS.map((opt) => (
-														<SelectItem key={opt.value} value={opt.value}>
-															{opt.label}
-														</SelectItem>
-													))}
-												</SelectContent>
-											</Select>
+									<div className="rounded-lg border border-app-line bg-app-box p-4">
+										<span className="text-sm font-medium text-ink">Server Pool</span>
+										<p className="mt-0.5 text-sm text-ink-dull">
+											Controls how many OpenCode server processes can run concurrently
+										</p>
+										<div className="mt-3 grid grid-cols-3 gap-3">
+											<label className="block">
+												<span className="text-tiny font-medium text-ink-dull">Max Servers</span>
+												<Input
+													type="number"
+													value={maxServers}
+													onChange={(e) => setMaxServers(e.target.value)}
+													min="1"
+													max="20"
+													className="mt-1"
+												/>
+											</label>
+											<label className="block">
+												<span className="text-tiny font-medium text-ink-dull">Startup Timeout (s)</span>
+												<Input
+													type="number"
+													value={startupTimeout}
+													onChange={(e) => setStartupTimeout(e.target.value)}
+													min="1"
+													className="mt-1"
+												/>
+											</label>
+											<label className="block">
+												<span className="text-tiny font-medium text-ink-dull">Max Retries</span>
+												<Input
+													type="number"
+													value={maxRetries}
+													onChange={(e) => setMaxRetries(e.target.value)}
+													min="0"
+													className="mt-1"
+												/>
+											</label>
 										</div>
-									))}
-								</div>
-							</div>
-						</>
-					)}
+									</div>
 
-					<div className="rounded-lg border border-app-line bg-app-box p-4">
-						<div className="flex items-center justify-between">
-							<div>
-								<h3 className="text-sm font-medium text-ink">ACP Workers</h3>
-								<p className="mt-0.5 text-sm text-ink-dull">
-									Each entry maps to <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">[defaults.acp.&lt;id&gt;]</code>. Use <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">worker_type: "acp"</code> and optional <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">acp_id</code>.
-								</p>
-							</div>
-							<Button variant="secondary" size="sm" onClick={addAcpWorker}>
-								Add ACP Worker
-							</Button>
+									<div className="rounded-lg border border-app-line bg-app-box p-4">
+										<span className="text-sm font-medium text-ink">Permissions</span>
+										<p className="mt-0.5 text-sm text-ink-dull">
+											Control which tools OpenCode workers can use
+										</p>
+										<div className="mt-3 flex flex-col gap-3">
+											{([
+												{ label: "File Edit", value: editPerm, setter: setEditPerm },
+												{ label: "Shell / Bash", value: bashPerm, setter: setBashPerm },
+												{ label: "Web Fetch", value: webfetchPerm, setter: setWebfetchPerm },
+											] as const).map(({ label, value, setter }) => (
+												<div key={label} className="flex items-center justify-between">
+													<span className="text-sm text-ink">{label}</span>
+													<Select value={value} onValueChange={(v) => setter(v)}>
+														<SelectTrigger className="w-28">
+															<SelectValue />
+														</SelectTrigger>
+														<SelectContent>
+															{PERMISSION_OPTIONS.map((opt) => (
+																<SelectItem key={opt.value} value={opt.value}>
+																	{opt.label}
+																</SelectItem>
+															))}
+														</SelectContent>
+													</Select>
+												</div>
+											))}
+										</div>
+									</div>
+								</>
+							)}
+						</div>
+					</div>
+
+					<div className="rounded-lg border border-app-line bg-app-darkBox/20 p-4">
+						<div>
+							<h3 className="text-sm font-medium text-ink">ACP</h3>
+							<p className="mt-0.5 text-sm text-ink-dull">
+								Each entry maps to <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">[defaults.acp.&lt;id&gt;]</code>. Use <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">worker_type: "acp"</code> and optional <code className="rounded bg-app-box px-1 py-0.5 text-tiny text-ink-dull">acp_id</code>.
+							</p>
 						</div>
 
 						<div className="mt-4 flex flex-col gap-3">
@@ -1557,7 +1550,7 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 														className="w-24"
 													/>
 												</label>
-												<Button variant="secondary" size="sm" onClick={() => removeAcpWorker(index)}>
+												<Button variant="outline" size="sm" onClick={() => removeAcpWorker(index)}>
 													Remove
 												</Button>
 											</div>
@@ -1565,6 +1558,17 @@ function OpenCodeSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 									</div>
 								))
 							)}
+						</div>
+
+						<div className="mt-4 flex justify-center">
+							<Button
+								variant="outline"
+								size="sm"
+								onClick={addAcpWorker}
+								leftIcon={<FontAwesomeIcon icon={faPlus} />}
+							>
+								Add ACP Worker
+							</Button>
 						</div>
 					</div>
 
