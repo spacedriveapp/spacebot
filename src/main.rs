@@ -633,7 +633,9 @@ fn spawn_worker_receipt_dispatch_loop(
     api_event_tx: tokio::sync::broadcast::Sender<spacebot::api::ApiEvent>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
+        const FAILURE_THRESHOLD: usize = 3;
         let mut next_prune_at = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        let mut consecutive_failures: usize = 0;
         loop {
             if tokio::time::Instant::now() >= next_prune_at {
                 match process_run_logger.prune_worker_delivery_receipts().await {
@@ -661,13 +663,28 @@ fn spawn_worker_receipt_dispatch_loop(
                 .claim_due_worker_terminal_receipts_any(WORKER_RECEIPT_GLOBAL_DISPATCH_BATCH_SIZE)
                 .await
             {
-                Ok(receipts) => receipts,
+                Ok(receipts) => {
+                    consecutive_failures = 0;
+                    receipts
+                }
                 Err(error) => {
+                    consecutive_failures = consecutive_failures.saturating_add(1);
                     tracing::warn!(
                         agent_id = %agent_id,
+                        consecutive_failures,
                         %error,
                         "global worker receipt dispatcher failed to claim receipts"
                     );
+                    if consecutive_failures >= FAILURE_THRESHOLD {
+                        tracing::error!(
+                            agent_id = %agent_id,
+                            consecutive_failures,
+                            threshold = FAILURE_THRESHOLD,
+                            next_prune_at = ?next_prune_at,
+                            "worker receipt dispatcher circuit breaker opened after repeated claim failures"
+                        );
+                        return;
+                    }
                     Vec::new()
                 }
             };
@@ -712,6 +729,7 @@ fn spawn_worker_receipt_dispatch_loop(
                         .await
                     {
                         Ok(acked_now) => {
+                            consecutive_failures = 0;
                             if acked_now {
                                 let channel_id: spacebot::ChannelId =
                                     Arc::from(receipt.channel_id.as_str());
@@ -734,17 +752,33 @@ fn spawn_worker_receipt_dispatch_loop(
                             }
                         }
                         Err(error) => {
+                            consecutive_failures = consecutive_failures.saturating_add(1);
                             tracing::warn!(
                                 agent_id = %agent_id,
                                 channel_id = %receipt.channel_id,
                                 worker_id = %receipt.worker_id,
                                 receipt_id = %receipt.id,
+                                consecutive_failures,
                                 %error,
                                 "failed to ack globally delivered worker terminal receipt"
                             );
+                            if consecutive_failures >= FAILURE_THRESHOLD {
+                                tracing::error!(
+                                    agent_id = %agent_id,
+                                    channel_id = %receipt.channel_id,
+                                    worker_id = %receipt.worker_id,
+                                    receipt_id = %receipt.id,
+                                    consecutive_failures,
+                                    threshold = FAILURE_THRESHOLD,
+                                    next_prune_at = ?next_prune_at,
+                                    "worker receipt dispatcher circuit breaker opened after repeated ack failures"
+                                );
+                                return;
+                            }
                         }
                     },
                     Err(error) => {
+                        consecutive_failures = consecutive_failures.saturating_add(1);
                         match process_run_logger
                             .fail_worker_delivery_receipt_attempt(&receipt.id, &error.to_string())
                             .await
@@ -758,20 +792,36 @@ fn spawn_worker_receipt_dispatch_loop(
                                     attempt_count = outcome.attempt_count,
                                     status = %outcome.status,
                                     next_attempt_at = ?outcome.next_attempt_at,
+                                    consecutive_failures,
                                     %error,
                                     "global worker receipt dispatcher failed to deliver terminal receipt"
                                 );
                             }
                             Err(update_error) => {
+                                consecutive_failures = consecutive_failures.saturating_add(1);
                                 tracing::warn!(
                                     agent_id = %agent_id,
                                     channel_id = %receipt.channel_id,
                                     worker_id = %receipt.worker_id,
                                     receipt_id = %receipt.id,
+                                    consecutive_failures,
                                     %update_error,
                                     "failed to record global worker receipt delivery failure"
                                 );
                             }
+                        }
+                        if consecutive_failures >= FAILURE_THRESHOLD {
+                            tracing::error!(
+                                agent_id = %agent_id,
+                                channel_id = %receipt.channel_id,
+                                worker_id = %receipt.worker_id,
+                                receipt_id = %receipt.id,
+                                consecutive_failures,
+                                threshold = FAILURE_THRESHOLD,
+                                next_prune_at = ?next_prune_at,
+                                "worker receipt dispatcher circuit breaker opened after repeated delivery/update failures"
+                            );
+                            return;
                         }
                     }
                 }

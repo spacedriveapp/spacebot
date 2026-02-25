@@ -525,6 +525,8 @@ pub struct BrowserConfig {
     pub headless: bool,
     /// Allow JavaScript evaluation via the browser tool.
     pub evaluate_enabled: bool,
+    /// Per-action timeout in seconds for browser operations.
+    pub browser_action_timeout_secs: u64,
     /// Custom Chrome/Chromium executable path.
     pub executable_path: Option<String>,
     /// Directory for storing screenshots and other browser artifacts.
@@ -537,6 +539,7 @@ impl Default for BrowserConfig {
             enabled: true,
             headless: true,
             evaluate_enabled: false,
+            browser_action_timeout_secs: 45,
             executable_path: None,
             screenshot_dir: None,
         }
@@ -1856,6 +1859,7 @@ struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
     evaluate_enabled: Option<bool>,
+    browser_action_timeout_secs: Option<u64>,
     executable_path: Option<String>,
     screenshot_dir: Option<String>,
 }
@@ -3238,6 +3242,10 @@ impl Config {
                         enabled: b.enabled.unwrap_or(base.enabled),
                         headless: b.headless.unwrap_or(base.headless),
                         evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
+                        browser_action_timeout_secs: b
+                            .browser_action_timeout_secs
+                            .and_then(|secs| (secs > 0).then_some(secs))
+                            .unwrap_or(base.browser_action_timeout_secs),
                         executable_path: b.executable_path.or_else(|| base.executable_path.clone()),
                         screenshot_dir: b
                             .screenshot_dir
@@ -3425,6 +3433,10 @@ impl Config {
                         evaluate_enabled: b
                             .evaluate_enabled
                             .unwrap_or(defaults.browser.evaluate_enabled),
+                        browser_action_timeout_secs: b
+                            .browser_action_timeout_secs
+                            .and_then(|secs| (secs > 0).then_some(secs))
+                            .unwrap_or(defaults.browser.browser_action_timeout_secs),
                         executable_path: b
                             .executable_path
                             .or_else(|| defaults.browser.executable_path.clone()),

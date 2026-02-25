@@ -1276,11 +1276,20 @@ fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
 }
 
 fn truncate_status_text(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    let char_count = text.chars().count();
+    if char_count <= max_chars {
         return text.to_string();
     }
 
-    let end = text.floor_char_boundary(max_chars.saturating_sub(3));
+    let visible_chars = max_chars.saturating_sub(3);
+    let end = if visible_chars == 0 {
+        0
+    } else {
+        text.char_indices()
+            .nth(visible_chars)
+            .map(|(index, _)| index)
+            .unwrap_or(text.len())
+    };
     format!("{}...", &text[..end])
 }
 

@@ -28,9 +28,6 @@ use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-/// Per-browser-action timeout to avoid hanging worker runs on Chrome/CDP stalls.
-const BROWSER_ACTION_TIMEOUT_SECS: u64 = 45;
-
 /// Validate that a URL is safe for the browser to navigate to.
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
 /// to prevent server-side request forgery.
@@ -474,7 +471,12 @@ impl Tool for BrowserTool {
 }
 
 impl BrowserTool {
+    fn action_timeout_secs(&self) -> u64 {
+        self.config.browser_action_timeout_secs.max(1)
+    }
+
     async fn with_action_timeout<T, F, E>(
+        &self,
         action_name: &str,
         action_future: F,
     ) -> Result<T, BrowserError>
@@ -482,16 +484,12 @@ impl BrowserTool {
         F: std::future::Future<Output = Result<T, E>>,
         E: std::fmt::Display,
     {
-        match tokio::time::timeout(
-            Duration::from_secs(BROWSER_ACTION_TIMEOUT_SECS),
-            action_future,
-        )
-        .await
-        {
+        let timeout_secs = self.action_timeout_secs();
+        match tokio::time::timeout(Duration::from_secs(timeout_secs), action_future).await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(error)) => Err(BrowserError::new(format!("{action_name} failed: {error}"))),
             Err(_) => Err(BrowserError::new(format!(
-                "{action_name} timed out after {BROWSER_ACTION_TIMEOUT_SECS}s"
+                "{action_name} timed out after {timeout_secs}s"
             ))),
         }
     }
@@ -523,8 +521,9 @@ impl BrowserTool {
             "launching chrome"
         );
 
-        let (browser, mut handler) =
-            Self::with_action_timeout("browser launch", Browser::launch(chrome_config)).await?;
+        let (browser, mut handler) = self
+            .with_action_timeout("browser launch", Browser::launch(chrome_config))
+            .await?;
 
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
@@ -545,7 +544,8 @@ impl BrowserTool {
         let mut state = self.state.lock().await;
         let page = self.get_or_create_page(&mut state, Some(&url)).await?;
 
-        Self::with_action_timeout("navigation", page.goto(&url)).await?;
+        self.with_action_timeout("navigation", page.goto(&url))
+            .await?;
 
         let title = page.get_title().await.ok().flatten();
         let current_url = page.url().await.ok().flatten();
@@ -573,7 +573,9 @@ impl BrowserTool {
             validate_url(target_url)?;
         }
 
-        let page = Self::with_action_timeout("open tab", browser.new_page(target_url)).await?;
+        let page = self
+            .with_action_timeout("open tab", browser.new_page(target_url))
+            .await?;
 
         let target_id = page_target_id(&page);
         let title = page.get_title().await.ok().flatten();
@@ -662,10 +664,13 @@ impl BrowserTool {
 
         let page = state
             .pages
-            .remove(&id)
+            .get(&id)
+            .cloned()
             .ok_or_else(|| BrowserError::new(format!("no tab with target_id '{id}'")))?;
 
-        Self::with_action_timeout("close tab", page.close()).await?;
+        self.with_action_timeout("close tab", page.close()).await?;
+
+        state.pages.remove(&id);
 
         if state.active_target.as_ref() == Some(&id) {
             state.active_target = state.pages.keys().next().cloned();
@@ -682,17 +687,18 @@ impl BrowserTool {
         let page = self.require_active_page(&state)?.clone();
 
         // Enable accessibility domain if not already enabled
-        Self::with_action_timeout(
+        self.with_action_timeout(
             "snapshot accessibility enable",
             page.execute(AxEnableParams::default()),
         )
         .await?;
 
-        let ax_tree = Self::with_action_timeout(
-            "snapshot accessibility tree",
-            page.execute(GetFullAxTreeParams::default()),
-        )
-        .await?;
+        let ax_tree = self
+            .with_action_timeout(
+                "snapshot accessibility tree",
+                page.execute(GetFullAxTreeParams::default()),
+            )
+            .await?;
 
         state.element_refs.clear();
         state.next_ref = 0;
@@ -780,7 +786,8 @@ impl BrowserTool {
         match act_kind {
             ActKind::Click => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act click", element.click()).await?;
+                self.with_action_timeout("act click", element.click())
+                    .await?;
                 Ok(BrowserOutput::success("Clicked element"))
             }
             ActKind::Type => {
@@ -788,7 +795,7 @@ impl BrowserTool {
                     return Err(BrowserError::new("text is required for act:type"));
                 };
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act type", async {
+                self.with_action_timeout("act type", async {
                     element.click().await?;
                     element.type_str(&text).await
                 })
@@ -804,27 +811,30 @@ impl BrowserTool {
                 };
                 if element_ref.is_some() {
                     let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                    Self::with_action_timeout("act press_key", element.press_key(&key)).await?;
+                    self.with_action_timeout("act press_key", element.press_key(&key))
+                        .await?;
                 } else {
-                    Self::with_action_timeout("act press_key", dispatch_key_press(page, &key))
+                    self.with_action_timeout("act press_key", dispatch_key_press(page, &key))
                         .await?;
                 }
                 Ok(BrowserOutput::success(format!("Pressed key '{key}'")))
             }
             ActKind::Hover => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act hover", element.hover()).await?;
+                self.with_action_timeout("act hover", element.hover())
+                    .await?;
                 Ok(BrowserOutput::success("Hovered over element"))
             }
             ActKind::ScrollIntoView => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act scroll_into_view", element.scroll_into_view())
+                self.with_action_timeout("act scroll_into_view", element.scroll_into_view())
                     .await?;
                 Ok(BrowserOutput::success("Scrolled element into view"))
             }
             ActKind::Focus => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                Self::with_action_timeout("act focus", element.focus()).await?;
+                self.with_action_timeout("act focus", element.focus())
+                    .await?;
                 Ok(BrowserOutput::success("Focused element"))
             }
         }
@@ -840,7 +850,7 @@ impl BrowserTool {
 
         let screenshot_data = if let Some(ref_id) = element_ref {
             let element = self.resolve_element_ref(&state, page, Some(ref_id)).await?;
-            Self::with_action_timeout(
+            self.with_action_timeout(
                 "element screenshot",
                 element.screenshot(CaptureScreenshotFormat::Png),
             )
@@ -850,7 +860,8 @@ impl BrowserTool {
                 .format(CaptureScreenshotFormat::Png)
                 .full_page(full_page)
                 .build();
-            Self::with_action_timeout("page screenshot", page.screenshot(params)).await?
+            self.with_action_timeout("page screenshot", page.screenshot(params))
+                .await?
         };
 
         // Save to disk
@@ -902,7 +913,9 @@ impl BrowserTool {
         let state = self.state.lock().await;
         let page = self.require_active_page(&state)?;
 
-        let result = Self::with_action_timeout("evaluate", page.evaluate(script)).await?;
+        let result = self
+            .with_action_timeout("evaluate", page.evaluate(script))
+            .await?;
 
         let value = result.value().cloned();
 
@@ -923,7 +936,9 @@ impl BrowserTool {
         let state = self.state.lock().await;
         let page = self.require_active_page(&state)?;
 
-        let html = Self::with_action_timeout("page content", page.content()).await?;
+        let html = self
+            .with_action_timeout("page content", page.content())
+            .await?;
 
         let title = page.get_title().await.ok().flatten();
         let url = page.url().await.ok().flatten();
@@ -958,8 +973,9 @@ impl BrowserTool {
         let mut close_error: Option<BrowserError> = None;
 
         if let Some(mut browser) = state.browser.take() {
-            let close_result =
-                Self::with_action_timeout("browser close", async { browser.close().await }).await;
+            let close_result = self
+                .with_action_timeout("browser close", async { browser.close().await })
+                .await;
             if let Err(error) = close_result {
                 tracing::warn!(%error, "browser close returned error");
                 close_error = Some(error);
@@ -1000,7 +1016,9 @@ impl BrowserTool {
             .ok_or_else(|| BrowserError::new("browser not launched — call launch first"))?;
 
         let target_url = url.unwrap_or("about:blank");
-        let page = Self::with_action_timeout("create page", browser.new_page(target_url)).await?;
+        let page = self
+            .with_action_timeout("create page", browser.new_page(target_url))
+            .await?;
 
         let target_id = page_target_id(&page);
         state.pages.insert(target_id.clone(), page);

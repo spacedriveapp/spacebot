@@ -407,7 +407,7 @@ impl Messaging for DiscordAdapter {
                 self.active_messages.write().await.remove(&message.id);
             }
             OutboundResponse::Status(status) => {
-                let _ = self.send_status(message, status).await?;
+                self.send_status(message, status).await?;
             }
             // Slack-specific variants — graceful fallbacks for Discord
             OutboundResponse::RemoveReaction(_) => {} // no-op

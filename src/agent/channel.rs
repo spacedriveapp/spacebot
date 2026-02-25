@@ -3074,6 +3074,23 @@ where
                                     worker_id = %worker_id,
                                     "worker timeout watcher event stream closed"
                                 );
+                                let outcome = match future.await {
+                                    Ok(text) => ("done", text, true, true),
+                                    Err(error) => {
+                                        tracing::error!(
+                                            worker_id = %worker_id,
+                                            %error,
+                                            "worker failed after watcher channel closed"
+                                        );
+                                        (
+                                            "failed",
+                                            format!("{WORKER_FAILED_PREFIX} {error}"),
+                                            true,
+                                            false,
+                                        )
+                                    }
+                                };
+                                break outcome;
                             }
                         }
                     }
@@ -4171,12 +4188,14 @@ mod tests {
         let progress_channel_id = channel_id.clone();
         let progress_task = tokio::spawn(async move {
             tokio::time::sleep(Duration::from_millis(700)).await;
-            let _ = progress_tx.send(ProcessEvent::WorkerStatus {
-                agent_id: progress_agent_id,
-                worker_id,
-                channel_id: Some(progress_channel_id),
-                status: "still working".to_string(),
-            });
+            progress_tx
+                .send(ProcessEvent::WorkerStatus {
+                    agent_id: progress_agent_id,
+                    worker_id,
+                    channel_id: Some(progress_channel_id),
+                    status: "still working".to_string(),
+                })
+                .ok();
         });
 
         let handle = spawn_worker_task(worker_id, event_tx, agent_id, Some(channel_id), 1, async {
@@ -4237,7 +4256,7 @@ mod tests {
         impl Drop for DropSignal {
             fn drop(&mut self) {
                 if let Some(sender) = self.0.take() {
-                    let _ = sender.send(());
+                    sender.send(()).ok();
                 }
             }
         }
@@ -4252,7 +4271,7 @@ mod tests {
         let handle =
             spawn_worker_task(worker_id, event_tx, agent_id, Some(channel_id), 30, async {
                 let _guard = DropSignal(Some(drop_tx));
-                let _ = started_tx.send(());
+                started_tx.send(()).ok();
                 tokio::time::sleep(Duration::from_secs(120)).await;
                 Ok::<String, anyhow::Error>("should not finish".to_string())
             });
@@ -4262,7 +4281,13 @@ mod tests {
             .expect("future should start before cancellation")
             .expect("start signal channel unexpectedly closed");
         handle.abort();
-        let _ = handle.await;
+        let join_error = handle
+            .await
+            .expect_err("aborted worker task should not complete successfully");
+        assert!(
+            join_error.is_cancelled(),
+            "aborted worker task should report cancellation"
+        );
 
         tokio::time::timeout(Duration::from_secs(1), drop_rx)
             .await

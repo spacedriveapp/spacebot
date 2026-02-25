@@ -109,6 +109,7 @@ startup_delay_secs = 5
 enabled = true
 headless = true
 evaluate_enabled = false
+browser_action_timeout_secs = 45
 executable_path = "/path/to/chrome"     # optional, auto-detected
 screenshot_dir = "/path/to/screenshots" # optional, defaults to data_dir/screenshots
 
@@ -239,7 +240,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
-| `[defaults.worker_contract]` (`ack_secs`, `progress_secs`, `tick_secs`) | Yes | Runtime contract deadlines and polling update without restart |
+| `[defaults.worker_contract]` / `[agents.worker_contract]` (`ack_secs`, `progress_secs`, `tick_secs`) | Yes | Runtime and agent-level contract deadlines and polling update without restart |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
@@ -527,6 +528,7 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `enabled` | bool | true | Whether workers have browser tools |
 | `headless` | bool | true | Run Chrome headless |
 | `evaluate_enabled` | bool | false | Allow JavaScript evaluation |
+| `browser_action_timeout_secs` | integer | 45 | Per-action timeout for browser operations |
 | `executable_path` | string | None | Custom Chrome/Chromium path |
 | `screenshot_dir` | string | None | Directory for screenshots |
 
