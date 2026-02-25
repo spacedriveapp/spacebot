@@ -305,9 +305,7 @@ impl Channel {
         };
 
         let self_tx = message_tx.clone();
-        let worker_contract_tick_secs = (**deps.runtime_config.worker_contract.load())
-            .tick_secs
-            .max(1);
+        let worker_contract_tick_secs = deps.runtime_config.worker_contract.load().tick_secs.max(1);
         let channel = Self {
             id: id.clone(),
             title: None,
@@ -444,7 +442,11 @@ impl Channel {
                     // Check worker task contract deadline
                     if self.worker_contract_tick_deadline <= now {
                         self.flush_due_worker_task_contract_deadlines().await;
-                        let tick_secs = (**self.deps.runtime_config.worker_contract.load())
+                        let tick_secs = self
+                            .deps
+                            .runtime_config
+                            .worker_contract
+                            .load()
                             .tick_secs
                             .max(1);
                         self.worker_contract_tick_deadline = tokio::time::Instant::now()
@@ -1760,7 +1762,11 @@ impl Channel {
                     &self.deps.agent_id,
                 );
                 let worker_contract_config = **self.deps.runtime_config.worker_contract.load();
-                let terminal_secs = (**self.deps.runtime_config.cortex.load())
+                let terminal_secs = self
+                    .deps
+                    .runtime_config
+                    .cortex
+                    .load()
                     .worker_timeout_secs
                     .max(1);
                 let public_task_summary = summarize_worker_start_for_status(task);
@@ -1770,9 +1776,11 @@ impl Channel {
                         &self.id,
                         *worker_id,
                         &public_task_summary,
-                        worker_contract_config.ack_secs.max(1),
-                        worker_contract_config.progress_secs.max(1),
-                        terminal_secs,
+                        crate::conversation::history::WorkerTaskContractTiming {
+                            ack_secs: worker_contract_config.ack_secs.max(1),
+                            progress_secs: worker_contract_config.progress_secs.max(1),
+                            terminal_secs,
+                        },
                     )
                     .await
                 {
@@ -1805,7 +1813,11 @@ impl Channel {
                 worker_id, status, ..
             } => {
                 run_logger.log_worker_status(*worker_id, status);
-                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                let progress_secs = self
+                    .deps
+                    .runtime_config
+                    .worker_contract
+                    .load()
                     .progress_secs
                     .max(1);
                 if let Err(error) = run_logger
@@ -1834,7 +1846,11 @@ impl Channel {
                     "tool_started",
                     serde_json::json!({ "tool_name": tool_name }),
                 );
-                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                let progress_secs = self
+                    .deps
+                    .runtime_config
+                    .worker_contract
+                    .load()
                     .progress_secs
                     .max(1);
                 if let Err(error) = run_logger
@@ -1864,7 +1880,11 @@ impl Channel {
                     "tool_completed",
                     serde_json::json!({ "tool_name": tool_name }),
                 );
-                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                let progress_secs = self
+                    .deps
+                    .runtime_config
+                    .worker_contract
+                    .load()
                     .progress_secs
                     .max(1);
                 if let Err(error) = run_logger
@@ -1898,7 +1918,11 @@ impl Channel {
                         "description": description,
                     }),
                 );
-                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                let progress_secs = self
+                    .deps
+                    .runtime_config
+                    .worker_contract
+                    .load()
                     .progress_secs
                     .max(1);
                 if let Err(error) = run_logger
@@ -1930,7 +1954,11 @@ impl Channel {
                         "question_id": question_id,
                     }),
                 );
-                let progress_secs = (**self.deps.runtime_config.worker_contract.load())
+                let progress_secs = self
+                    .deps
+                    .runtime_config
+                    .worker_contract
+                    .load()
                     .progress_secs
                     .max(1);
                 if let Err(error) = run_logger
@@ -1962,7 +1990,11 @@ impl Channel {
                     .await;
 
                     let terminal_state = classify_worker_terminal_state(result);
-                    let terminal_secs = (**self.deps.runtime_config.cortex.load())
+                    let terminal_secs = self
+                        .deps
+                        .runtime_config
+                        .cortex
+                        .load()
                         .worker_timeout_secs
                         .max(1);
                     if let Err(error) = self
@@ -2654,7 +2686,7 @@ pub async fn spawn_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
-        (**state.deps.runtime_config.cortex.load()).worker_timeout_secs,
+        state.deps.runtime_config.cortex.load().worker_timeout_secs,
         worker.run().instrument(worker_span),
     );
 
@@ -2750,7 +2782,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
-        (**state.deps.runtime_config.cortex.load()).worker_timeout_secs,
+        state.deps.runtime_config.cortex.load().worker_timeout_secs,
         async move {
             let result = worker.run().await?;
             Ok::<String, anyhow::Error>(result.result_text)

@@ -283,6 +283,13 @@ pub struct DueWorkerTaskContractTerminal {
     pub worker_id: WorkerId,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerTaskContractTiming {
+    pub ack_secs: u64,
+    pub progress_secs: u64,
+    pub terminal_secs: u64,
+}
+
 /// Persists branch and worker run records for channel timeline history.
 ///
 /// All write methods are fire-and-forget, same pattern as ConversationLogger.
@@ -552,9 +559,7 @@ impl ProcessRunLogger {
         channel_id: &ChannelId,
         worker_id: WorkerId,
         task_summary: &str,
-        ack_secs: u64,
-        progress_secs: u64,
-        terminal_secs: u64,
+        timing: WorkerTaskContractTiming,
     ) -> crate::error::Result<()> {
         let id = uuid::Uuid::new_v4().to_string();
         let worker_id = worker_id.to_string();
@@ -578,9 +583,9 @@ impl ProcessRunLogger {
         .bind(&worker_id)
         .bind(task_summary)
         .bind(WORKER_CONTRACT_STATE_CREATED)
-        .bind(ack_secs as i64)
-        .bind(progress_secs as i64)
-        .bind(terminal_secs as i64)
+        .bind(timing.ack_secs as i64)
+        .bind(timing.progress_secs as i64)
+        .bind(timing.terminal_secs as i64)
         .bind(&status_hash)
         .execute(&self.pool)
         .await
@@ -601,9 +606,9 @@ impl ProcessRunLogger {
         )
         .bind(task_summary)
         .bind(WORKER_CONTRACT_STATE_CREATED)
-        .bind(ack_secs as i64)
-        .bind(progress_secs as i64)
-        .bind(terminal_secs as i64)
+        .bind(timing.ack_secs as i64)
+        .bind(timing.progress_secs as i64)
+        .bind(timing.terminal_secs as i64)
         .bind(&status_hash)
         .bind(&worker_id)
         .bind(WORKER_CONTRACT_STATE_TERMINAL_ACKED)
@@ -1969,9 +1974,11 @@ mod tests {
                 &channel_id,
                 worker_id,
                 "research task",
-                0,
-                0,
-                60,
+                WorkerTaskContractTiming {
+                    ack_secs: 0,
+                    progress_secs: 0,
+                    terminal_secs: 60,
+                },
             )
             .await
             .expect("upsert contract");
@@ -2061,9 +2068,11 @@ mod tests {
                 &channel_id,
                 worker_id,
                 "analysis task",
-                5,
-                45,
-                60,
+                WorkerTaskContractTiming {
+                    ack_secs: 5,
+                    progress_secs: 45,
+                    terminal_secs: 60,
+                },
             )
             .await
             .expect("upsert contract");
@@ -2111,9 +2120,11 @@ mod tests {
                 &channel_id,
                 worker_id,
                 "deadline task",
-                5,
-                45,
-                1,
+                WorkerTaskContractTiming {
+                    ack_secs: 5,
+                    progress_secs: 45,
+                    terminal_secs: 1,
+                },
             )
             .await
             .expect("upsert contract");
