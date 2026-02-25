@@ -2,11 +2,10 @@
 
 use crate::{BranchId, ChannelId, WorkerId};
 
-use fnv::FnvHasher;
 use serde::Serialize;
+use sha2::{Digest as _, Sha256};
 use sqlx::{Row as _, SqlitePool};
 use std::collections::HashMap;
-use std::hash::{Hash as _, Hasher as _};
 
 /// Persists conversation messages (user and assistant) to SQLite.
 ///
@@ -238,9 +237,9 @@ fn worker_receipt_backoff_secs(attempt_count: i64) -> Option<i64> {
 }
 
 fn status_fingerprint(status: &str) -> String {
-    let mut hasher = FnvHasher::default();
-    status.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(status.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 #[derive(Debug, Clone)]
@@ -1172,7 +1171,18 @@ impl ProcessRunLogger {
 
         let mut claimed = Vec::with_capacity(rows.len());
         for row in rows {
-            let receipt_id: String = row.try_get("id").unwrap_or_default();
+            let receipt_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        column = "id",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
             let updated = sqlx::query(
                 "UPDATE worker_delivery_receipts \
                  SET status = 'sending', updated_at = CURRENT_TIMESTAMP \
@@ -1188,13 +1198,83 @@ impl ProcessRunLogger {
                 continue;
             }
 
+            let worker_id: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        receipt_id = %receipt_id,
+                        column = "worker_id",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
+            let receipt_channel_id: String = match row.try_get("channel_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "channel_id",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
+            let terminal_state: String = match row.try_get("terminal_state") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "terminal_state",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
+            let payload_text: String = match row.try_get("payload_text") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "payload_text",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
+            let attempt_count: i64 = match row.try_get("attempt_count") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel_id,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "attempt_count",
+                        "skipping malformed terminal receipt row"
+                    );
+                    continue;
+                }
+            };
+
             claimed.push(PendingWorkerDeliveryReceipt {
                 id: receipt_id,
-                worker_id: row.try_get("worker_id").unwrap_or_default(),
-                channel_id: row.try_get("channel_id").unwrap_or_default(),
-                terminal_state: row.try_get("terminal_state").unwrap_or_default(),
-                payload_text: row.try_get("payload_text").unwrap_or_default(),
-                attempt_count: row.try_get("attempt_count").unwrap_or_default(),
+                worker_id,
+                channel_id: receipt_channel_id,
+                terminal_state,
+                payload_text,
+                attempt_count,
             });
         }
 
@@ -1233,7 +1313,17 @@ impl ProcessRunLogger {
 
         let mut claimed = Vec::with_capacity(rows.len());
         for row in rows {
-            let receipt_id: String = row.try_get("id").unwrap_or_default();
+            let receipt_id: String = match row.try_get("id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        column = "id",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
             let updated = sqlx::query(
                 "UPDATE worker_delivery_receipts \
                  SET status = 'sending', updated_at = CURRENT_TIMESTAMP \
@@ -1249,13 +1339,78 @@ impl ProcessRunLogger {
                 continue;
             }
 
+            let worker_id: String = match row.try_get("worker_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        receipt_id = %receipt_id,
+                        column = "worker_id",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
+            let receipt_channel_id: String = match row.try_get("channel_id") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "channel_id",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
+            let terminal_state: String = match row.try_get("terminal_state") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "terminal_state",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
+            let payload_text: String = match row.try_get("payload_text") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "payload_text",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
+            let attempt_count: i64 = match row.try_get("attempt_count") {
+                Ok(value) => value,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        receipt_id = %receipt_id,
+                        worker_id = %worker_id,
+                        column = "attempt_count",
+                        "skipping malformed terminal receipt row (global claim)"
+                    );
+                    continue;
+                }
+            };
+
             claimed.push(PendingWorkerDeliveryReceipt {
                 id: receipt_id,
-                worker_id: row.try_get("worker_id").unwrap_or_default(),
-                channel_id: row.try_get("channel_id").unwrap_or_default(),
-                terminal_state: row.try_get("terminal_state").unwrap_or_default(),
-                payload_text: row.try_get("payload_text").unwrap_or_default(),
-                attempt_count: row.try_get("attempt_count").unwrap_or_default(),
+                worker_id,
+                channel_id: receipt_channel_id,
+                terminal_state,
+                payload_text,
+                attempt_count,
             });
         }
 
@@ -1337,8 +1492,16 @@ impl ProcessRunLogger {
         .map_err(|db_error| anyhow::anyhow!(db_error))?
         .ok_or_else(|| anyhow::anyhow!("worker delivery receipt not found: {receipt_id}"))?;
 
-        let current_status: String = row.try_get("status").unwrap_or_default();
-        let current_attempts: i64 = row.try_get("attempt_count").unwrap_or_default();
+        let current_status: String = row.try_get("status").map_err(|decode_error| {
+            anyhow::anyhow!(
+                "failed to decode worker_delivery_receipts.status for {receipt_id}: {decode_error}"
+            )
+        })?;
+        let current_attempts: i64 = row.try_get("attempt_count").map_err(|decode_error| {
+            anyhow::anyhow!(
+                "failed to decode worker_delivery_receipts.attempt_count for {receipt_id}: {decode_error}"
+            )
+        })?;
 
         if current_status == "acked" {
             tx.commit()

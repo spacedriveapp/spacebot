@@ -104,5 +104,9 @@ mod tests {
                 "duplicate migration version detected: {version} ({file_name})"
             );
         }
+        assert!(
+            !seen_versions.is_empty(),
+            "no migrations found in migrations/"
+        );
     }
 }

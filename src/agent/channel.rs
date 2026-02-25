@@ -491,7 +491,7 @@ impl Channel {
                     }
                     // Check worker terminal receipt dispatch deadline
                     if self.worker_receipt_dispatch_deadline <= now {
-                        self.flush_due_worker_delivery_receipts().await;
+                        self.flush_due_worker_delivery_receipts();
                         self.worker_receipt_dispatch_deadline = tokio::time::Instant::now()
                             + std::time::Duration::from_secs(
                                 WORKER_RECEIPT_DISPATCH_INTERVAL_SECS,
@@ -499,7 +499,7 @@ impl Channel {
                     }
                     // Check worker task contract deadline
                     if self.worker_contract_tick_deadline <= now {
-                        self.flush_due_worker_task_contract_deadlines().await;
+                        self.flush_due_worker_task_contract_deadlines();
                         let tick_secs = self
                             .deps
                             .runtime_config
@@ -2177,18 +2177,30 @@ impl Channel {
         );
     }
 
-    async fn flush_due_worker_delivery_receipts(&mut self) {
-        let due = match self
-            .state
-            .process_run_logger
-            .claim_due_worker_terminal_receipts(&self.id, WORKER_RECEIPT_DISPATCH_BATCH_SIZE)
+    fn flush_due_worker_delivery_receipts(&self) {
+        let run_logger = self.state.process_run_logger.clone();
+        let response_tx = self.response_tx.clone();
+        let channel_id = self.id.clone();
+        tokio::spawn(async move {
+            Self::flush_due_worker_delivery_receipts_task(run_logger, response_tx, channel_id)
+                .await;
+        });
+    }
+
+    async fn flush_due_worker_delivery_receipts_task(
+        run_logger: ProcessRunLogger,
+        response_tx: mpsc::Sender<OutboundEnvelope>,
+        channel_id: ChannelId,
+    ) {
+        let due = match run_logger
+            .claim_due_worker_terminal_receipts(&channel_id, WORKER_RECEIPT_DISPATCH_BATCH_SIZE)
             .await
         {
             Ok(receipts) => receipts,
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    channel_id = %self.id,
+                    channel_id = %channel_id,
                     "failed to claim due worker terminal receipts"
                 );
                 return;
@@ -2203,24 +2215,22 @@ impl Channel {
             let message = OutboundResponse::Text(receipt.payload_text.clone());
             let envelope = OutboundEnvelope::tracked(message, receipt.id.clone());
 
-            if let Err(error) = self.response_tx.send(envelope).await {
+            if let Err(error) = response_tx.send(envelope).await {
                 tracing::warn!(
                     %error,
-                    channel_id = %self.id,
+                    channel_id = %channel_id,
                     worker_id = %receipt.worker_id,
                     receipt_id = %receipt.id,
                     "failed to queue worker terminal receipt for outbound delivery"
                 );
 
-                if let Err(update_error) = self
-                    .state
-                    .process_run_logger
+                if let Err(update_error) = run_logger
                     .fail_worker_delivery_receipt_attempt(&receipt.id, &error.to_string())
                     .await
                 {
                     tracing::warn!(
                         %update_error,
-                        channel_id = %self.id,
+                        channel_id = %channel_id,
                         worker_id = %receipt.worker_id,
                         receipt_id = %receipt.id,
                         "failed to mark worker terminal receipt send failure"
@@ -2230,16 +2240,42 @@ impl Channel {
         }
     }
 
-    async fn flush_due_worker_task_contract_deadlines(&mut self) {
-        let worker_contract_config = **self.deps.runtime_config.worker_contract.load();
+    fn flush_due_worker_task_contract_deadlines(&self) {
+        let run_logger = self.state.process_run_logger.clone();
+        let response_tx = self.response_tx.clone();
+        let channel_id = self.id.clone();
+        let status_block = self.state.status_block.clone();
+        let ack_secs = self
+            .deps
+            .runtime_config
+            .worker_contract
+            .load()
+            .ack_secs
+            .max(1);
+        tokio::spawn(async move {
+            Self::flush_due_worker_task_contract_deadlines_task(
+                run_logger,
+                response_tx,
+                channel_id,
+                status_block,
+                ack_secs,
+            )
+            .await;
+        });
+    }
 
-        let due_ack = match self
-            .state
-            .process_run_logger
+    async fn flush_due_worker_task_contract_deadlines_task(
+        run_logger: ProcessRunLogger,
+        response_tx: mpsc::Sender<OutboundEnvelope>,
+        channel_id: ChannelId,
+        status_block: Arc<RwLock<StatusBlock>>,
+        ack_secs: u64,
+    ) {
+        let due_ack = match run_logger
             .claim_due_worker_task_contract_ack_deadlines(
-                &self.id,
+                &channel_id,
                 WORKER_CONTRACT_ACK_BATCH_SIZE,
-                worker_contract_config.ack_secs.max(1),
+                ack_secs,
             )
             .await
         {
@@ -2247,7 +2283,7 @@ impl Channel {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    channel_id = %self.id,
+                    channel_id = %channel_id,
                     "failed to claim due worker task contract ack deadlines"
                 );
                 Vec::new()
@@ -2255,16 +2291,14 @@ impl Channel {
         };
 
         for due in due_ack {
-            if !self.worker_is_user_visible(due.worker_id).await {
-                if let Err(error) = self
-                    .state
-                    .process_run_logger
+            if !Self::worker_is_user_visible_in_status_block(&status_block, due.worker_id).await {
+                if let Err(error) = run_logger
                     .mark_worker_task_contract_acknowledged(due.worker_id)
                     .await
                 {
                     tracing::warn!(
                         %error,
-                        channel_id = %self.id,
+                        channel_id = %channel_id,
                         worker_id = %due.worker_id,
                         "failed to auto-ack hidden worker task contract"
                     );
@@ -2272,18 +2306,27 @@ impl Channel {
                 continue;
             }
             let status = build_worker_ack_checkpoint(&due.task_summary, due.attempt_count);
-            self.send_status_update(crate::StatusUpdate::WorkerCheckpoint {
-                worker_id: due.worker_id,
-                status,
-            })
-            .await;
+            if let Err(error) = response_tx
+                .send(OutboundEnvelope::from(OutboundResponse::Status(
+                    crate::StatusUpdate::WorkerCheckpoint {
+                        worker_id: due.worker_id,
+                        status,
+                    },
+                )))
+                .await
+            {
+                tracing::debug!(
+                    %error,
+                    channel_id = %channel_id,
+                    worker_id = %due.worker_id,
+                    "failed to route worker ack checkpoint status update"
+                );
+            }
         }
 
-        let due_progress = match self
-            .state
-            .process_run_logger
+        let due_progress = match run_logger
             .claim_due_worker_task_contract_progress_deadlines(
-                &self.id,
+                &channel_id,
                 WORKER_CONTRACT_PROGRESS_BATCH_SIZE,
             )
             .await
@@ -2292,7 +2335,7 @@ impl Channel {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    channel_id = %self.id,
+                    channel_id = %channel_id,
                     "failed to claim due worker task contract progress deadlines"
                 );
                 Vec::new()
@@ -2300,22 +2343,31 @@ impl Channel {
         };
 
         for due in due_progress {
-            if !self.worker_is_user_visible(due.worker_id).await {
+            if !Self::worker_is_user_visible_in_status_block(&status_block, due.worker_id).await {
                 continue;
             }
             let status = build_worker_progress_sla_nudge(&due.task_summary);
-            self.send_status_update(crate::StatusUpdate::WorkerCheckpoint {
-                worker_id: due.worker_id,
-                status,
-            })
-            .await;
+            if let Err(error) = response_tx
+                .send(OutboundEnvelope::from(OutboundResponse::Status(
+                    crate::StatusUpdate::WorkerCheckpoint {
+                        worker_id: due.worker_id,
+                        status,
+                    },
+                )))
+                .await
+            {
+                tracing::debug!(
+                    %error,
+                    channel_id = %channel_id,
+                    worker_id = %due.worker_id,
+                    "failed to route worker progress checkpoint status update"
+                );
+            }
         }
 
-        let due_terminal = match self
-            .state
-            .process_run_logger
+        let due_terminal = match run_logger
             .claim_due_worker_task_contract_terminal_deadlines(
-                &self.id,
+                &channel_id,
                 WORKER_CONTRACT_TERMINAL_BATCH_SIZE,
             )
             .await
@@ -2324,7 +2376,7 @@ impl Channel {
             Err(error) => {
                 tracing::warn!(
                     %error,
-                    channel_id = %self.id,
+                    channel_id = %channel_id,
                     "failed to claim due worker task contract terminal deadlines"
                 );
                 Vec::new()
@@ -2332,13 +2384,24 @@ impl Channel {
         };
 
         for due in due_terminal {
-            self.worker_checkpoints.remove(&due.worker_id);
             tracing::warn!(
-                channel_id = %self.id,
+                channel_id = %channel_id,
                 worker_id = %due.worker_id,
                 "worker terminal deadline elapsed before adapter acknowledgement"
             );
         }
+    }
+
+    async fn worker_is_user_visible_in_status_block(
+        status_block: &Arc<RwLock<StatusBlock>>,
+        worker_id: WorkerId,
+    ) -> bool {
+        let status_block = status_block.read().await;
+        status_block
+            .active_workers
+            .iter()
+            .find(|worker| worker.id == worker_id)
+            .is_some_and(|worker| worker.notify_on_complete)
     }
 
     async fn worker_is_user_visible(&self, worker_id: WorkerId) -> bool {
@@ -2932,6 +2995,7 @@ where
                                     skipped,
                                     "worker timeout watcher lagged on event stream"
                                 );
+                                deadline = tokio::time::Instant::now() + timeout_duration;
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                                 tracing::warn!(

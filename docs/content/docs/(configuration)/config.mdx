@@ -486,6 +486,8 @@ Thresholds are fractions of `context_window`.
 | `progress_secs` | integer | 45 | Deadline between meaningful worker progress updates |
 | `tick_secs` | integer | 2 | Poll interval for worker contract deadline checks |
 
+Setting `ack_secs`, `progress_secs`, or `tick_secs` to `0` is treated as unset and falls back to the resolved default for that scope.
+
 ### `[defaults.cortex]`
 
 | Key | Type | Default | Description |
