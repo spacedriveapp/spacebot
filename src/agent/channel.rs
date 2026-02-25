@@ -1347,11 +1347,24 @@ impl Channel {
             .await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
-        // to use the tool calling API. Inject a correction and give it one more try.
-        if let Ok(ref response) = result
-            && extract_reply_from_tool_syntax(response.trim()).is_some()
-        {
-            tracing::warn!(channel_id = %self.id, "LLM emitted tool syntax as text, retrying with correction");
+        // to use the tool calling API. Inject a correction and retry a couple
+        // times so the model can recover by calling `reply` or `skip`.
+        const TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS: usize = 2;
+        let mut recovery_attempts = 0;
+        while let Ok(ref response) = result {
+            if !crate::tools::should_block_user_visible_text(response)
+                || recovery_attempts >= TOOL_SYNTAX_RECOVERY_MAX_ATTEMPTS
+            {
+                break;
+            }
+
+            recovery_attempts += 1;
+            tracing::warn!(
+                channel_id = %self.id,
+                attempt = recovery_attempts,
+                "LLM emitted blocked structured output, retrying with correction"
+            );
+
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
             result = agent
@@ -1405,34 +1418,41 @@ impl Channel {
                     // fallback since the user hasn't seen the result yet.
                     let text = response.trim();
                     if !text.is_empty() {
-                        tracing::info!(
-                            channel_id = %self.id,
-                            response_len = text.len(),
-                            "LLM skipped on retrigger but produced text, sending as fallback"
-                        );
-                        let extracted = extract_reply_from_tool_syntax(text);
-                        let source = self
-                            .conversation_id
-                            .as_deref()
-                            .and_then(|conversation_id| conversation_id.split(':').next())
-                            .unwrap_or("unknown");
-                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                            extracted.as_deref().unwrap_or(text),
-                            source,
-                        );
-                        if !final_text.is_empty() {
-                            if extracted.is_some() {
-                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
-                            }
-                            self.state
-                                .conversation_logger
-                                .log_bot_message(&self.state.channel_id, &final_text);
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundResponse::Text(final_text))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                        if crate::tools::should_block_user_visible_text(text) {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                "blocked retrigger fallback output containing structured or tool syntax"
+                            );
+                        } else {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                response_len = text.len(),
+                                "LLM skipped on retrigger but produced text, sending as fallback"
+                            );
+                            let extracted = extract_reply_from_tool_syntax(text);
+                            let source = self
+                                .conversation_id
+                                .as_deref()
+                                .and_then(|conversation_id| conversation_id.split(':').next())
+                                .unwrap_or("unknown");
+                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                                extracted.as_deref().unwrap_or(text),
+                                source,
+                            );
+                            if !final_text.is_empty() {
+                                if extracted.is_some() {
+                                    tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
+                                }
+                                self.state
+                                    .conversation_logger
+                                    .log_bot_message(&self.state.channel_id, &final_text);
+                                if let Err(error) = self
+                                    .response_tx
+                                    .send(OutboundResponse::Text(final_text))
+                                    .await
+                                {
+                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                }
                             }
                         }
                     } else {
@@ -1451,31 +1471,38 @@ impl Channel {
                     // as a fallback so the user still gets the worker/branch output.
                     let text = response.trim();
                     if !text.is_empty() {
-                        tracing::info!(
-                            channel_id = %self.id,
-                            response_len = text.len(),
-                            "retrigger produced text without reply tool, sending as fallback"
-                        );
-                        let extracted = extract_reply_from_tool_syntax(text);
-                        let source = self
-                            .conversation_id
-                            .as_deref()
-                            .and_then(|conversation_id| conversation_id.split(':').next())
-                            .unwrap_or("unknown");
-                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                            extracted.as_deref().unwrap_or(text),
-                            source,
-                        );
-                        if !final_text.is_empty() {
-                            self.state
-                                .conversation_logger
-                                .log_bot_message(&self.state.channel_id, &final_text);
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundResponse::Text(final_text))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                        if crate::tools::should_block_user_visible_text(text) {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                "blocked retrigger output containing structured or tool syntax"
+                            );
+                        } else {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                response_len = text.len(),
+                                "retrigger produced text without reply tool, sending as fallback"
+                            );
+                            let extracted = extract_reply_from_tool_syntax(text);
+                            let source = self
+                                .conversation_id
+                                .as_deref()
+                                .and_then(|conversation_id| conversation_id.split(':').next())
+                                .unwrap_or("unknown");
+                            let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                                extracted.as_deref().unwrap_or(text),
+                                source,
+                            );
+                            if !final_text.is_empty() {
+                                self.state
+                                    .conversation_logger
+                                    .log_bot_message(&self.state.channel_id, &final_text);
+                                if let Err(error) = self
+                                    .response_tx
+                                    .send(OutboundResponse::Text(final_text))
+                                    .await
+                                {
+                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                }
                             }
                         }
                     } else {
@@ -1490,31 +1517,38 @@ impl Channel {
                     // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
                     // attempt to extract the reply content and send that instead.
                     let text = response.trim();
-                    let extracted = extract_reply_from_tool_syntax(text);
-                    let source = self
-                        .conversation_id
-                        .as_deref()
-                        .and_then(|conversation_id| conversation_id.split(':').next())
-                        .unwrap_or("unknown");
-                    let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                        extracted.as_deref().unwrap_or(text),
-                        source,
-                    );
-                    if !final_text.is_empty() {
-                        if extracted.is_some() {
-                            tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
-                        }
-                        self.state.conversation_logger.log_bot_message_with_name(
-                            &self.state.channel_id,
-                            &final_text,
-                            Some(self.agent_display_name()),
+                    if crate::tools::should_block_user_visible_text(text) {
+                        tracing::warn!(
+                            channel_id = %self.id,
+                            "blocked fallback output containing structured or tool syntax"
                         );
-                        if let Err(error) = self
-                            .response_tx
-                            .send(OutboundResponse::Text(final_text))
-                            .await
-                        {
-                            tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
+                    } else {
+                        let extracted = extract_reply_from_tool_syntax(text);
+                        let source = self
+                            .conversation_id
+                            .as_deref()
+                            .and_then(|conversation_id| conversation_id.split(':').next())
+                            .unwrap_or("unknown");
+                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+                            extracted.as_deref().unwrap_or(text),
+                            source,
+                        );
+                        if !final_text.is_empty() {
+                            if extracted.is_some() {
+                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
+                            }
+                            self.state.conversation_logger.log_bot_message_with_name(
+                                &self.state.channel_id,
+                                &final_text,
+                                Some(self.agent_display_name()),
+                            );
+                            if let Err(error) = self
+                                .response_tx
+                                .send(OutboundResponse::Text(final_text))
+                                .await
+                            {
+                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
+                            }
                         }
                     }
 
