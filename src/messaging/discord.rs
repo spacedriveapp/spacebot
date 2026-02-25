@@ -483,7 +483,7 @@ impl Messaging for DiscordAdapter {
             | StatusUpdate::ToolCompleted { .. }
             | StatusUpdate::BranchStarted { .. } => {
                 self.stop_typing(message).await;
-                true
+                false
             }
         };
         Ok(if surfaced {

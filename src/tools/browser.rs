@@ -660,9 +660,7 @@ impl BrowserTool {
             .remove(&id)
             .ok_or_else(|| BrowserError::new(format!("no tab with target_id '{id}'")))?;
 
-        page.close()
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to close tab: {error}")))?;
+        Self::with_action_timeout("close tab", page.close()).await?;
 
         if state.active_target.as_ref() == Some(&id) {
             state.active_target = state.pages.keys().next().cloned();
@@ -679,18 +677,17 @@ impl BrowserTool {
         let page = self.require_active_page(&state)?.clone();
 
         // Enable accessibility domain if not already enabled
-        page.execute(AxEnableParams::default())
-            .await
-            .map_err(|error| {
-                BrowserError::new(format!("failed to enable accessibility: {error}"))
-            })?;
+        Self::with_action_timeout(
+            "snapshot accessibility enable",
+            page.execute(AxEnableParams::default()),
+        )
+        .await?;
 
-        let ax_tree = page
-            .execute(GetFullAxTreeParams::default())
-            .await
-            .map_err(|error| {
-                BrowserError::new(format!("failed to get accessibility tree: {error}"))
-            })?;
+        let ax_tree = Self::with_action_timeout(
+            "snapshot accessibility tree",
+            page.execute(GetFullAxTreeParams::default()),
+        )
+        .await?;
 
         state.element_refs.clear();
         state.next_ref = 0;
@@ -778,10 +775,7 @@ impl BrowserTool {
         match act_kind {
             ActKind::Click => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .click()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("click failed: {error}")))?;
+                Self::with_action_timeout("act click", element.click()).await?;
                 Ok(BrowserOutput::success("Clicked element"))
             }
             ActKind::Type => {
@@ -789,14 +783,8 @@ impl BrowserTool {
                     return Err(BrowserError::new("text is required for act:type"));
                 };
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .click()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("focus failed: {error}")))?;
-                element
-                    .type_str(&text)
-                    .await
-                    .map_err(|error| BrowserError::new(format!("type failed: {error}")))?;
+                Self::with_action_timeout("act focus", element.click()).await?;
+                Self::with_action_timeout("act type", element.type_str(&text)).await?;
                 Ok(BrowserOutput::success(format!(
                     "Typed '{}' into element",
                     truncate_for_display(&text, 50)
@@ -808,36 +796,27 @@ impl BrowserTool {
                 };
                 if element_ref.is_some() {
                     let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                    element
-                        .press_key(&key)
-                        .await
-                        .map_err(|error| BrowserError::new(format!("press_key failed: {error}")))?;
+                    Self::with_action_timeout("act press_key", element.press_key(&key)).await?;
                 } else {
-                    dispatch_key_press(page, &key).await?;
+                    Self::with_action_timeout("act press_key", dispatch_key_press(page, &key))
+                        .await?;
                 }
                 Ok(BrowserOutput::success(format!("Pressed key '{key}'")))
             }
             ActKind::Hover => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .hover()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("hover failed: {error}")))?;
+                Self::with_action_timeout("act hover", element.hover()).await?;
                 Ok(BrowserOutput::success("Hovered over element"))
             }
             ActKind::ScrollIntoView => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element.scroll_into_view().await.map_err(|error| {
-                    BrowserError::new(format!("scroll_into_view failed: {error}"))
-                })?;
+                Self::with_action_timeout("act scroll_into_view", element.scroll_into_view())
+                    .await?;
                 Ok(BrowserOutput::success("Scrolled element into view"))
             }
             ActKind::Focus => {
                 let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .focus()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("focus failed: {error}")))?;
+                Self::with_action_timeout("act focus", element.focus()).await?;
                 Ok(BrowserOutput::success("Focused element"))
             }
         }
@@ -853,18 +832,17 @@ impl BrowserTool {
 
         let screenshot_data = if let Some(ref_id) = element_ref {
             let element = self.resolve_element_ref(&state, page, Some(ref_id)).await?;
-            element
-                .screenshot(CaptureScreenshotFormat::Png)
-                .await
-                .map_err(|error| BrowserError::new(format!("element screenshot failed: {error}")))?
+            Self::with_action_timeout(
+                "element screenshot",
+                element.screenshot(CaptureScreenshotFormat::Png),
+            )
+            .await?
         } else {
             let params = ScreenshotParams::builder()
                 .format(CaptureScreenshotFormat::Png)
                 .full_page(full_page)
                 .build();
-            page.screenshot(params)
-                .await
-                .map_err(|error| BrowserError::new(format!("screenshot failed: {error}")))?
+            Self::with_action_timeout("page screenshot", page.screenshot(params)).await?
         };
 
         // Save to disk
@@ -916,10 +894,7 @@ impl BrowserTool {
         let state = self.state.lock().await;
         let page = self.require_active_page(&state)?;
 
-        let result = page
-            .evaluate(script)
-            .await
-            .map_err(|error| BrowserError::new(format!("evaluate failed: {error}")))?;
+        let result = Self::with_action_timeout("evaluate", page.evaluate(script)).await?;
 
         let value = result.value().cloned();
 
@@ -940,10 +915,7 @@ impl BrowserTool {
         let state = self.state.lock().await;
         let page = self.require_active_page(&state)?;
 
-        let html = page
-            .content()
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to get page content: {error}")))?;
+        let html = Self::with_action_timeout("page content", page.content()).await?;
 
         let title = page.get_title().await.ok().flatten();
         let url = page.url().await.ok().flatten();

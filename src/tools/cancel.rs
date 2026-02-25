@@ -107,11 +107,15 @@ impl Tool for CancelTool {
             other => return Err(CancelError(format!("Unknown process type: {other}"))),
         }
 
-        let message = if let Some(reason) = &args.reason {
-            format!(
-                "{} {} cancelled: {reason}",
-                args.process_type, args.process_id
-            )
+        let message = if args.process_type == "worker" {
+            if let Some(reason) = &args.reason {
+                format!(
+                    "{} {} cancelled: {reason}",
+                    args.process_type, args.process_id
+                )
+            } else {
+                format!("{} {} cancelled.", args.process_type, args.process_id)
+            }
         } else {
             format!("{} {} cancelled.", args.process_type, args.process_id)
         };
