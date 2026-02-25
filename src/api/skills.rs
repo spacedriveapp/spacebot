@@ -3,8 +3,22 @@ use super::state::{ApiEvent, ApiState};
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
+use moka::sync::Cache;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+use std::sync::LazyLock;
+use std::time::Duration;
+
+const REGISTRY_SKILL_DESCRIPTION_CACHE_CAPACITY: u64 = 10_000;
+const REGISTRY_SKILL_DESCRIPTION_CACHE_TTL: Duration = Duration::from_secs(60 * 60 * 6);
+
+static REGISTRY_SKILL_DESCRIPTION_CACHE: LazyLock<Cache<String, Option<String>>> =
+    LazyLock::new(|| {
+        Cache::builder()
+            .max_capacity(REGISTRY_SKILL_DESCRIPTION_CACHE_CAPACITY)
+            .time_to_live(REGISTRY_SKILL_DESCRIPTION_CACHE_TTL)
+            .build()
+    });
 
 #[derive(Serialize)]
 pub(super) struct SkillInfo {
@@ -52,6 +66,9 @@ pub(super) struct RegistrySkill {
     skill_id: String,
     name: String,
     installs: u64,
+    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     id: Option<String>,
 }
@@ -60,6 +77,8 @@ pub(super) struct RegistrySkill {
 pub(super) struct RegistryBrowseResponse {
     skills: Vec<RegistrySkill>,
     has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total: Option<u64>,
 }
 
 #[derive(Serialize)]
@@ -214,7 +233,7 @@ pub(super) async fn registry_browse(
     let client = reqwest::Client::new();
     let response = client
         .get(&url)
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|error| {
@@ -233,6 +252,8 @@ pub(super) async fn registry_browse(
         #[serde(default)]
         #[serde(rename = "hasMore")]
         has_more: bool,
+        #[serde(default)]
+        total: Option<u64>,
     }
 
     let body: UpstreamResponse = response.json().await.map_err(|error| {
@@ -240,9 +261,14 @@ pub(super) async fn registry_browse(
         StatusCode::BAD_GATEWAY
     })?;
 
+    let mut skills = body.skills;
+    apply_cached_registry_descriptions(&mut skills);
+    spawn_registry_description_enrichment(client, skills.clone());
+
     Ok(Json(RegistryBrowseResponse {
-        skills: body.skills,
+        skills,
         has_more: body.has_more,
+        total: body.total,
     }))
 }
 
@@ -261,7 +287,7 @@ pub(super) async fn registry_search(
             ("q", &query.q),
             ("limit", &query.limit.min(100).to_string()),
         ])
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(Duration::from_secs(10))
         .send()
         .await
         .map_err(|error| {
@@ -286,9 +312,253 @@ pub(super) async fn registry_search(
         StatusCode::BAD_GATEWAY
     })?;
 
+    let mut skills = body.skills;
+    apply_cached_registry_descriptions(&mut skills);
+    spawn_registry_description_enrichment(client, skills.clone());
+
     Ok(Json(RegistrySearchResponse {
-        skills: body.skills,
+        skills,
         query: body.query,
         count: body.count,
     }))
+}
+
+fn apply_cached_registry_descriptions(skills: &mut [RegistrySkill]) {
+    for skill in skills {
+        if skill
+            .description
+            .as_ref()
+            .is_some_and(|description| !description.trim().is_empty())
+        {
+            continue;
+        }
+
+        let cache_key = registry_skill_key(&skill.source, &skill.skill_id);
+        if let Some(cached_description) = REGISTRY_SKILL_DESCRIPTION_CACHE.get(&cache_key) {
+            skill.description = cached_description;
+        }
+    }
+}
+
+fn spawn_registry_description_enrichment(client: reqwest::Client, skills: Vec<RegistrySkill>) {
+    let should_enrich = skills.iter().any(|skill| {
+        if skill
+            .description
+            .as_ref()
+            .is_some_and(|description| !description.trim().is_empty())
+        {
+            return false;
+        }
+
+        let cache_key = registry_skill_key(&skill.source, &skill.skill_id);
+        REGISTRY_SKILL_DESCRIPTION_CACHE.get(&cache_key).is_none()
+    });
+    if !should_enrich {
+        return;
+    }
+
+    tokio::spawn(async move {
+        let mut enrichment_skills = skills;
+        enrich_registry_descriptions(&client, &mut enrichment_skills).await;
+    });
+}
+
+async fn enrich_registry_descriptions(client: &reqwest::Client, skills: &mut [RegistrySkill]) {
+    let mut join_set = tokio::task::JoinSet::new();
+
+    for (index, skill) in skills.iter_mut().enumerate() {
+        if skill
+            .description
+            .as_ref()
+            .is_some_and(|description| !description.trim().is_empty())
+        {
+            continue;
+        }
+
+        let source = skill.source.clone();
+        let skill_id = skill.skill_id.clone();
+        let cache_key = registry_skill_key(&source, &skill_id);
+
+        if let Some(cached_description) = REGISTRY_SKILL_DESCRIPTION_CACHE.get(&cache_key) {
+            skill.description = cached_description;
+            continue;
+        }
+
+        let client = client.clone();
+        join_set.spawn(async move {
+            let description = fetch_registry_skill_description(&client, &source, &skill_id).await;
+            (index, cache_key, description)
+        });
+    }
+
+    while let Some(result) = join_set.join_next().await {
+        let Ok((index, cache_key, description)) = result else {
+            continue;
+        };
+        let description = description.filter(|candidate| !candidate.trim().is_empty());
+
+        if let Some(skill) = skills.get_mut(index) {
+            skill.description = description.clone();
+        }
+
+        REGISTRY_SKILL_DESCRIPTION_CACHE.insert(cache_key, description);
+    }
+}
+
+fn registry_skill_key(source: &str, skill_id: &str) -> String {
+    format!("{source}/{skill_id}")
+}
+
+async fn fetch_registry_skill_description(
+    client: &reqwest::Client,
+    source: &str,
+    skill_id: &str,
+) -> Option<String> {
+    let repo_name = source.split('/').next_back().unwrap_or_default();
+
+    let mut candidate_paths = if repo_name == skill_id {
+        vec![
+            "SKILL.md".to_string(),
+            format!("{skill_id}/SKILL.md"),
+            format!("skills/{skill_id}/SKILL.md"),
+            format!(".claude/skills/{skill_id}/SKILL.md"),
+        ]
+    } else {
+        vec![
+            format!("{skill_id}/SKILL.md"),
+            format!("skills/{skill_id}/SKILL.md"),
+            format!(".claude/skills/{skill_id}/SKILL.md"),
+            "SKILL.md".to_string(),
+        ]
+    };
+
+    for path in candidate_paths.drain(..) {
+        for branch in ["HEAD", "main", "master"] {
+            let url = format!("https://raw.githubusercontent.com/{source}/{branch}/{path}");
+            let response = match client
+                .get(&url)
+                .header(reqwest::header::USER_AGENT, "spacebot-registry-client")
+                .timeout(Duration::from_secs(3))
+                .send()
+                .await
+            {
+                Ok(response) => response,
+                Err(_) => continue,
+            };
+
+            if !response.status().is_success() {
+                continue;
+            }
+
+            let markdown = match response.text().await {
+                Ok(markdown) => markdown,
+                Err(_) => continue,
+            };
+
+            if let Some(description) = extract_skill_description(&markdown) {
+                return Some(description);
+            }
+        }
+    }
+
+    None
+}
+
+fn extract_skill_description(markdown: &str) -> Option<String> {
+    let lines = strip_frontmatter(markdown)
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    for (index, line) in lines.iter().enumerate() {
+        let heading = line.trim().to_ascii_lowercase();
+        if heading.starts_with('#')
+            && heading.contains("description")
+            && let Some(description) = extract_paragraph(&lines[(index + 1)..])
+        {
+            return Some(description);
+        }
+    }
+
+    extract_paragraph(&lines)
+}
+
+fn strip_frontmatter(markdown: &str) -> String {
+    let mut lines = markdown.lines();
+    let Some(first_line) = lines.next() else {
+        return String::new();
+    };
+
+    if first_line.trim() != "---" {
+        return markdown.to_string();
+    }
+
+    for line in lines.by_ref() {
+        if line.trim() == "---" {
+            break;
+        }
+    }
+
+    lines.collect::<Vec<_>>().join("\n")
+}
+
+fn extract_paragraph(lines: &[String]) -> Option<String> {
+    let mut in_code_block = false;
+    let mut paragraph_lines = Vec::new();
+
+    for line in lines {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("```") {
+            in_code_block = !in_code_block;
+            continue;
+        }
+        if in_code_block {
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            if paragraph_lines.is_empty() {
+                continue;
+            }
+            break;
+        }
+
+        if trimmed.starts_with('#') || trimmed.starts_with("| ---") {
+            if paragraph_lines.is_empty() {
+                continue;
+            }
+            break;
+        }
+
+        let cleaned = cleaned_description_line(trimmed);
+        if cleaned.is_empty() {
+            continue;
+        }
+        paragraph_lines.push(cleaned);
+    }
+
+    if paragraph_lines.is_empty() {
+        return None;
+    }
+
+    let mut description = paragraph_lines.join(" ");
+    description = description.split_whitespace().collect::<Vec<_>>().join(" ");
+
+    if description.is_empty() {
+        return None;
+    }
+
+    if description.chars().count() > 220 {
+        description = format!("{}...", description.chars().take(217).collect::<String>());
+    }
+
+    Some(description)
+}
+
+fn cleaned_description_line(line: &str) -> String {
+    line.trim_start_matches("- ")
+        .trim_start_matches("* ")
+        .trim_start_matches("+ ")
+        .replace('`', "")
 }

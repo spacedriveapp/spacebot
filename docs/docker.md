@@ -197,6 +197,31 @@ healthcheck:
 - Graceful shutdown on `SIGTERM` (what `docker stop` sends). Drains active channels, closes database connections.
 - The PID file and Unix socket (used in daemon mode) are not created.
 
+## Updates
+
+Spacebot checks for new releases on startup and every hour. When a new version is available, a banner appears in the web UI.
+
+The web dashboard also includes **Settings → Updates** with status details, one-click controls (Docker), and manual command snippets.
+
+`latest` is supported and continues to receive updates (it tracks the rolling `full` image). Use explicit version tags only when you want controlled rollouts.
+
+### Manual Update
+
+```bash
+docker compose pull spacebot
+docker compose up -d --force-recreate spacebot
+```
+
+### One-Click Update
+
+Mount `/var/run/docker.sock` into the Spacebot container to enable the **Update now** button in the UI. Without the socket mount, update checks still work but apply is manual.
+
+One-click updates are intended for containers running Spacebot release tags. If you're running a custom/self-built image, rebuild your image and recreate the container.
+
+### Native / Source Builds
+
+If Spacebot is installed from source (`cargo install --path .` or a local release build), updates are manual: pull latest source, rebuild/reinstall, then restart.
+
 ## CI / Releases
 
 Images are built and pushed to `ghcr.io/spacedriveapp/spacebot` via GitHub Actions (`.github/workflows/release.yml`).

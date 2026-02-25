@@ -12,6 +12,42 @@ interface WebChatPanelProps {
 	agentId: string;
 }
 
+const ASSISTANT_DUPLICATE_WINDOW_MS = 12_000;
+const ASSISTANT_FINGERPRINT_TTL_MS = 30_000;
+
+function normalizeAssistantContent(content: string) {
+	return content.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function rememberAssistantContent(
+	fingerprints: Map<string, number>,
+	content: string,
+	now: number,
+) {
+	const fingerprint = normalizeAssistantContent(content);
+	if (!fingerprint) return;
+	fingerprints.set(fingerprint, now);
+}
+
+function isRecentAssistantDuplicate(
+	fingerprints: Map<string, number>,
+	content: string,
+	now: number,
+) {
+	const fingerprint = normalizeAssistantContent(content);
+	if (!fingerprint) return false;
+	const seenAt = fingerprints.get(fingerprint);
+	return seenAt !== undefined && now - seenAt < ASSISTANT_DUPLICATE_WINDOW_MS;
+}
+
+function pruneAssistantFingerprints(fingerprints: Map<string, number>, now: number) {
+	for (const [fingerprint, seenAt] of fingerprints.entries()) {
+		if (now - seenAt > ASSISTANT_FINGERPRINT_TTL_MS) {
+			fingerprints.delete(fingerprint);
+		}
+	}
+}
+
 function ToolActivityIndicator({activity}: {activity: ToolActivity[]}) {
 	if (activity.length === 0) return null;
 
@@ -179,6 +215,8 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const sessionId = getPortalChatSessionId(agentId);
 	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
+	const recentAssistantFingerprintsRef = useRef(new Map<string, number>());
+	const fingerprintedMessageIdsRef = useRef(new Set<string>());
 
 	// Pick up assistant messages from the global SSE stream that arrived
 	// after the webchat request SSE closed (e.g. worker completion retriggers).
@@ -186,8 +224,17 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const seenIdsRef = useRef(new Set<string>());
 	useEffect(() => {
 		if (!timeline) return;
+		const now = Date.now();
+		pruneAssistantFingerprints(recentAssistantFingerprintsRef.current, now);
+
 		// Seed seen IDs from webchat messages so we don't duplicate
-		for (const m of messages) seenIdsRef.current.add(m.id);
+		for (const m of messages) {
+			seenIdsRef.current.add(m.id);
+			if (m.role === "assistant" && !fingerprintedMessageIdsRef.current.has(m.id)) {
+				fingerprintedMessageIdsRef.current.add(m.id);
+				rememberAssistantContent(recentAssistantFingerprintsRef.current, m.content, now);
+			}
+		}
 
 		const newMessages: {id: string; role: "assistant"; content: string}[] = [];
 		for (const item of timeline) {
@@ -197,6 +244,11 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 				!seenIdsRef.current.has(item.id)
 			) {
 				seenIdsRef.current.add(item.id);
+				if (isRecentAssistantDuplicate(recentAssistantFingerprintsRef.current, item.content, now)) {
+					continue;
+				}
+				fingerprintedMessageIdsRef.current.add(item.id);
+				rememberAssistantContent(recentAssistantFingerprintsRef.current, item.content, now);
 				newMessages.push({
 					id: item.id,
 					role: "assistant",

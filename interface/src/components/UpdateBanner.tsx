@@ -30,6 +30,8 @@ export function UpdateBanner() {
 	if (!data || !data.update_available || dismissed || data.deployment === "hosted") return null;
 
 	const isApplying = applyMutation.isPending;
+	const isDocker = data.deployment === "docker";
+	const isNative = data.deployment === "native";
 
 	return (
 		<div>
@@ -49,7 +51,7 @@ export function UpdateBanner() {
 					</a>
 				)}
 				<BannerActions>
-					{data.can_apply && (
+					{isDocker && data.can_apply && (
 						<Button
 							onClick={() => {
 								setApplyError(null);
@@ -62,9 +64,14 @@ export function UpdateBanner() {
 							Update now
 						</Button>
 					)}
-					{!data.can_apply && data.deployment === "docker" && (
+					{isDocker && !data.can_apply && (
 						<span className="text-xs text-ink-faint">
-							Mount docker.sock for one-click updates
+							{data.cannot_apply_reason ?? "Mount docker.sock for one-click updates"}
+						</span>
+					)}
+					{isNative && (
+						<span className="text-xs text-ink-faint">
+							{data.cannot_apply_reason ?? "Native/source installs update manually (rebuild + restart)"}
 						</span>
 					)}
 					<Button

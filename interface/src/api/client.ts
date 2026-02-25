@@ -320,6 +320,8 @@ export interface UpdateStatus {
 	release_notes: string | null;
 	deployment: Deployment;
 	can_apply: boolean;
+	cannot_apply_reason: string | null;
+	docker_image: string | null;
 	checked_at: string | null;
 	error: string | null;
 }
@@ -847,12 +849,14 @@ export interface RegistrySkill {
 	skillId: string;
 	name: string;
 	installs: number;
+	description?: string;
 	id?: string;
 }
 
 export interface RegistryBrowseResponse {
 	skills: RegistrySkill[];
 	has_more: boolean;
+	total?: number;
 }
 
 export interface RegistrySearchResponse {

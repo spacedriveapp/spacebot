@@ -465,6 +465,7 @@ impl SpacebotModel {
             &self.model_name,
             &request,
             effort,
+            provider_config.use_bearer_auth,
         );
 
         let is_oauth =
@@ -527,8 +528,9 @@ impl SpacebotModel {
 
         messages.extend(convert_messages_to_openai(&request.chat_history));
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "messages": messages,
         });
 
@@ -631,8 +633,9 @@ impl SpacebotModel {
 
         let input = convert_messages_to_openai_responses(&request.chat_history);
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "input": input,
         });
 
@@ -836,6 +839,20 @@ impl SpacebotModel {
         parse_openai_response(response_body, provider_display_name)
     }
 
+    /// Remap model name for providers that require a different format in API calls.
+    fn remap_model_name_for_api(&self) -> String {
+        if self.provider == "zai-coding-plan" {
+            // Z.AI Coding Plan API expects "zai/glm-5" not "glm-5"
+            let model_name = self
+                .model_name
+                .strip_prefix("zai/")
+                .unwrap_or(&self.model_name);
+            format!("zai/{model_name}")
+        } else {
+            self.model_name.clone()
+        }
+    }
+
     /// Generic OpenAI-compatible API call with optional bearer auth.
     async fn call_openai_compatible_with_optional_auth(
         &self,
@@ -856,8 +873,9 @@ impl SpacebotModel {
 
         messages.extend(convert_messages_to_openai(&request.chat_history));
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "messages": messages,
         });
 

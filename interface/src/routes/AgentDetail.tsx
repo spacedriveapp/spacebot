@@ -144,35 +144,51 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 						{/* Memory Donut */}
 						<div className="rounded-xl bg-app-darkBox p-5">
 							<div className="mb-4 flex items-center justify-between">
-								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory Types</h3>
-								<span className="text-2xl font-medium tabular-nums text-ink">{overviewData.memory_total}</span>
+								<h3 className="font-plex text-sm font-medium text-ink-dull">Memory</h3>
+								<Link
+									to="/agents/$agentId/memories"
+									params={{ agentId }}
+									className="text-tiny text-accent hover:text-accent/80"
+								>
+									Edit
+								</Link>
 							</div>
 							<MemoryDonut counts={overviewData.memory_counts} />
 						</div>
 
 						{/* Model Routing */}
 						{configData && (
-							<div className="rounded-xl bg-app-darkBox p-5">
+							<div className="flex h-full flex-col rounded-xl bg-app-darkBox p-5">
 								<div className="mb-4 flex items-center justify-between">
 									<h3 className="font-plex text-sm font-medium text-ink-dull">Model Routing</h3>
 									<Link
 										to="/agents/$agentId/config"
 										params={{ agentId }}
+										search={{ tab: "routing" }}
 										className="text-tiny text-accent hover:text-accent/80"
 									>
 										Edit
 									</Link>
 								</div>
-								<ModelRoutingList config={configData} />
+								<div className="flex-1">
+									<ModelRoutingList config={configData} />
+								</div>
 							</div>
 						)}
 
 						{/* Quick Stats */}
-						<div className="rounded-xl bg-app-darkBox p-5">
-							<div className="mb-4">
+						<div className="flex h-full flex-col rounded-xl bg-app-darkBox p-5">
+							<div className="mb-4 flex items-center justify-between">
 								<h3 className="font-plex text-sm font-medium text-ink-dull">Configuration</h3>
+								<Link
+									to="/agents/$agentId/config"
+									params={{ agentId }}
+									className="text-tiny text-accent hover:text-accent/80"
+								>
+									Edit
+								</Link>
 							</div>
-							<div className="flex flex-col gap-3">
+							<div className="flex flex-1 flex-col justify-evenly gap-2">
 								<StatRow label="Context Window" value={agent.context_window.toLocaleString()} />
 								<StatRow label="Max Turns" value={String(agent.max_turns)} />
 								<StatRow label="Max Branches" value={String(agent.max_concurrent_branches)} />
@@ -470,8 +486,8 @@ function ActivityHeatmap({ data }: { data: { day: number; hour: number; count: n
 
 	const maxCount = Math.max(...data.map((d) => d.count), 1);
 	const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+	const hours = Array.from({ length: 24 }, (_value, index) => index);
 
-	// Create a 7x24 grid
 	const getCell = (day: number, hour: number) => {
 		const cell = data.find((d) => d.day === day && d.hour === hour);
 		return cell?.count ?? 0;
@@ -483,34 +499,30 @@ function ActivityHeatmap({ data }: { data: { day: number; hour: number; count: n
 	};
 
 	return (
-		<div className="h-48 overflow-auto">
-			<div className="flex flex-col gap-1">
-				{/* Hour labels */}
-				<div className="flex gap-1">
-					<div className="w-8 flex-shrink-0" /> {/* Day label spacer */}
-					{Array.from({ length: 24 }, (_, h) => (
-						<div key={h} className="w-4 flex-shrink-0 text-center text-[10px] text-ink-faint">
-							{h % 6 === 0 ? h : ""}
+		<div className="h-48">
+			<div className="grid h-full grid-rows-[auto_repeat(7,minmax(0,1fr))] gap-y-1">
+				<div className="grid grid-cols-[2rem_repeat(24,minmax(0,1fr))] gap-1">
+					<div />
+					{hours.map((hour) => (
+						<div key={hour} className="text-center text-[10px] text-ink-faint">
+							{hour % 6 === 0 ? hour : ""}
 						</div>
 					))}
 				</div>
-				{/* Heatmap grid */}
 				{days.map((dayLabel, day) => (
-					<div key={day} className="flex items-center gap-1">
-						<div className="w-8 flex-shrink-0 text-[10px] text-ink-faint">{dayLabel}</div>
-						<div className="flex gap-1">
-							{Array.from({ length: 24 }, (_, hour) => {
-								const count = getCell(day, hour);
-								return (
-									<div
-										key={hour}
-										title={`${dayLabel} ${hour}:00 - ${count} messages`}
-										className="h-4 w-4 flex-shrink-0 rounded-sm bg-accent transition-opacity hover:ring-1 hover:ring-accent"
-										style={{ opacity: getOpacity(count) }}
-									/>
-								);
-							})}
-						</div>
+					<div key={day} className="grid grid-cols-[2rem_repeat(24,minmax(0,1fr))] items-center gap-1">
+						<div className="text-[10px] text-ink-faint">{dayLabel}</div>
+						{hours.map((hour) => {
+							const count = getCell(day, hour);
+							return (
+								<div
+									key={hour}
+									title={`${dayLabel} ${hour}:00 - ${count} messages`}
+									className="h-3.5 w-full rounded-sm bg-accent transition-opacity hover:ring-1 hover:ring-accent"
+									style={{ opacity: getOpacity(count) }}
+								/>
+							);
+						})}
 					</div>
 				))}
 			</div>
@@ -524,14 +536,15 @@ function MemoryDonut({ counts }: { counts: Record<string, number> }) {
 		value: counts[type] ?? 0,
 		color: MEMORY_TYPE_COLORS[idx % MEMORY_TYPE_COLORS.length],
 	})).filter((d) => d.value > 0);
+	const total = data.reduce((sum, item) => sum + item.value, 0);
 
 	if (data.length === 0) {
 		return <div className="h-48 flex items-center justify-center text-ink-faint text-sm">No memories</div>;
 	}
 
 	return (
-		<div>
-			<div className="h-40">
+			<div>
+			<div className="relative h-40">
 				<ResponsiveContainer width="100%" height="100%">
 					<PieChart>
 						<Pie
@@ -555,11 +568,18 @@ function MemoryDonut({ counts }: { counts: Record<string, number> }) {
 								border: `1px solid ${CHART_COLORS.tooltip.border}`,
 								borderRadius: "6px",
 								fontSize: "12px",
+								padding: "4px 6px",
 							}}
-							itemStyle={{ color: CHART_COLORS.tooltip.text }}
+							wrapperStyle={{ zIndex: 20 }}
+							labelStyle={{ display: "none" }}
+							itemStyle={{ color: CHART_COLORS.tooltip.text, margin: 0, lineHeight: 1.2 }}
 						/>
 					</PieChart>
 				</ResponsiveContainer>
+				<div className="pointer-events-none absolute inset-0 z-0 flex flex-col items-center justify-center">
+					<span className="text-2xl font-medium tabular-nums text-ink">{total}</span>
+					<span className="text-tiny text-ink-faint">total</span>
+				</div>
 			</div>
 			<div className="mt-2 flex flex-wrap justify-center gap-2">
 				{data.map((item) => (
@@ -586,7 +606,7 @@ function ModelRoutingList({ config }: { config: { routing: { channel: string; br
 	];
 
 	return (
-		<div className="flex flex-col gap-2">
+		<div className="flex h-full flex-col justify-evenly gap-2">
 			{models.map(({ label, model, color }) => (
 				<div key={label} className="flex items-center justify-between">
 					<span className="text-tiny text-ink-faint">{label}</span>
@@ -628,29 +648,32 @@ function IdentitySection({
 	if (!hasContent) return null;
 
 	const files = [
-		{ label: "SOUL.md", content: identity.soul },
-		{ label: "IDENTITY.md", content: identity.identity },
-		{ label: "USER.md", content: identity.user },
+		{ label: "SOUL.md", tab: "soul", content: identity.soul },
+		{ label: "IDENTITY.md", tab: "identity", content: identity.identity },
+		{ label: "USER.md", tab: "user", content: identity.user },
 	].filter((f) => f.content && f.content.trim().length > 0 && !f.content.startsWith("<!--"));
 
 	if (files.length === 0) return null;
 
 	return (
 		<section className="mt-6">
-			<div className="mb-3 flex items-center justify-between">
+			<div className="mb-3">
 				<h3 className="font-plex text-sm font-medium text-ink-dull">Identity</h3>
-				<Link
-					to="/agents/$agentId/config"
-					params={{ agentId }}
-					className="text-tiny text-accent hover:text-accent/80"
-				>
-					Edit
-				</Link>
 			</div>
 			<div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
-				{files.map(({ label, content }) => (
+				{files.map(({ label, tab, content }) => (
 					<div key={label} className="rounded-xl bg-app-darkBox p-4">
-						<span className="text-tiny font-medium text-ink-faint">{label}</span>
+						<div className="flex items-center justify-between gap-3">
+							<span className="text-tiny font-medium text-ink-faint">{label}</span>
+							<Link
+								to="/agents/$agentId/config"
+								params={{ agentId }}
+								search={{ tab }}
+								className="text-tiny text-accent hover:text-accent/80"
+							>
+								Edit
+							</Link>
+						</div>
 						<p className="mt-2 line-clamp-4 whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
 							{content!.trim()}
 						</p>
