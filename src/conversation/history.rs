@@ -381,7 +381,6 @@ impl ProcessRunLogger {
             .await
             {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker start");
-                return;
             }
         });
     }
@@ -426,7 +425,6 @@ impl ProcessRunLogger {
             .await
             {
                 tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
-                return;
             }
         });
     }
