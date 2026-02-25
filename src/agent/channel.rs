@@ -1953,7 +1953,12 @@ impl Channel {
                 question_id: _,
                 ..
             } if channel_id.as_ref() == Some(&self.id) => {
-                self.spawn_worker_progress_refresh(run_logger.clone(), *worker_id, None, "question");
+                self.spawn_worker_progress_refresh(
+                    run_logger.clone(),
+                    *worker_id,
+                    None,
+                    "question",
+                );
             }
             ProcessEvent::WorkerComplete {
                 worker_id,

@@ -115,9 +115,11 @@ impl Tool for WorkerInspectTool {
             summary.push_str(&format!("\n### Result\n\n{result}\n"));
         }
 
+        let mut transcript_steps = Vec::new();
         if let Some(blob) = &detail.transcript_blob {
             match worker_transcript::deserialize_transcript(blob) {
                 Ok(steps) => {
+                    transcript_steps = steps.clone();
                     summary.push_str(&format!("\n### Transcript ({} steps)\n\n", steps.len()));
                     for step in &steps {
                         match step {
@@ -167,6 +169,46 @@ impl Tool for WorkerInspectTool {
             }
         } else {
             summary.push_str("\n*No transcript available for this worker.*\n");
+        }
+
+        let contract = self
+            .run_logger
+            .get_worker_task_contract_snapshot(&worker_id)
+            .await
+            .map_err(|e| WorkerInspectError(format!("Failed to load worker contract: {e}")))?;
+        let receipt = self
+            .run_logger
+            .get_worker_terminal_receipt_snapshot(&worker_id)
+            .await
+            .map_err(|e| WorkerInspectError(format!("Failed to load worker receipt: {e}")))?;
+        let projection = crate::conversation::history::build_worker_timeline_projection(
+            &detail.status,
+            &transcript_steps,
+            contract.as_ref(),
+            receipt.as_ref(),
+        );
+        if !projection.events.is_empty() {
+            summary.push_str("\n### Projected Timeline\n\n");
+            summary.push_str(&format!(
+                "- terminal_converged: {}\n",
+                projection.terminal_converged
+            ));
+
+            let max_events = 80;
+            for event in projection.events.iter().take(max_events) {
+                let timestamp = event.at.as_deref().unwrap_or("transcript");
+                summary.push_str(&format!(
+                    "- [{}] {}: {}\n",
+                    timestamp, event.kind, event.summary
+                ));
+            }
+            if projection.events.len() > max_events {
+                summary.push_str(&format!(
+                    "- ... {} additional projected events omitted\n",
+                    projection.events.len() - max_events
+                ));
+            }
+            summary.push('\n');
         }
 
         Ok(WorkerInspectOutput {

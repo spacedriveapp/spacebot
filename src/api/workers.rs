@@ -52,6 +52,8 @@ pub(super) struct WorkerListItem {
 pub(super) struct WorkerDetailQuery {
     agent_id: String,
     worker_id: String,
+    #[serde(default)]
+    include_timeline: bool,
 }
 
 #[derive(Serialize)]
@@ -67,6 +69,8 @@ pub(super) struct WorkerDetailResponse {
     completed_at: Option<String>,
     transcript: Option<Vec<worker_transcript::TranscriptStep>>,
     tool_calls: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timeline: Option<crate::conversation::history::WorkerTimelineProjection>,
 }
 
 /// List worker runs for an agent, with live status merged from StatusBlocks.
@@ -164,6 +168,42 @@ pub(super) async fn worker_detail(
             .ok()
     });
 
+    let timeline = if query.include_timeline {
+        let contract = logger
+            .get_worker_task_contract_snapshot(&query.worker_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    worker_id = %query.worker_id,
+                    "failed to load worker task contract snapshot"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let receipt = logger
+            .get_worker_terminal_receipt_snapshot(&query.worker_id)
+            .await
+            .map_err(|error| {
+                tracing::warn!(
+                    %error,
+                    worker_id = %query.worker_id,
+                    "failed to load worker receipt snapshot"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+        let steps = transcript.as_deref().unwrap_or(&[]);
+        Some(
+            crate::conversation::history::build_worker_timeline_projection(
+                &detail.status,
+                steps,
+                contract.as_ref(),
+                receipt.as_ref(),
+            ),
+        )
+    } else {
+        None
+    };
+
     Ok(Json(WorkerDetailResponse {
         id: detail.id,
         task: detail.task,
@@ -176,5 +216,6 @@ pub(super) async fn worker_detail(
         completed_at: detail.completed_at,
         transcript,
         tool_calls: detail.tool_calls,
+        timeline,
     }))
 }

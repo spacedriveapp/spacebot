@@ -150,6 +150,17 @@ Terminal worker notices (`done`, `failed`, `timed_out`, `cancelled`) are queued 
 - On process restart, in-flight (`sending`) receipts are re-queued so completion notices are not silently dropped.
 - Old terminal receipts (`acked`, `failed`) are pruned periodically to keep storage bounded.
 
+## Canonical Timeline Projection
+
+Worker execution truth stays in `worker_runs.transcript`. Delivery truth stays in `worker_task_contracts` and `worker_delivery_receipts`.
+
+Spacebot computes a read-time projection (it does not persist a second event log):
+
+- Transcript steps are ordered by step index.
+- Delivery/contract snapshots are ordered by timestamp.
+- `workers/detail?include_timeline=true` returns the synthesized timeline plus a `terminal_converged` flag.
+- `worker_inspect` shows the same projection so transcript and delivery state can be audited together.
+
 ## Model Routing
 
 Workers default to `anthropic/claude-haiku-4.5-20250514`. Task-type overrides apply — for example, a `coding` task type routes to `anthropic/claude-sonnet-4-20250514`. Fallback chains are supported. All hot-reloadable.

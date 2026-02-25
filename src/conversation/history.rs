@@ -1,5 +1,6 @@
 //! Conversation message persistence (SQLite).
 
+use crate::conversation::worker_transcript::{ActionContent, TranscriptStep};
 use crate::{BranchId, ChannelId, WorkerId};
 
 use serde::Serialize;
@@ -1900,6 +1901,160 @@ impl ProcessRunLogger {
         }))
     }
 
+    /// Load the current worker task contract snapshot for a worker.
+    pub async fn get_worker_task_contract_snapshot(
+        &self,
+        worker_id: &str,
+    ) -> crate::error::Result<Option<WorkerTaskContractSnapshot>> {
+        let row = sqlx::query(
+            "SELECT id, worker_id, task_summary, state, attempt_count, sla_nudge_sent, \
+                    terminal_state, ack_deadline_at, progress_deadline_at, terminal_deadline_at, \
+                    last_progress_at, created_at, updated_at \
+             FROM worker_task_contracts \
+             WHERE worker_id = ? \
+             LIMIT 1",
+        )
+        .bind(worker_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let id: String = row.try_get("id").map_err(|error| anyhow::anyhow!(error))?;
+        let worker_id: String = row
+            .try_get("worker_id")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let task_summary: String = row
+            .try_get("task_summary")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let state: String = row
+            .try_get("state")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let attempt_count: i64 = row
+            .try_get("attempt_count")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let sla_nudge_sent = row.try_get::<i64, _>("sla_nudge_sent").unwrap_or(0) != 0;
+        let terminal_state = row.try_get("terminal_state").ok();
+        let ack_deadline_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("ack_deadline_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let progress_deadline_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("progress_deadline_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let terminal_deadline_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("terminal_deadline_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let last_progress_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("last_progress_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let created_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let updated_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+
+        Ok(Some(WorkerTaskContractSnapshot {
+            id,
+            worker_id,
+            task_summary,
+            state,
+            attempt_count,
+            sla_nudge_sent,
+            terminal_state,
+            ack_deadline_at,
+            progress_deadline_at,
+            terminal_deadline_at,
+            last_progress_at,
+            created_at,
+            updated_at,
+        }))
+    }
+
+    /// Load the current terminal delivery receipt snapshot for a worker.
+    pub async fn get_worker_terminal_receipt_snapshot(
+        &self,
+        worker_id: &str,
+    ) -> crate::error::Result<Option<WorkerDeliveryReceiptSnapshot>> {
+        let row = sqlx::query(
+            "SELECT id, worker_id, channel_id, status, terminal_state, payload_text, \
+                    attempt_count, last_error, next_attempt_at, acked_at, created_at, updated_at \
+             FROM worker_delivery_receipts \
+             WHERE worker_id = ? \
+               AND kind = ? \
+             LIMIT 1",
+        )
+        .bind(worker_id)
+        .bind(WORKER_TERMINAL_RECEIPT_KIND)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let id: String = row.try_get("id").map_err(|error| anyhow::anyhow!(error))?;
+        let worker_id: String = row
+            .try_get("worker_id")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let channel_id: String = row
+            .try_get("channel_id")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let status: String = row
+            .try_get("status")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let terminal_state: String = row
+            .try_get("terminal_state")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let payload_text: String = row
+            .try_get("payload_text")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let attempt_count: i64 = row
+            .try_get("attempt_count")
+            .map_err(|error| anyhow::anyhow!(error))?;
+        let last_error = row.try_get("last_error").ok();
+        let next_attempt_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("next_attempt_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let acked_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("acked_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let created_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+        let updated_at = row
+            .try_get::<chrono::DateTime<chrono::Utc>, _>("updated_at")
+            .ok()
+            .map(|timestamp| timestamp.to_rfc3339());
+
+        Ok(Some(WorkerDeliveryReceiptSnapshot {
+            id,
+            worker_id,
+            channel_id,
+            status,
+            terminal_state,
+            payload_text,
+            attempt_count,
+            last_error,
+            next_attempt_at,
+            acked_at,
+            created_at,
+            updated_at,
+        }))
+    }
 }
 
 /// A worker run row without the transcript blob (for list queries).
@@ -1933,6 +2088,279 @@ pub struct WorkerDetailRow {
     pub tool_calls: i64,
 }
 
+/// Snapshot of a worker task contract row.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerTaskContractSnapshot {
+    pub id: String,
+    pub worker_id: String,
+    pub task_summary: String,
+    pub state: String,
+    pub attempt_count: i64,
+    pub sla_nudge_sent: bool,
+    pub terminal_state: Option<String>,
+    pub ack_deadline_at: Option<String>,
+    pub progress_deadline_at: Option<String>,
+    pub terminal_deadline_at: Option<String>,
+    pub last_progress_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// Snapshot of a worker terminal delivery receipt row.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerDeliveryReceiptSnapshot {
+    pub id: String,
+    pub worker_id: String,
+    pub channel_id: String,
+    pub status: String,
+    pub terminal_state: String,
+    pub payload_text: String,
+    pub attempt_count: i64,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<String>,
+    pub acked_at: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: Option<String>,
+}
+
+/// One synthesized entry in the canonical worker timeline projection.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerTimelineEvent {
+    pub sequence: usize,
+    pub source: String,
+    pub kind: String,
+    pub summary: String,
+    pub at: Option<String>,
+    pub step_index: Option<usize>,
+    pub details: Option<serde_json::Value>,
+}
+
+/// Computed worker timeline projection used by APIs and tooling.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorkerTimelineProjection {
+    pub terminal_converged: bool,
+    pub events: Vec<WorkerTimelineEvent>,
+}
+
+/// Build a deterministic worker timeline projection.
+///
+/// Transcript entries are ordered strictly by transcript step index.
+/// Delivery and contract snapshots are ordered by timestamp and appended after transcript entries.
+pub fn build_worker_timeline_projection(
+    worker_status: &str,
+    transcript_steps: &[TranscriptStep],
+    contract: Option<&WorkerTaskContractSnapshot>,
+    receipt: Option<&WorkerDeliveryReceiptSnapshot>,
+) -> WorkerTimelineProjection {
+    let mut events: Vec<WorkerTimelineEvent> = transcript_steps
+        .iter()
+        .enumerate()
+        .map(|(step_index, step)| project_transcript_step(step_index, step))
+        .collect();
+
+    let mut delivery_events = Vec::new();
+    if let Some(contract) = contract {
+        let at = contract
+            .updated_at
+            .clone()
+            .or_else(|| contract.created_at.clone());
+        let mut summary = format!("Contract state: {}", contract.state);
+        if let Some(terminal_state) = &contract.terminal_state {
+            summary.push_str(&format!(" ({terminal_state})"));
+        }
+        delivery_events.push(WorkerTimelineEvent {
+            sequence: 0,
+            source: "delivery".to_string(),
+            kind: "contract_state".to_string(),
+            summary,
+            at,
+            step_index: None,
+            details: Some(serde_json::json!({
+                "attempt_count": contract.attempt_count,
+                "task_summary": contract.task_summary,
+                "sla_nudge_sent": contract.sla_nudge_sent,
+                "ack_deadline_at": contract.ack_deadline_at,
+                "progress_deadline_at": contract.progress_deadline_at,
+                "terminal_deadline_at": contract.terminal_deadline_at,
+                "last_progress_at": contract.last_progress_at,
+            })),
+        });
+    }
+
+    if let Some(receipt) = receipt {
+        let at = if receipt.status == "acked" {
+            receipt
+                .acked_at
+                .clone()
+                .or_else(|| receipt.updated_at.clone())
+                .or_else(|| receipt.created_at.clone())
+        } else {
+            receipt
+                .updated_at
+                .clone()
+                .or_else(|| receipt.created_at.clone())
+        };
+        let summary = format!(
+            "Terminal receipt: {} ({}, attempts={})",
+            receipt.status, receipt.terminal_state, receipt.attempt_count
+        );
+        delivery_events.push(WorkerTimelineEvent {
+            sequence: 0,
+            source: "delivery".to_string(),
+            kind: "terminal_receipt".to_string(),
+            summary,
+            at,
+            step_index: None,
+            details: Some(serde_json::json!({
+                "id": receipt.id,
+                "status": receipt.status,
+                "terminal_state": receipt.terminal_state,
+                "attempt_count": receipt.attempt_count,
+                "next_attempt_at": receipt.next_attempt_at,
+                "last_error": receipt.last_error,
+            })),
+        });
+    }
+
+    delivery_events.sort_by(|left, right| {
+        timeline_timestamp_key(left.at.as_deref())
+            .cmp(&timeline_timestamp_key(right.at.as_deref()))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.summary.cmp(&right.summary))
+    });
+    events.extend(delivery_events);
+
+    for (sequence, event) in events.iter_mut().enumerate() {
+        event.sequence = sequence;
+    }
+
+    WorkerTimelineProjection {
+        terminal_converged: worker_terminal_delivery_converged(worker_status, contract),
+        events,
+    }
+}
+
+/// Whether a terminal worker has converged to a terminal delivery contract state.
+pub fn worker_terminal_delivery_converged(
+    worker_status: &str,
+    contract: Option<&WorkerTaskContractSnapshot>,
+) -> bool {
+    if !is_terminal_worker_status(worker_status) {
+        return true;
+    }
+
+    matches!(
+        contract.map(|value| value.state.as_str()),
+        Some(WORKER_CONTRACT_STATE_TERMINAL_ACKED | WORKER_CONTRACT_STATE_TERMINAL_FAILED)
+    )
+}
+
+fn project_transcript_step(step_index: usize, step: &TranscriptStep) -> WorkerTimelineEvent {
+    match step {
+        TranscriptStep::Action { content } => {
+            let mut tool_names = Vec::new();
+            let mut text_preview = None;
+
+            for item in content {
+                match item {
+                    ActionContent::Text { text } => {
+                        if text_preview.is_none() {
+                            text_preview = Some(truncate_timeline_text(text, 180));
+                        }
+                    }
+                    ActionContent::ToolCall { name, .. } => tool_names.push(name.clone()),
+                }
+            }
+
+            if !tool_names.is_empty() {
+                let summary = format!("Tool call(s): {}", tool_names.join(", "));
+                WorkerTimelineEvent {
+                    sequence: 0,
+                    source: "transcript".to_string(),
+                    kind: "tool_call".to_string(),
+                    summary,
+                    at: None,
+                    step_index: Some(step_index),
+                    details: Some(serde_json::json!({
+                        "tool_names": tool_names,
+                        "text_preview": text_preview,
+                    })),
+                }
+            } else {
+                let text_preview = text_preview.unwrap_or_default();
+                let summary = if text_preview.is_empty() {
+                    "Agent message".to_string()
+                } else {
+                    format!("Agent message: {text_preview}")
+                };
+                WorkerTimelineEvent {
+                    sequence: 0,
+                    source: "transcript".to_string(),
+                    kind: "agent_text".to_string(),
+                    summary,
+                    at: None,
+                    step_index: Some(step_index),
+                    details: None,
+                }
+            }
+        }
+        TranscriptStep::ToolResult {
+            call_id,
+            name,
+            text,
+        } => {
+            let label = if name.is_empty() { "tool" } else { name };
+            let preview = truncate_timeline_text(text, 180);
+            let summary = if preview.is_empty() {
+                format!("Tool result ({label})")
+            } else {
+                format!("Tool result ({label}): {preview}")
+            };
+            WorkerTimelineEvent {
+                sequence: 0,
+                source: "transcript".to_string(),
+                kind: "tool_result".to_string(),
+                summary,
+                at: None,
+                step_index: Some(step_index),
+                details: Some(serde_json::json!({
+                    "call_id": call_id,
+                    "bytes": text.len(),
+                })),
+            }
+        }
+    }
+}
+
+fn timeline_timestamp_key(value: Option<&str>) -> (i64, u32) {
+    let Some(value) = value else {
+        return (i64::MAX, u32::MAX);
+    };
+    let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) else {
+        return (i64::MAX, u32::MAX);
+    };
+    (parsed.timestamp(), parsed.timestamp_subsec_nanos())
+}
+
+fn truncate_timeline_text(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+
+    let mut end = text.len();
+    for (index, (byte_index, _)) in text.char_indices().enumerate() {
+        if index >= max_chars {
+            end = byte_index;
+            break;
+        }
+    }
+    format!("{}...", &text[..end])
+}
+
+fn is_terminal_worker_status(status: &str) -> bool {
+    matches!(status, "done" | "failed" | "cancelled" | "timed_out")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1953,6 +2381,109 @@ mod tests {
             .await
             .expect("migrations");
         ProcessRunLogger::new(pool)
+    }
+
+    #[test]
+    fn worker_timeline_projection_orders_transcript_then_delivery() {
+        let transcript = vec![
+            TranscriptStep::Action {
+                content: vec![ActionContent::Text {
+                    text: "starting task".to_string(),
+                }],
+            },
+            TranscriptStep::Action {
+                content: vec![ActionContent::ToolCall {
+                    id: "call-1".to_string(),
+                    name: "read_file".to_string(),
+                    args: "{\"path\":\"README.md\"}".to_string(),
+                }],
+            },
+            TranscriptStep::ToolResult {
+                call_id: "call-1".to_string(),
+                name: "read_file".to_string(),
+                text: "file contents".to_string(),
+            },
+        ];
+        let contract = WorkerTaskContractSnapshot {
+            id: "contract-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            task_summary: "test task".to_string(),
+            state: "terminal_acked".to_string(),
+            attempt_count: 2,
+            sla_nudge_sent: true,
+            terminal_state: Some("done".to_string()),
+            ack_deadline_at: None,
+            progress_deadline_at: None,
+            terminal_deadline_at: None,
+            last_progress_at: None,
+            created_at: Some("2026-02-25T01:00:00+00:00".to_string()),
+            updated_at: Some("2026-02-25T01:10:00+00:00".to_string()),
+        };
+        let receipt = WorkerDeliveryReceiptSnapshot {
+            id: "receipt-1".to_string(),
+            worker_id: "worker-1".to_string(),
+            channel_id: "channel-1".to_string(),
+            status: "acked".to_string(),
+            terminal_state: "done".to_string(),
+            payload_text: "done".to_string(),
+            attempt_count: 1,
+            last_error: None,
+            next_attempt_at: None,
+            acked_at: Some("2026-02-25T01:11:00+00:00".to_string()),
+            created_at: Some("2026-02-25T01:05:00+00:00".to_string()),
+            updated_at: Some("2026-02-25T01:11:00+00:00".to_string()),
+        };
+
+        let projection =
+            build_worker_timeline_projection("done", &transcript, Some(&contract), Some(&receipt));
+        assert_eq!(projection.events.len(), 5);
+
+        assert_eq!(projection.events[0].step_index, Some(0));
+        assert_eq!(projection.events[1].step_index, Some(1));
+        assert_eq!(projection.events[2].step_index, Some(2));
+        assert_eq!(projection.events[3].kind, "contract_state");
+        assert_eq!(projection.events[4].kind, "terminal_receipt");
+
+        for (index, event) in projection.events.iter().enumerate() {
+            assert_eq!(event.sequence, index);
+        }
+    }
+
+    #[test]
+    fn worker_terminal_convergence_requires_terminal_contract_state() {
+        assert!(worker_terminal_delivery_converged("running", None));
+        assert!(!worker_terminal_delivery_converged("done", None));
+
+        let acked = WorkerTaskContractSnapshot {
+            id: "contract-acked".to_string(),
+            worker_id: "worker-1".to_string(),
+            task_summary: "task".to_string(),
+            state: "terminal_acked".to_string(),
+            attempt_count: 0,
+            sla_nudge_sent: false,
+            terminal_state: Some("done".to_string()),
+            ack_deadline_at: None,
+            progress_deadline_at: None,
+            terminal_deadline_at: None,
+            last_progress_at: None,
+            created_at: None,
+            updated_at: None,
+        };
+        let failed = WorkerTaskContractSnapshot {
+            state: "terminal_failed".to_string(),
+            ..acked.clone()
+        };
+        let progressing = WorkerTaskContractSnapshot {
+            state: "progressing".to_string(),
+            ..acked.clone()
+        };
+
+        assert!(worker_terminal_delivery_converged("done", Some(&acked)));
+        assert!(worker_terminal_delivery_converged("failed", Some(&failed)));
+        assert!(!worker_terminal_delivery_converged(
+            "timed_out",
+            Some(&progressing)
+        ));
     }
 
     #[tokio::test]
