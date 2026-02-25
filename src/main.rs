@@ -421,12 +421,10 @@ async fn handle_delivery_receipt(
     receipt_log_text: Option<&str>,
 ) {
     if routed.is_status_update && !routed.status_surfaced {
+        let failure_reason = unsurfaced_status_failure_reason(&routed.delivery_result);
         match context
             .outbound_process_logger
-            .fail_worker_delivery_receipt_attempt(
-                receipt_id,
-                "status update not surfaced by adapter",
-            )
+            .fail_worker_delivery_receipt_attempt(receipt_id, &failure_reason)
             .await
         {
             Ok(outcome) => {
@@ -505,6 +503,14 @@ async fn handle_delivery_receipt(
             }
         },
     }
+}
+
+fn unsurfaced_status_failure_reason(delivery_result: &spacebot::Result<()>) -> String {
+    delivery_result
+        .as_ref()
+        .err()
+        .map(std::string::ToString::to_string)
+        .unwrap_or_else(|| "status update not surfaced by adapter".to_string())
 }
 
 fn main() -> anyhow::Result<()> {
@@ -622,6 +628,31 @@ async fn cmd_stop() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::unsurfaced_status_failure_reason;
+
+    #[test]
+    fn unsurfaced_status_failure_reason_uses_adapter_error_when_present() {
+        let result: spacebot::Result<()> = Err(spacebot::Error::from(anyhow::anyhow!(
+            "discord adapter rejected update"
+        )));
+        assert_eq!(
+            unsurfaced_status_failure_reason(&result),
+            "discord adapter rejected update"
+        );
+    }
+
+    #[test]
+    fn unsurfaced_status_failure_reason_falls_back_for_non_error_result() {
+        let result: spacebot::Result<()> = Ok(());
+        assert_eq!(
+            unsurfaced_status_failure_reason(&result),
+            "status update not surfaced by adapter"
+        );
+    }
 }
 
 fn spawn_worker_receipt_dispatch_loop(
@@ -778,7 +809,6 @@ fn spawn_worker_receipt_dispatch_loop(
                         }
                     },
                     Err(error) => {
-                        consecutive_failures = consecutive_failures.saturating_add(1);
                         match process_run_logger
                             .fail_worker_delivery_receipt_attempt(&receipt.id, &error.to_string())
                             .await

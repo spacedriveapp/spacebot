@@ -21,7 +21,7 @@ use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 use tracing::Instrument as _;
@@ -62,6 +62,7 @@ const WORKER_CONTRACT_PROGRESS_BATCH_SIZE: i64 = 8;
 ///
 /// Uses `i64` for SQL LIMIT compatibility; callers only cast when needed.
 const WORKER_CONTRACT_TERMINAL_BATCH_SIZE: i64 = 8;
+const WORKER_FLUSH_FAILURE_THRESHOLD: usize = 3;
 const WORKER_FAILED_PREFIX: &str = "Worker failed:";
 const WORKER_TIMED_OUT_PREFIX: &str = "Worker timed out after ";
 const WORKER_CANCELLED_PREFIX: &str = "Worker cancelled:";
@@ -70,6 +71,35 @@ const WORKER_CANCELLED_PREFIX: &str = "Worker cancelled:";
 struct WorkerCheckpointState {
     last_status: String,
     last_sent_at: tokio::time::Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FallbackReplyOutcome {
+    Sent,
+    EmptyInput,
+    EmptyNormalized,
+    SuppressedLowValue,
+    SendFailed,
+}
+
+fn apply_periodic_flush_circuit(
+    task_result: std::result::Result<(), &'static str>,
+    failure_count: &AtomicUsize,
+    circuit_open: &AtomicBool,
+) -> std::result::Result<(), (usize, &'static str)> {
+    match task_result {
+        Ok(()) => {
+            failure_count.store(0, Ordering::Release);
+            Ok(())
+        }
+        Err(task_error) => {
+            let failures = failure_count.fetch_add(1, Ordering::AcqRel) + 1;
+            if failures >= WORKER_FLUSH_FAILURE_THRESHOLD {
+                circuit_open.store(true, Ordering::Release);
+            }
+            Err((failures, task_error))
+        }
+    }
 }
 
 /// Shared state that channel tools need to act on the channel.
@@ -291,10 +321,18 @@ pub struct Channel {
     worker_checkpoints: HashMap<WorkerId, WorkerCheckpointState>,
     /// Periodic deadline for checking due worker terminal delivery receipts.
     worker_receipt_dispatch_deadline: tokio::time::Instant,
+    /// Consecutive failures for flush_due_worker_delivery_receipts().
+    worker_receipt_failure_count: Arc<AtomicUsize>,
+    /// Circuit-breaker state for worker_receipt_dispatch_deadline scheduling.
+    worker_receipt_circuit_open: Arc<AtomicBool>,
     /// True while a worker terminal receipt flush task is running.
     worker_receipt_flush_in_progress: Arc<AtomicBool>,
     /// Periodic deadline for deterministic worker task contract checks.
     worker_contract_tick_deadline: tokio::time::Instant,
+    /// Consecutive failures for flush_due_worker_task_contract_deadlines().
+    worker_contract_failure_count: Arc<AtomicUsize>,
+    /// Circuit-breaker state for worker_contract_tick_deadline scheduling.
+    worker_contract_circuit_open: Arc<AtomicBool>,
     /// True while a worker task-contract deadline flush task is running.
     worker_contract_flush_in_progress: Arc<AtomicBool>,
 }
@@ -409,9 +447,13 @@ impl Channel {
             worker_checkpoints: HashMap::new(),
             worker_receipt_dispatch_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(WORKER_RECEIPT_DISPATCH_INTERVAL_SECS),
+            worker_receipt_failure_count: Arc::new(AtomicUsize::new(0)),
+            worker_receipt_circuit_open: Arc::new(AtomicBool::new(false)),
             worker_receipt_flush_in_progress: Arc::new(AtomicBool::new(false)),
             worker_contract_tick_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_secs(worker_contract_tick_secs),
+            worker_contract_failure_count: Arc::new(AtomicUsize::new(0)),
+            worker_contract_circuit_open: Arc::new(AtomicBool::new(false)),
             worker_contract_flush_in_progress: Arc::new(AtomicBool::new(false)),
         };
 
@@ -432,12 +474,19 @@ impl Channel {
         tracing::info!(channel_id = %self.id, "channel started");
 
         loop {
-            // Compute next deadline from coalesce/retrigger timers and receipt dispatch.
+            // Compute next deadline from coalesce/retrigger timers and periodic flushes.
+            // Circuit-open flushers are omitted from scheduling until explicitly reset.
+            let worker_receipt_deadline =
+                (!self.worker_receipt_circuit_open.load(Ordering::Acquire))
+                    .then_some(self.worker_receipt_dispatch_deadline);
+            let worker_contract_deadline =
+                (!self.worker_contract_circuit_open.load(Ordering::Acquire))
+                    .then_some(self.worker_contract_tick_deadline);
             let next_deadline = [
                 self.coalesce_deadline,
                 self.retrigger_deadline,
-                Some(self.worker_receipt_dispatch_deadline),
-                Some(self.worker_contract_tick_deadline),
+                worker_receipt_deadline,
+                worker_contract_deadline,
             ]
             .into_iter()
             .flatten()
@@ -507,7 +556,9 @@ impl Channel {
                         self.flush_pending_retrigger().await;
                     }
                     // Check worker terminal receipt dispatch deadline
-                    if self.worker_receipt_dispatch_deadline <= now {
+                    if !self.worker_receipt_circuit_open.load(Ordering::Acquire)
+                        && self.worker_receipt_dispatch_deadline <= now
+                    {
                         self.flush_due_worker_delivery_receipts();
                         self.worker_receipt_dispatch_deadline = tokio::time::Instant::now()
                             + std::time::Duration::from_secs(
@@ -515,7 +566,9 @@ impl Channel {
                             );
                     }
                     // Check worker task contract deadline
-                    if self.worker_contract_tick_deadline <= now {
+                    if !self.worker_contract_circuit_open.load(Ordering::Acquire)
+                        && self.worker_contract_tick_deadline <= now
+                    {
                         self.flush_due_worker_task_contract_deadlines();
                         let tick_secs = self
                             .deps
@@ -585,6 +638,43 @@ impl Channel {
             skipped,
             removed_handles,
             "reconciled finished workers after lagged channel events"
+        );
+    }
+
+    pub fn reset_worker_receipt_circuit(&mut self) {
+        self.worker_receipt_failure_count
+            .store(0, Ordering::Release);
+        self.worker_receipt_circuit_open
+            .store(false, Ordering::Release);
+        self.worker_receipt_dispatch_deadline = tokio::time::Instant::now()
+            + std::time::Duration::from_secs(WORKER_RECEIPT_DISPATCH_INTERVAL_SECS);
+        tracing::info!(
+            channel_id = %self.id,
+            worker_receipt_failure_count = 0,
+            worker_receipt_circuit_open = false,
+            "reset worker receipt circuit breaker for flush_due_worker_delivery_receipts / worker_receipt_dispatch_deadline"
+        );
+    }
+
+    pub fn reset_worker_contract_circuit(&mut self) {
+        self.worker_contract_failure_count
+            .store(0, Ordering::Release);
+        self.worker_contract_circuit_open
+            .store(false, Ordering::Release);
+        let tick_secs = self
+            .deps
+            .runtime_config
+            .worker_contract
+            .load()
+            .tick_secs
+            .max(1);
+        self.worker_contract_tick_deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(tick_secs);
+        tracing::info!(
+            channel_id = %self.id,
+            worker_contract_failure_count = 0,
+            worker_contract_circuit_open = false,
+            "reset worker contract circuit breaker for flush_due_worker_task_contract_deadlines / worker_contract_tick_deadline"
         );
     }
 
@@ -1649,41 +1739,16 @@ impl Channel {
                             response_len = text.len(),
                             "LLM skipped on retrigger but produced text, sending as fallback"
                         );
-                        let extracted = extract_reply_from_tool_syntax(text);
-                        let source = self
-                            .conversation_id
-                            .as_deref()
-                            .and_then(|conversation_id| conversation_id.split(':').next())
-                            .unwrap_or("unknown");
-                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                            extracted.as_deref().unwrap_or(text),
-                            source,
-                        );
-                        if !final_text.is_empty() {
-                            if crate::tools::reply::is_low_value_waiting_update(&final_text) {
-                                tracing::info!(
-                                    channel_id = %self.id,
-                                    "suppressing low-value waiting retrigger fallback text"
-                                );
-                            } else {
-                                if extracted.is_some() {
-                                    tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger fallback");
-                                }
-                                self.state
-                                    .conversation_logger
-                                    .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundEnvelope::from(OutboundResponse::Text(
-                                        final_text,
-                                    )))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
-                            }
-                        }
-                    } else {
+                    }
+
+                    if self
+                        .emit_fallback_reply(
+                            &response,
+                            "LLM skipped on retrigger but produced text fallback",
+                        )
+                        .await
+                        == FallbackReplyOutcome::EmptyInput
+                    {
                         tracing::warn!(
                             channel_id = %self.id,
                             "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
@@ -1697,87 +1762,31 @@ impl Channel {
                     // Retrigger turns are vulnerable to tool-call misses; when the
                     // model emits substantive text without calling `reply`, relay it.
                     // Keep suppressing low-value "still waiting" chatter.
-                    let text = response.trim();
-                    if text.is_empty() {
-                        tracing::debug!(
-                            channel_id = %self.id,
-                            "retrigger turn fallback suppressed (empty text)"
-                        );
-                    } else {
-                        let extracted = extract_reply_from_tool_syntax(text);
-                        let source = self
-                            .conversation_id
-                            .as_deref()
-                            .and_then(|conversation_id| conversation_id.split(':').next())
-                            .unwrap_or("unknown");
-                        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                            extracted.as_deref().unwrap_or(text),
-                            source,
-                        );
-                        if final_text.is_empty() {
+                    match self
+                        .emit_fallback_reply(&response, "retrigger text output fallback")
+                        .await
+                    {
+                        FallbackReplyOutcome::EmptyInput => {
+                            tracing::debug!(
+                                channel_id = %self.id,
+                                "retrigger turn fallback suppressed (empty text)"
+                            );
+                        }
+                        FallbackReplyOutcome::EmptyNormalized => {
                             tracing::debug!(
                                 channel_id = %self.id,
                                 "retrigger turn fallback suppressed (empty normalized text)"
                             );
-                        } else if crate::tools::reply::is_low_value_waiting_update(&final_text) {
-                            tracing::info!(
-                                channel_id = %self.id,
-                                "suppressing low-value waiting retrigger fallback text"
-                            );
-                        } else {
-                            if extracted.is_some() {
-                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in retrigger text output");
-                            }
-                            self.state
-                                .conversation_logger
-                                .log_bot_message(&self.state.channel_id, &final_text);
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundEnvelope::from(OutboundResponse::Text(final_text)))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                            }
                         }
+                        _ => {}
                     }
                 } else {
                     // If the LLM returned text without using the reply tool, send it
                     // directly. Some models respond with text instead of tool calls.
                     // When the text looks like tool call syntax (e.g. "[reply]\n{\"content\": \"hi\"}"),
                     // attempt to extract the reply content and send that instead.
-                    let text = response.trim();
-                    let extracted = extract_reply_from_tool_syntax(text);
-                    let source = self
-                        .conversation_id
-                        .as_deref()
-                        .and_then(|conversation_id| conversation_id.split(':').next())
-                        .unwrap_or("unknown");
-                    let final_text = crate::tools::reply::normalize_discord_mention_tokens(
-                        extracted.as_deref().unwrap_or(text),
-                        source,
-                    );
-                    if !final_text.is_empty() {
-                        if crate::tools::reply::is_low_value_waiting_update(&final_text) {
-                            tracing::info!(
-                                channel_id = %self.id,
-                                "suppressing low-value waiting fallback text"
-                            );
-                        } else {
-                            if extracted.is_some() {
-                                tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
-                            }
-                            self.state
-                                .conversation_logger
-                                .log_bot_message(&self.state.channel_id, &final_text);
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundEnvelope::from(OutboundResponse::Text(final_text)))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
-                            }
-                        }
-                    }
+                    self.emit_fallback_reply(&response, "LLM text output fallback")
+                        .await;
 
                     tracing::debug!(channel_id = %self.id, "channel turn completed");
                 }
@@ -1811,6 +1820,62 @@ impl Channel {
                 "failed to send stop-typing status update"
             );
         }
+    }
+
+    async fn emit_fallback_reply(&self, raw_response: &str, source: &str) -> FallbackReplyOutcome {
+        let text = raw_response.trim();
+        if text.is_empty() {
+            return FallbackReplyOutcome::EmptyInput;
+        }
+
+        let extracted = extract_reply_from_tool_syntax(text);
+        let message_source = self
+            .conversation_id
+            .as_deref()
+            .and_then(|conversation_id| conversation_id.split(':').next())
+            .unwrap_or("unknown");
+        let final_text = crate::tools::reply::normalize_discord_mention_tokens(
+            extracted.as_deref().unwrap_or(text),
+            message_source,
+        );
+        if final_text.is_empty() {
+            return FallbackReplyOutcome::EmptyNormalized;
+        }
+        if crate::tools::reply::is_low_value_waiting_update(&final_text) {
+            tracing::info!(
+                channel_id = %self.id,
+                source,
+                "suppressing low-value waiting fallback text"
+            );
+            return FallbackReplyOutcome::SuppressedLowValue;
+        }
+
+        if extracted.is_some() {
+            tracing::warn!(
+                channel_id = %self.id,
+                source,
+                "extracted reply from malformed tool syntax in fallback output"
+            );
+        }
+
+        self.state
+            .conversation_logger
+            .log_bot_message(&self.state.channel_id, &final_text);
+        if let Err(error) = self
+            .response_tx
+            .send(OutboundEnvelope::from(OutboundResponse::Text(final_text)))
+            .await
+        {
+            tracing::error!(
+                %error,
+                channel_id = %self.id,
+                source,
+                "failed to send fallback reply"
+            );
+            return FallbackReplyOutcome::SendFailed;
+        }
+
+        FallbackReplyOutcome::Sent
     }
 
     /// Handle a process event (branch results, worker completions, status updates).
@@ -2240,9 +2305,34 @@ impl Channel {
         let response_tx = self.response_tx.clone();
         let channel_id = self.id.clone();
         let in_progress = self.worker_receipt_flush_in_progress.clone();
+        let failure_count = self.worker_receipt_failure_count.clone();
+        let circuit_open = self.worker_receipt_circuit_open.clone();
         tokio::spawn(async move {
-            Self::flush_due_worker_delivery_receipts_task(run_logger, response_tx, channel_id)
-                .await;
+            let task_result = Self::flush_due_worker_delivery_receipts_task(
+                run_logger,
+                response_tx,
+                channel_id.clone(),
+            )
+            .await;
+            if let Err((failures, task_error)) =
+                apply_periodic_flush_circuit(task_result, &failure_count, &circuit_open)
+            {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    task_error,
+                    worker_receipt_failure_count = failures,
+                    "flush_due_worker_delivery_receipts failed; incrementing worker_receipt_failure_count"
+                );
+                if failures == WORKER_FLUSH_FAILURE_THRESHOLD {
+                    tracing::error!(
+                        channel_id = %channel_id,
+                        worker_receipt_failure_count = failures,
+                        threshold = WORKER_FLUSH_FAILURE_THRESHOLD,
+                        worker_receipt_circuit_open = true,
+                        "opening worker receipt circuit breaker after repeated flush_due_worker_delivery_receipts failures; scheduling via worker_receipt_dispatch_deadline is disabled until reset_worker_receipt_circuit"
+                    );
+                }
+            }
             in_progress.store(false, Ordering::Release);
         });
     }
@@ -2251,7 +2341,7 @@ impl Channel {
         run_logger: ProcessRunLogger,
         response_tx: mpsc::Sender<OutboundEnvelope>,
         channel_id: ChannelId,
-    ) {
+    ) -> std::result::Result<(), &'static str> {
         let due = match run_logger
             .claim_due_worker_terminal_receipts(&channel_id, WORKER_RECEIPT_DISPATCH_BATCH_SIZE)
             .await
@@ -2263,19 +2353,21 @@ impl Channel {
                     channel_id = %channel_id,
                     "failed to claim due worker terminal receipts"
                 );
-                return;
+                return Err("claim_due_worker_terminal_receipts");
             }
         };
 
         if due.is_empty() {
-            return;
+            return Ok(());
         }
 
+        let mut had_errors = false;
         for receipt in due {
             let message = OutboundResponse::Text(receipt.payload_text.clone());
             let envelope = OutboundEnvelope::tracked(message, receipt.id.clone());
 
             if let Err(error) = response_tx.send(envelope).await {
+                had_errors = true;
                 tracing::warn!(
                     %error,
                     channel_id = %channel_id,
@@ -2295,8 +2387,15 @@ impl Channel {
                         receipt_id = %receipt.id,
                         "failed to mark worker terminal receipt send failure"
                     );
+                    had_errors = true;
                 }
             }
+        }
+
+        if had_errors {
+            Err("dispatch_due_worker_terminal_receipts")
+        } else {
+            Ok(())
         }
     }
 
@@ -2317,6 +2416,8 @@ impl Channel {
         let channel_id = self.id.clone();
         let status_block = self.state.status_block.clone();
         let in_progress = self.worker_contract_flush_in_progress.clone();
+        let failure_count = self.worker_contract_failure_count.clone();
+        let circuit_open = self.worker_contract_circuit_open.clone();
         let ack_secs = self
             .deps
             .runtime_config
@@ -2325,14 +2426,33 @@ impl Channel {
             .ack_secs
             .max(1);
         tokio::spawn(async move {
-            Self::flush_due_worker_task_contract_deadlines_task(
+            let task_result = Self::flush_due_worker_task_contract_deadlines_task(
                 run_logger,
                 response_tx,
-                channel_id,
+                channel_id.clone(),
                 status_block,
                 ack_secs,
             )
             .await;
+            if let Err((failures, task_error)) =
+                apply_periodic_flush_circuit(task_result, &failure_count, &circuit_open)
+            {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    task_error,
+                    worker_contract_failure_count = failures,
+                    "flush_due_worker_task_contract_deadlines failed; incrementing worker_contract_failure_count"
+                );
+                if failures == WORKER_FLUSH_FAILURE_THRESHOLD {
+                    tracing::error!(
+                        channel_id = %channel_id,
+                        worker_contract_failure_count = failures,
+                        threshold = WORKER_FLUSH_FAILURE_THRESHOLD,
+                        worker_contract_circuit_open = true,
+                        "opening worker contract circuit breaker after repeated flush_due_worker_task_contract_deadlines failures; scheduling via worker_contract_tick_deadline is disabled until reset_worker_contract_circuit"
+                    );
+                }
+            }
             in_progress.store(false, Ordering::Release);
         });
     }
@@ -2343,7 +2463,7 @@ impl Channel {
         channel_id: ChannelId,
         status_block: Arc<RwLock<StatusBlock>>,
         ack_secs: u64,
-    ) {
+    ) -> std::result::Result<(), &'static str> {
         let due_ack = match run_logger
             .claim_due_worker_task_contract_ack_deadlines(
                 &channel_id,
@@ -2359,10 +2479,11 @@ impl Channel {
                     channel_id = %channel_id,
                     "failed to claim due worker task contract ack deadlines"
                 );
-                Vec::new()
+                return Err("claim_due_worker_task_contract_ack_deadlines");
             }
         };
 
+        let mut had_errors = false;
         for due in due_ack {
             if !Self::worker_is_user_visible_in_status_block(&status_block, due.worker_id).await {
                 if let Err(error) = run_logger
@@ -2375,6 +2496,7 @@ impl Channel {
                         worker_id = %due.worker_id,
                         "failed to auto-ack hidden worker task contract"
                     );
+                    had_errors = true;
                 }
                 continue;
             }
@@ -2394,6 +2516,7 @@ impl Channel {
                     worker_id = %due.worker_id,
                     "failed to route worker ack checkpoint status update"
                 );
+                had_errors = true;
             }
         }
 
@@ -2411,7 +2534,7 @@ impl Channel {
                     channel_id = %channel_id,
                     "failed to claim due worker task contract progress deadlines"
                 );
-                Vec::new()
+                return Err("claim_due_worker_task_contract_progress_deadlines");
             }
         };
 
@@ -2435,6 +2558,7 @@ impl Channel {
                     worker_id = %due.worker_id,
                     "failed to route worker progress checkpoint status update"
                 );
+                had_errors = true;
             }
         }
 
@@ -2452,7 +2576,7 @@ impl Channel {
                     channel_id = %channel_id,
                     "failed to claim due worker task contract terminal deadlines"
                 );
-                Vec::new()
+                return Err("claim_due_worker_task_contract_terminal_deadlines");
             }
         };
 
@@ -2462,6 +2586,12 @@ impl Channel {
                 worker_id = %due.worker_id,
                 "worker terminal deadline elapsed before adapter acknowledgement"
             );
+        }
+
+        if had_errors {
+            Err("dispatch_due_worker_task_contract_deadlines")
+        } else {
+            Ok(())
         }
     }
 
@@ -3876,8 +4006,10 @@ fn apply_history_after_turn(
 #[cfg(test)]
 mod tests {
     use super::WORKER_CHECKPOINT_MIN_INTERVAL_SECS;
+    use super::WORKER_FLUSH_FAILURE_THRESHOLD;
     use super::WorkerCheckpointState;
     use super::apply_history_after_turn;
+    use super::apply_periodic_flush_circuit;
     use super::build_worker_ack_checkpoint;
     use super::build_worker_progress_sla_nudge;
     use super::build_worker_terminal_receipt_payload;
@@ -3894,6 +4026,7 @@ mod tests {
     use rig::message::Message;
     use rig::tool::ToolSetError;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::Duration;
     use tokio::sync::{broadcast, oneshot};
     use uuid::Uuid;
@@ -4455,5 +4588,43 @@ mod tests {
             build_worker_progress_sla_nudge("analysis task"),
             "Still working on analysis task. I will report back when complete."
         );
+    }
+
+    #[test]
+    fn periodic_flush_circuit_resets_failure_count_on_success() {
+        let failure_count = AtomicUsize::new(2);
+        let circuit_open = AtomicBool::new(false);
+        let result = apply_periodic_flush_circuit(Ok(()), &failure_count, &circuit_open);
+        assert!(result.is_ok());
+        assert_eq!(failure_count.load(Ordering::Acquire), 0);
+        assert!(!circuit_open.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn periodic_flush_circuit_opens_after_three_failures() {
+        let failure_count = AtomicUsize::new(0);
+        let circuit_open = AtomicBool::new(false);
+
+        for expected in 1..WORKER_FLUSH_FAILURE_THRESHOLD {
+            let result = apply_periodic_flush_circuit(
+                Err("dispatch_due_worker_terminal_receipts"),
+                &failure_count,
+                &circuit_open,
+            );
+            let (count, error) = result.expect_err("expected failure path");
+            assert_eq!(count, expected);
+            assert_eq!(error, "dispatch_due_worker_terminal_receipts");
+            assert!(!circuit_open.load(Ordering::Acquire));
+        }
+
+        let threshold_result = apply_periodic_flush_circuit(
+            Err("dispatch_due_worker_terminal_receipts"),
+            &failure_count,
+            &circuit_open,
+        );
+        let (count, error) = threshold_result.expect_err("expected threshold failure path");
+        assert_eq!(count, WORKER_FLUSH_FAILURE_THRESHOLD);
+        assert_eq!(error, "dispatch_due_worker_terminal_receipts");
+        assert!(circuit_open.load(Ordering::Acquire));
     }
 }

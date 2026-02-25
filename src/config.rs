@@ -3242,10 +3242,10 @@ impl Config {
                         enabled: b.enabled.unwrap_or(base.enabled),
                         headless: b.headless.unwrap_or(base.headless),
                         evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
-                        browser_action_timeout_secs: b
-                            .browser_action_timeout_secs
-                            .and_then(|secs| (secs > 0).then_some(secs))
-                            .unwrap_or(base.browser_action_timeout_secs),
+                        browser_action_timeout_secs: resolve_nonzero_secs(
+                            b.browser_action_timeout_secs,
+                            base.browser_action_timeout_secs,
+                        ),
                         executable_path: b.executable_path.or_else(|| base.executable_path.clone()),
                         screenshot_dir: b
                             .screenshot_dir
@@ -3433,10 +3433,10 @@ impl Config {
                         evaluate_enabled: b
                             .evaluate_enabled
                             .unwrap_or(defaults.browser.evaluate_enabled),
-                        browser_action_timeout_secs: b
-                            .browser_action_timeout_secs
-                            .and_then(|secs| (secs > 0).then_some(secs))
-                            .unwrap_or(defaults.browser.browser_action_timeout_secs),
+                        browser_action_timeout_secs: resolve_nonzero_secs(
+                            b.browser_action_timeout_secs,
+                            defaults.browser.browser_action_timeout_secs,
+                        ),
                         executable_path: b
                             .executable_path
                             .or_else(|| defaults.browser.executable_path.clone()),
@@ -5300,6 +5300,44 @@ tick_secs = 0
         assert_eq!(resolved.worker_contract.ack_secs, 9);
         assert_eq!(resolved.worker_contract.progress_secs, 27);
         assert_eq!(resolved.worker_contract.tick_secs, 3);
+    }
+
+    #[test]
+    fn browser_action_timeout_zero_defaults_fallback_to_safe_default() {
+        let toml = r#"
+[defaults.browser]
+browser_action_timeout_secs = 0
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let default_timeout = BrowserConfig::default().browser_action_timeout_secs;
+
+        assert_eq!(
+            config.defaults.browser.browser_action_timeout_secs,
+            default_timeout
+        );
+    }
+
+    #[test]
+    fn browser_action_timeout_zero_agent_override_falls_back_to_instance_default() {
+        let toml = r#"
+[defaults.browser]
+browser_action_timeout_secs = 33
+
+[[agents]]
+id = "main"
+
+[agents.browser]
+browser_action_timeout_secs = 0
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert_eq!(resolved.browser.browser_action_timeout_secs, 33);
     }
 
     #[test]

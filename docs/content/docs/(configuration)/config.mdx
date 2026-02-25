@@ -543,23 +543,26 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `max_concurrent_branches` | integer | inherits | Override instance default |
 | `max_turns` | integer | inherits | Override instance default |
 | `context_window` | integer | inherits | Override instance default |
-| `worker_contract` | table | inherits | Per-agent worker contract override (`AgentConfig.worker_contract`) |
+| `worker_contract` | table | inherits | Per-agent worker contract override |
 
 Agent-specific routing is set via `[agents.routing]` with the same keys as `[defaults.routing]`.
 
 ### `[agents.worker_contract]`
 
-Per-agent worker contract override for `AgentConfig.worker_contract`.
+Per-agent worker contract override.
 Unset keys inherit from `[defaults.worker_contract]`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `ack_secs` | integer | inherits | Seconds before first worker acknowledgement checkpoint |
-| `progress_secs` | integer | inherits | Seconds between worker progress deadline checks |
-| `tick_secs` | integer | inherits | Scheduler tick interval for contract scans |
+| `ack_secs` | integer | inherits | Deadline to confirm a worker start was surfaced |
+| `progress_secs` | integer | inherits | Deadline between meaningful worker progress updates |
+| `tick_secs` | integer | inherits | Poll interval for worker contract deadline checks |
+
+Setting `ack_secs`, `progress_secs`, or `tick_secs` to `0` is treated as unset and falls back to the resolved default for that scope.
 
 ```toml
 [agents.worker_contract]
+# Setting any field to 0 treats it as unset and falls back to the resolved default.
 ack_secs = 8
 progress_secs = 60
 tick_secs = 3
