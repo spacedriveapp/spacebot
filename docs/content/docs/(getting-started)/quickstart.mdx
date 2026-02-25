@@ -30,6 +30,17 @@ docker run -d \
 
 See [Docker deployment](/docs/docker) for image variants, compose files, and configuration options.
 
+To update Docker installs, pull and recreate the container:
+
+```bash
+docker pull ghcr.io/spacedriveapp/spacebot:latest
+docker stop spacebot && docker rm spacebot
+# re-run your docker run command
+```
+
+If you mount `/var/run/docker.sock`, the web UI can apply Docker updates directly from the update banner.
+You can also manage updates from **Settings → Updates** in the web UI.
+
 ## Build from source
 
 ### Prerequisites

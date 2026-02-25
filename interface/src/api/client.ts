@@ -320,6 +320,8 @@ export interface UpdateStatus {
 	release_notes: string | null;
 	deployment: Deployment;
 	can_apply: boolean;
+	cannot_apply_reason: string | null;
+	docker_image: string | null;
 	checked_at: string | null;
 	error: string | null;
 }

@@ -34,7 +34,37 @@ impl Deployment {
         match std::env::var("SPACEBOT_DEPLOYMENT").as_deref() {
             Ok("docker") => Deployment::Docker,
             Ok("hosted") => Deployment::Hosted,
+            _ if is_running_in_container() => Deployment::Docker,
             _ => Deployment::Native,
+        }
+    }
+}
+
+fn is_running_in_container() -> bool {
+    if std::path::Path::new("/.dockerenv").exists() {
+        return true;
+    }
+
+    let Ok(cgroup) = std::fs::read_to_string("/proc/1/cgroup") else {
+        return false;
+    };
+
+    ["docker", "containerd", "kubepods", "podman"]
+        .iter()
+        .any(|marker| cgroup.contains(marker))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageVariant {
+    Slim,
+    Full,
+}
+
+impl ImageVariant {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Slim => "slim",
+            Self::Full => "full",
         }
     }
 }
@@ -50,6 +80,10 @@ pub struct UpdateStatus {
     pub deployment: Deployment,
     /// Whether the Docker socket is accessible (enables one-click update).
     pub can_apply: bool,
+    /// Human-readable reason when one-click apply is unavailable.
+    pub cannot_apply_reason: Option<String>,
+    /// Current container image reference when running in Docker.
+    pub docker_image: Option<String>,
     pub checked_at: Option<chrono::DateTime<chrono::Utc>>,
     pub error: Option<String>,
 }
@@ -64,6 +98,8 @@ impl Default for UpdateStatus {
             release_notes: None,
             deployment: Deployment::detect(),
             can_apply: false,
+            cannot_apply_reason: None,
+            docker_image: None,
             checked_at: None,
             error: None,
         }
@@ -75,8 +111,24 @@ pub type SharedUpdateStatus = Arc<ArcSwap<UpdateStatus>>;
 
 pub fn new_shared_status() -> SharedUpdateStatus {
     let mut status = UpdateStatus::default();
-    // Probe Docker socket availability on init
-    status.can_apply = status.deployment == Deployment::Docker && docker_socket_available();
+    match status.deployment {
+        Deployment::Docker => {
+            status.can_apply = docker_socket_available();
+            if !status.can_apply {
+                status.cannot_apply_reason =
+                    Some("Mount /var/run/docker.sock to enable one-click updates.".to_string());
+            }
+        }
+        Deployment::Native => {
+            status.cannot_apply_reason =
+                Some("Native/source installs update manually (rebuild + restart).".to_string());
+        }
+        Deployment::Hosted => {
+            status.cannot_apply_reason = Some(
+                "Hosted instances are updated by platform rollout, not self-service.".to_string(),
+            );
+        }
+    }
     Arc::new(ArcSwap::from_pointee(status))
 }
 
@@ -93,10 +145,13 @@ pub async fn check_for_update(status: &SharedUpdateStatus) {
     let result = fetch_latest_release().await;
 
     let current = status.load();
+    let capability = detect_apply_capability(current.deployment).await;
     let mut next = UpdateStatus {
         current_version: CURRENT_VERSION.to_string(),
         deployment: current.deployment,
-        can_apply: current.can_apply,
+        can_apply: capability.can_apply,
+        cannot_apply_reason: capability.cannot_apply_reason,
+        docker_image: capability.docker_image,
         checked_at: Some(chrono::Utc::now()),
         ..Default::default()
     };
@@ -182,6 +237,90 @@ fn docker_socket_available() -> bool {
     std::path::Path::new("/var/run/docker.sock").exists()
 }
 
+#[derive(Debug, Clone)]
+struct ApplyCapability {
+    can_apply: bool,
+    cannot_apply_reason: Option<String>,
+    docker_image: Option<String>,
+}
+
+async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
+    match deployment {
+        Deployment::Native => ApplyCapability {
+            can_apply: false,
+            cannot_apply_reason: Some(
+                "Native/source installs update manually (rebuild + restart).".to_string(),
+            ),
+            docker_image: None,
+        },
+        Deployment::Hosted => ApplyCapability {
+            can_apply: false,
+            cannot_apply_reason: Some(
+                "Hosted instances are updated by platform rollout, not self-service.".to_string(),
+            ),
+            docker_image: None,
+        },
+        Deployment::Docker => {
+            if !docker_socket_available() {
+                return ApplyCapability {
+                    can_apply: false,
+                    cannot_apply_reason: Some(
+                        "Mount /var/run/docker.sock to enable one-click updates.".to_string(),
+                    ),
+                    docker_image: None,
+                };
+            }
+
+            let docker = match bollard::Docker::connect_with_local_defaults() {
+                Ok(client) => client,
+                Err(error) => {
+                    return ApplyCapability {
+                        can_apply: false,
+                        cannot_apply_reason: Some(format!(
+                            "Docker socket is present but cannot be opened: {error}"
+                        )),
+                        docker_image: None,
+                    };
+                }
+            };
+
+            if let Err(error) = docker.ping().await {
+                return ApplyCapability {
+                    can_apply: false,
+                    cannot_apply_reason: Some(format!(
+                        "Docker socket is mounted but engine is not reachable: {error}"
+                    )),
+                    docker_image: None,
+                };
+            }
+
+            let docker_image = detect_current_docker_image(&docker).await.ok();
+
+            ApplyCapability {
+                can_apply: true,
+                cannot_apply_reason: None,
+                docker_image,
+            }
+        }
+    }
+}
+
+async fn detect_current_docker_image(docker: &bollard::Docker) -> anyhow::Result<String> {
+    let container_id = get_own_container_id()?;
+    let container_info = docker
+        .inspect_container(&container_id, None)
+        .await
+        .map_err(|error| anyhow::anyhow!("failed to inspect container: {error}"))?;
+
+    let image = container_info
+        .config
+        .as_ref()
+        .and_then(|config| config.image.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("could not determine current image"))?;
+
+    Ok(image.to_string())
+}
+
 /// Apply a Docker self-update: pull the new image, recreate this container.
 ///
 /// This function does not return on success — the current container is stopped
@@ -195,8 +334,14 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
     if current.deployment != Deployment::Docker {
         anyhow::bail!("not running in Docker");
     }
-    if !current.can_apply {
-        anyhow::bail!("Docker socket not available");
+    let capability = detect_apply_capability(current.deployment).await;
+    if !capability.can_apply {
+        anyhow::bail!(
+            "{}",
+            capability
+                .cannot_apply_reason
+                .unwrap_or_else(|| "Docker socket not available".to_string())
+        );
     }
 
     let latest_version = current
@@ -229,7 +374,8 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
 
     // Resolve the target image: same base name, new version tag.
     // e.g. ghcr.io/spacedriveapp/spacebot:v0.1.0-slim -> ghcr.io/spacedriveapp/spacebot:v0.2.0-slim
-    let target_image = resolve_target_image(&current_image, latest_version);
+    let runtime_variant = detect_runtime_image_variant();
+    let target_image = resolve_target_image(&current_image, latest_version, runtime_variant);
 
     tracing::info!(
         current_image = %current_image,
@@ -255,6 +401,15 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
                 }
             }
             Err(error) => {
+                let error_text = error.to_string();
+                if error_text.contains("manifest unknown")
+                    || error_text.contains("not found")
+                    || error_text.contains("pull access denied")
+                {
+                    anyhow::bail!(
+                        "image pull failed for {target_image}. this image does not have Spacebot release tags; rebuild and redeploy manually"
+                    );
+                }
                 anyhow::bail!("image pull failed: {}", error);
             }
         }
@@ -412,17 +567,60 @@ fn get_own_container_id() -> anyhow::Result<String> {
 /// Examples:
 ///   - `ghcr.io/spacedriveapp/spacebot:v0.1.0-slim` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-slim`
 ///   - `ghcr.io/spacedriveapp/spacebot:slim` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-slim`
-///   - `ghcr.io/spacedriveapp/spacebot:latest` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-slim`
-fn resolve_target_image(current_image: &str, new_version: &str) -> String {
-    let (base, tag) = match current_image.rsplit_once(':') {
-        Some((b, t)) => (b, t),
-        None => (current_image, "latest"),
+///   - `ghcr.io/spacedriveapp/spacebot:latest` + `0.2.0` + full runtime -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-full`
+fn resolve_target_image(
+    current_image: &str,
+    new_version: &str,
+    runtime_variant: Option<ImageVariant>,
+) -> String {
+    let image_without_digest = current_image
+        .split_once('@')
+        .map(|(name, _)| name)
+        .unwrap_or(current_image);
+
+    let last_slash = image_without_digest.rfind('/');
+    let last_colon = image_without_digest.rfind(':');
+
+    let (base, tag) = match last_colon {
+        Some(colon) if last_slash.map_or(true, |slash| colon > slash) => (
+            &image_without_digest[..colon],
+            &image_without_digest[colon + 1..],
+        ),
+        _ => (image_without_digest, "latest"),
     };
 
-    // Determine the variant suffix (slim, full, or default to slim)
-    let variant = if tag.contains("full") { "full" } else { "slim" };
+    let variant = detect_variant_from_tag(tag)
+        .or(runtime_variant)
+        .unwrap_or(ImageVariant::Slim);
 
-    format!("{}:v{}-{}", base, new_version, variant)
+    format!("{}:v{}-{}", base, new_version, variant.as_str())
+}
+
+fn detect_variant_from_tag(tag: &str) -> Option<ImageVariant> {
+    if tag.contains("full") {
+        Some(ImageVariant::Full)
+    } else if tag.contains("slim") {
+        Some(ImageVariant::Slim)
+    } else {
+        None
+    }
+}
+
+fn detect_runtime_image_variant() -> Option<ImageVariant> {
+    if let Ok(chrome_path) = std::env::var("CHROME_PATH")
+        && !chrome_path.is_empty()
+        && std::path::Path::new(&chrome_path).exists()
+    {
+        return Some(ImageVariant::Full);
+    }
+
+    if std::path::Path::new("/usr/bin/chromium").exists()
+        || std::path::Path::new("/usr/bin/chromium-browser").exists()
+    {
+        return Some(ImageVariant::Full);
+    }
+
+    None
 }
 
 #[cfg(test)]
@@ -440,20 +638,68 @@ mod tests {
     #[test]
     fn test_resolve_target_image() {
         assert_eq!(
-            resolve_target_image("ghcr.io/spacedriveapp/spacebot:v0.1.0-slim", "0.2.0"),
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:v0.1.0-slim",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
             "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
         );
         assert_eq!(
-            resolve_target_image("ghcr.io/spacedriveapp/spacebot:v0.1.0-full", "0.2.0"),
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:v0.1.0-full",
+                "0.2.0",
+                Some(ImageVariant::Slim)
+            ),
             "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
         );
         assert_eq!(
-            resolve_target_image("ghcr.io/spacedriveapp/spacebot:latest", "0.2.0"),
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:latest",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
+        );
+        assert_eq!(
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:latest",
+                "0.2.0",
+                Some(ImageVariant::Slim)
+            ),
             "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
         );
         assert_eq!(
-            resolve_target_image("ghcr.io/spacedriveapp/spacebot:slim", "0.2.0"),
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:slim",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
             "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
+        );
+        assert_eq!(
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot:v0.1.0",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
+        );
+        assert_eq!(
+            resolve_target_image(
+                "registry.local:5000/spacebot",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
+            "registry.local:5000/spacebot:v0.2.0-full"
+        );
+        assert_eq!(
+            resolve_target_image(
+                "ghcr.io/spacedriveapp/spacebot@sha256:abcdef",
+                "0.2.0",
+                Some(ImageVariant::Full)
+            ),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
         );
     }
 }
