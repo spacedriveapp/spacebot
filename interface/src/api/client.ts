@@ -1068,6 +1068,8 @@ export interface GlobalSettingsResponse {
 	api_bind: string;
 	worker_log_mode: string;
 	opencode: OpenCodeSettings;
+	ssh_enabled: boolean;
+	ssh_port: number;
 }
 
 export interface GlobalSettingsUpdate {
@@ -1077,12 +1079,21 @@ export interface GlobalSettingsUpdate {
 	api_bind?: string;
 	worker_log_mode?: string;
 	opencode?: OpenCodeSettingsUpdate;
+	ssh_enabled?: boolean;
+	ssh_port?: number;
 }
 
 export interface GlobalSettingsUpdateResponse {
 	success: boolean;
 	message: string;
 	requires_restart: boolean;
+}
+
+export interface SshStatusResponse {
+	enabled: boolean;
+	running: boolean;
+	port: number;
+	has_authorized_key: boolean;
 }
 
 export interface RawConfigResponse {
@@ -1589,6 +1600,9 @@ export const api = {
 		}
 		return response.json() as Promise<GlobalSettingsUpdateResponse>;
 	},
+
+	// SSH API
+	sshStatus: () => fetchJson<SshStatusResponse>("/ssh/status"),
 
 	// Raw config API
 	rawConfig: () => fetchJson<RawConfigResponse>("/config/raw"),

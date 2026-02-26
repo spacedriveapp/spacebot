@@ -20,6 +20,7 @@ mod providers;
 mod server;
 mod settings;
 mod skills;
+mod ssh;
 mod state;
 mod system;
 mod tasks;

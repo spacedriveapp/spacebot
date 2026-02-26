@@ -740,6 +740,16 @@ async fn run(
     api_state.set_agent_groups(config.groups.clone());
     api_state.set_agent_humans(config.humans.clone());
 
+    // Initialize SSH manager and start sshd if enabled
+    let ssh_manager = spacebot::ssh::SshManager::new(&config.instance_dir);
+    api_state.set_ssh_manager(ssh_manager).await;
+    if config.ssh.enabled {
+        let mut ssh = api_state.ssh_manager.lock().await;
+        if let Err(error) = ssh.start(config.ssh.port).await {
+            tracing::error!(%error, "failed to start sshd");
+        }
+    }
+
     // Track whether agents have been initialized
     let mut agents_initialized = false;
 
@@ -1166,6 +1176,11 @@ async fn run(
     drop(cron_schedulers_for_shutdown);
 
     messaging_manager.shutdown().await;
+
+    // Stop sshd if running
+    if let Err(error) = api_state.ssh_manager.lock().await.stop().await {
+        tracing::warn!(%error, "failed to stop sshd during shutdown");
+    }
 
     for (agent_id, agent) in agents {
         tracing::info!(%agent_id, "shutting down agent");

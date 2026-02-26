@@ -11,7 +11,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
 
-type SectionId = "providers" | "channels" | "api-keys" | "server" | "opencode" | "worker-logs" | "updates" | "config-file";
+type SectionId = "providers" | "channels" | "api-keys" | "server" | "ssh" | "opencode" | "worker-logs" | "updates" | "config-file";
 
 const SECTIONS = [
 	{
@@ -37,6 +37,12 @@ const SECTIONS = [
 		label: "Server",
 		group: "system" as const,
 		description: "API server configuration",
+	},
+	{
+		id: "ssh" as const,
+		label: "SSH",
+		group: "system" as const,
+		description: "SSH server access",
 	},
 	{
 		id: "opencode" as const,
@@ -289,7 +295,7 @@ export function Settings() {
 		queryKey: ["global-settings"],
 		queryFn: api.globalSettings,
 		staleTime: 5_000,
-		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "opencode" || activeSection === "worker-logs",
+		enabled: activeSection === "api-keys" || activeSection === "server" || activeSection === "ssh" || activeSection === "opencode" || activeSection === "worker-logs",
 	});
 
 	const updateMutation = useMutation({
@@ -676,6 +682,8 @@ export function Settings() {
 						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "server" ? (
 						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
+					) : activeSection === "ssh" ? (
+						<SshSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "opencode" ? (
 						<OpenCodeSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "worker-logs" ? (
@@ -1116,6 +1124,138 @@ function ServerSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 							⚠️ Restart required for changes to take effect
 						</div>
 					)}
+				</div>
+			)}
+		</div>
+	);
+}
+
+function SshSection({ settings, isLoading }: GlobalSettingsSectionProps) {
+	const queryClient = useQueryClient();
+	const [sshEnabled, setSshEnabled] = useState(settings?.ssh_enabled ?? false);
+	const [sshPort, setSshPort] = useState(settings?.ssh_port.toString() ?? "22");
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+
+	const { data: sshStatus } = useQuery({
+		queryKey: ["ssh-status"],
+		queryFn: api.sshStatus,
+		refetchInterval: 5_000,
+	});
+
+	useEffect(() => {
+		if (settings) {
+			setSshEnabled(settings.ssh_enabled);
+			setSshPort(settings.ssh_port.toString());
+		}
+	}, [settings]);
+
+	const updateMutation = useMutation({
+		mutationFn: api.updateGlobalSettings,
+		onSuccess: (result) => {
+			if (result.success) {
+				setMessage({ text: result.message, type: "success" });
+				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
+				queryClient.invalidateQueries({ queryKey: ["ssh-status"] });
+			} else {
+				setMessage({ text: result.message, type: "error" });
+			}
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+	});
+
+	const handleSave = () => {
+		const port = parseInt(sshPort, 10);
+		if (isNaN(port) || port < 1 || port > 65535) {
+			setMessage({ text: "Port must be between 1 and 65535", type: "error" });
+			return;
+		}
+		updateMutation.mutate({
+			ssh_enabled: sshEnabled,
+			ssh_port: port,
+		});
+	};
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">SSH Server</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Enable SSH access to this instance. Requires an authorized public key to be set by the hosting platform.
+				</p>
+			</div>
+
+			{isLoading ? (
+				<div className="flex items-center gap-2 text-ink-dull">
+					<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Loading settings...
+				</div>
+			) : (
+				<div className="flex flex-col gap-4">
+					{/* Status indicator */}
+					{sshStatus && (
+						<div className="rounded-lg border border-app-line bg-app-box p-4">
+							<div className="flex items-center gap-3">
+								<div className={`h-2 w-2 rounded-full ${sshStatus.running ? "bg-green-500" : "bg-zinc-500"}`} />
+								<div>
+									<span className="text-sm font-medium text-ink">
+										{sshStatus.running ? "Running" : "Stopped"}
+									</span>
+									{sshStatus.running && !sshStatus.has_authorized_key && (
+										<p className="text-sm text-yellow-400">
+											No authorized key configured. SSH connections will be rejected.
+										</p>
+									)}
+								</div>
+							</div>
+						</div>
+					)}
+
+					{/* Enable SSH toggle */}
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<div className="flex items-center justify-between">
+							<div>
+								<span className="text-sm font-medium text-ink">Enable SSH Server</span>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Start an sshd process on this instance
+								</p>
+							</div>
+							<Toggle size="sm" checked={sshEnabled} onCheckedChange={setSshEnabled} />
+						</div>
+					</div>
+
+					{/* Port input */}
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<label className="block">
+							<span className="text-sm font-medium text-ink">Port</span>
+							<p className="mt-0.5 text-sm text-ink-dull">Port number for the SSH server</p>
+							<Input
+								type="number"
+								value={sshPort}
+								onChange={(e) => setSshPort(e.target.value)}
+								min="1"
+								max="65535"
+								className="mt-2"
+							/>
+						</label>
+					</div>
+
+					<Button onClick={handleSave} loading={updateMutation.isPending}>
+						Save Changes
+					</Button>
+				</div>
+			)}
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${
+						message.type === "success"
+							? "border-green-800 bg-green-950/50 text-green-400"
+							: "border-red-800 bg-red-950/50 text-red-400"
+					}`}
+				>
+					{message.text}
 				</div>
 			)}
 		</div>

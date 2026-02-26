@@ -3,7 +3,7 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, settings, skills, system, tasks, webchat, workers,
+    models, providers, settings, skills, ssh, system, tasks, webchat, workers,
 };
 
 use axum::Json;
@@ -185,6 +185,11 @@ pub async fn start_http_server(
         .route("/update/apply", post(settings::update_apply))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
+        .route("/ssh/status", get(ssh::ssh_status))
+        .route(
+            "/ssh/authorized-key",
+            put(ssh::set_authorized_key).delete(ssh::clear_authorized_keys),
+        )
         .route("/links", get(links::list_links).post(links::create_link))
         .route(
             "/links/{from}/{to}",
