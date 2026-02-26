@@ -974,14 +974,13 @@ fn tool_result_content_to_string(content: &OneOrMany<rig::message::ToolResultCon
 pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
     messages
         .iter()
-        .map(|message| match message {
+        .filter_map(|message| match message {
             Message::User { content } => {
                 let parts: Vec<serde_json::Value> = content
                     .iter()
                     .filter_map(|c| match c {
-                        UserContent::Text(t) => {
-                            Some(serde_json::json!({"type": "text", "text": t.text}))
-                        }
+                        UserContent::Text(t) => (!t.text.trim().is_empty())
+                            .then(|| serde_json::json!({"type": "text", "text": t.text})),
                         UserContent::Image(image) => convert_image_anthropic(image),
                         UserContent::ToolResult(result) => Some(serde_json::json!({
                             "type": "tool_result",
@@ -991,15 +990,14 @@ pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde
                         _ => None,
                     })
                     .collect();
-                serde_json::json!({"role": "user", "content": parts})
+                (!parts.is_empty()).then(|| serde_json::json!({"role": "user", "content": parts}))
             }
             Message::Assistant { content, .. } => {
                 let parts: Vec<serde_json::Value> = content
                     .iter()
                     .filter_map(|c| match c {
-                        AssistantContent::Text(t) => {
-                            Some(serde_json::json!({"type": "text", "text": t.text}))
-                        }
+                        AssistantContent::Text(t) => (!t.text.trim().is_empty())
+                            .then(|| serde_json::json!({"type": "text", "text": t.text})),
                         AssistantContent::ToolCall(tc) => Some(serde_json::json!({
                             "type": "tool_use",
                             "id": tc.id,
@@ -1009,7 +1007,8 @@ pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde
                         _ => None,
                     })
                     .collect();
-                serde_json::json!({"role": "assistant", "content": parts})
+                (!parts.is_empty())
+                    .then(|| serde_json::json!({"role": "assistant", "content": parts}))
             }
         })
         .collect()
@@ -1301,8 +1300,14 @@ fn parse_anthropic_response(
     for block in content_blocks {
         match block["type"].as_str() {
             Some("text") => {
-                let text = block["text"].as_str().unwrap_or("").to_string();
-                assistant_content.push(AssistantContent::Text(Text { text }));
+                let text = block["text"].as_str().unwrap_or("");
+                if !text.trim().is_empty() {
+                    assistant_content.push(AssistantContent::Text(Text {
+                        text: text.to_string(),
+                    }));
+                } else {
+                    tracing::debug!("dropping empty text block in Anthropic response");
+                }
             }
             Some("tool_use") => {
                 let id = block["id"].as_str().unwrap_or("").to_string();
@@ -1327,21 +1332,35 @@ fn parse_anthropic_response(
         }
     }
 
-    let choice = OneOrMany::many(assistant_content).unwrap_or_else(|_| {
-        // Anthropic returns an empty content array when stop_reason is end_turn
-        // and the model has nothing further to say (e.g. after a side-effect-only
-        // tool call like react/skip). Treat this as a clean empty response rather
-        // than an error so the agentic loop terminates gracefully.
-        let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
-        tracing::debug!(
-            stop_reason,
-            content_blocks = content_blocks.len(),
-            "empty assistant_content from Anthropic — returning synthetic empty text"
-        );
-        OneOrMany::one(AssistantContent::Text(Text {
-            text: String::new(),
-        }))
-    });
+    let choice = match OneOrMany::many(assistant_content) {
+        Ok(choice) => choice,
+        Err(_) => {
+            // Anthropic can return an empty content array when stop_reason is
+            // end_turn and the model has nothing further to say (e.g. after a
+            // side-effect-only tool call like react/skip). Treat this as a clean
+            // no-op so the agentic loop terminates gracefully.
+            let stop_reason = body["stop_reason"].as_str().unwrap_or("unknown");
+            if stop_reason == "end_turn" {
+                tracing::debug!(
+                    stop_reason,
+                    content_blocks = content_blocks.len(),
+                    "empty assistant_content from Anthropic end_turn — returning synthetic whitespace placeholder"
+                );
+                OneOrMany::one(AssistantContent::Text(Text {
+                    text: " ".to_string(),
+                }))
+            } else {
+                tracing::warn!(
+                    stop_reason,
+                    content_blocks = content_blocks.len(),
+                    "unexpected empty assistant_content from Anthropic"
+                );
+                return Err(CompletionError::ResponseError(format!(
+                    "empty response from Anthropic (stop_reason: {stop_reason})"
+                )));
+            }
+        }
+    };
 
     let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
@@ -1556,6 +1575,7 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rig::message::Message;
 
     #[test]
     fn reverse_map_restores_original_tool_names() {
@@ -1610,5 +1630,85 @@ mod tests {
             "gpt-4o-mini"
         );
         assert_eq!(remap_model_name_for_api("openai", "zai/glm-5"), "zai/glm-5");
+    }
+
+    #[test]
+    fn parse_anthropic_response_drops_empty_text_blocks() {
+        let body = serde_json::json!({
+            "content": [
+                {"type": "text", "text": ""},
+                {"type": "text", "text": "   "},
+                {
+                    "type": "tool_use",
+                    "id": "call_1",
+                    "name": "reply",
+                    "input": {"content": "hi"}
+                }
+            ],
+            "usage": {"input_tokens": 1, "output_tokens": 2}
+        });
+
+        let response = parse_anthropic_response(body).expect("valid response");
+        let contents: Vec<_> = response.choice.iter().collect();
+        assert_eq!(contents.len(), 1);
+        assert!(matches!(contents[0], AssistantContent::ToolCall(_)));
+    }
+
+    #[test]
+    fn convert_messages_to_anthropic_omits_empty_text_messages() {
+        let messages = OneOrMany::many(vec![
+            Message::User {
+                content: OneOrMany::one(UserContent::text("   ")),
+            },
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::text("")),
+            },
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "reply",
+                    serde_json::json!({"content": "ok"}),
+                )),
+            },
+        ])
+        .expect("non-empty message list");
+
+        let converted = convert_messages_to_anthropic(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "assistant");
+        assert_eq!(converted[0]["content"][0]["type"], "tool_use");
+    }
+
+    #[test]
+    fn end_turn_placeholder_is_not_forwarded_back_to_anthropic() {
+        let body = serde_json::json!({
+            "content": [],
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 0}
+        });
+
+        let response = parse_anthropic_response(body).expect("valid response");
+        let history = OneOrMany::one(Message::Assistant {
+            id: None,
+            content: response.choice,
+        });
+
+        let converted = convert_messages_to_anthropic(&history);
+        assert!(converted.is_empty());
+    }
+
+    #[test]
+    fn empty_non_end_turn_response_returns_error() {
+        let body = serde_json::json!({
+            "content": [],
+            "stop_reason": "max_tokens",
+            "usage": {"input_tokens": 1, "output_tokens": 0}
+        });
+
+        let error = parse_anthropic_response(body).expect_err("should fail");
+        assert!(matches!(error, CompletionError::ResponseError(_)));
+        assert!(error.to_string().contains("stop_reason: max_tokens"));
     }
 }
