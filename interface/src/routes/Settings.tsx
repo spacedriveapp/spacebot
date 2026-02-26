@@ -2051,6 +2051,7 @@ function ChatGptOAuthDialog({
 					{!message && (
 						<DialogDescription>
 							Copy the device code below, then sign in to your OpenAI account to authorize access.
+							You must first <a href="https://chatgpt.com/security-settings" target="_blank" rel="noopener noreferrer" className="underline text-accent hover:text-accent/80">enable device code login</a> in your ChatGPT security settings.
 						</DialogDescription>
 					)}
 				</DialogHeader>
