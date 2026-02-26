@@ -18,7 +18,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Config** — hierarchical TOML with `Config`, `AgentConfig`, `ResolvedAgentConfig`, `Binding`, `MessagingConfig`. File watcher with event filtering and content hash debounce for hot-reload.
 - **Multi-agent** — per-agent database isolation, `Agent` struct bundles all dependencies
 - **Database connections** — SQLite + LanceDB + redb per-agent, migrations for all tables
-- **LLM** — `SpacebotModel` implements Rig's `CompletionModel`, routes through `LlmManager` via HTTP with retries and fallback chains across 11 providers (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, OpenCode Zen)
+- **LLM** — `SpacebotModel` implements Rig's `CompletionModel`, routes through `LlmManager` via HTTP with retries and fallback chains across 13 providers (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, OpenCode Zen, OpenCode Go)
 - **Model routing** — `RoutingConfig` with process-type defaults, task overrides, fallback chains
 - **Memory** — full stack: types, SQLite store (CRUD + graph), LanceDB (embeddings + vector + FTS), fastembed, hybrid search (RRF fusion). `memory_type` filter wired end-to-end through SearchConfig. `total_cmp` for safe sorting.
 - **Memory maintenance** — decay + prune implemented

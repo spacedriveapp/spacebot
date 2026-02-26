@@ -111,29 +111,44 @@ impl SpacebotModel {
                 .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
         };
 
-        if provider_id == "zai-coding-plan" || provider_id == "zhipu" {
-            let display_name = if provider_id == "zhipu" {
-                "Z.AI (GLM)"
-            } else {
-                "Z.AI Coding Plan"
-            };
-            let endpoint = format!(
-                "{}/chat/completions",
-                provider_config.base_url.trim_end_matches('/')
-            );
-            return self
-                .call_openai_compatible_with_optional_auth(
+        match provider_config.api_type {
+            ApiType::Anthropic => self.call_anthropic(request, &provider_config).await,
+            ApiType::OpenAiCompletions => self.call_openai(request, &provider_config).await,
+            ApiType::OpenAiChatCompletions => {
+                let endpoint = format!(
+                    "{}/chat/completions",
+                    provider_config.base_url.trim_end_matches('/')
+                );
+                let display_name = provider_config
+                    .name
+                    .as_deref()
+                    .unwrap_or("OpenAI-compatible provider");
+                self.call_openai_compatible_with_optional_auth(
                     request,
                     display_name,
                     &endpoint,
                     Some(provider_config.api_key.clone()),
+                    &[],
                 )
-                .await;
-        }
-
-        match provider_config.api_type {
-            ApiType::Anthropic => self.call_anthropic(request, &provider_config).await,
-            ApiType::OpenAiCompletions => self.call_openai(request, &provider_config).await,
+                .await
+            }
+            ApiType::KiloGateway => {
+                let endpoint = format!(
+                    "{}/chat/completions",
+                    provider_config.base_url.trim_end_matches('/')
+                );
+                self.call_openai_compatible_with_optional_auth(
+                    request,
+                    "Kilo Gateway",
+                    &endpoint,
+                    Some(provider_config.api_key.clone()),
+                    &[
+                        ("HTTP-Referer", "https://github.com/spacedriveapp/spacebot"),
+                        ("X-Title", "spacebot"),
+                    ],
+                )
+                .await
+            }
             ApiType::OpenAiResponses => self.call_openai_responses(request, &provider_config).await,
             ApiType::Gemini => {
                 self.call_openai_compatible(request, "Google Gemini", &provider_config)
@@ -450,6 +465,7 @@ impl SpacebotModel {
             &self.model_name,
             &request,
             effort,
+            provider_config.use_bearer_auth,
         );
 
         let is_oauth =
@@ -512,8 +528,9 @@ impl SpacebotModel {
 
         messages.extend(convert_messages_to_openai(&request.chat_history));
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "messages": messages,
         });
 
@@ -616,8 +633,9 @@ impl SpacebotModel {
 
         let input = convert_messages_to_openai_responses(&request.chat_history);
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "input": input,
         });
 
@@ -731,10 +749,16 @@ impl SpacebotModel {
         let base_url = provider_config.base_url.trim_end_matches('/');
         let endpoint_path = match provider_config.api_type {
             ApiType::OpenAiCompletions | ApiType::OpenAiResponses => "/v1/chat/completions",
-            ApiType::Gemini => "/chat/completions",
+            ApiType::OpenAiChatCompletions | ApiType::Gemini => "/chat/completions",
             ApiType::Anthropic => {
                 return Err(CompletionError::ProviderError(format!(
                     "{provider_display_name} is configured with anthropic API type, but this call expects an OpenAI-compatible API"
+                )));
+            }
+            _ => {
+                return Err(CompletionError::ProviderError(format!(
+                    "{provider_display_name} uses API type {:?} which does not support OpenAI-compatible calls",
+                    provider_config.api_type
                 )));
             }
         };
@@ -819,6 +843,11 @@ impl SpacebotModel {
         parse_openai_response(response_body, provider_display_name)
     }
 
+    /// Remap model name for providers that require a different format in API calls.
+    fn remap_model_name_for_api(&self) -> String {
+        remap_model_name_for_api(&self.provider, &self.model_name)
+    }
+
     /// Generic OpenAI-compatible API call with optional bearer auth.
     async fn call_openai_compatible_with_optional_auth(
         &self,
@@ -826,6 +855,7 @@ impl SpacebotModel {
         provider_display_name: &str,
         endpoint: &str,
         api_key: Option<String>,
+        extra_headers: &[(&str, &str)],
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let mut messages = Vec::new();
 
@@ -838,8 +868,9 @@ impl SpacebotModel {
 
         messages.extend(convert_messages_to_openai(&request.chat_history));
 
+        let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
-            "model": self.model_name,
+            "model": api_model_name,
             "messages": messages,
         });
 
@@ -869,15 +900,17 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self.llm_manager.http_client().post(endpoint);
+        let mut request_builder = self.llm_manager.http_client().post(endpoint);
 
-        let response = if let Some(api_key) = api_key {
-            response.header("authorization", format!("Bearer {api_key}"))
-        } else {
-            response
-        };
+        for (header_name, header_value) in extra_headers {
+            request_builder = request_builder.header(*header_name, *header_value);
+        }
 
-        let response = response
+        if let Some(api_key) = api_key {
+            request_builder = request_builder.header("authorization", format!("Bearer {api_key}"));
+        }
+
+        let response = request_builder
             .header("content-type", "application/json")
             .json(&body)
             .send()
@@ -1508,6 +1541,18 @@ fn parse_openai_error_message(response_text: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
+    if provider == "zai-coding-plan" {
+        // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
+        model_name
+            .strip_prefix("zai/")
+            .unwrap_or(model_name)
+            .to_string()
+    } else {
+        model_name.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1549,5 +1594,21 @@ mod tests {
         } else {
             panic!("expected ToolCall");
         }
+    }
+    #[test]
+    fn coding_plan_model_name_uses_plain_glm_id() {
+        assert_eq!(
+            remap_model_name_for_api("zai-coding-plan", "glm-5"),
+            "glm-5"
+        );
+        assert_eq!(
+            remap_model_name_for_api("zai-coding-plan", "zai/glm-5"),
+            "glm-5"
+        );
+        assert_eq!(
+            remap_model_name_for_api("openai", "gpt-4o-mini"),
+            "gpt-4o-mini"
+        );
+        assert_eq!(remap_model_name_for_api("openai", "zai/glm-5"), "zai/glm-5");
     }
 }

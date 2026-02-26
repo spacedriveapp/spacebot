@@ -197,6 +197,7 @@ impl Worker {
             self.deps.agent_id.clone(),
             self.id,
             self.channel_id.clone(),
+            self.deps.task_store.clone(),
             self.deps.event_tx.clone(),
             self.browser_config.clone(),
             self.screenshot_dir.clone(),

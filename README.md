@@ -184,7 +184,7 @@ coding = "ollama/qwen3"
 
 ```toml
 [llm.provider.my-provider]
-api_type = "openai_completions"  # or "anthropic"
+api_type = "openai_completions"  # or "openai_chat_completions", "openai_responses", "anthropic"
 base_url = "https://my-llm-host.example.com"
 api_key = "env:MY_PROVIDER_KEY"
 
@@ -192,7 +192,7 @@ api_key = "env:MY_PROVIDER_KEY"
 channel = "my-provider/my-model"
 ```
 
-Additional built-in providers include **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
+Additional built-in providers include **Kilo Gateway**, **OpenCode Go**, **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `kilo_key`, `opencode_go_key`, `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
 
 ### Skills
 
@@ -381,7 +381,7 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 ### Prerequisites
 
 - **Rust** 1.85+ ([rustup](https://rustup.rs/))
-- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen) — or use `spacebot auth login` for Anthropic OAuth
+- An LLM API key from any supported provider (Anthropic, OpenAI, OpenRouter, Kilo Gateway, Z.ai, Groq, Together, Fireworks, DeepSeek, xAI, Mistral, NVIDIA, MiniMax, Moonshot AI, OpenCode Zen, OpenCode Go) — or use `spacebot auth login` for Anthropic OAuth
 
 ### Build and Run
 

@@ -11,6 +11,70 @@ interface CortexChatPanelProps {
 	onClose?: () => void;
 }
 
+interface StarterPrompt {
+	label: string;
+	prompt: string;
+}
+
+const STARTER_PROMPTS: StarterPrompt[] = [
+	{
+		label: "Run health check",
+		prompt: "Give me an agent health report with active risks, stale work, and the top 3 fixes to do now.",
+	},
+	{
+		label: "Audit memories",
+		prompt: "Audit memory quality, find stale or contradictory memories, and propose exact cleanup actions.",
+	},
+	{
+		label: "Review workers",
+		prompt: "List recent worker runs, inspect failures, and summarize root cause plus next actions.",
+	},
+	{
+		label: "Draft task spec",
+		prompt: "Turn this goal into a task spec with subtasks, then move it to ready when it is execution-ready: ",
+	},
+];
+
+function EmptyCortexState({
+	channelId,
+	onStarterPrompt,
+	disabled,
+}: {
+	channelId?: string;
+	onStarterPrompt: (prompt: string) => void;
+	disabled: boolean;
+}) {
+	const contextHint = channelId
+		? "Current channel transcript is injected for this send only."
+		: "No channel transcript is injected. Operating at full agent scope.";
+
+	return (
+		<div className="mx-auto w-full max-w-md">
+			<div className="rounded-2xl border border-app-line/40 bg-app-darkBox/15 p-5">
+				<h3 className="font-plex text-base font-medium text-ink">Cortex chat</h3>
+				<p className="mt-2 text-sm leading-relaxed text-ink-dull">
+					System-level control for this agent: memory, tasks, worker inspection, and direct tool execution.
+				</p>
+				<p className="mt-2 text-tiny text-ink-faint">{contextHint}</p>
+
+				<div className="mt-4 grid grid-cols-2 gap-2">
+					{STARTER_PROMPTS.map((item) => (
+						<button
+							key={item.label}
+							type="button"
+							onClick={() => onStarterPrompt(item.prompt)}
+							disabled={disabled}
+							className="rounded-lg border border-app-line/35 bg-app-box/20 px-2.5 py-2 text-left text-tiny text-ink-dull transition-colors hover:border-app-line/60 hover:text-ink disabled:opacity-40"
+						>
+							{item.label}
+						</button>
+					))}
+				</div>
+			</div>
+		</div>
+	);
+}
+
 function ToolActivityIndicator({ activity }: { activity: ToolActivity[] }) {
 	if (activity.length === 0) return null;
 
@@ -128,7 +192,7 @@ function CortexChatInput({
 }
 
 export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanelProps) {
-	const { messages, isStreaming, error, toolActivity, sendMessage, newThread } = useCortexChat(agentId, channelId);
+	const { messages, threadId, isStreaming, error, toolActivity, sendMessage, newThread } = useCortexChat(agentId, channelId);
 	const [input, setInput] = useState("");
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -141,6 +205,11 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 		if (!trimmed || isStreaming) return;
 		setInput("");
 		sendMessage(trimmed);
+	};
+
+	const handleStarterPrompt = (prompt: string) => {
+		if (isStreaming || !threadId) return;
+		sendMessage(prompt);
 	};
 
 	return (
@@ -183,12 +252,6 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 			{/* Messages */}
 			<div className="flex-1 overflow-y-auto">
 				<div className="flex flex-col gap-5 p-3 pb-4">
-					{messages.length === 0 && !isStreaming && (
-						<div className="flex items-center justify-center py-12">
-							<p className="text-sm text-ink-faint">Ask the cortex anything</p>
-						</div>
-					)}
-
 					{messages.map((message) => (
 						<div key={message.id}>
 							{message.role === "user" ? (
@@ -221,6 +284,16 @@ export function CortexChatPanel({ agentId, channelId, onClose }: CortexChatPanel
 					<div ref={messagesEndRef} />
 				</div>
 			</div>
+
+			{messages.length === 0 && !isStreaming && (
+				<div className="px-3 pb-2">
+					<EmptyCortexState
+						channelId={channelId}
+						onStarterPrompt={handleStarterPrompt}
+						disabled={isStreaming || !threadId}
+					/>
+				</div>
+			)}
 
 			{/* Input */}
 			<div className="border-t border-app-line/50 p-3">

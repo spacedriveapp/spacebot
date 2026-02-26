@@ -8,6 +8,7 @@ const tabs = [
 	{ label: "Memories", to: "/agents/$agentId/memories" as const, exact: false },
 	{ label: "Ingest", to: "/agents/$agentId/ingest" as const, exact: false },
 	{ label: "Workers", to: "/agents/$agentId/workers" as const, exact: false },
+	{ label: "Tasks", to: "/agents/$agentId/tasks" as const, exact: false },
 	{ label: "Cortex", to: "/agents/$agentId/cortex" as const, exact: false },
 	{ label: "Skills", to: "/agents/$agentId/skills" as const, exact: false },
 	{ label: "Cron", to: "/agents/$agentId/cron" as const, exact: false },

@@ -11,6 +11,7 @@ use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
 use crate::messaging::webchat::WebChatAdapter;
 use crate::prompts::PromptEngine;
+use crate::tasks::TaskStore;
 use crate::update::SharedUpdateStatus;
 use crate::{ProcessEvent, ProcessId};
 
@@ -65,6 +66,8 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
+    /// Per-agent task stores for task CRUD operations.
+    pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
     pub runtime_configs: ArcSwap<HashMap<String, Arc<RuntimeConfig>>>,
     /// Per-agent MCP managers for status and reconnect APIs.
@@ -202,6 +205,14 @@ pub enum ApiEvent {
         link_id: String,
         channel_id: String,
     },
+    /// A task was created, updated, or deleted.
+    TaskUpdated {
+        agent_id: String,
+        task_number: i64,
+        status: String,
+        /// "created", "updated", or "deleted".
+        action: String,
+    },
 }
 
 impl ApiState {
@@ -225,6 +236,7 @@ impl ApiState {
             config_path: RwLock::new(PathBuf::new()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             sandboxes: ArcSwap::from_pointee(HashMap::new()),
@@ -438,6 +450,21 @@ impl ApiState {
                                     })
                                     .ok();
                             }
+                            ProcessEvent::TaskUpdated {
+                                task_number,
+                                status,
+                                action,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::TaskUpdated {
+                                        agent_id: agent_id.clone(),
+                                        task_number: *task_number,
+                                        status: status.clone(),
+                                        action: action.clone(),
+                                    })
+                                    .ok();
+                            }
                             _ => {}
                         }
                     }
@@ -489,6 +516,11 @@ impl ApiState {
     /// Set the cron schedulers for all agents.
     pub fn set_cron_schedulers(&self, schedulers: HashMap<String, Arc<Scheduler>>) {
         self.cron_schedulers.store(Arc::new(schedulers));
+    }
+
+    /// Set the task stores for all agents.
+    pub fn set_task_stores(&self, stores: HashMap<String, Arc<TaskStore>>) {
+        self.task_stores.store(Arc::new(stores));
     }
 
     /// Set the runtime configs for all agents.

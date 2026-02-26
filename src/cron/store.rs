@@ -78,7 +78,7 @@ impl CronStore {
                     let start: Option<i64> = row.try_get("active_start_hour").ok();
                     let end: Option<i64> = row.try_get("active_end_hour").ok();
                     match (start, end) {
-                        (Some(s), Some(e)) => Some((s as u8, e as u8)),
+                        (Some(s), Some(e)) if s != e => Some((s as u8, e as u8)),
                         _ => None,
                     }
                 },
@@ -168,7 +168,7 @@ impl CronStore {
                     let start: Option<i64> = row.try_get("active_start_hour").ok();
                     let end: Option<i64> = row.try_get("active_end_hour").ok();
                     match (start, end) {
-                        (Some(s), Some(e)) => Some((s as u8, e as u8)),
+                        (Some(s), Some(e)) if s != e => Some((s as u8, e as u8)),
                         _ => None,
                     }
                 },

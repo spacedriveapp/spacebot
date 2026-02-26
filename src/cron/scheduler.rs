@@ -76,6 +76,16 @@ pub struct CronContext {
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+
+/// RAII guard that clears an `AtomicBool` on drop, ensuring the flag is
+/// released even if the holding task panics.
+struct ExecutionGuard(Arc<std::sync::atomic::AtomicBool>);
+
+impl Drop for ExecutionGuard {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
@@ -93,6 +103,17 @@ impl std::fmt::Debug for Scheduler {
 
 impl Scheduler {
     pub fn new(context: CronContext) -> Self {
+        let tz_label = cron_timezone_label(&context);
+        if tz_label == SYSTEM_TIMEZONE_LABEL {
+            tracing::warn!(
+                agent_id = %context.deps.agent_id,
+                "no cron_timezone configured; active_hours will use the host system's local time, \
+                 which is often UTC in Docker/containerized environments — set [defaults] \
+                 cron_timezone to an IANA timezone like \"America/New_York\" if jobs are \
+                 skipping their active window"
+            );
+        }
+
         Self {
             jobs: Arc::new(RwLock::new(HashMap::new())),
             timers: Arc::new(RwLock::new(HashMap::new())),
@@ -118,7 +139,7 @@ impl Scheduler {
             prompt: config.prompt,
             interval_secs: config.interval_secs,
             delivery_target,
-            active_hours: config.active_hours,
+            active_hours: normalize_active_hours(config.active_hours),
             enabled: config.enabled,
             run_once: config.run_once,
             consecutive_failures: 0,
@@ -197,6 +218,8 @@ impl Scheduler {
             // Skip catch-up ticks if processing falls behind — maintain original cadence.
             ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
+            let execution_lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
             loop {
                 ticker.tick().await;
 
@@ -232,72 +255,84 @@ impl Scheduler {
                     }
                 }
 
+                if execution_lock.load(std::sync::atomic::Ordering::Acquire) {
+                    tracing::debug!(cron_id = %job_id, "previous execution still running, skipping tick");
+                    continue;
+                }
+
                 tracing::info!(cron_id = %job_id, "cron job firing");
+                execution_lock.store(true, std::sync::atomic::Ordering::Release);
 
-                match run_cron_job(&job, &context).await {
-                    Ok(()) => {
-                        // Reset failure count on success
-                        let mut j = jobs.write().await;
-                        if let Some(j) = j.get_mut(&job_id) {
-                            j.consecutive_failures = 0;
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(
-                            cron_id = %job_id,
-                            %error,
-                            "cron job execution failed"
-                        );
+                let exec_jobs = jobs.clone();
+                let exec_context = context.clone();
+                let exec_job_id = job_id.clone();
+                let guard = ExecutionGuard(execution_lock.clone());
 
-                        let should_disable = {
-                            let mut j = jobs.write().await;
-                            if let Some(j) = j.get_mut(&job_id) {
-                                j.consecutive_failures += 1;
-                                j.consecutive_failures >= MAX_CONSECUTIVE_FAILURES
-                            } else {
-                                false
+                tokio::spawn(async move {
+                    let _guard = guard;
+                    match run_cron_job(&job, &exec_context).await {
+                        Ok(()) => {
+                            let mut j = exec_jobs.write().await;
+                            if let Some(j) = j.get_mut(&exec_job_id) {
+                                j.consecutive_failures = 0;
                             }
-                        };
-
-                        if should_disable {
-                            tracing::warn!(
-                                cron_id = %job_id,
-                                "circuit breaker tripped after {MAX_CONSECUTIVE_FAILURES} consecutive failures, disabling"
+                        }
+                        Err(error) => {
+                            tracing::error!(
+                                cron_id = %exec_job_id,
+                                %error,
+                                "cron job execution failed"
                             );
 
-                            {
-                                let mut j = jobs.write().await;
-                                if let Some(j) = j.get_mut(&job_id) {
-                                    j.enabled = false;
+                            let should_disable = {
+                                let mut j = exec_jobs.write().await;
+                                if let Some(j) = j.get_mut(&exec_job_id) {
+                                    j.consecutive_failures += 1;
+                                    j.consecutive_failures >= MAX_CONSECUTIVE_FAILURES
+                                } else {
+                                    false
+                                }
+                            };
+
+                            if should_disable {
+                                tracing::warn!(
+                                    cron_id = %exec_job_id,
+                                    "circuit breaker tripped after {MAX_CONSECUTIVE_FAILURES} consecutive failures, disabling"
+                                );
+
+                                {
+                                    let mut j = exec_jobs.write().await;
+                                    if let Some(j) = j.get_mut(&exec_job_id) {
+                                        j.enabled = false;
+                                    }
+                                }
+
+                                if let Err(error) =
+                                    exec_context.store.update_enabled(&exec_job_id, false).await
+                                {
+                                    tracing::error!(%error, "failed to persist cron job disabled state");
                                 }
                             }
+                        }
+                    }
 
-                            // Persist the disabled state
-                            if let Err(error) = context.store.update_enabled(&job_id, false).await {
-                                tracing::error!(%error, "failed to persist cron job disabled state");
+                    if job.run_once {
+                        tracing::info!(cron_id = %exec_job_id, "run-once cron completed, disabling");
+
+                        {
+                            let mut j = exec_jobs.write().await;
+                            if let Some(j) = j.get_mut(&exec_job_id) {
+                                j.enabled = false;
                             }
+                        }
 
-                            break;
+                        if let Err(error) =
+                            exec_context.store.update_enabled(&exec_job_id, false).await
+                        {
+                            tracing::error!(%error, "failed to persist run-once cron disabled state");
                         }
                     }
-                }
-
-                if job.run_once {
-                    tracing::info!(cron_id = %job_id, "run-once cron completed, disabling");
-
-                    {
-                        let mut j = jobs.write().await;
-                        if let Some(j) = j.get_mut(&job_id) {
-                            j.enabled = false;
-                        }
-                    }
-
-                    if let Err(error) = context.store.update_enabled(&job_id, false).await {
-                        tracing::error!(%error, "failed to persist run-once cron disabled state");
-                    }
-
-                    break;
-                }
+                });
             }
         });
 
@@ -424,7 +459,7 @@ impl Scheduler {
                         prompt: config.prompt,
                         interval_secs: config.interval_secs,
                         delivery_target,
-                        active_hours: config.active_hours,
+                        active_hours: normalize_active_hours(config.active_hours),
                         enabled: true,
                         run_once: config.run_once,
                         consecutive_failures: 0,
@@ -512,11 +547,19 @@ fn current_hour_and_timezone(context: &CronContext, cron_id: &str) -> (u8, Strin
 }
 
 fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool {
-    if start_hour <= end_hour {
+    if start_hour == end_hour {
+        return true;
+    }
+    if start_hour < end_hour {
         current_hour >= start_hour && current_hour < end_hour
     } else {
         current_hour >= start_hour || current_hour < end_hour
     }
+}
+
+/// Normalize degenerate active_hours where start == end to None (always active).
+fn normalize_active_hours(active_hours: Option<(u8, u8)>) -> Option<(u8, u8)> {
+    active_hours.filter(|(start, end)| start != end)
 }
 
 fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
@@ -613,19 +656,23 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     // when the sender is dropped (message_rx returns None).
     drop(channel_tx);
 
+    let deadline = tokio::time::Instant::now() + timeout;
     loop {
-        match tokio::time::timeout(timeout, response_rx.recv()).await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(cron_id = %job.id, "cron job timed out after {timeout:?}");
+            channel_handle.abort();
+            break;
+        }
+        match tokio::time::timeout(remaining, response_rx.recv()).await {
             Ok(Some(OutboundResponse::Text(text))) => {
                 collected_text.push(text);
             }
             Ok(Some(OutboundResponse::RichMessage { text, .. })) => {
                 collected_text.push(text);
             }
-            Ok(Some(_)) => {
-                // Status updates, stream chunks, etc. — ignore for cron jobs
-            }
+            Ok(Some(_)) => {}
             Ok(None) => {
-                // Channel finished (response_tx dropped)
                 break;
             }
             Err(_) => {
@@ -692,7 +739,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::hour_in_active_window;
+    use super::{hour_in_active_window, normalize_active_hours};
 
     #[test]
     fn test_hour_in_active_window_non_wrapping() {
@@ -707,5 +754,22 @@ mod tests {
         assert!(hour_in_active_window(22, 22, 6));
         assert!(hour_in_active_window(3, 22, 6));
         assert!(!hour_in_active_window(12, 22, 6));
+    }
+
+    #[test]
+    fn test_hour_in_active_window_equal_start_end_is_always_active() {
+        assert!(hour_in_active_window(0, 0, 0));
+        assert!(hour_in_active_window(12, 0, 0));
+        assert!(hour_in_active_window(23, 0, 0));
+        assert!(hour_in_active_window(5, 5, 5));
+        assert!(hour_in_active_window(14, 14, 14));
+    }
+
+    #[test]
+    fn test_normalize_active_hours() {
+        assert_eq!(normalize_active_hours(Some((0, 0))), None);
+        assert_eq!(normalize_active_hours(Some((12, 12))), None);
+        assert_eq!(normalize_active_hours(Some((9, 17))), Some((9, 17)));
+        assert_eq!(normalize_active_hours(None), None);
     }
 }

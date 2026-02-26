@@ -1,0 +1,31 @@
+Things to Fix:
+  ☐ Add behaviour settings per channel
+  ☐ Force branching before response
+
+Cortex Loops:
+  ☐ Check tasks + elevate todos
+  ☐ Improve bulletin
+  ☐ Better cortex loop context
+
+Improvements:
+  ☐ Improve cron
+  ☐ Named adapters
+  ☐ Thread names should be better, match channel name style
+
+Live Data Sources (maybe not needed):
+  ☐ Repos
+  ☐ Documentation
+
+Features:
+  ☐ Agent creation flow / onboarding UI
+  ☐ Cortex chat context inspection — should be able to read the full channel context at any time
+  ☐ Add streaming support
+
+Urgent:
+  ☐ Send customer emails ASAP
+
+Settings:
+  ☐ Disable sandboxing / sandbox settings
+
+Notes:
+  Testing inter-agent comms: send a message to the Spacebot Tech Lead, who forwards to the Community Manager, who picks a random word relating to fruit, technology, or space exploration, sending it back up the chain.

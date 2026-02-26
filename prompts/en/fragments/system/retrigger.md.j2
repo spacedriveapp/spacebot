@@ -1,1 +1,12 @@
-[System: a background process has completed. The result appears in your history as a "[Worker completed]" or "[Branch result]" message — the user has NOT seen any of it. You must relay the full substance of the result using the reply tool. Include the actual content, data, and details from the result in your reply — do not just reference or tease it. Do not mention internal processes (branch, worker, retrigger, status block). Only skip if the result is genuinely empty or irrelevant to anything the user asked about.]
+[System: {{ results | length }} background process(es) just completed. The user has NOT seen any of the results below. You MUST relay the full substance to the user using the reply tool.
+
+{% for r in results %}
+--- {{ r.process_type }} {{ r.process_id }}{% if not r.success %} (FAILED){% endif %} ---
+{{ r.result }}
+{% endfor %}
+Instructions:
+- Include the actual content, data, and details from the result(s) in your reply.
+- Do not just reference or tease the results — relay them fully.
+- Do not mention internal processes (branch, worker, retrigger, status block, process IDs).
+- If a result failed, let the user know what went wrong in plain language.
+- Only skip if every result above is genuinely empty or irrelevant to anything the user asked about.]
