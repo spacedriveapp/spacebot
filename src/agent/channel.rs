@@ -33,6 +33,24 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
 
+/// A background process result waiting to be relayed to the user via retrigger.
+///
+/// Instead of injecting raw result text into history as a fake "User" message
+/// (where it can be confused with prior results), pending results are accumulated
+/// here and embedded directly into the retrigger message text. This gives the
+/// LLM unambiguous, ID-tagged results to relay.
+#[derive(Clone, Debug)]
+struct PendingResult {
+    /// "branch" or "worker"
+    process_type: &'static str,
+    /// The branch or worker ID (short UUID).
+    process_id: String,
+    /// The result/conclusion text from the process.
+    result: String,
+    /// Whether the process completed successfully.
+    success: bool,
+}
+
 /// Shared state that channel tools need to act on the channel.
 ///
 /// Wrapped in Arc and passed to tools (branch, spawn_worker, route, cancel)
@@ -149,6 +167,9 @@ pub struct Channel {
     pending_retrigger_metadata: HashMap<String, serde_json::Value>,
     /// Deadline for firing the pending retrigger (debounce timer).
     retrigger_deadline: Option<tokio::time::Instant>,
+    /// Background process results waiting to be embedded in the next retrigger.
+    /// Accumulated during the debounce window and drained when the retrigger fires.
+    pending_results: Vec<PendingResult>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
 }
@@ -247,6 +268,7 @@ impl Channel {
             pending_retrigger: false,
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
+            pending_results: Vec::new(),
             send_agent_message_tool,
         };
 
@@ -605,6 +627,7 @@ impl Channel {
                 &system_prompt,
                 &conversation_id,
                 attachment_parts,
+                false, // not a retrigger
             )
             .await?;
 
@@ -775,11 +798,34 @@ impl Channel {
                 &system_prompt,
                 &message.conversation_id,
                 attachment_content,
+                is_retrigger,
             )
             .await?;
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
+
+        // After a successful retrigger relay, inject a compact record into
+        // history so the conversation has context about what was relayed.
+        // The retrigger turn itself is rolled back by apply_history_after_turn
+        // (PromptCancelled leaves dangling tool calls), so without this the
+        // LLM would have no memory of the background result on subsequent turns.
+        if is_retrigger && replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            // Extract the result summaries from the metadata we attached in
+            // flush_pending_retrigger, so we record only the substance (not
+            // the retrigger instructions/template scaffolding).
+            let summary = message
+                .metadata
+                .get("retrigger_result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("[background work completed and result relayed to user]");
+
+            let mut history = self.state.history.write().await;
+            history.push(rig::message::Message::Assistant {
+                id: None,
+                content: OneOrMany::one(rig::message::AssistantContent::text(summary)),
+            });
+        }
 
         // Check context size and trigger compaction if needed
         if let Err(error) = self.compactor.check_and_compact().await {
@@ -947,6 +993,7 @@ impl Channel {
         system_prompt: &str,
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
+        is_retrigger: bool,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
@@ -1045,7 +1092,14 @@ impl Channel {
 
         {
             let mut guard = self.state.history.write().await;
-            apply_history_after_turn(&result, &mut guard, history, history_len_before, &self.id);
+            apply_history_after_turn(
+                &result,
+                &mut guard,
+                history,
+                history_len_before,
+                &self.id,
+                is_retrigger,
+            );
         }
 
         if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
@@ -1294,10 +1348,15 @@ impl Channel {
                     self.branch_reply_targets.remove(branch_id);
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
                 } else {
-                    // Regular branch: inject conclusion into history
-                    let mut history = self.state.history.write().await;
-                    let branch_message = format!("[Branch result]: {conclusion}");
-                    history.push(rig::message::Message::from(branch_message));
+                    // Regular branch: accumulate result for the next retrigger.
+                    // The result text will be embedded directly in the retrigger
+                    // message so the LLM knows exactly which process produced it.
+                    self.pending_results.push(PendingResult {
+                        process_type: "branch",
+                        process_id: branch_id.to_string(),
+                        result: conclusion.clone(),
+                        success: true,
+                    });
                     should_retrigger = true;
 
                     if let Some(message_id) = self.branch_reply_targets.remove(branch_id) {
@@ -1307,7 +1366,7 @@ impl Channel {
                         );
                     }
 
-                    tracing::info!(branch_id = %branch_id, "branch result incorporated");
+                    tracing::info!(branch_id = %branch_id, "branch result queued for retrigger");
                 }
             }
             ProcessEvent::WorkerStarted {
@@ -1347,13 +1406,18 @@ impl Channel {
                 self.state.worker_inputs.write().await.remove(worker_id);
 
                 if *notify {
-                    let mut history = self.state.history.write().await;
-                    let worker_message = format!("[Worker {worker_id} completed]: {result}");
-                    history.push(rig::message::Message::from(worker_message));
+                    // Accumulate result for the next retrigger instead of
+                    // injecting into history as a fake user message.
+                    self.pending_results.push(PendingResult {
+                        process_type: "worker",
+                        process_id: worker_id.to_string(),
+                        result: result.clone(),
+                        success: *success,
+                    });
                     should_retrigger = true;
                 }
 
-                tracing::info!(worker_id = %worker_id, "worker completed");
+                tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
             }
             _ => {}
         }
@@ -1369,6 +1433,28 @@ impl Channel {
                     max = MAX_RETRIGGERS_PER_TURN,
                     "retrigger cap reached, suppressing further retriggers until next user message"
                 );
+                // Drain any pending results into history as assistant messages
+                // so they aren't silently lost when the cap prevents a retrigger.
+                if !self.pending_results.is_empty() {
+                    let results = std::mem::take(&mut self.pending_results);
+                    let mut history = self.state.history.write().await;
+                    for r in &results {
+                        let status = if r.success { "completed" } else { "failed" };
+                        let summary = format!(
+                            "[Background {} {} {}]: {}",
+                            r.process_type, r.process_id, status, r.result
+                        );
+                        history.push(rig::message::Message::Assistant {
+                            id: None,
+                            content: OneOrMany::one(rig::message::AssistantContent::text(summary)),
+                        });
+                    }
+                    tracing::info!(
+                        channel_id = %self.id,
+                        count = results.len(),
+                        "injected capped results into history as assistant messages"
+                    );
+                }
             } else {
                 self.pending_retrigger = true;
                 // Merge metadata (later events override earlier ones for the same key)
@@ -1387,39 +1473,107 @@ impl Channel {
 
     /// Flush the pending retrigger: send a synthetic system message to re-trigger
     /// the channel LLM so it can process background results and respond.
+    ///
+    /// Drains `pending_results` and embeds them directly in the retrigger message
+    /// so the LLM sees exactly which process(es) completed and what they returned.
+    /// No result text is left floating in history as an ambiguous user message.
+    ///
+    /// Results are drained only after the synthetic message is queued
+    /// successfully. On transient failures, retrigger state is kept and retried
+    /// so background results are not silently lost.
     async fn flush_pending_retrigger(&mut self) {
         self.retrigger_deadline = None;
 
         if !self.pending_retrigger {
             return;
         }
-        self.pending_retrigger = false;
-        let metadata = std::mem::take(&mut self.pending_retrigger_metadata);
 
         let Some(conversation_id) = &self.conversation_id else {
+            tracing::warn!(
+                channel_id = %self.id,
+                "retrigger pending but conversation_id is missing, dropping pending results"
+            );
+            self.pending_retrigger = false;
+            self.pending_retrigger_metadata.clear();
+            self.pending_results.clear();
             return;
         };
 
-        self.retrigger_count += 1;
-        tracing::info!(
-            channel_id = %self.id,
-            retrigger_count = self.retrigger_count,
-            "firing debounced retrigger"
-        );
+        if self.pending_results.is_empty() {
+            tracing::warn!(
+                channel_id = %self.id,
+                "retrigger fired but no pending results to relay"
+            );
+            self.pending_retrigger = false;
+            self.pending_retrigger_metadata.clear();
+            return;
+        }
+
+        let result_count = self.pending_results.len();
+
+        // Build per-result summaries for the template.
+        let result_items: Vec<_> = self
+            .pending_results
+            .iter()
+            .map(|r| crate::prompts::engine::RetriggerResult {
+                process_type: r.process_type.to_string(),
+                process_id: r.process_id.clone(),
+                success: r.success,
+                result: r.result.clone(),
+            })
+            .collect();
 
         let retrigger_message = match self
             .deps
             .runtime_config
             .prompts
             .load()
-            .render_system_retrigger()
+            .render_system_retrigger(&result_items)
         {
             Ok(message) => message,
             Err(error) => {
-                tracing::error!(%error, "failed to render retrigger message");
+                tracing::error!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to render retrigger message, retrying"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
                 return;
             }
         };
+
+        // Build a compact summary of the results to inject into history after
+        // a successful relay. This goes into metadata so handle_message can
+        // pull it out without re-parsing the template.
+        let result_summary = self
+            .pending_results
+            .iter()
+            .map(|r| {
+                let status = if r.success { "completed" } else { "failed" };
+                // Truncate very long results for the history record — the user
+                // already saw the full version via the reply tool.
+                let truncated = if r.result.len() > 500 {
+                    let boundary = r.result.floor_char_boundary(500);
+                    format!("{}... [truncated]", &r.result[..boundary])
+                } else {
+                    r.result.clone()
+                };
+                format!(
+                    "[{} {} {}]: {}",
+                    r.process_type, r.process_id, status, truncated
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let mut metadata = self.pending_retrigger_metadata.clone();
+        metadata.insert(
+            "retrigger_result_summary".to_string(),
+            serde_json::Value::String(result_summary),
+        );
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1432,8 +1586,41 @@ impl Channel {
             metadata,
             formatted_author: None,
         };
-        if let Err(error) = self.self_tx.try_send(synthetic) {
-            tracing::warn!(%error, "failed to re-trigger channel after process completion");
+        match self.self_tx.try_send(synthetic) {
+            Ok(()) => {
+                self.retrigger_count += 1;
+                tracing::info!(
+                    channel_id = %self.id,
+                    retrigger_count = self.retrigger_count,
+                    result_count,
+                    "firing debounced retrigger with {} result(s)",
+                    result_count,
+                );
+
+                self.pending_retrigger = false;
+                self.pending_retrigger_metadata.clear();
+                self.pending_results.clear();
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    result_count,
+                    "channel self queue is full, retrying retrigger"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    "failed to re-trigger channel: queue is closed, dropping pending results"
+                );
+                self.pending_retrigger = false;
+                self.pending_retrigger_metadata.clear();
+                self.pending_results.clear();
+            }
         }
     }
 
@@ -2479,14 +2666,17 @@ async fn download_text_attachment(
 /// Write history back after the agentic loop completes.
 ///
 /// On success or `MaxTurnsError`, the history Rig built is consistent and safe
-/// to keep. On `PromptCancelled` or hard errors, it must be rolled back:
+/// to keep.
 ///
-/// - `PromptCancelled`: Rig snapshots history *before* the tool batch runs, so
-///   the carried history has the assistant's tool-call message but no tool
-///   results. Writing it back leaves a dangling tool-call that poisons every
-///   subsequent turn with "tool call result does not follow tool call (2013)".
-/// - Hard errors: Rig mutates history in-place and may have appended a
-///   tool-call message before the error was raised.
+/// On `PromptCancelled` (e.g. reply tool fired), Rig's carried history has
+/// the user prompt + the assistant's tool-call message but no tool results.
+/// Writing it back wholesale would leave a dangling tool-call that poisons
+/// every subsequent turn. Instead, we preserve only the **first user text
+/// message** Rig appended (the real user prompt), while discarding assistant
+/// tool-call messages and tool-result user messages.
+///
+/// On hard errors, we truncate to the pre-turn snapshot since the history
+/// state is unpredictable.
 ///
 /// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
 /// before raising it, so history is consistent.
@@ -2496,19 +2686,66 @@ fn apply_history_after_turn(
     history: Vec<rig::message::Message>,
     history_len_before: usize,
     channel_id: &str,
+    is_retrigger: bool,
 ) {
     match result {
         Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
             *guard = history;
         }
-        Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
+        Err(rig::completion::PromptError::PromptCancelled { .. }) => {
+            // Rig appended the user prompt and possibly an assistant tool-call
+            // message to history before cancellation. We keep only the first
+            // user text message (the actual user prompt) and discard everything else
+            // (assistant tool-calls without results, tool-result user messages).
+            //
+            // Exception: retrigger turns. The "user prompt" Rig pushed is actually
+            // the synthetic system retrigger message (internal template scaffolding),
+            // not a real user message. We inject a proper summary record separately
+            // in handle_message, so don't preserve anything from retrigger turns.
+            if is_retrigger {
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    rolled_back = history.len().saturating_sub(history_len_before),
+                    "discarding retrigger turn history (summary injected separately)"
+                );
+                return;
+            }
+            let new_messages = &history[history_len_before..];
+            let mut preserved = 0usize;
+            if let Some(message) = new_messages.iter().find(|m| is_user_text_message(m)) {
+                guard.push(message.clone());
+                preserved = 1;
+            }
+            // Skip: Assistant messages (contain tool calls without results),
+            // user ToolResult messages, and internal correction prompts.
+            tracing::debug!(
+                channel_id = %channel_id,
+                total_new = new_messages.len(),
+                preserved,
+                discarded = new_messages.len() - preserved,
+                "selectively preserved first user message after PromptCancelled"
+            );
+        }
+        Err(_) => {
+            // Hard errors: history state is unpredictable, truncate to snapshot.
             tracing::debug!(
                 channel_id = %channel_id,
                 rolled_back = history.len().saturating_sub(history_len_before),
-                "rolling back history after cancelled or failed turn"
+                "rolling back history after failed turn"
             );
             guard.truncate(history_len_before);
         }
+    }
+}
+
+/// Returns true if a message is a User message containing only text content
+/// (i.e., an actual user prompt, not a tool result).
+fn is_user_text_message(message: &rig::message::Message) -> bool {
+    match message {
+        rig::message::Message::User { content } => content
+            .iter()
+            .all(|c| matches!(c, rig::message::UserContent::Text(_))),
+        _ => false,
     }
 }
 
@@ -2558,6 +2795,7 @@ mod tests {
             history.clone(),
             len_before,
             "test",
+            false,
         );
 
         assert_eq!(guard, history);
@@ -2576,20 +2814,21 @@ mod tests {
             prompt: Box::new(user_msg("prompt")),
         });
 
-        apply_history_after_turn(&err, &mut guard, history.clone(), len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history.clone(), len_before, "test", false);
 
         assert_eq!(guard, history);
     }
 
-    /// PromptCancelled carries history missing tool results — roll back to snapshot.
+    /// PromptCancelled preserves user text messages but discards assistant
+    /// tool-call messages (which have no matching tool results).
     #[test]
-    fn prompt_cancelled_rolls_back() {
+    fn prompt_cancelled_preserves_user_prompt() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        // Rig appended a tool-call message before cancelling — simulated by
-        // the longer history passed as `history`.
+        // Simulate what Rig does: push user prompt + assistant tool-call
         let mut history = initial.clone();
-        history.push(user_msg("[dangling tool-call]"));
+        history.push(user_msg("new user prompt")); // should be preserved
+        history.push(assistant_msg("tool call without result")); // should be discarded
         let len_before = initial.len();
 
         let err = Err(PromptError::PromptCancelled {
@@ -2597,11 +2836,111 @@ mod tests {
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        // User prompt should be preserved, assistant tool-call discarded
+        let mut expected = initial;
+        expected.push(user_msg("new user prompt"));
+        assert_eq!(
+            guard, expected,
+            "user text messages should be preserved, assistant messages discarded"
+        );
+    }
+
+    /// PromptCancelled discards tool-result User messages (ToolResult content).
+    #[test]
+    fn prompt_cancelled_discards_tool_results() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("new user prompt")); // preserved
+        // Simulate an assistant tool-call followed by a tool-result user message
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "hello"}),
+            )),
+        });
+        // A tool-result message is a User message with ToolResult content —
+        // is_user_text_message returns false for these, so they get discarded.
+        history.push(Message::User {
+            content: rig::OneOrMany::one(rig::message::UserContent::ToolResult(
+                rig::message::ToolResult {
+                    id: "call_1".to_string(),
+                    call_id: None,
+                    content: rig::OneOrMany::one(rig::message::ToolResultContent::text("ok")),
+                },
+            )),
+        });
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        let mut expected = initial;
+        expected.push(user_msg("new user prompt"));
+        assert_eq!(
+            guard, expected,
+            "tool-call and tool-result messages should be discarded"
+        );
+    }
+
+    /// PromptCancelled preserves only the first user prompt and drops any
+    /// internal correction prompts that may have been appended on retry.
+    #[test]
+    fn prompt_cancelled_preserves_only_first_user_prompt() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("real user prompt")); // preserved
+        history.push(assistant_msg("bad tool syntax"));
+        history.push(user_msg("Please proceed and use the available tools.")); // dropped
+        history.push(assistant_msg("tool call without result"));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
+
+        let mut expected = initial;
+        expected.push(user_msg("real user prompt"));
+        assert_eq!(
+            guard, expected,
+            "only the first user prompt should be preserved"
+        );
+    }
+
+    /// PromptCancelled on retrigger turns discards everything — the synthetic
+    /// system message is internal scaffolding, not a real user message.
+    /// A summary record is injected separately in handle_message.
+    #[test]
+    fn prompt_cancelled_retrigger_discards_all() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut history = initial.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg("relaying result..."));
+        let len_before = initial.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
 
         assert_eq!(
             guard, initial,
-            "history should be rolled back to pre-turn snapshot"
+            "retrigger turns should discard all new messages"
         );
     }
 
@@ -2618,7 +2957,7 @@ mod tests {
             CompletionError::ResponseError("API error".to_string()),
         ));
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -2639,7 +2978,7 @@ mod tests {
             "nonexistent_tool".to_string(),
         )));
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -2659,7 +2998,7 @@ mod tests {
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert!(
             guard.is_empty(),
@@ -2681,7 +3020,7 @@ mod tests {
             reason: "skip delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test");
+        apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
         assert_eq!(
             guard, initial,
@@ -2689,16 +3028,26 @@ mod tests {
         );
     }
 
-    /// After rollback, the next turn starts clean with no dangling messages.
+    /// After PromptCancelled, the next turn starts clean with user messages
+    /// preserved but no dangling assistant tool-calls.
     #[test]
     fn next_turn_is_clean_after_prompt_cancelled() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
         let mut poisoned_history = initial.clone();
-        poisoned_history.push(user_msg("[dangling tool-call without result]"));
+        // Rig appends: user prompt + assistant tool-call (dangling, no result)
+        poisoned_history.push(user_msg("what's up"));
+        poisoned_history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "hey!"}),
+            )),
+        });
         let len_before = initial.len();
 
-        // First turn: cancelled (reply tool fired)
+        // First turn: cancelled (reply tool fired) — not a retrigger
         apply_history_after_turn(
             &Err(PromptError::PromptCancelled {
                 chat_history: Box::new(poisoned_history.clone()),
@@ -2708,6 +3057,18 @@ mod tests {
             poisoned_history,
             len_before,
             "test",
+            false,
+        );
+
+        // User prompt preserved, assistant tool-call discarded
+        assert_eq!(
+            guard.len(),
+            initial.len() + 1,
+            "user prompt should be preserved"
+        );
+        assert!(
+            matches!(&guard[guard.len() - 1], Message::User { .. }),
+            "last message should be the preserved user prompt"
         );
 
         // Second turn: new user message appended, successful response
@@ -2722,22 +3083,19 @@ mod tests {
             history2.clone(),
             len_before2,
             "test",
+            false,
         );
 
         assert_eq!(
             guard, history2,
             "second turn should succeed with clean history"
         );
-        // Crucially: no dangling tool-call in history
+        // No dangling tool-call assistant messages in history
         let has_dangling = guard.iter().any(|m| {
-            if let Message::User { content } = m {
-                content.iter().any(|c| {
-                    if let rig::message::UserContent::Text(t) = c {
-                        t.text.contains("dangling")
-                    } else {
-                        false
-                    }
-                })
+            if let Message::Assistant { content, .. } = m {
+                content
+                    .iter()
+                    .any(|c| matches!(c, rig::message::AssistantContent::ToolCall(_)))
             } else {
                 false
             }

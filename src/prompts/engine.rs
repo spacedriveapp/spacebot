@@ -1,8 +1,22 @@
 use crate::error::Result;
 use anyhow::Context;
 use minijinja::{Environment, Value, context};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// A completed background process result, passed to the retrigger template.
+#[derive(Clone, Debug, Serialize)]
+pub struct RetriggerResult {
+    /// "branch" or "worker"
+    pub process_type: String,
+    /// The branch or worker ID (short UUID).
+    pub process_id: String,
+    /// Whether the process completed successfully.
+    pub success: bool,
+    /// The result/conclusion text from the process.
+    pub result: String,
+}
 
 /// Template engine for rendering system prompts with dynamic variables.
 ///
@@ -266,9 +280,17 @@ impl PromptEngine {
         )
     }
 
-    /// Convenience method for rendering system retrigger message.
-    pub fn render_system_retrigger(&self) -> Result<String> {
-        self.render_static("fragments/system/retrigger")
+    /// Render the retrigger message with specific process results embedded.
+    ///
+    /// Each result includes the process type, ID, and full result text so the
+    /// LLM knows exactly what completed and what to relay to the user.
+    pub fn render_system_retrigger(&self, results: &[RetriggerResult]) -> Result<String> {
+        self.render(
+            "fragments/system/retrigger",
+            context! {
+                results => results,
+            },
+        )
     }
 
     /// Correction message when the LLM outputs tool call syntax as plain text.
