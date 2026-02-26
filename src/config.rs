@@ -2252,7 +2252,6 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("KILO_API_KEY").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
             || std::env::var("OPENCODE_GO_API_KEY").is_ok();
 
@@ -4376,7 +4375,6 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
-        17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -4589,7 +4587,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 24] = [
+            const KEYS: [&str; 23] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
@@ -4605,7 +4603,6 @@ mod tests {
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
                 "GEMINI_API_KEY",
-                "KILO_API_KEY",
                 "NVIDIA_API_KEY",
                 "OLLAMA_API_KEY",
                 "OLLAMA_BASE_URL",
