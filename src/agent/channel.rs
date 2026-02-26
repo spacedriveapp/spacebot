@@ -325,6 +325,8 @@ pub struct Channel {
     pending_retrigger_metadata: HashMap<String, serde_json::Value>,
     /// Deadline for firing the pending retrigger (debounce timer).
     retrigger_deadline: Option<tokio::time::Instant>,
+    /// Non-terminal worker completion payloads waiting to be relayed on retrigger.
+    pending_worker_completion_results: Vec<String>,
     /// Optional cross-agent messaging tool for linked agent conversations.
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
     /// Number of turns processed in a link channel.
@@ -457,6 +459,7 @@ impl Channel {
             pending_retrigger: false,
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
+            pending_worker_completion_results: Vec::new(),
             send_agent_message_tool,
             link_turn_count: 0,
             originating_channel: None,
@@ -790,6 +793,7 @@ impl Channel {
         self.state.worker_inputs.write().await.remove(&worker_id);
 
         if notify && !is_worker_terminal_failure(result) {
+            self.queue_pending_worker_completion_result(result);
             let mut history = self.state.history.write().await;
             let worker_message = format!("[Worker {worker_id} completed]: {result}");
             history.push(rig::message::Message::from(worker_message));
@@ -799,6 +803,17 @@ impl Channel {
                     + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
             );
         }
+    }
+
+    fn queue_pending_worker_completion_result(&mut self, result: &str) {
+        let trimmed = result.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        if self.pending_worker_completion_results.len() >= 8 {
+            self.pending_worker_completion_results.remove(0);
+        }
+        self.pending_worker_completion_results.push(trimmed.to_string());
     }
 
     pub fn reset_worker_receipt_circuit(&mut self) {
@@ -1876,12 +1891,13 @@ impl Channel {
     /// The LLM sometimes incorrectly skips on retrigger turns thinking the
     /// result was "already processed" when the user hasn't seen it yet.
     async fn handle_agent_result(
-        &self,
+        &mut self,
         result: std::result::Result<String, rig::completion::PromptError>,
         skip_flag: &crate::tools::SkipFlag,
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
     ) {
+        let mut relayed_retrigger_result = false;
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -1901,14 +1917,15 @@ impl Channel {
                         );
                     }
 
-                    if self
+                    let fallback_outcome = self
                         .emit_fallback_reply(
                             &response,
                             "LLM skipped on retrigger but produced text fallback",
                         )
-                        .await
-                        == FallbackReplyOutcome::EmptyInput
-                    {
+                        .await;
+                    relayed_retrigger_result =
+                        relayed_retrigger_result || fallback_outcome == FallbackReplyOutcome::Sent;
+                    if fallback_outcome == FallbackReplyOutcome::EmptyInput {
                         tracing::warn!(
                             channel_id = %self.id,
                             "LLM skipped on retrigger with no text — worker/branch result may not have been relayed"
@@ -1918,14 +1935,19 @@ impl Channel {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
+                    if is_retrigger {
+                        relayed_retrigger_result = true;
+                    }
                 } else if is_retrigger {
                     // Retrigger turns are vulnerable to tool-call misses; when the
                     // model emits substantive text without calling `reply`, relay it.
                     // Keep suppressing low-value "still waiting" chatter.
-                    match self
+                    let fallback_outcome = self
                         .emit_fallback_reply(&response, "retrigger text output fallback")
-                        .await
-                    {
+                        .await;
+                    relayed_retrigger_result =
+                        relayed_retrigger_result || fallback_outcome == FallbackReplyOutcome::Sent;
+                    match fallback_outcome {
                         FallbackReplyOutcome::EmptyInput => {
                             tracing::debug!(
                                 channel_id = %self.id,
@@ -1957,6 +1979,9 @@ impl Channel {
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
                     tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
+                    if is_retrigger {
+                        relayed_retrigger_result = true;
+                    }
                 } else {
                     tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
                 }
@@ -1964,6 +1989,19 @@ impl Channel {
             Err(error) => {
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
+        }
+
+        if is_retrigger && !relayed_retrigger_result {
+            relayed_retrigger_result = self
+                .emit_pending_worker_completion_fallback(
+                    "retrigger produced no user-visible reply; relaying worker result fallback",
+                )
+                .await
+                == FallbackReplyOutcome::Sent;
+        }
+
+        if is_retrigger && relayed_retrigger_result {
+            self.pending_worker_completion_results.clear();
         }
 
         // Ensure typing indicator is always cleaned up, even on error paths
@@ -1980,6 +2018,16 @@ impl Channel {
                 "failed to send stop-typing status update"
             );
         }
+    }
+
+    async fn emit_pending_worker_completion_fallback(&self, source: &str) -> FallbackReplyOutcome {
+        let Some(fallback_text) =
+            format_pending_worker_completion_fallback(&self.pending_worker_completion_results)
+        else {
+            return FallbackReplyOutcome::EmptyInput;
+        };
+
+        self.emit_fallback_reply(&fallback_text, source).await
     }
 
     async fn emit_fallback_reply(&self, raw_response: &str, source: &str) -> FallbackReplyOutcome {
@@ -3656,6 +3704,21 @@ fn build_worker_terminal_receipt_payload(terminal_state: &str, result: &str) -> 
     }
 }
 
+fn format_pending_worker_completion_fallback(pending_results: &[String]) -> Option<String> {
+    if pending_results.is_empty() {
+        return None;
+    }
+    if pending_results.len() == 1 {
+        return Some(pending_results[0].clone());
+    }
+
+    Some(format!(
+        "Completed {} background tasks:\n\n{}",
+        pending_results.len(),
+        pending_results.join("\n\n---\n\n")
+    ))
+}
+
 /// Check if a ProcessEvent is targeted at a specific channel.
 ///
 /// Events from branches and workers carry a channel_id. We only process events
@@ -4101,6 +4164,7 @@ mod tests {
     use super::build_worker_progress_sla_nudge;
     use super::build_worker_terminal_receipt_payload;
     use super::classify_worker_terminal_state;
+    use super::format_pending_worker_completion_fallback;
     use super::is_worker_progress_event;
     use super::is_worker_terminal_failure;
     use super::normalize_worker_checkpoint_status;
@@ -4580,6 +4644,33 @@ mod tests {
         assert_eq!(
             build_worker_terminal_receipt_payload("done", "Completed report with citations"),
             "Background task completed: Completed report with citations"
+        );
+    }
+
+    #[test]
+    fn pending_worker_completion_fallback_formats_consistently() {
+        assert_eq!(
+            format_pending_worker_completion_fallback(&[]),
+            None,
+            "empty pending set should not produce fallback text"
+        );
+
+        let single = vec!["## Summary\nLeafs game details".to_string()];
+        assert_eq!(
+            format_pending_worker_completion_fallback(&single),
+            Some("## Summary\nLeafs game details".to_string())
+        );
+
+        let multiple = vec![
+            "First worker result".to_string(),
+            "Second worker result".to_string(),
+        ];
+        assert_eq!(
+            format_pending_worker_completion_fallback(&multiple),
+            Some(
+                "Completed 2 background tasks:\n\nFirst worker result\n\n---\n\nSecond worker result"
+                    .to_string()
+            )
         );
     }
 
