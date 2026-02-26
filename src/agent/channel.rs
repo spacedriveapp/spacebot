@@ -662,9 +662,8 @@ impl Channel {
                 conversation_id = message.conversation_id.clone();
 
                 // Include both absolute and relative time context.
-                let relative_secs = message
-                    .timestamp
-                    .signed_duration_since(first_timestamp)
+                let relative_secs = last_timestamp
+                    .signed_duration_since(message.timestamp)
                     .num_seconds()
                     .max(0);
                 let relative_text = if relative_secs < 1 {
