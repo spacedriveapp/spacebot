@@ -145,7 +145,7 @@ impl EmailAdapter {
         }
     }
 
-    fn from_mailbox(&self) -> crate::Result<Mailbox> {
+    fn sender_mailbox(&self) -> crate::Result<Mailbox> {
         let from_address: Address = self
             .from_address
             .parse()
@@ -166,7 +166,7 @@ impl EmailAdapter {
             .with_context(|| format!("invalid recipient address '{recipient}'"))?;
 
         let mut builder = Message::builder()
-            .from(self.from_mailbox()?)
+            .from(self.sender_mailbox()?)
             .to(recipient_mailbox)
             .subject(subject.to_string());
 
@@ -1102,12 +1102,11 @@ fn collect_parts(
             {
                 plain_text_parts.push(body);
             }
-        } else if mime_type.starts_with("text/html") {
-            if let Ok(body) = part.get_body()
-                && !body.trim().is_empty()
-            {
-                html_parts.push(body);
-            }
+        } else if mime_type.starts_with("text/html")
+            && let Ok(body) = part.get_body()
+            && !body.trim().is_empty()
+        {
+            html_parts.push(body);
         }
         return;
     }
