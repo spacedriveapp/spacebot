@@ -255,6 +255,13 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
             name: None,
             use_bearer_auth: false,
         }),
+        "opencode-go" => Some(ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: "https://opencode.ai/zen/go".to_string(),
+            api_key: credential.to_string(),
+            name: None,
+            use_bearer_auth: false,
+        }),
         "nvidia" => Some(ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
             base_url: "https://integrate.api.nvidia.com".to_string(),
