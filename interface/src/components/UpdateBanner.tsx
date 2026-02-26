@@ -66,7 +66,7 @@ export function UpdateBanner() {
 					)}
 					{isDocker && !data.can_apply && (
 						<span className="text-xs text-ink-faint">
-							{data.cannot_apply_reason ?? "Mount docker.sock for one-click updates"}
+							{data.cannot_apply_reason ?? "Mount a container runtime socket for one-click updates"}
 						</span>
 					)}
 					{isNative && (

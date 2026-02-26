@@ -227,7 +227,13 @@ docker stop spacebot && docker rm spacebot
 
 ### One-Click Update
 
-Mount the Docker socket to enable updating directly from the web UI:
+Mount a container runtime socket to enable updating directly from the web UI.
+
+- Docker: mount `/var/run/docker.sock`
+- Podman (rootful): mount `/run/podman/podman.sock`
+- Podman (rootless): mount `${XDG_RUNTIME_DIR}/podman/podman.sock` to `/run/podman/podman.sock` in the container
+
+Docker example:
 
 ```yaml
 services:
@@ -271,9 +277,47 @@ curl http://localhost:19898/api/update/check
 # Force a fresh check
 curl -X POST http://localhost:19898/api/update/check
 
-# Apply update (requires Docker socket)
+# Apply update (requires container runtime socket)
 curl -X POST http://localhost:19898/api/update/apply
 ```
+
+### Podman One-Click Update
+
+Set `SPACEBOT_DEPLOYMENT=docker` and mount a Podman socket.
+
+Rootful:
+
+```bash
+sudo systemctl enable --now podman.socket
+
+podman run -d \
+  --name spacebot \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e SPACEBOT_DEPLOYMENT=docker \
+  -v spacebot-data:/data \
+  -v /run/podman/podman.sock:/run/podman/podman.sock \
+  --security-opt label=disable \
+  -p 19898:19898 \
+  ghcr.io/spacedriveapp/spacebot:latest
+```
+
+Rootless:
+
+```bash
+systemctl --user enable --now podman.socket
+
+podman run -d \
+  --name spacebot \
+  -e ANTHROPIC_API_KEY="sk-ant-..." \
+  -e SPACEBOT_DEPLOYMENT=docker \
+  -v spacebot-data:/data \
+  -v ${XDG_RUNTIME_DIR}/podman/podman.sock:/run/podman/podman.sock \
+  --security-opt label=disable \
+  -p 19898:19898 \
+  ghcr.io/spacedriveapp/spacebot:latest
+```
+
+On Fedora/RHEL with SELinux enforcing, keep `--security-opt label=disable` when mounting the Podman socket.
 
 ## CI / Releases
 
