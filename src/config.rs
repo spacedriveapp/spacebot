@@ -207,6 +207,7 @@ pub struct LlmConfig {
     pub ollama_key: Option<String>,
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub opencode_go_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub minimax_cn_key: Option<String>,
@@ -263,6 +264,10 @@ impl std::fmt::Debug for LlmConfig {
                 &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
+                "opencode_go_key",
+                &self.opencode_go_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
                 "nvidia_key",
                 &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
             )
@@ -300,6 +305,7 @@ impl LlmConfig {
             || self.ollama_key.is_some()
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
+            || self.opencode_go_key.is_some()
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
             || self.minimax_cn_key.is_some()
@@ -313,6 +319,8 @@ const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
+const OPENCODE_GO_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen/go";
+const KILO_PROVIDER_BASE_URL: &str = "https://api.kilo.ai/v1";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
@@ -329,6 +337,173 @@ const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 
+/// Returns the default ProviderConfig for a provider ID and API key.
+/// Used by API tests and other code that needs provider configs without duplicating metadata.
+pub(crate) fn default_provider_config(
+    provider_id: &str,
+    api_key: impl Into<String>,
+) -> Option<ProviderConfig> {
+    use crate::config::ApiType;
+    let api_key = api_key.into();
+    Some(match provider_id {
+        "anthropic" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openrouter" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "kilo" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: KILO_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
+        },
+        "zhipu" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Z.AI (GLM)".to_string()),
+            use_bearer_auth: false,
+        },
+        "groq" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "together" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "fireworks" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "deepseek" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "xai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: XAI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "mistral" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "gemini" => ProviderConfig {
+            api_type: ApiType::Gemini,
+            base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-zen" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-go" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "nvidia" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax-cn" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "moonshot" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: None,
+            use_bearer_auth: false,
+        },
+        "zai-coding-plan" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+            api_key: api_key.clone(),
+            name: Some("Z.AI Coding Plan".to_string()),
+            use_bearer_auth: false,
+        },
+        _ => return None,
+    })
+}
+
+fn add_shorthand_provider(
+    providers: &mut std::collections::HashMap<String, ProviderConfig>,
+    provider_id: &str,
+    key: Option<String>,
+    api_type: ApiType,
+    base_url: &str,
+    name: Option<&str>,
+    use_bearer_auth: bool,
+) {
+    if let Some(api_key) = key {
+        providers
+            .entry(provider_id.to_string())
+            .or_insert_with(|| ProviderConfig {
+                api_type,
+                base_url: base_url.to_string(),
+                api_key,
+                name: name.map(str::to_string),
+                use_bearer_auth,
+            });
+    }
+}
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Clone)]
 pub struct DefaultsConfig {
@@ -1614,6 +1789,7 @@ struct TomlLlmConfigFields {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1642,6 +1818,7 @@ struct TomlLlmConfig {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1695,6 +1872,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             ollama_key: fields.ollama_key,
             ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
+            opencode_go_key: fields.opencode_go_key,
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
             minimax_cn_key: fields.minimax_cn_key,
@@ -2220,6 +2398,7 @@ impl Config {
             || std::env::var("OLLAMA_API_KEY").is_ok()
             || std::env::var("OLLAMA_BASE_URL").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
             || std::env::var("MINIMAX_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
@@ -2241,7 +2420,9 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+            || std::env::var("KILO_API_KEY").is_ok()
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok();
 
         !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
@@ -2295,6 +2476,7 @@ impl Config {
             ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
@@ -2373,6 +2555,18 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
                     api_key: opencode_zen_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(opencode_go_key) = llm.opencode_go_key.clone() {
+            llm.providers
+                .entry("opencode-go".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_go_key,
                     name: None,
                     use_bearer_auth: false,
                 });
@@ -2751,6 +2945,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            opencode_go_key: toml
+                .llm
+                .opencode_go_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("OPENCODE_GO_API_KEY").ok()),
             nvidia_key: toml
                 .llm
                 .nvidia_key
@@ -2880,6 +3080,18 @@ impl Config {
                     api_type: ApiType::OpenAiCompletions,
                     base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
                     api_key: opencode_zen_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(opencode_go_key) = llm.opencode_go_key.clone() {
+            llm.providers
+                .entry("opencode-go".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_go_key,
                     name: None,
                     use_bearer_auth: false,
                 });
@@ -4264,6 +4476,7 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "Mistral AI",
         "Ollama",
         "OpenCode Zen",
+        "OpenCode Go",
         "MiniMax",
         "Moonshot AI (Kimi)",
         "Z.AI Coding Plan",
@@ -4323,13 +4536,15 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         10 => ("Google Gemini API key", "gemini_key", "gemini"),
         11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
         12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
-        13 => ("MiniMax API key", "minimax_key", "minimax"),
-        14 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        15 => (
+        13 => ("OpenCode Go API key", "opencode_go_key", "opencode-go"),
+        14 => ("MiniMax API key", "minimax_key", "minimax"),
+        15 => ("Moonshot API key", "moonshot_key", "moonshot"),
+        16 => (
             "Z.AI Coding Plan API key",
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
+        17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -4542,7 +4757,7 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 22] = [
+            const KEYS: [&str; 24] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
@@ -4558,10 +4773,12 @@ mod tests {
                 "XAI_API_KEY",
                 "MISTRAL_API_KEY",
                 "GEMINI_API_KEY",
+                "KILO_API_KEY",
                 "NVIDIA_API_KEY",
                 "OLLAMA_API_KEY",
                 "OLLAMA_BASE_URL",
                 "OPENCODE_ZEN_API_KEY",
+                "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
@@ -5379,6 +5596,18 @@ startup_delay_secs = 2
             ("xai_key", "test-key", "xai", "x.ai"),
             ("mistral_key", "test-key", "mistral", "mistral.ai"),
             (
+                "opencode_zen_key",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "opencode_go_key",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
+            (
                 "ollama_base_url",
                 "http://localhost:11434",
                 "ollama",
@@ -5439,6 +5668,18 @@ startup_delay_secs = 2
             ("TOGETHER_API_KEY", "test-key", "together", "together"),
             ("XAI_API_KEY", "test-key", "xai", "x.ai"),
             ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OPENCODE_ZEN_API_KEY",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "OPENCODE_GO_API_KEY",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
             (
                 "OLLAMA_BASE_URL",
                 "http://localhost:11434",

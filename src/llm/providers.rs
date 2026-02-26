@@ -25,6 +25,10 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
         tracing::info!("OpenCode Zen provider configured");
     }
 
+    if config.opencode_go_key.is_some() {
+        tracing::info!("OpenCode Go provider configured");
+    }
+
     if config.minimax_key.is_some() {
         tracing::info!("MiniMax provider configured");
     }

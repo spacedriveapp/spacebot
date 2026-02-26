@@ -53,6 +53,7 @@ pub(super) struct ProviderStatus {
     gemini: bool,
     ollama: bool,
     opencode_zen: bool,
+    opencode_go: bool,
     nvidia: bool,
     minimax: bool,
     minimax_cn: bool,
@@ -137,6 +138,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "gemini" => Some("gemini_key"),
         "ollama" => Some("ollama_base_url"),
         "opencode-zen" => Some("opencode_zen_key"),
+        "opencode-go" => Some("opencode_go_key"),
         "nvidia" => Some("nvidia_key"),
         "minimax" => Some("minimax_key"),
         "minimax-cn" => Some("minimax_cn_key"),
@@ -310,6 +312,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         ollama_key: None,
         ollama_base_url: (provider == "ollama").then(|| credential.to_string()),
         opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
+        opencode_go_key: (provider == "opencode-go").then(|| credential.to_string()),
         nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
         minimax_key: (provider == "minimax").then(|| credential.to_string()),
         minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
@@ -460,6 +463,7 @@ pub(super) async fn get_providers(
         gemini,
         ollama,
         opencode_zen,
+        opencode_go,
         nvidia,
         minimax,
         minimax_cn,
@@ -502,6 +506,7 @@ pub(super) async fn get_providers(
             has_value("ollama_base_url", "OLLAMA_BASE_URL")
                 || has_value("ollama_key", "OLLAMA_API_KEY"),
             has_value("opencode_zen_key", "OPENCODE_ZEN_API_KEY"),
+            has_value("opencode_go_key", "OPENCODE_GO_API_KEY"),
             has_value("nvidia_key", "NVIDIA_API_KEY"),
             has_value("minimax_key", "MINIMAX_API_KEY"),
             has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
@@ -524,6 +529,7 @@ pub(super) async fn get_providers(
             std::env::var("GEMINI_API_KEY").is_ok(),
             std::env::var("OLLAMA_BASE_URL").is_ok() || std::env::var("OLLAMA_API_KEY").is_ok(),
             std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
+            std::env::var("OPENCODE_GO_API_KEY").is_ok(),
             std::env::var("NVIDIA_API_KEY").is_ok(),
             std::env::var("MINIMAX_API_KEY").is_ok(),
             std::env::var("MINIMAX_CN_API_KEY").is_ok(),
@@ -547,6 +553,7 @@ pub(super) async fn get_providers(
         gemini,
         ollama,
         opencode_zen,
+        opencode_go,
         nvidia,
         minimax,
         minimax_cn,
@@ -567,6 +574,7 @@ pub(super) async fn get_providers(
         || providers.gemini
         || providers.ollama
         || providers.opencode_zen
+        || providers.opencode_go
         || providers.nvidia
         || providers.minimax
         || providers.minimax_cn
@@ -891,7 +899,8 @@ pub(super) async fn update_provider(
 pub(super) async fn test_provider_model(
     Json(request): Json<ProviderModelTestRequest>,
 ) -> Result<Json<ProviderModelTestResponse>, StatusCode> {
-    if provider_toml_key(&request.provider).is_none() {
+    let normalized_provider = request.provider.trim().to_lowercase();
+    if provider_toml_key(&normalized_provider).is_none() {
         return Ok(Json(ProviderModelTestResponse {
             success: false,
             message: format!("Unknown provider: {}", request.provider),
@@ -921,7 +930,7 @@ pub(super) async fn test_provider_model(
         }));
     }
 
-    if !model_matches_provider(&request.provider, &request.model) {
+    if !model_matches_provider(&normalized_provider, &request.model) {
         return Ok(Json(ProviderModelTestResponse {
             success: false,
             message: format!(
@@ -934,7 +943,7 @@ pub(super) async fn test_provider_model(
         }));
     }
 
-    let llm_config = build_test_llm_config(&request.provider, request.api_key.trim());
+    let llm_config = build_test_llm_config(&normalized_provider, request.api_key.trim());
     let llm_manager = match crate::llm::LlmManager::new(llm_config).await {
         Ok(manager) => Arc::new(manager),
         Err(error) => {

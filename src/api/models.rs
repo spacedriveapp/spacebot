@@ -204,6 +204,43 @@ fn extra_models() -> Vec<ModelInfo> {
             reasoning: false,
             input_audio: false,
         },
+        // OpenCode Go (Lite catalog)
+        ModelInfo {
+            id: "opencode-go/kimi-k2.5".into(),
+            name: "Kimi K2.5 Lite".into(),
+            provider: "opencode-go".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: true,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "opencode-go/kimi-k2".into(),
+            name: "Kimi K2 Lite".into(),
+            provider: "opencode-go".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "opencode-go/glm-5".into(),
+            name: "GLM 5 Lite".into(),
+            provider: "opencode-go".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
+        ModelInfo {
+            id: "opencode-go/qwen3-coder".into(),
+            name: "Qwen3 Coder 480B Lite".into(),
+            provider: "opencode-go".into(),
+            context_window: None,
+            tool_call: true,
+            reasoning: false,
+            input_audio: false,
+        },
         // Z.AI Coding Plan
         ModelInfo {
             id: "zai-coding-plan/glm-4.7".into(),
@@ -432,6 +469,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
+    }
+    if has_key("opencode_go_key", "OPENCODE_GO_API_KEY") {
+        providers.push("opencode-go");
     }
     if has_key("minimax_key", "MINIMAX_API_KEY") {
         providers.push("minimax");

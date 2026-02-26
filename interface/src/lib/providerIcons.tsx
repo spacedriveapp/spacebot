@@ -112,6 +112,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		"zai-coding-plan": ZAI,
 		ollama: OllamaIcon,
 		"opencode-zen": OpenCodeZenIcon,
+		"opencode-go": OpenCodeZenIcon,
 		nvidia: NvidiaIcon,
 		minimax: Minimax,
 		"minimax-cn": Minimax,

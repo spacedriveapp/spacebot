@@ -353,6 +353,22 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
+        "opencode-go" => {
+            let channel: String = "opencode-go/kimi-k2.5".into();
+            let worker: String = "opencode-go/kimi-k2".into();
+            RoutingConfig {
+                channel: channel.clone(),
+                branch: channel.clone(),
+                worker: worker.clone(),
+                compactor: worker.clone(),
+                cortex: worker.clone(),
+                voice: String::new(),
+                task_overrides: HashMap::from([("coding".into(), channel.clone())]),
+                fallbacks: HashMap::from([(channel, vec![worker])]),
+                rate_limit_cooldown_secs: 60,
+                ..RoutingConfig::default()
+            }
+        }
         "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
         "minimax" => RoutingConfig::for_model("minimax/MiniMax-M2.5".into()),
         "minimax-cn" => RoutingConfig::for_model("minimax-cn/MiniMax-M2.5".into()),
@@ -380,6 +396,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "gemini" => "gemini/",
         "nvidia" => "nvidia/",
         "opencode-zen" => "opencode-zen/",
+        "opencode-go" => "opencode-go/",
         "minimax" => "minimax/",
         "minimax-cn" => "minimax-cn/",
         "moonshot" => "moonshot/",

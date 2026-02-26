@@ -87,6 +87,14 @@ const PROVIDERS = [
 		defaultModel: "opencode-zen/kimi-k2.5",
 	},
 	{
+		id: "opencode-go",
+		name: "OpenCode Go",
+		description: "Lite OpenCode model catalog and limits",
+		placeholder: "...",
+		envVar: "OPENCODE_GO_API_KEY",
+		defaultModel: "opencode-go/kimi-k2.5",
+	},
+	{
 		id: "anthropic",
 		name: "Anthropic",
 		description: "Claude models (Sonnet, Opus, Haiku)",

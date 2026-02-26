@@ -27,6 +27,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   zhipu: "Z.ai (GLM)",
   ollama: "Ollama",
   "opencode-zen": "OpenCode Zen",
+  "opencode-go": "OpenCode Go",
   minimax: "MiniMax",
   "minimax-cn": "MiniMax CN",
 };
@@ -141,6 +142,7 @@ export function ModelSelect({
     "fireworks",
     "zhipu",
     "opencode-zen",
+    "opencode-go",
     "minimax",
     "minimax-cn",
   ];
