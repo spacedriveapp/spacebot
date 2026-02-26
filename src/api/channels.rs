@@ -223,3 +223,113 @@ pub(super) async fn cancel_process(
         _ => Err(StatusCode::BAD_REQUEST),
     }
 }
+
+#[derive(Deserialize)]
+pub(super) struct DumpQuery {
+    /// Max messages per channel (default 50).
+    #[serde(default = "default_dump_limit")]
+    limit: i64,
+    /// Filter to a specific agent_id.
+    agent_id: Option<String>,
+    /// Filter to a specific platform (e.g. "link", "portal", "discord").
+    platform: Option<String>,
+}
+
+fn default_dump_limit() -> i64 {
+    50
+}
+
+#[derive(Serialize)]
+pub(super) struct DumpChannel {
+    agent_id: String,
+    channel_id: String,
+    platform: String,
+    display_name: Option<String>,
+    last_activity_at: String,
+    created_at: String,
+    messages: Vec<crate::conversation::history::TimelineItem>,
+}
+
+#[derive(Serialize)]
+pub(super) struct DumpResponse {
+    channels: Vec<DumpChannel>,
+    total_channels: usize,
+    total_messages: usize,
+}
+
+/// Dump all channels with their message history in a single call.
+/// Useful for inspecting test runs and debugging agent communication.
+///
+/// Query params:
+///   - `limit`: max messages per channel (default 50)
+///   - `agent_id`: filter to a specific agent
+///   - `platform`: filter to a specific platform (e.g. "link", "portal")
+pub(super) async fn dump_channels(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<DumpQuery>,
+) -> Json<DumpResponse> {
+    let pools = state.agent_pools.load();
+    let limit = query.limit.min(500);
+    let mut channels = Vec::new();
+    let mut total_messages = 0;
+
+    for (agent_id, pool) in pools.iter() {
+        if let Some(filter_agent) = &query.agent_id {
+            if agent_id != filter_agent {
+                continue;
+            }
+        }
+
+        let store = ChannelStore::new(pool.clone());
+        let logger = ProcessRunLogger::new(pool.clone());
+
+        let active_channels = match store.list_active().await {
+            Ok(channels) => channels,
+            Err(error) => {
+                tracing::warn!(%error, agent_id, "dump: failed to list channels");
+                continue;
+            }
+        };
+
+        for channel in active_channels {
+            if let Some(filter_platform) = &query.platform {
+                if &channel.platform != filter_platform {
+                    continue;
+                }
+            }
+
+            let messages = match logger.load_channel_timeline(&channel.id, limit, None).await {
+                Ok(items) => items,
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        channel_id = %channel.id,
+                        "dump: failed to load timeline"
+                    );
+                    Vec::new()
+                }
+            };
+
+            total_messages += messages.len();
+            channels.push(DumpChannel {
+                agent_id: agent_id.clone(),
+                channel_id: channel.id,
+                platform: channel.platform,
+                display_name: channel.display_name,
+                last_activity_at: channel.last_activity_at.to_rfc3339(),
+                created_at: channel.created_at.to_rfc3339(),
+                messages,
+            });
+        }
+    }
+
+    // Sort by last activity (most recent first)
+    channels.sort_by(|a, b| b.last_activity_at.cmp(&a.last_activity_at));
+
+    let total_channels = channels.len();
+    Json(DumpResponse {
+        channels,
+        total_channels,
+        total_messages,
+    })
+}

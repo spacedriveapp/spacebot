@@ -44,6 +44,7 @@ export interface ChannelLiveState {
 }
 
 const PAGE_SIZE = 50;
+const DUPLICATE_MESSAGE_WINDOW_MS = 12_000;
 
 function emptyLiveState(): ChannelLiveState {
 	return { isTyping: false, timeline: [], workers: {}, branches: {}, historyLoaded: false, hasMore: true, loadingMore: false };
@@ -60,6 +61,30 @@ function itemTimestamp(item: TimelineItem): string {
 
 function itemKey(item: TimelineItem): string {
 	return `${item.type}:${item.id}`;
+}
+
+function normalizeMessageContent(content: string): string {
+	return content.trim().replace(/\s+/g, " ").toLowerCase();
+}
+
+function isRecentDuplicateAssistantMessage(timeline: TimelineItem[], content: string, nowIso: string): boolean {
+	const normalized = normalizeMessageContent(content);
+	if (!normalized) return false;
+
+	const now = new Date(nowIso).getTime();
+	for (let index = timeline.length - 1; index >= 0; index -= 1) {
+		const item = timeline[index];
+		if (item.type !== "message" || item.role !== "assistant") continue;
+
+		const delta = now - new Date(item.created_at).getTime();
+		if (delta > DUPLICATE_MESSAGE_WINDOW_MS) break;
+
+		if (normalizeMessageContent(item.content) === normalized) {
+			return true;
+		}
+	}
+
+	return false;
 }
 
 /**
@@ -202,20 +227,27 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 
 	const handleOutboundMessage = useCallback((data: unknown) => {
 		const event = data as OutboundMessageEvent;
-		pushItem(event.channel_id, {
-			type: "message",
-			id: `out-${Date.now()}-${crypto.randomUUID()}`,
-			role: "assistant",
-			sender_name: event.agent_id,
-			sender_id: null,
-			content: event.text,
-			created_at: new Date().toISOString(),
-		});
 		setLiveStates((prev) => {
 			const existing = getOrCreate(prev, event.channel_id);
-			return { ...prev, [event.channel_id]: { ...existing, isTyping: false } };
+			const createdAt = new Date().toISOString();
+
+			if (isRecentDuplicateAssistantMessage(existing.timeline, event.text, createdAt)) {
+				return prev;
+			}
+
+			const timeline = [...existing.timeline, {
+				type: "message" as const,
+				id: `out-${Date.now()}-${crypto.randomUUID()}`,
+				role: "assistant" as const,
+				sender_name: event.agent_id,
+				sender_id: null,
+				content: event.text,
+				created_at: createdAt,
+			}];
+
+			return { ...prev, [event.channel_id]: { ...existing, timeline, isTyping: false } };
 		});
-	}, [pushItem]);
+	}, []);
 
 	const handleTypingState = useCallback((data: unknown) => {
 		const event = data as TypingStateEvent;

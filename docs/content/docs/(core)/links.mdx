@@ -1,0 +1,259 @@
+---
+title: Links
+description: Mirrored conversations between agents — the messaging model, delegation flow, and multi-hop routing.
+---
+
+# Links
+
+Links are directed edges in the communication graph that let agents talk to each other. When two agents are linked, each side gets its own channel — a private conversation that mirrors messages between them like a phone call. The messaging layer is invisible. Neither agent knows how messages travel; they just send and receive.
+
+For link configuration (kinds, directions, org context), see [Agents — Communication Graph](/docs/agents#communication-graph). This page covers how the link system works internally.
+
+## The Model: Two Phones on a Call
+
+When two people text each other, both sides have their own chat history. You type a message — it appears on your screen as sent, and on their screen as received. The carrier in the middle is invisible.
+
+Agent link channels work the same way:
+
+- Agent A has `link:A:B` — their side of the conversation with B
+- Agent B has `link:B:A` — their side of the conversation with A
+- When A sends a message, the system mirrors it to B's side
+- When B replies, the system mirrors it to A's side
+
+Both channels always have the full conversation. Both agents have their own independent Channel instance with their own context, tools, and LLM. The system is just the carrier.
+
+## Channel Creation
+
+Both link channels are pre-registered in `ChannelStore` at startup for every link in config. No on-demand creation, no materialization hacks. If a link exists in config, both channels exist.
+
+```toml
+[[links]]
+from = "chief-ai-officer"
+to = "spacebot-tech-lead"
+```
+
+Creates two channel records:
+- `link:chief-ai-officer:spacebot-tech-lead` (owned by chief-ai-officer)
+- `link:spacebot-tech-lead:chief-ai-officer` (owned by spacebot-tech-lead)
+
+The Channel runtime instance (LLM event loop) is spawned on first message. But the channel record exists from boot.
+
+## Sending a Message
+
+Agent A calls `send_agent_message(target: "B", message: "hello")`.
+
+The tool does two things:
+
+1. **Receiver injection** — Injects a user message into `link:B:A` (B's side) with `source: "internal"`. This triggers B's Channel to process it — run the LLM, potentially reply.
+2. **Sender record** — Injects a history-only record into `link:A:B` (A's side) marked with `sender_record: true` in metadata. This does NOT trigger LLM processing. It's a "sent" receipt — A's history shows what they said.
+
+The tool also records which channel initiated the delegation (see [Bridging](#bridging-results-to-the-originating-channel) below).
+
+## Receiving a Reply
+
+When B's LLM runs on `link:B:A` and calls `reply`, the outbound handler in `main.rs` detects `source: "internal"` and mirrors the reply:
+
+1. B's reply text is recorded on `link:B:A` as a bot message (handled by the reply tool)
+2. The system injects B's reply into `link:A:B` as a user message — this triggers A's Channel
+
+A's Channel on `link:A:B` now has the conversation:
+
+```
+[A - sent]: hello
+[B - received]: hey, what's up?
+```
+
+A's LLM runs and can reply, forward the info, or do whatever it decides. The back-and-forth continues until one side concludes.
+
+## Concluding a Link Conversation
+
+`conclude_link` is a final reply that stops the conversation. When an agent determines the objective is met, it calls `conclude_link(summary: "...")`. This:
+
+1. Mirrors the summary to the peer as a final message (via the normal mirror mechanism)
+2. Marks the channel as concluded — stops accepting further messages
+3. If `initiated_from` is set, sends a retrigger to the originating channel (see below)
+
+`conclude_link` has zero routing logic. It doesn't know or care where the result ultimately needs to go. It just ends the conversation on this link channel.
+
+### Auto-Conclude on Peer Conclusion
+
+When agent B concludes and the summary arrives on A's side, A's channel auto-concludes too. It doesn't need to call `conclude_link` itself — receiving a peer's conclusion is sufficient.
+
+If A's side was already concluded (a late result arriving from a previous delegation), the channel re-opens temporarily to process the incoming message.
+
+### Safety Cap
+
+Link conversations are force-concluded after 6 message turns. The LLM is also capped at 3 max turns per invocation on link channels. This prevents infinite delegation loops and keeps link conversations focused.
+
+## Bridging Results to the Originating Channel
+
+When `send_agent_message` is called from a channel (e.g., a Discord conversation), the tool records `initiated_from` on the sender-side link channel. This is the channel that triggered the delegation.
+
+When the link channel concludes, the system injects a retrigger message into the `initiated_from` channel with the conclusion summary. This wakes up the originating channel's LLM, which sees "your delegation to X returned: \[result\]" and can relay it to the user.
+
+Each link channel independently tracks its own `initiated_from`. No global chain. No metadata propagation through hops.
+
+## Multi-Hop Delegation
+
+The mirrored model handles chains naturally. Each hop is independent — every link channel knows only where it was initiated from.
+
+**Example:** User asks chief-ai-officer to get a word from community-manager, routed through spacebot-tech-lead.
+
+### Step 1: User Message
+
+User messages chief-ai-officer on `portal:chat:chief-ai-officer`.
+
+### Step 2: First Delegation
+
+chief-ai-officer calls `send_agent_message(target: "spacebot-tech-lead", message: "forward this to community manager...")`.
+
+- `link:spacebot-tech-lead:chief-ai-officer` gets the message, triggers spacebot-tech-lead's LLM
+- `link:chief-ai-officer:spacebot-tech-lead` gets a sent record (no LLM trigger)
+- `link:chief-ai-officer:spacebot-tech-lead` records `initiated_from = "portal:chat:chief-ai-officer"`
+
+### Step 3: Second Delegation
+
+spacebot-tech-lead reads the request, calls `send_agent_message(target: "community-manager", ...)` from the link channel.
+
+- `link:community-manager:spacebot-tech-lead` gets the message, triggers community-manager's LLM
+- `link:spacebot-tech-lead:community-manager` records `initiated_from = "link:spacebot-tech-lead:chief-ai-officer"`
+
+### Step 4: Result Produced
+
+community-manager picks "nebula", calls `conclude_link(summary: "nebula")`.
+
+- Summary is mirrored to `link:spacebot-tech-lead:community-manager`
+- `link:community-manager:spacebot-tech-lead` is marked concluded
+
+### Step 5: Result Bubbles Up
+
+spacebot-tech-lead receives the conclusion. Its LLM runs and concludes the chief-ai-officer link:
+
+> "Got the word back — they picked 'nebula'."
+
+`conclude_link(summary: "The word was nebula")`
+
+- Summary is mirrored to `link:chief-ai-officer:spacebot-tech-lead`
+- `initiated_from` is `"link:spacebot-tech-lead:chief-ai-officer"` — retrigger hits the chief link
+- `link:spacebot-tech-lead:community-manager` is marked concluded
+
+### Step 6: Result Delivered
+
+chief-ai-officer receives the conclusion on `link:chief-ai-officer:spacebot-tech-lead`.
+
+- `initiated_from` is `"portal:chat:chief-ai-officer"` — retrigger hits the portal channel
+- chief-ai-officer's LLM replies to the user: "Community manager picked 'nebula'."
+
+Every hop is independent. The chain bubbles up naturally through retriggers, with no global state or metadata propagation.
+
+## What the Messaging Layer Knows
+
+Nothing. `MessagingManager` is a dumb pipe with three methods — `inject_message()`, `respond()`, `send_status()`. None of them inspect conversation IDs, parse `link:` prefixes, or special-case link channels.
+
+The `InboundMessage` struct has no link-specific fields. Link metadata travels in the generic `metadata: HashMap<String, serde_json::Value>` — the same map every message type uses.
+
+Link awareness exists in exactly two places:
+
+1. **The Channel struct** (`src/agent/channel.rs`) — handles `sender_record` skipping, auto-conclude on peer conclusion, `initiated_from` tracking, and message dropping on concluded channels.
+2. **The outbound handler** (`src/main.rs`) — checks `source == "internal"` and mirrors replies to the peer. This is the "carrier" in the phone metaphor. It needs to know enough to relay, but nothing about link semantics.
+
+## Tool Availability
+
+Link channels get a different tool set than normal channels:
+
+| Tool | Available | Notes |
+|------|-----------|-------|
+| `reply` | Yes | Send a message to the peer |
+| `conclude_link` | Yes | End the conversation with a summary |
+| `branch` | Yes | Fork context to think |
+| `spawn_worker` | Yes | Delegate tasks |
+| `send_agent_message` | Conditional | Only if other delegation targets exist (prevents loops) |
+| `skip` | No | Must respond or conclude |
+| `send_message_to_another_channel` | No | Link channels are scoped to the link |
+
+## Link Context Prompt
+
+Every link channel gets a context block injected into its system prompt describing the peer, the relationship, and the rules:
+
+```markdown
+## Agent Communication
+
+This is a link channel — a short-lived, task-oriented conversation
+with **Engineering Agent** (subordinate).
+
+This agent reports to you. Evaluate their result and conclude.
+
+**Link channel rules:**
+- Keep it transactional. Do the task, deliver the result, call conclude_link.
+- You MUST call conclude_link when you have a result.
+- If you delegated via send_agent_message, conclude immediately.
+- Never use skip on a link channel.
+```
+
+The relationship framing (`superior`, `subordinate`, `peer`) comes from the link's `kind` and direction. This is the same org structure that appears in the agent's org context block.
+
+## Coalescing
+
+Message coalescing (batching rapid-fire messages into a single LLM turn) is disabled for link channels. Every message triggers its own LLM turn. Link channels are stateful handshakes where message ordering matters — coalescing would break the request-response pattern.
+
+## Testing Link Conversations
+
+The `GET /api/channels/dump` endpoint returns all channels with their full message timeline in a single call. This is the fastest way to inspect a test run — you get every channel's conversation history across all agents without chaining multiple API calls.
+
+```bash
+# Dump everything
+curl localhost:19898/api/channels/dump
+
+# Just link channels (agent-to-agent comms)
+curl "localhost:19898/api/channels/dump?platform=link"
+
+# Just one agent's channels
+curl "localhost:19898/api/channels/dump?agent_id=spacebot-tech-lead"
+
+# More history per channel (default 50, max 500)
+curl "localhost:19898/api/channels/dump?platform=link&limit=200"
+```
+
+**Response shape:**
+
+```json
+{
+  "channels": [
+    {
+      "agent_id": "spacebot-tech-lead",
+      "channel_id": "link:spacebot-tech-lead:chief-ai-officer",
+      "platform": "link",
+      "display_name": null,
+      "last_activity_at": "2026-02-26T00:16:55+00:00",
+      "created_at": "2026-02-26T00:15:38+00:00",
+      "messages": [
+        { "type": "message", "role": "user", "sender_name": "chief-ai-officer", "content": "...", "created_at": "..." },
+        { "type": "message", "role": "assistant", "sender_name": "Spacebot Tech Lead", "content": "...", "created_at": "..." },
+        { "type": "branch_run", "description": "...", "conclusion": "...", "started_at": "...", "completed_at": "..." },
+        { "type": "worker_run", "task": "...", "result": "...", "status": "done", "started_at": "...", "completed_at": "..." }
+      ]
+    }
+  ],
+  "total_channels": 6,
+  "total_messages": 42
+}
+```
+
+Channels are sorted by most recent activity. Each channel includes the unified timeline — messages, branch runs, and worker runs interleaved chronologically. Filter by `platform=link` to focus on agent-to-agent communication and trace delegation chains.
+
+## Implementation
+
+| Component | File | Description |
+|-----------|------|-------------|
+| `send_agent_message` | `src/tools/send_agent_message.rs` | Dual injection (receiver + sender record) |
+| `conclude_link` | `src/tools/conclude_link.rs` | Sets conclude flag and summary |
+| Channel link handling | `src/agent/channel.rs` | `sender_record` skip, auto-conclude, `initiated_from`, safety cap |
+| `handle_link_conclusion` | `src/agent/channel.rs` | Mirror to peer + bridge to initiator |
+| `build_link_context` | `src/agent/channel.rs` | Renders link context prompt fragment |
+| Outbound mirror | `src/main.rs` | Mirrors replies on `source: "internal"` channels |
+| Link pre-registration | `src/main.rs` | Registers both sides in `ChannelStore` at startup |
+| Link types | `src/links/types.rs` | `AgentLink`, `channel_id_for()` |
+| Link context prompt | `prompts/en/fragments/link_context.md.j2` | Jinja template for link channel system prompt |
+| Tool descriptions | `prompts/en/tools/send_agent_message_description.md.j2` | LLM-facing tool description |
+| Tool descriptions | `prompts/en/tools/conclude_link_description.md.j2` | LLM-facing tool description |
+| Channel dump | `src/api/channels.rs` | `GET /api/channels/dump` — all channels + history in one call |

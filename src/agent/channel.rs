@@ -156,6 +156,14 @@ pub struct Channel {
     /// Set after `conclude_link` fires or a peer conclusion is received.
     /// Prevents further processing on this link channel.
     link_concluded: bool,
+    /// Set when this channel's conclusion was triggered by the peer (either
+    /// auto-conclude from a peer conclusion, or re-opened for a late result).
+    /// When true, `handle_link_conclusion` skips the peer mirror (the peer
+    /// already knows) and only bridges to the initiator. Prevents conclusion
+    /// ping-pong between link channel pairs. Reset to false when the LLM
+    /// calls `conclude_link` itself (agent-initiated conclusion).
+    peer_initiated_conclusion: bool,
+
     /// The channel that called `send_agent_message` to start this link conversation.
     /// On conclusion, a retrigger is sent here so results bridge back.
     initiated_from: Option<String>,
@@ -264,6 +272,7 @@ impl Channel {
             send_agent_message_tool,
             link_turn_count: 0,
             link_concluded: false,
+            peer_initiated_conclusion: false,
             initiated_from: None,
         };
 
@@ -754,8 +763,13 @@ impl Channel {
                 .ok();
         }
 
-        // Persist user messages (skip system re-triggers)
+        // Persist user messages (skip system re-triggers and sender records)
         let is_link_conclusion = message.metadata.contains_key("link_conclusion");
+        let is_sender_record = message
+            .metadata
+            .get("sender_record")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         if is_link_conclusion {
             // Link conclusion messages are internal control messages used to
             // retrigger the originating channel. Do not persist them to the
@@ -764,6 +778,9 @@ impl Channel {
                 channel_id = %self.id,
                 "received link conclusion control message"
             );
+        } else if is_sender_record {
+            // Sender records are logged as assistant messages in the
+            // sender_record handler below. Don't double-log as user messages.
         } else if message.source != "system" {
             let sender_name = message
                 .metadata
@@ -822,13 +839,25 @@ impl Channel {
                 .unwrap_or(false);
 
             if is_sender_record {
-                // Capture initiated_from so we know where to bridge results on conclusion
+                // Capture initiated_from so we know where to bridge results
+                // on conclusion. Only set it when the sender_record is the
+                // first message on this channel — that means the agent
+                // initiated this link conversation. If history already exists,
+                // this agent is replying to an existing conversation (e.g.
+                // using send_agent_message to relay a result back upstream)
+                // and must not overwrite the bridge target.
                 if self.initiated_from.is_none() {
-                    self.initiated_from = message
-                        .metadata
-                        .get("initiated_from")
-                        .and_then(|v| v.as_str())
-                        .map(String::from);
+                    let history = self.state.history.read().await;
+                    let is_first_message = history.is_empty();
+                    drop(history);
+
+                    if is_first_message {
+                        self.initiated_from = message
+                            .metadata
+                            .get("initiated_from")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
+                    }
                 }
 
                 let text = match &message.content {
@@ -866,45 +895,40 @@ impl Channel {
 
         // Auto-conclude link channels when a conclusion message arrives.
         // Skip the LLM — conclusions are control signals, not conversation.
-        // Bridge conclusions (from downstream links) pass through even on
-        // already-concluded channels so late results still cascade upward.
-        // Peer mirrors are blocked once concluded to prevent ping-pong.
-        let is_bridge_conclusion = message.metadata.contains_key("bridge_conclusion");
-        if is_link_conclusion && is_link_channel && (!self.link_concluded || is_bridge_conclusion) {
-            let summary = message
-                .metadata
-                .get("link_conclusion_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or(raw_text.as_str());
-
-            if self.link_concluded && is_bridge_conclusion {
-                // Late result bubbling up through an already-concluded channel.
-                // If this side has initiated_from, bridge directly to the
-                // initiator without mirroring to peer (which would loop).
-                // If not, forward the bridge to the peer side (which holds
-                // initiated_from) so they can cascade it upward.
-                if self.initiated_from.is_some() {
-                    tracing::info!(
-                        channel_id = %self.id,
-                        "cascading bridge conclusion to initiator"
-                    );
-                    self.bridge_to_initiator(summary).await;
-                } else {
-                    tracing::info!(
-                        channel_id = %self.id,
-                        "forwarding bridge conclusion to peer (they hold initiated_from)"
-                    );
-                    self.forward_bridge_to_peer(summary).await;
-                }
+        // If this channel already concluded and a new conclusion arrives (late
+        // result from a downstream delegation), re-open the channel and let the
+        // message fall through to a normal LLM turn so the agent can process
+        // the late result and forward it naturally.
+        if is_link_conclusion && is_link_channel {
+            if self.link_concluded {
+                // Late result on an already-concluded channel. Re-open it so
+                // the LLM gets a turn to process and relay the result upward.
+                tracing::info!(
+                    channel_id = %self.id,
+                    "re-opening concluded link channel for late result"
+                );
+                self.link_concluded = false;
+                self.peer_initiated_conclusion = true;
+                self.link_turn_count = 0;
+                // Fall through to normal message processing below — the LLM
+                // will see this as a new message and can conclude_link again.
             } else {
+                let summary = message
+                    .metadata
+                    .get("link_conclusion_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(raw_text.as_str());
+
                 tracing::info!(
                     channel_id = %self.id,
                     "auto-concluding link channel"
                 );
+                // The conclusion came from our peer — don't mirror it back.
+                self.peer_initiated_conclusion = true;
                 self.handle_link_conclusion(summary).await;
                 self.link_concluded = true;
+                return Ok(());
             }
-            return Ok(());
         }
 
         // Log conclusion retriggers on non-link channels to conversation history
@@ -926,13 +950,33 @@ impl Channel {
             );
         }
 
-        // Drop non-conclusion messages on concluded link channels
+        // Re-open concluded link channels for any incoming message.
+        // Late results from downstream agents often arrive as regular
+        // messages (via send_agent_message) rather than conclusions. Let
+        // the LLM process them so it can relay results up the chain.
         if is_link_channel && self.link_concluded {
-            tracing::debug!(
+            tracing::info!(
                 channel_id = %self.id,
-                "dropping message on concluded link channel"
+                "re-opening concluded link channel for incoming message"
             );
-            return Ok(());
+            self.link_concluded = false;
+            self.peer_initiated_conclusion = true;
+
+            // Only reset the turn budget for genuine external input
+            // (a new send_agent_message call). Peer replies within an
+            // existing conversation are part of the same transaction and
+            // must not get a fresh budget — otherwise the safety cap
+            // never sticks.
+            let is_sender_record = message
+                .metadata
+                .get("sender_record")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_sender_record {
+                self.link_turn_count = 0;
+            }
+
+            // Fall through to normal message processing below.
         }
 
         // Track link channel turns for safety cap
@@ -1143,121 +1187,72 @@ impl Channel {
 
     /// Handle link channel conclusion: mirror the summary to the peer and
     /// bridge results back to the channel that initiated this link conversation.
-    /// Mirror the conclusion to the peer channel and bridge results to the
-    /// initiating channel. Only called for initial conclusions — bridge cascades
-    /// on already-concluded channels are handled inline in `handle_message`.
+    ///
+    /// When `self.peer_initiated_conclusion` is true (conclusion triggered by
+    /// the peer, either auto-conclude or re-open for late result), the peer
+    /// mirror is skipped — the peer already knows. Only the initiator bridge
+    /// fires.
     async fn handle_link_conclusion(&self, summary: &str) {
         let Some(mm) = &self.deps.messaging_manager else {
             return;
         };
 
-        // Mirror the conclusion summary to the peer's link channel
-        let peer_info = self
-            .conversation_id
-            .as_deref()
-            .and_then(|cid| cid.strip_prefix("link:"))
-            .and_then(|rest| rest.split_once(':'))
-            .map(|(_, peer_id)| peer_id.to_string());
+        // Mirror the conclusion summary to the peer's link channel.
+        // Skip when re-opened: the peer already sent us this conclusion.
+        if !self.peer_initiated_conclusion {
+            let peer_info = self
+                .conversation_id
+                .as_deref()
+                .and_then(|cid| cid.strip_prefix("link:"))
+                .and_then(|rest| rest.split_once(':'))
+                .map(|(_, peer_id)| peer_id.to_string());
 
-        if let Some(peer_id) = &peer_info {
-            let peer_channel = format!("link:{}:{}", peer_id, self.deps.agent_id);
-            let peer_display = self
-                .deps
-                .agent_names
-                .get(peer_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| peer_id.clone());
+            if let Some(peer_id) = &peer_info {
+                let peer_channel = format!("link:{}:{}", peer_id, self.deps.agent_id);
+                let peer_display = self
+                    .deps
+                    .agent_names
+                    .get(peer_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| peer_id.clone());
 
-            let mut metadata = std::collections::HashMap::new();
-            metadata.insert("link_conclusion".into(), serde_json::json!(true));
-            metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
+                let mut metadata = std::collections::HashMap::new();
+                metadata.insert("link_conclusion".into(), serde_json::json!(true));
+                metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
 
-            let conclusion_message = crate::InboundMessage {
-                id: uuid::Uuid::new_v4().to_string(),
-                source: "internal".into(),
-                conversation_id: peer_channel.clone(),
-                sender_id: self.deps.agent_id.to_string(),
-                agent_id: Some(Arc::from(peer_id.as_str())),
-                content: crate::MessageContent::Text(format!(
-                    "[Link conversation with {} concluded]\n{}",
-                    self.agent_display_name(),
-                    summary
-                )),
-                timestamp: chrono::Utc::now(),
-                metadata,
-                formatted_author: Some(format!("[{}]", self.agent_display_name())),
-            };
+                let conclusion_message = crate::InboundMessage {
+                    id: uuid::Uuid::new_v4().to_string(),
+                    source: "internal".into(),
+                    conversation_id: peer_channel.clone(),
+                    sender_id: self.deps.agent_id.to_string(),
+                    agent_id: Some(Arc::from(peer_id.as_str())),
+                    content: crate::MessageContent::Text(format!(
+                        "[Link conversation with {} concluded]\n{}",
+                        self.agent_display_name(),
+                        summary
+                    )),
+                    timestamp: chrono::Utc::now(),
+                    metadata,
+                    formatted_author: Some(format!("[{}]", self.agent_display_name())),
+                };
 
-            if let Err(error) = mm.inject_message(conclusion_message).await {
-                tracing::error!(
-                    %error,
-                    peer_channel = %peer_channel,
-                    "failed to mirror conclusion to peer"
-                );
-            } else {
-                tracing::info!(
-                    peer = %peer_display,
-                    "mirrored conclusion to peer"
-                );
+                if let Err(error) = mm.inject_message(conclusion_message).await {
+                    tracing::error!(
+                        %error,
+                        peer_channel = %peer_channel,
+                        "failed to mirror conclusion to peer"
+                    );
+                } else {
+                    tracing::info!(
+                        peer = %peer_display,
+                        "mirrored conclusion to peer"
+                    );
+                }
             }
         }
 
         // Bridge results back to the channel that started this link conversation
         self.bridge_to_initiator(summary).await;
-    }
-
-    /// Forward a bridge conclusion to the peer channel. Used when a late result
-    /// arrives on the receiver side of an already-concluded link (which has no
-    /// `initiated_from`). The peer side holds `initiated_from` and can cascade
-    /// the result upward.
-    async fn forward_bridge_to_peer(&self, summary: &str) {
-        let Some(mm) = &self.deps.messaging_manager else {
-            return;
-        };
-        let Some((_, peer_id)) = self
-            .conversation_id
-            .as_deref()
-            .and_then(|cid| cid.strip_prefix("link:"))
-            .and_then(|rest| rest.split_once(':'))
-        else {
-            return;
-        };
-
-        let peer_channel = format!("link:{}:{}", peer_id, self.deps.agent_id);
-
-        let mut metadata = std::collections::HashMap::new();
-        metadata.insert("link_conclusion".into(), serde_json::json!(true));
-        metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
-        metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
-
-        let bridge_message = crate::InboundMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            source: "internal".into(),
-            conversation_id: peer_channel.clone(),
-            sender_id: self.deps.agent_id.to_string(),
-            agent_id: Some(Arc::from(peer_id)),
-            content: crate::MessageContent::Text(format!(
-                "[Link conversation with {} concluded]\n{}",
-                self.agent_display_name(),
-                summary
-            )),
-            timestamp: chrono::Utc::now(),
-            metadata,
-            formatted_author: Some(format!("[{}]", self.agent_display_name())),
-        };
-
-        if let Err(error) = mm.inject_message(bridge_message).await {
-            tracing::error!(
-                %error,
-                peer_channel = %peer_channel,
-                "failed to forward bridge conclusion to peer"
-            );
-        } else {
-            tracing::info!(
-                peer_channel = %peer_channel,
-                "forwarded bridge conclusion to peer"
-            );
-        }
     }
 
     /// Retrigger the channel that called send_agent_message to start this
@@ -1301,9 +1296,6 @@ impl Channel {
         let mut metadata = std::collections::HashMap::new();
         metadata.insert("link_conclusion".into(), serde_json::json!(true));
         metadata.insert("link_conclusion_summary".into(), serde_json::json!(summary));
-        // Distinguish bridge conclusions from peer mirrors so the receiver
-        // can let bridges through even on already-concluded channels.
-        metadata.insert("bridge_conclusion".into(), serde_json::json!(true));
 
         let retrigger = crate::InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
@@ -1317,7 +1309,15 @@ impl Channel {
             )),
             timestamp: chrono::Utc::now(),
             metadata,
-            formatted_author: Some(format!("[{}]", peer_name)),
+            // Only set formatted_author for link-channel targets (where
+            // the peer name is useful context for the next hop). For non-link
+            // channels (e.g. portal:chat) omit it so the retrigger renders as
+            // a plain system message — agent comms stay inside link channels.
+            formatted_author: if initiated_from.starts_with("link:") {
+                Some(format!("[{}]", peer_name))
+            } else {
+                None
+            },
         };
 
         if let Err(error) = mm.inject_message(retrigger).await {
@@ -2955,6 +2955,13 @@ async fn download_text_attachment(
 ///
 /// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
 /// before raising it, so history is consistent.
+///
+/// Special case — `"reply delivered"` cancellation: when the reply tool fires
+/// and the hook terminates the turn, Rig raises `PromptCancelled` even though
+/// the reply was successfully sent. The dangling tool-call must still be
+/// stripped, but we reconstruct the turn's user message and any assistant text
+/// so that persistent channels (especially link channels) retain conversation
+/// context across turns.
 fn apply_history_after_turn(
     result: &std::result::Result<String, rig::completion::PromptError>,
     guard: &mut Vec<rig::message::Message>,
@@ -2965,6 +2972,52 @@ fn apply_history_after_turn(
     match result {
         Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
             *guard = history;
+        }
+        Err(rig::completion::PromptError::PromptCancelled { reason, .. })
+            if reason == "reply delivered" =>
+        {
+            // The reply was successfully sent but Rig left a dangling tool-call
+            // in history. Reconstruct the turn with clean messages: keep the
+            // user prompt Rig pushed and extract any assistant text (stripping
+            // tool-call content that would poison subsequent turns).
+            guard.truncate(history_len_before);
+
+            // Rig pushes the user prompt at history[history_len_before].
+            if let Some(user_message) = history.get(history_len_before) {
+                guard.push(user_message.clone());
+            }
+
+            // The assistant message (with tool calls) is at history_len_before + 1.
+            // Extract only the text content, dropping ToolCall entries.
+            if let Some(rig::message::Message::Assistant { content, .. }) =
+                history.get(history_len_before + 1)
+            {
+                let text_parts: Vec<_> = content
+                    .iter()
+                    .filter_map(|c| match c {
+                        rig::message::AssistantContent::Text(t) => {
+                            if t.text.is_empty() {
+                                None
+                            } else {
+                                Some(rig::message::AssistantContent::text(&t.text))
+                            }
+                        }
+                        _ => None,
+                    })
+                    .collect();
+
+                if !text_parts.is_empty() {
+                    if let Ok(content) = rig::OneOrMany::many(text_parts) {
+                        guard.push(rig::message::Message::Assistant { id: None, content });
+                    }
+                }
+            }
+
+            tracing::debug!(
+                channel_id = %channel_id,
+                preserved = guard.len().saturating_sub(history_len_before),
+                "reconstructed history after reply-delivered cancellation"
+            );
         }
         Err(rig::completion::PromptError::PromptCancelled { .. }) | Err(_) => {
             tracing::debug!(
@@ -3046,7 +3099,7 @@ mod tests {
         assert_eq!(guard, history);
     }
 
-    /// PromptCancelled carries history missing tool results — roll back to snapshot.
+    /// PromptCancelled (non-reply) carries history missing tool results — roll back to snapshot.
     #[test]
     fn prompt_cancelled_rolls_back() {
         let initial = make_history(&["hello", "thinking..."]);
@@ -3059,7 +3112,7 @@ mod tests {
 
         let err = Err(PromptError::PromptCancelled {
             chat_history: Box::new(history.clone()),
-            reason: "reply delivered".to_string(),
+            reason: "budget exceeded".to_string(),
         });
 
         apply_history_after_turn(&err, &mut guard, history, len_before, "test");
@@ -3121,7 +3174,7 @@ mod tests {
 
         let err = Err(PromptError::PromptCancelled {
             chat_history: Box::new(history.clone()),
-            reason: "reply delivered".to_string(),
+            reason: "budget exceeded".to_string(),
         });
 
         apply_history_after_turn(&err, &mut guard, history, len_before, "test");
@@ -3154,35 +3207,47 @@ mod tests {
         );
     }
 
-    /// After rollback, the next turn starts clean with no dangling messages.
+    /// After reply-delivered reconstruction, the next turn has full context.
     #[test]
-    fn next_turn_is_clean_after_prompt_cancelled() {
+    fn next_turn_has_context_after_reply_delivered() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        let mut poisoned_history = initial.clone();
-        poisoned_history.push(user_msg("[dangling tool-call without result]"));
         let len_before = initial.len();
 
-        // First turn: cancelled (reply tool fired)
+        // Simulate Rig's history after reply tool fires:
+        // [existing...] + user prompt + assistant tool-call (dangling)
+        let mut history_after_rig = initial.clone();
+        history_after_rig.push(user_msg("pick a random word"));
+        history_after_rig.push(assistant_msg("Asteroid")); // simplified; real would have ToolCall
+        let len_before = initial.len();
+
+        // First turn: reply delivered
         apply_history_after_turn(
             &Err(PromptError::PromptCancelled {
-                chat_history: Box::new(poisoned_history.clone()),
+                chat_history: Box::new(history_after_rig.clone()),
                 reason: "reply delivered".to_string(),
             }),
             &mut guard,
-            poisoned_history,
+            history_after_rig,
             len_before,
             "test",
         );
 
-        // Second turn: new user message appended, successful response
-        guard.push(user_msg("follow-up question"));
+        // Guard should have: initial + user prompt + assistant text
+        assert_eq!(
+            guard.len(),
+            initial.len() + 2,
+            "should preserve user message and assistant text"
+        );
+
+        // Second turn: peer replies back
+        guard.push(user_msg("now pick another"));
         let len_before2 = guard.len();
         let mut history2 = guard.clone();
-        history2.push(assistant_msg("clean response"));
+        history2.push(assistant_msg("Quantum"));
 
         apply_history_after_turn(
-            &Ok("clean response".to_string()),
+            &Ok("Quantum".to_string()),
             &mut guard,
             history2.clone(),
             len_before2,
@@ -3191,25 +3256,62 @@ mod tests {
 
         assert_eq!(
             guard, history2,
-            "second turn should succeed with clean history"
+            "second turn should have full conversation context"
         );
-        // Crucially: no dangling tool-call in history
-        let has_dangling = guard.iter().any(|m| {
-            if let Message::User { content } = m {
-                content.iter().any(|c| {
-                    if let rig::message::UserContent::Text(t) = c {
-                        t.text.contains("dangling")
-                    } else {
-                        false
-                    }
-                })
-            } else {
-                false
-            }
-        });
+        // Verify the full conversation is present
+        assert_eq!(guard.len(), initial.len() + 4); // initial + prompt + reply + follow-up + reply2
+    }
+
+    /// Non-reply PromptCancelled still fully rolls back (no context preservation).
+    #[test]
+    fn non_reply_prompt_cancelled_fully_rolls_back() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        let mut poisoned_history = initial.clone();
+        poisoned_history.push(user_msg("new message"));
+        poisoned_history.push(assistant_msg("[dangling tool-call]"));
+        let len_before = initial.len();
+
+        apply_history_after_turn(
+            &Err(PromptError::PromptCancelled {
+                chat_history: Box::new(poisoned_history.clone()),
+                reason: "budget exceeded".to_string(),
+            }),
+            &mut guard,
+            poisoned_history,
+            len_before,
+            "test",
+        );
+
+        assert_eq!(
+            guard, initial,
+            "non-reply cancellation should fully roll back"
+        );
+    }
+
+    /// Reply-delivered on empty history preserves just the user message.
+    #[test]
+    fn reply_delivered_on_empty_history_preserves_user_message() {
+        let mut guard: Vec<Message> = vec![];
+        let mut history = vec![user_msg("hello from peer")];
+        // No assistant message (edge case: reply happened but no text in assistant content)
+        let len_before = 0;
+
+        apply_history_after_turn(
+            &Err(PromptError::PromptCancelled {
+                chat_history: Box::new(history.clone()),
+                reason: "reply delivered".to_string(),
+            }),
+            &mut guard,
+            history,
+            len_before,
+            "test",
+        );
+
+        assert_eq!(guard.len(), 1, "should preserve the user message");
         assert!(
-            !has_dangling,
-            "no dangling tool-call messages in history after rollback"
+            matches!(&guard[0], Message::User { .. }),
+            "preserved message should be a User message"
         );
     }
 

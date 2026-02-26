@@ -6,6 +6,7 @@
     "memory",
     "routing",
     "channels",
+    "links",
     "cortex",
     "compaction",
     "prompts"

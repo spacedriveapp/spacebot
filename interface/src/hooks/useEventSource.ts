@@ -35,10 +35,20 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 	const eventSourceRef = useRef<EventSource>();
 	const retryDelayRef = useRef(INITIAL_RETRY_MS);
 	const hadConnectionRef = useRef(false);
+	const shouldReconnectRef = useRef(enabled);
+	shouldReconnectRef.current = enabled;
 
 	const connect = useCallback(() => {
+		if (!shouldReconnectRef.current) return;
+
+		if (reconnectTimeout.current) {
+			clearTimeout(reconnectTimeout.current);
+			reconnectTimeout.current = undefined;
+		}
+
 		if (eventSourceRef.current) {
 			eventSourceRef.current.close();
+			eventSourceRef.current = undefined;
 		}
 
 		setConnectionState(hadConnectionRef.current ? "reconnecting" : "connecting");
@@ -47,6 +57,8 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 		eventSourceRef.current = source;
 
 		source.onopen = () => {
+			if (eventSourceRef.current !== source) return;
+
 			const wasReconnect = hadConnectionRef.current;
 			hadConnectionRef.current = true;
 			retryDelayRef.current = INITIAL_RETRY_MS;
@@ -60,6 +72,8 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 		// Register a listener for each event type in handlers
 		for (const eventType of Object.keys(handlersRef.current)) {
 			source.addEventListener(eventType, (event: MessageEvent) => {
+				if (eventSourceRef.current !== source) return;
+
 				try {
 					const data = JSON.parse(event.data);
 					handlersRef.current[eventType]?.(data);
@@ -71,6 +85,8 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 
 		// Handle the lagged event from the server
 		source.addEventListener("lagged", (event: MessageEvent) => {
+			if (eventSourceRef.current !== source) return;
+
 			try {
 				const data = JSON.parse(event.data);
 				console.warn(`SSE lagged, skipped ${data.skipped} events`);
@@ -82,17 +98,37 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 		});
 
 		source.onerror = () => {
+			if (eventSourceRef.current !== source) return;
+
 			source.close();
+			eventSourceRef.current = undefined;
+
+			if (!shouldReconnectRef.current) {
+				setConnectionState("disconnected");
+				return;
+			}
+
 			setConnectionState("reconnecting");
 
 			const delay = retryDelayRef.current;
 			retryDelayRef.current = Math.min(delay * BACKOFF_MULTIPLIER, MAX_RETRY_MS);
+			if (reconnectTimeout.current) {
+				clearTimeout(reconnectTimeout.current);
+			}
 			reconnectTimeout.current = setTimeout(connect, delay);
 		};
 	}, [url]);
 
 	useEffect(() => {
+		shouldReconnectRef.current = enabled;
+
 		if (!enabled) {
+			if (reconnectTimeout.current) {
+				clearTimeout(reconnectTimeout.current);
+				reconnectTimeout.current = undefined;
+			}
+			eventSourceRef.current?.close();
+			eventSourceRef.current = undefined;
 			setConnectionState("disconnected");
 			return;
 		}
@@ -100,10 +136,13 @@ export function useEventSource(url: string, options: UseEventSourceOptions) {
 		connect();
 
 		return () => {
+			shouldReconnectRef.current = false;
 			if (reconnectTimeout.current) {
 				clearTimeout(reconnectTimeout.current);
+				reconnectTimeout.current = undefined;
 			}
 			eventSourceRef.current?.close();
+			eventSourceRef.current = undefined;
 		};
 	}, [connect, enabled]);
 

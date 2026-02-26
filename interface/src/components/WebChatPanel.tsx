@@ -216,7 +216,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
 	const recentAssistantFingerprintsRef = useRef(new Map<string, number>());
-	const fingerprintedMessageIdsRef = useRef(new Set<string>());
 
 	// Pick up assistant messages from the global SSE stream that arrived
 	// after the webchat request SSE closed (e.g. worker completion retriggers).
@@ -230,8 +229,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 		// Seed seen IDs from webchat messages so we don't duplicate
 		for (const m of messages) {
 			seenIdsRef.current.add(m.id);
-			if (m.role === "assistant" && !fingerprintedMessageIdsRef.current.has(m.id)) {
-				fingerprintedMessageIdsRef.current.add(m.id);
+			if (m.role === "assistant") {
 				rememberAssistantContent(recentAssistantFingerprintsRef.current, m.content, now);
 			}
 		}
@@ -247,7 +245,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 				if (isRecentAssistantDuplicate(recentAssistantFingerprintsRef.current, item.content, now)) {
 					continue;
 				}
-				fingerprintedMessageIdsRef.current.add(item.id);
 				rememberAssistantContent(recentAssistantFingerprintsRef.current, item.content, now);
 				newMessages.push({
 					id: item.id,
@@ -269,7 +266,22 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const allMessages = useMemo(() => {
 		const messageIds = new Set(messages.map((message) => message.id));
 		const dedupedSse = sseMessages.filter((message) => !messageIds.has(message.id));
-		return [...messages, ...dedupedSse];
+		const merged = [...messages, ...dedupedSse];
+		const collapsed: typeof merged = [];
+
+		for (const message of merged) {
+			const last = collapsed[collapsed.length - 1];
+			if (
+				last &&
+				last.role === message.role &&
+				normalizeAssistantContent(last.content) === normalizeAssistantContent(message.content)
+			) {
+				continue;
+			}
+			collapsed.push(message);
+		}
+
+		return collapsed;
 	}, [messages, sseMessages]);
 
 	useEffect(() => {
