@@ -31,10 +31,7 @@ impl CronTool {
         }
     }
 
-    pub fn with_default_delivery_target(
-        mut self,
-        default_delivery_target: Option<String>,
-    ) -> Self {
+    pub fn with_default_delivery_target(mut self, default_delivery_target: Option<String>) -> Self {
         self.default_delivery_target = default_delivery_target;
         self
     }
