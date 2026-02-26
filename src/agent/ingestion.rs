@@ -472,11 +472,13 @@ async fn process_chunk(
         crate::conversation::history::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = crate::conversation::ChannelStore::new(deps.sqlite_pool.clone());
     let tool_server: ToolServerHandle = crate::tools::create_branch_tool_server(
+        None,
+        deps.agent_id.clone(),
+        deps.task_store.clone(),
         deps.memory_search.clone(),
         conversation_logger,
         channel_store,
         crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
-        &deps.agent_id,
     );
 
     let agent = AgentBuilder::new(model)

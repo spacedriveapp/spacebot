@@ -223,7 +223,7 @@ Branch, worker, and cron dispatch paths consult a derived `ready_for_work` signa
 
 - warmup state is `warm`
 - embedding model is ready
-- bulletin age is fresh (<= `max(60s, refresh_secs * 2)`)
+- bulletin age is fresh (`<= max(60s, refresh_secs * 2)`)
 
 If dispatch arrives while not ready, Spacebot does **not** block the channel or scheduler:
 

@@ -16,6 +16,8 @@ interface LiveContextValue {
 	activeWorkers: Record<string, ActiveWorker & { channelId?: string; agentId: string }>;
 	/** Monotonically increasing counter, bumped on every worker lifecycle SSE event. */
 	workerEventVersion: number;
+	/** Monotonically increasing counter, bumped on every task lifecycle SSE event. */
+	taskEventVersion: number;
 	/** Live transcript steps for running workers, keyed by worker_id. Built from SSE tool events. */
 	liveTranscripts: Record<string, TranscriptStep[]>;
 }
@@ -29,6 +31,7 @@ const LiveContext = createContext<LiveContextValue>({
 	activeLinks: new Set(),
 	activeWorkers: {},
 	workerEventVersion: 0,
+	taskEventVersion: 0,
 	liveTranscripts: {},
 });
 
@@ -56,6 +59,9 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 	// tab can react to SSE events without scanning all channels.
 	const [workerEventVersion, setWorkerEventVersion] = useState(0);
 	const bumpWorkerVersion = useCallback(() => setWorkerEventVersion((v) => v + 1), []);
+
+	const [taskEventVersion, setTaskEventVersion] = useState(0);
+	const bumpTaskVersion = useCallback(() => setTaskEventVersion((v) => v + 1), []);
 
 	// Live transcript accumulator: builds TranscriptStep[] from SSE tool events
 	// for running workers. Cleared when worker completes.
@@ -211,7 +217,7 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		}
 	}, [channelHandlers, bumpWorkerVersion]);
 
-	// Merge channel handlers with agent message handlers
+	// Merge channel handlers with agent message + task handlers
 	const handlers = useMemo(
 		() => ({
 			...channelHandlers,
@@ -222,8 +228,9 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 			tool_completed: wrappedToolCompleted,
 			agent_message_sent: handleAgentMessage,
 			agent_message_received: handleAgentMessage,
+			task_updated: bumpTaskVersion,
 		}),
-		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleAgentMessage],
+		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleAgentMessage, bumpTaskVersion],
 	);
 
 	const onReconnect = useCallback(() => {
@@ -231,7 +238,10 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		queryClient.invalidateQueries({ queryKey: ["channels"] });
 		queryClient.invalidateQueries({ queryKey: ["status"] });
 		queryClient.invalidateQueries({ queryKey: ["agents"] });
-	}, [syncStatusSnapshot, queryClient]);
+		queryClient.invalidateQueries({ queryKey: ["tasks"] });
+		// Bump task version so any mounted task views refetch immediately.
+		bumpTaskVersion();
+	}, [syncStatusSnapshot, queryClient, bumpTaskVersion]);
 
 	const { connectionState } = useEventSource(api.eventsUrl, {
 		handlers,
@@ -242,7 +252,7 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 	const hasData = channels.length > 0 || channelsData !== undefined;
 
 	return (
-		<LiveContext.Provider value={{ liveStates, channels, connectionState, hasData, loadOlderMessages, activeLinks, activeWorkers, workerEventVersion, liveTranscripts }}>
+		<LiveContext.Provider value={{ liveStates, channels, connectionState, hasData, loadOlderMessages, activeLinks, activeWorkers, workerEventVersion, taskEventVersion, liveTranscripts }}>
 			{children}
 		</LiveContext.Provider>
 	);

@@ -493,7 +493,7 @@ Dispatch readiness is derived from warmup runtime state:
 
 - warmup state must be `warm`
 - embedding must be ready
-- bulletin age must be fresh (<= `max(60s, refresh_secs * 2)`)
+- bulletin age must be fresh (`<= max(60s, refresh_secs * 2)`)
 
 When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot still dispatches, increments cold-dispatch metrics, and queues a forced warmup pass in the background.
 

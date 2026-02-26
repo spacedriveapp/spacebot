@@ -1,8 +1,22 @@
 use crate::error::Result;
 use anyhow::Context;
 use minijinja::{Environment, Value, context};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// A completed background process result, passed to the retrigger template.
+#[derive(Clone, Debug, Serialize)]
+pub struct RetriggerResult {
+    /// "branch" or "worker"
+    pub process_type: String,
+    /// The branch or worker ID (short UUID).
+    pub process_id: String,
+    /// Whether the process completed successfully.
+    pub success: bool,
+    /// The result/conclusion text from the process.
+    pub result: String,
+}
 
 /// Template engine for rendering system prompts with dynamic variables.
 ///
@@ -266,9 +280,17 @@ impl PromptEngine {
         )
     }
 
-    /// Convenience method for rendering system retrigger message.
-    pub fn render_system_retrigger(&self) -> Result<String> {
-        self.render_static("fragments/system/retrigger")
+    /// Render the retrigger message with specific process results embedded.
+    ///
+    /// Each result includes the process type, ID, and full result text so the
+    /// LLM knows exactly what completed and what to relay to the user.
+    pub fn render_system_retrigger(&self, results: &[RetriggerResult]) -> Result<String> {
+        self.render(
+            "fragments/system/retrigger",
+            context! {
+                results => results,
+            },
+        )
     }
 
     /// Correction message when the LLM outputs tool call syntax as plain text.
@@ -406,7 +428,6 @@ impl PromptEngine {
             coalesce_hint,
             available_channels,
             None,
-            None,
         )
     }
 
@@ -439,17 +460,7 @@ impl PromptEngine {
         )
     }
 
-    /// Render the link context fragment for an internal agent-to-agent channel.
-    pub fn render_link_context(&self, link_context: LinkContext) -> Result<String> {
-        self.render(
-            "fragments/link_context",
-            context! {
-                link_context => link_context,
-            },
-        )
-    }
-
-    /// Render the channel system prompt with all dynamic components including org/link context.
+    /// Render the channel system prompt with all dynamic components including org context.
     #[allow(clippy::too_many_arguments)]
     pub fn render_channel_prompt_with_links(
         &self,
@@ -462,7 +473,6 @@ impl PromptEngine {
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
         org_context: Option<String>,
-        link_context: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -476,7 +486,6 @@ impl PromptEngine {
                 coalesce_hint => coalesce_hint,
                 available_channels => available_channels,
                 org_context => org_context,
-                link_context => link_context,
             },
         )
     }
@@ -502,13 +511,6 @@ pub struct LinkedAgent {
     pub id: String,
     /// Whether this is a human (true) or an agent (false).
     pub is_human: bool,
-}
-
-/// Context for the current link channel.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LinkContext {
-    pub agent_name: String,
-    pub relationship: String,
 }
 
 /// Information about a skill for template rendering.

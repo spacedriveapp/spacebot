@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
 import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
+import { TagInput } from "@/components/TagInput";
 import { Markdown } from "@/components/Markdown";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
@@ -14,7 +15,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
 }
 
-type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser";
+type SectionId = "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "sandbox";
 
 const SECTIONS: {
 	id: SectionId;
@@ -33,6 +34,7 @@ const SECTIONS: {
 	{ id: "coalesce", label: "Coalesce", group: "config", description: "Message batching", detail: "When multiple messages arrive in quick succession, coalescing batches them into a single LLM turn. This prevents the agent from responding to each message individually in fast-moving conversations." },
 	{ id: "memory", label: "Memory Persistence", group: "config", description: "Auto-save interval", detail: "Spawns a silent background branch at regular intervals to recall existing memories and save new ones from the recent conversation. Runs without blocking the channel." },
 	{ id: "browser", label: "Browser", group: "config", description: "Chrome automation", detail: "Controls browser automation tools available to workers. When enabled, workers can navigate web pages, take screenshots, and interact with sites. JavaScript evaluation is a separate permission." },
+	{ id: "sandbox", label: "Sandbox", group: "config", description: "Process containment", detail: "OS-level filesystem containment for shell and exec tool subprocesses. When enabled, worker processes run inside a kernel-enforced sandbox (bubblewrap on Linux, sandbox-exec on macOS) that makes the entire filesystem read-only except for the workspace and any configured writable paths. On hosted deployments, sandbox mode is always enforced." },
 ];
 
 interface AgentConfigProps {
@@ -62,7 +64,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	// Sync activeSection with URL search param
 	useEffect(() => {
 		if (search.tab) {
-			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser"];
+			const validSections: SectionId[] = ["soul", "identity", "user", "routing", "tuning", "compaction", "cortex", "coalesce", "memory", "browser", "sandbox"];
 			if (validSections.includes(search.tab as SectionId)) {
 				setActiveSection(search.tab as SectionId);
 			}
@@ -103,9 +105,32 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 	const configMutation = useMutation({
 		mutationFn: (update: AgentConfigUpdateRequest) => api.updateAgentConfig(update),
-		onMutate: () => setSaving(true),
+		onMutate: (update) => {
+			setSaving(true);
+			// Optimistically merge the sent values into the cache so the UI
+			// reflects the change immediately (covers fields the backend
+			// doesn't yet return in its response, like sandbox).
+			const previous = queryClient.getQueryData<AgentConfigResponse>(["agent-config", agentId]);
+			if (previous) {
+				const { agent_id: _, ...sections } = update;
+				const merged = { ...previous } as unknown as Record<string, unknown>;
+				const prev = previous as unknown as Record<string, unknown>;
+				for (const [key, value] of Object.entries(sections)) {
+					if (value !== undefined) {
+						merged[key] = {
+							...(prev[key] as Record<string, unknown> | undefined),
+							...value,
+						};
+					}
+				}
+				queryClient.setQueryData(["agent-config", agentId], merged as unknown as AgentConfigResponse);
+			}
+		},
 		onSuccess: (result) => {
-			queryClient.setQueryData(["agent-config", agentId], result);
+			// Merge server response with cache to preserve fields the backend
+			// doesn't yet return (e.g. sandbox).
+			const previous = queryClient.getQueryData<AgentConfigResponse>(["agent-config", agentId]);
+			queryClient.setQueryData(["agent-config", agentId], { ...previous, ...result });
 			setDirty(false);
 			setSaving(false);
 		},
@@ -384,24 +409,30 @@ interface ConfigSectionEditorProps {
 	onSave: (update: Partial<AgentConfigUpdateRequest>) => void;
 }
 
+const SANDBOX_DEFAULTS = { mode: "enabled" as const, writable_paths: [] as string[] };
+
 function ConfigSectionEditor({ sectionId, label, description, detail, config, onDirtyChange, saveHandlerRef, onSave }: ConfigSectionEditorProps) {
-	const [localValues, setLocalValues] = useState<Record<string, string | number | boolean>>(() => {
+	type ConfigValues = Record<string, string | number | boolean | string[]>;
+	const sandbox = config.sandbox ?? SANDBOX_DEFAULTS;
+	const [localValues, setLocalValues] = useState<ConfigValues>(() => {
 		// Initialize from config based on section
 		switch (sectionId) {
 			case "routing":
-				return { ...config.routing };
+				return { ...config.routing } as ConfigValues;
 			case "tuning":
-				return { ...config.tuning };
+				return { ...config.tuning } as ConfigValues;
 			case "compaction":
-				return { ...config.compaction };
+				return { ...config.compaction } as ConfigValues;
 			case "cortex":
-				return { ...config.cortex };
+				return { ...config.cortex } as ConfigValues;
 			case "coalesce":
-				return { ...config.coalesce };
+				return { ...config.coalesce } as ConfigValues;
 			case "memory":
-				return { ...config.memory_persistence };
+				return { ...config.memory_persistence } as ConfigValues;
 			case "browser":
-				return { ...config.browser };
+				return { ...config.browser } as ConfigValues;
+			case "sandbox":
+				return { mode: sandbox.mode, writable_paths: sandbox.writable_paths } as ConfigValues;
 			default:
 				return {};
 		}
@@ -438,11 +469,14 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				case "browser":
 					setLocalValues({ ...config.browser });
 					break;
+				case "sandbox":
+					setLocalValues({ mode: sandbox.mode, writable_paths: sandbox.writable_paths });
+					break;
 			}
 		}
 	}, [config, sectionId, localDirty]);
 
-	const handleChange = useCallback((field: string, value: string | number | boolean) => {
+	const handleChange = useCallback((field: string, value: string | number | boolean | string[]) => {
 		setLocalValues((prev) => ({ ...prev, [field]: value }));
 		setLocalDirty(true);
 	}, []);
@@ -474,6 +508,9 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 				break;
 			case "browser":
 				setLocalValues({ ...config.browser });
+				break;
+			case "sandbox":
+				setLocalValues({ mode: sandbox.mode, writable_paths: sandbox.writable_paths });
 				break;
 		}
 		setLocalDirty(false);
@@ -783,6 +820,36 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 							value={localValues.evaluate_enabled as boolean}
 							onChange={(v) => handleChange("evaluate_enabled", v)}
 						/>
+					</div>
+				);
+			case "sandbox":
+				return (
+					<div className="grid gap-4">
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">Mode</label>
+							<p className="text-tiny text-ink-faint">Kernel-enforced filesystem containment for shell and exec subprocesses. On hosted deployments this is always enforced regardless of this setting.</p>
+							<Select
+								value={localValues.mode as string}
+								onValueChange={(v) => handleChange("mode", v)}
+							>
+								<SelectTrigger className="border-app-line/50 bg-app-darkBox/30">
+									<SelectValue />
+								</SelectTrigger>
+								<SelectContent>
+									<SelectItem value="enabled">Enabled</SelectItem>
+									<SelectItem value="disabled">Disabled</SelectItem>
+								</SelectContent>
+							</Select>
+						</div>
+						<div className="flex flex-col gap-1.5">
+							<label className="text-sm font-medium text-ink">Writable Paths</label>
+							<p className="text-tiny text-ink-faint">Additional directories workers can write to beyond the workspace. The workspace is always writable. Press Enter to add a path.</p>
+							<TagInput
+								value={(localValues.writable_paths as string[]) ?? []}
+								onChange={(paths) => handleChange("writable_paths", paths)}
+								placeholder="/home/user/projects/myapp"
+							/>
+						</div>
 					</div>
 				);
 			default:
