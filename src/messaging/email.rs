@@ -71,6 +71,7 @@ pub struct EmailSearchHit {
 
 /// Email adapter state.
 pub struct EmailAdapter {
+    runtime_key: String,
     imap_host: String,
     imap_port: u16,
     imap_username: String,
@@ -117,6 +118,39 @@ impl std::fmt::Debug for EmailAdapter {
 
 impl EmailAdapter {
     pub fn from_config(config: &EmailConfig) -> crate::Result<Self> {
+        Self::build("email".to_string(), config)
+    }
+
+    pub fn from_instance_config(
+        runtime_key: impl Into<String>,
+        config: &crate::config::EmailInstanceConfig,
+    ) -> crate::Result<Self> {
+        // Build a temporary EmailConfig to reuse build_smtp_transport and shared logic.
+        let email_config = EmailConfig {
+            enabled: config.enabled,
+            imap_host: config.imap_host.clone(),
+            imap_port: config.imap_port,
+            imap_username: config.imap_username.clone(),
+            imap_password: config.imap_password.clone(),
+            imap_use_tls: config.imap_use_tls,
+            smtp_host: config.smtp_host.clone(),
+            smtp_port: config.smtp_port,
+            smtp_username: config.smtp_username.clone(),
+            smtp_password: config.smtp_password.clone(),
+            smtp_use_starttls: config.smtp_use_starttls,
+            from_address: config.from_address.clone(),
+            from_name: config.from_name.clone(),
+            poll_interval_secs: config.poll_interval_secs,
+            folders: config.folders.clone(),
+            allowed_senders: config.allowed_senders.clone(),
+            max_body_bytes: config.max_body_bytes,
+            max_attachment_bytes: config.max_attachment_bytes,
+            instances: Vec::new(),
+        };
+        Self::build(runtime_key.into(), &email_config)
+    }
+
+    fn build(runtime_key: String, config: &EmailConfig) -> crate::Result<Self> {
         let folders = config
             .folders
             .iter()
@@ -133,6 +167,7 @@ impl EmailAdapter {
         let smtp_transport = build_smtp_transport(config)?;
 
         Ok(Self {
+            runtime_key,
             imap_host: config.imap_host.clone(),
             imap_port: config.imap_port,
             imap_username: config.imap_username.clone(),
@@ -168,7 +203,7 @@ impl EmailAdapter {
             poll_interval: self.poll_interval,
             allowed_senders: self.allowed_senders.clone(),
             max_body_bytes: self.max_body_bytes,
-            runtime_key: "email".to_string(),
+            runtime_key: self.runtime_key.clone(),
         }
     }
 
@@ -244,7 +279,7 @@ impl EmailAdapter {
 
 impl Messaging for EmailAdapter {
     fn name(&self) -> &str {
-        "email"
+        &self.runtime_key
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {

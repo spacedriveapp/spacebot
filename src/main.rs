@@ -1610,12 +1610,40 @@ async fn initialize_agents(
     if let Some(email_config) = &config.messaging.email
         && email_config.enabled
     {
-        match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
-            Ok(adapter) => {
-                new_messaging_manager.register(adapter).await;
+        if !email_config.imap_host.is_empty() {
+            match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build email adapter");
+                }
             }
-            Err(error) => {
-                tracing::error!(%error, "failed to build email adapter");
+        }
+
+        for instance in email_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.imap_host.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled email instance with empty credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "email",
+                Some(instance.name.as_str()),
+            );
+            match spacebot::messaging::email::EmailAdapter::from_instance_config(
+                runtime_key,
+                instance,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, adapter = %instance.name, "failed to build named email adapter");
+                }
             }
         }
     }

@@ -1322,7 +1322,10 @@ struct AdapterValidationState {
 }
 
 fn is_named_adapter_platform(platform: &str) -> bool {
-    matches!(platform, "discord" | "slack" | "telegram" | "twitch")
+    matches!(
+        platform,
+        "discord" | "slack" | "telegram" | "twitch" | "email"
+    )
 }
 
 fn validate_named_messaging_adapters(
@@ -1460,6 +1463,25 @@ fn build_adapter_validation_states(
         validate_runtime_keys("twitch", default_present, &named_instances)?;
         states.insert(
             "twitch",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
+    if let Some(email) = &messaging.email {
+        let named_instances = validate_instance_names(
+            "email",
+            email
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present = !email.imap_host.trim().is_empty();
+        validate_runtime_keys("email", default_present, &named_instances)?;
+        states.insert(
+            "email",
             AdapterValidationState {
                 default_present,
                 named_instances,
@@ -1917,6 +1939,31 @@ impl std::fmt::Debug for TelegramConfig {
 
 #[derive(Clone)]
 pub struct EmailConfig {
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+    pub instances: Vec<EmailInstanceConfig>,
+}
+
+/// Per-instance config for a named email adapter.
+#[derive(Debug, Clone)]
+pub struct EmailInstanceConfig {
+    pub name: String,
     pub enabled: bool,
     pub imap_host: String,
     pub imap_port: u16,
@@ -2722,6 +2769,41 @@ struct TomlTelegramInstanceConfig {
 
 #[derive(Deserialize)]
 struct TomlEmailConfig {
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+    #[serde(default)]
+    instances: Vec<TomlEmailInstanceConfig>,
+}
+
+#[derive(Deserialize)]
+struct TomlEmailInstanceConfig {
+    name: String,
     #[serde(default)]
     enabled: bool,
     imap_host: Option<String>,
@@ -4605,19 +4687,105 @@ impl Config {
                 })
             }),
             email: toml.messaging.email.and_then(|email| {
+                let instances = email
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let imap_host =
+                            instance.imap_host.as_deref().and_then(resolve_env_value);
+                        let imap_username =
+                            instance.imap_username.as_deref().and_then(resolve_env_value);
+                        let imap_password =
+                            instance.imap_password.as_deref().and_then(resolve_env_value);
+                        let smtp_host =
+                            instance.smtp_host.as_deref().and_then(resolve_env_value);
+
+                        let has_credentials = imap_host.is_some()
+                            && imap_username.is_some()
+                            && imap_password.is_some()
+                            && smtp_host.is_some();
+
+                        if instance.enabled && !has_credentials {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "email instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+
+                        let imap_username_val = imap_username.unwrap_or_default();
+                        let imap_password_val = imap_password.unwrap_or_default();
+                        let smtp_username = instance
+                            .smtp_username
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| imap_username_val.clone());
+                        let smtp_password = instance
+                            .smtp_password
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| imap_password_val.clone());
+                        let from_address = instance
+                            .from_address
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| smtp_username.clone());
+                        let from_name =
+                            instance.from_name.as_deref().and_then(resolve_env_value);
+
+                        EmailInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            imap_host: imap_host.unwrap_or_default(),
+                            imap_port: instance.imap_port,
+                            imap_username: imap_username_val,
+                            imap_password: imap_password_val,
+                            imap_use_tls: instance.imap_use_tls,
+                            smtp_host: smtp_host.unwrap_or_default(),
+                            smtp_port: instance.smtp_port,
+                            smtp_username,
+                            smtp_password,
+                            smtp_use_starttls: instance.smtp_use_starttls,
+                            from_address,
+                            from_name,
+                            poll_interval_secs: instance.poll_interval_secs,
+                            folders: if instance.folders.is_empty() {
+                                vec!["INBOX".to_string()]
+                            } else {
+                                instance.folders
+                            },
+                            allowed_senders: instance.allowed_senders,
+                            max_body_bytes: instance.max_body_bytes,
+                            max_attachment_bytes: instance.max_attachment_bytes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
                 let imap_host = std::env::var("EMAIL_IMAP_HOST")
                     .ok()
-                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value))?;
+                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value));
                 let imap_username = std::env::var("EMAIL_IMAP_USERNAME")
                     .ok()
-                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value))?;
+                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value));
                 let imap_password = std::env::var("EMAIL_IMAP_PASSWORD")
                     .ok()
-                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value))?;
-
+                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value));
                 let smtp_host = std::env::var("EMAIL_SMTP_HOST")
                     .ok()
-                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value))?;
+                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value));
+
+                let has_default = imap_host.is_some()
+                    && imap_username.is_some()
+                    && imap_password.is_some()
+                    && smtp_host.is_some();
+
+                if !has_default && instances.is_empty() {
+                    return None;
+                }
+
+                let imap_host = imap_host.unwrap_or_default();
+                let imap_username = imap_username.unwrap_or_default();
+                let imap_password = imap_password.unwrap_or_default();
+                let smtp_host = smtp_host.unwrap_or_default();
                 let smtp_username = std::env::var("EMAIL_SMTP_USERNAME")
                     .ok()
                     .or_else(|| email.smtp_username.as_deref().and_then(resolve_env_value))
@@ -4658,6 +4826,7 @@ impl Config {
                     allowed_senders: email.allowed_senders,
                     max_body_bytes: email.max_body_bytes,
                     max_attachment_bytes: email.max_attachment_bytes,
+                    instances,
                 })
             }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
@@ -5490,17 +5659,43 @@ pub fn spawn_file_watcher(
                                 }
                             }
 
-                        // Email: start if enabled and not already running
+                        // Email: start default + named instances that are enabled and not already running.
                         if let Some(email_config) = &config.messaging.email
-                            && email_config.enabled && !manager.has_adapter("email").await {
-                                match crate::messaging::email::EmailAdapter::from_config(email_config) {
-                                    Ok(adapter) => {
-                                        if let Err(error) = manager.register_and_start(adapter).await {
-                                            tracing::error!(%error, "failed to hot-start email adapter from config change");
+                            && email_config.enabled {
+                                if !email_config.imap_host.is_empty() && !manager.has_adapter("email").await {
+                                    match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start email adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to build email adapter from config change");
                                         }
                                     }
-                                    Err(error) => {
-                                        tracing::error!(%error, "failed to build email adapter from config change");
+                                }
+
+                                for instance in email_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "email",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        continue;
+                                    }
+
+                                    match crate::messaging::email::EmailAdapter::from_instance_config(
+                                        runtime_key.as_str(),
+                                        instance,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named email adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to build named email adapter from config change");
+                                        }
                                     }
                                 }
                             }
@@ -7349,6 +7544,7 @@ startup_delay_secs = 2
                 allowed_senders: vec![],
                 max_body_bytes: 1_000_000,
                 max_attachment_bytes: 10_000_000,
+                instances: vec![],
             }),
             webhook: None,
             twitch: None,

@@ -692,6 +692,30 @@ Channel/worker temporal context timezone precedence is:
 | `max_body_bytes` | integer | 262144 | Max inbound body bytes before truncation |
 | `max_attachment_bytes` | integer | 10485760 | Max attachment bytes to process metadata for |
 
+### `[[messaging.email.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `imap_host` | string | **required** | IMAP host (or `env:VAR_NAME`) |
+| `imap_port` | integer | 993 | IMAP port |
+| `imap_username` | string | **required** | IMAP username (or `env:VAR_NAME`) |
+| `imap_password` | string | **required** | IMAP password (or `env:VAR_NAME`) |
+| `imap_use_tls` | bool | true | Use direct TLS for IMAP |
+| `smtp_host` | string | **required** | SMTP host (or `env:VAR_NAME`) |
+| `smtp_port` | integer | 587 | SMTP port |
+| `smtp_username` | string | None | SMTP username (defaults to IMAP username) |
+| `smtp_password` | string | None | SMTP password (defaults to IMAP password) |
+| `smtp_use_starttls` | bool | true | Use STARTTLS for SMTP |
+| `from_address` | string | None | Sender address (defaults to SMTP username) |
+| `from_name` | string | None | Optional sender display name |
+| `poll_interval_secs` | integer | 30 | How often to check for new email |
+| `folders` | string[] | `["INBOX"]` | IMAP folders to poll |
+| `allowed_senders` | string[] | `[]` | Optional allowlist (empty = all) |
+| `max_body_bytes` | integer | 262144 | Max inbound body bytes |
+| `max_attachment_bytes` | integer | 10485760 | Max attachment bytes |
+
 ### `[messaging.webhook]`
 
 | Key | Type | Default | Description |
