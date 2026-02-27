@@ -83,7 +83,7 @@ impl SshManager {
             ])
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::inherit())
             .spawn()
             .context("failed to start sshd")?;
 
