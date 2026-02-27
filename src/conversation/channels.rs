@@ -240,6 +240,10 @@ fn extract_display_name(
             .get("display_name")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        "email" => metadata
+            .get("email_subject")
+            .and_then(|v| v.as_str())
+            .map(|subject| format!("Email: {subject}")),
         "portal" => Some("portal:chat".to_string()),
         _ => None,
     }
@@ -283,6 +287,22 @@ fn extract_platform_meta(
         "twitch" => {
             if let Some(value) = metadata.get("twitch_channel") {
                 meta.insert("twitch_channel".to_string(), value.clone());
+            }
+        }
+        "email" => {
+            for key in [
+                "email_from",
+                "email_reply_to",
+                "email_to",
+                "email_subject",
+                "email_message_id",
+                "email_in_reply_to",
+                "email_references",
+                "email_thread_key",
+            ] {
+                if let Some(value) = metadata.get(key) {
+                    meta.insert(key.to_string(), value.clone());
+                }
             }
         }
         _ => {}

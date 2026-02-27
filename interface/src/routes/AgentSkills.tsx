@@ -266,8 +266,13 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 	});
 
 	const installedSkills = skillsData?.skills ?? [];
-	const installedSkillNames = new Map(
-		installedSkills.map((skill) => [skill.name.toLowerCase(), skill.name]),
+	const installedKeys = new Map(
+		installedSkills.map((s) => [
+			s.source_repo
+				? `${s.source_repo}/${s.name}`.toLowerCase()
+				: s.name.toLowerCase(),
+			s.name,
+		]),
 	);
 
 	// Flatten browse pages or use search results
@@ -462,7 +467,10 @@ export function AgentSkills({ agentId }: AgentSkillsProps) {
 							<div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
 								{registrySkills.map((skill) => {
 									const spec = installSpec(skill);
-									const installedName = installedSkillNames.get(skill.name.toLowerCase());
+									const compositeKey = `${skill.source}/${skill.name}`.toLowerCase();
+									const installedName =
+										installedKeys.get(compositeKey) ??
+										installedKeys.get(skill.name.toLowerCase());
 									const isInstalled = Boolean(installedName);
 									return (
 										<RegistrySkillCard

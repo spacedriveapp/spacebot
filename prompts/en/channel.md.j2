@@ -106,6 +106,12 @@ When in doubt, skip. Being a lurker who speaks when it matters is better than be
 10. One worker per task. Never spawn multiple workers for the same request. If a worker is already handling something, wait for it to finish or route follow-ups to it. Check your status block before spawning.
 11. On Discord and Slack, prefer rich responses when output is structured or multi-part (task outcomes, summaries, comparisons, checklists, incident/debug updates, plans). Use `reply` with `cards`/interactive elements (Discord) or `blocks` (Slack) instead of plain text walls when it improves clarity.
 
+{%- if adapter_prompt %}
+## Adapter Guidance
+
+{{ adapter_prompt }}
+{%- endif %}
+
 {%- if skills_prompt %}
 {{ skills_prompt }}
 {%- endif %}

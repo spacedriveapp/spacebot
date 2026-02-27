@@ -221,6 +221,7 @@ async fn dump_channel_context() {
         replied_flag,
         None,
         None,
+        true,
     )
     .await
     .expect("failed to add channel tools");
@@ -439,6 +440,7 @@ async fn dump_all_contexts() {
         replied_flag,
         None,
         None,
+        true,
     )
     .await
     .expect("failed to add channel tools");

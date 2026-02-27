@@ -1524,6 +1524,19 @@ async fn initialize_agents(
         new_messaging_manager.register(adapter).await;
     }
 
+    if let Some(email_config) = &config.messaging.email
+        && email_config.enabled
+    {
+        match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
+            Ok(adapter) => {
+                new_messaging_manager.register(adapter).await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to build email adapter");
+            }
+        }
+    }
+
     if let Some(webhook_config) = &config.messaging.webhook
         && webhook_config.enabled
     {

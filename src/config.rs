@@ -1301,6 +1301,7 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
 }
@@ -1517,6 +1518,53 @@ impl std::fmt::Debug for TelegramConfig {
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
     }
 }
@@ -2131,6 +2179,7 @@ struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
     telegram: Option<TomlTelegramConfig>,
+    email: Option<TomlEmailConfig>,
     webhook: Option<TomlWebhookConfig>,
     twitch: Option<TomlTwitchConfig>,
 }
@@ -2175,6 +2224,38 @@ struct TomlTelegramConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlEmailConfig {
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+}
+
+#[derive(Deserialize)]
 struct TomlWebhookConfig {
     #[serde(default)]
     enabled: bool,
@@ -2204,6 +2285,38 @@ fn default_webhook_port() -> u16 {
 }
 fn default_webhook_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn default_email_imap_port() -> u16 {
+    993
+}
+
+fn default_email_imap_use_tls() -> bool {
+    true
+}
+
+fn default_email_smtp_port() -> u16 {
+    587
+}
+
+fn default_email_smtp_use_starttls() -> bool {
+    true
+}
+
+fn default_email_poll_interval_secs() -> u64 {
+    30
+}
+
+fn default_email_folders() -> Vec<String> {
+    vec!["INBOX".to_string()]
+}
+
+fn default_email_max_body_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_email_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 #[derive(Deserialize)]
@@ -3836,6 +3949,62 @@ impl Config {
                     dm_allowed_users: t.dm_allowed_users,
                 })
             }),
+            email: toml.messaging.email.and_then(|email| {
+                let imap_host = std::env::var("EMAIL_IMAP_HOST")
+                    .ok()
+                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value))?;
+                let imap_username = std::env::var("EMAIL_IMAP_USERNAME")
+                    .ok()
+                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value))?;
+                let imap_password = std::env::var("EMAIL_IMAP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value))?;
+
+                let smtp_host = std::env::var("EMAIL_SMTP_HOST")
+                    .ok()
+                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value))?;
+                let smtp_username = std::env::var("EMAIL_SMTP_USERNAME")
+                    .ok()
+                    .or_else(|| email.smtp_username.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_username.clone());
+                let smtp_password = std::env::var("EMAIL_SMTP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.smtp_password.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_password.clone());
+
+                let from_address = std::env::var("EMAIL_FROM_ADDRESS")
+                    .ok()
+                    .or_else(|| email.from_address.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| smtp_username.clone());
+                let from_name = std::env::var("EMAIL_FROM_NAME")
+                    .ok()
+                    .or_else(|| email.from_name.as_deref().and_then(resolve_env_value));
+
+                Some(EmailConfig {
+                    enabled: email.enabled,
+                    imap_host,
+                    imap_port: email.imap_port,
+                    imap_username,
+                    imap_password,
+                    imap_use_tls: email.imap_use_tls,
+                    smtp_host,
+                    smtp_port: email.smtp_port,
+                    smtp_username,
+                    smtp_password,
+                    smtp_use_starttls: email.smtp_use_starttls,
+                    from_address,
+                    from_name,
+                    poll_interval_secs: email.poll_interval_secs,
+                    folders: if email.folders.is_empty() {
+                        vec!["INBOX".to_string()]
+                    } else {
+                        email.folders
+                    },
+                    allowed_senders: email.allowed_senders,
+                    max_body_bytes: email.max_body_bytes,
+                    max_attachment_bytes: email.max_attachment_bytes,
+                })
+            }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
                 enabled: w.enabled,
                 port: w.port,
@@ -4526,6 +4695,21 @@ pub fn spawn_file_watcher(
                                 );
                                 if let Err(error) = manager.register_and_start(adapter).await {
                                     tracing::error!(%error, "failed to hot-start telegram adapter from config change");
+                                }
+                            }
+
+                        // Email: start if enabled and not already running
+                        if let Some(email_config) = &config.messaging.email
+                            && email_config.enabled && !manager.has_adapter("email").await {
+                                match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                                    Ok(adapter) => {
+                                        if let Err(error) = manager.register_and_start(adapter).await {
+                                            tracing::error!(%error, "failed to hot-start email adapter from config change");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "failed to build email adapter from config change");
+                                    }
                                 }
                             }
 

@@ -16,6 +16,22 @@ Single binary. No server dependencies. Runs on tokio. All data lives in embedded
 - Treat migration files as immutable; modifying historical migrations causes checksum mismatches and can block startup.
 - For schema changes, always create a new migration with a new timestamp/version.
 
+## Delivery Gates (Mandatory)
+
+Run these checks in this order for code changes before pushing or updating a PR:
+
+1. `just preflight` — validate git/remote/auth state and avoid push-loop churn.
+2. `just gate-pr` — enforce formatting, compile checks, migration safety, lib tests, and integration test compile.
+
+If `just` is unavailable, run the equivalent scripts directly in the same order: `./scripts/preflight.sh` then `./scripts/gate-pr.sh`.
+
+Additional rules:
+
+- If the same command fails twice in one session, stop rerunning it blindly. Capture root cause and switch strategy.
+- For every external review finding marked P1/P2, add a targeted verification command in the final handoff.
+- For changes in async/stateful paths (worker lifecycle, cancellation, retrigger, recall cache behavior), include explicit race/terminal-state reasoning in the PR summary and run targeted tests in addition to `just gate-pr`.
+- Do not push if any gate is red.
+
 ## Architecture Overview
 
 Five process types. Every LLM process is a Rig `Agent<SpacebotModel, SpacebotHook>`. They differ in system prompt, tools, history, and hooks.

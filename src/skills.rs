@@ -35,6 +35,8 @@ pub struct Skill {
     pub content: String,
     /// Where this skill was loaded from.
     pub source: SkillSource,
+    /// GitHub `owner/repo` that this skill was installed from, if any.
+    pub source_repo: Option<String>,
 }
 
 /// Where a skill was loaded from, used for precedence tracking.
@@ -213,6 +215,7 @@ impl SkillSet {
                 file_path: s.file_path.clone(),
                 base_dir: s.base_dir.clone(),
                 source: s.source.clone(),
+                source_repo: s.source_repo.clone(),
             })
             .collect()
     }
@@ -226,6 +229,7 @@ pub struct SkillInfo {
     pub file_path: PathBuf,
     pub base_dir: PathBuf,
     pub source: SkillSource,
+    pub source_repo: Option<String>,
 }
 
 /// Load all skills from a directory.
@@ -293,6 +297,7 @@ async fn load_skill(
     });
 
     let description = frontmatter.get("description").cloned().unwrap_or_default();
+    let source_repo = frontmatter.get("source_repo").cloned();
 
     // Resolve {baseDir} template variable in the body
     let base_dir_str = base_dir.to_string_lossy();
@@ -305,6 +310,7 @@ async fn load_skill(
         base_dir: base_dir.to_path_buf(),
         content,
         source,
+        source_repo,
     })
 }
 
@@ -465,6 +471,7 @@ mod tests {
                 base_dir: PathBuf::from("/skills/weather"),
                 content: "# Weather\n\nUse curl.".into(),
                 source: SkillSource::Instance,
+                source_repo: None,
             },
         );
 
@@ -487,6 +494,7 @@ mod tests {
                 base_dir: PathBuf::from("/skills/weather"),
                 content: "# Weather\n\nUse curl.".into(),
                 source: SkillSource::Instance,
+                source_repo: None,
             },
         );
 

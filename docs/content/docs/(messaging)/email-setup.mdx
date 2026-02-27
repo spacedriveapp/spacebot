@@ -1,0 +1,147 @@
+---
+title: Email Setup
+description: Connect Spacebot to an inbox with IMAP + SMTP.
+---
+
+# Email Setup
+
+Connect Spacebot to any mailbox that supports IMAP and SMTP. Inbound messages are polled over IMAP, and replies are sent over SMTP.
+
+You need:
+
+- an IMAP host, username, and password
+- an SMTP host, username, and password
+- a sender address (`from_address`) for outbound replies
+
+Most providers require an app password when MFA is enabled.
+
+## Step 1: Prepare mailbox access
+
+In your mail provider settings:
+
+1. Enable IMAP access for the mailbox.
+2. Create an app password (recommended) for IMAP/SMTP.
+3. Confirm IMAP and SMTP hosts/ports.
+
+Typical defaults are IMAP `993` (TLS) and SMTP `587` (STARTTLS).
+
+## Step 2: Add Email credentials to Spacebot
+
+<Tabs items={["Spacebot UI", "TOML Config"]}>
+<Tab value="Spacebot UI">
+
+1. Open **Settings** -> **Messaging Platforms**.
+2. Expand the **Email** card.
+3. Enter IMAP and SMTP credentials.
+4. Set **From Address** (and optional **From Name**).
+5. Click **Connect**.
+
+</Tab>
+<Tab value="TOML Config">
+
+```toml
+[messaging.email]
+enabled = true
+
+imap_host = "imap.example.com"
+imap_port = 993
+imap_username = "inbox@example.com"
+imap_password = "env:EMAIL_IMAP_PASSWORD"
+imap_use_tls = true
+
+smtp_host = "smtp.example.com"
+smtp_port = 587
+smtp_username = "inbox@example.com"
+smtp_password = "env:EMAIL_SMTP_PASSWORD"
+smtp_use_starttls = true
+
+from_address = "bot@example.com"
+from_name = "Spacebot"
+
+poll_interval_secs = 30
+folders = ["INBOX"]
+allowed_senders = []
+```
+
+Credentials support `env:VAR_NAME` references.
+
+</Tab>
+</Tabs>
+
+## Step 3: Add a binding
+
+Add an Email binding to route inbound mail to an agent.
+
+```toml
+[[bindings]]
+agent_id = "main"
+channel = "email"
+```
+
+If no Email binding exists, inbound email falls back to your default agent.
+
+## Email intake behavior
+
+Email channels are treated as intake streams, not always-on chat threads.
+
+- Spacebot triages inbound mail first.
+- Inbound email channels are reply-disabled by default (no automatic outbound email response).
+- For non-spam mail, it is encouraged to persist key memory (sender, subject, commitments, deadlines, urgency).
+- For urgent mail, it can escalate to another active channel using cross-channel messaging.
+- If you need to send an email intentionally, initiate it from another channel using cross-channel tooling.
+
+## Intentional outbound email from another channel
+
+When the Email adapter is configured, you can intentionally send email from a non-email channel (for example, Telegram or Discord) using cross-channel messaging.
+
+- explicit format: `email:alice@example.com`
+- bare address also works: `alice@example.com`
+
+This keeps email channels inbound-only while still allowing deliberate outbound send workflows.
+
+## Thread behavior
+
+Spacebot keeps one conversation per email thread. It uses `References`, `In-Reply-To`, and `Message-ID` headers to map replies back to the correct conversation.
+
+Outbound replies include the correct threading headers so responses stay in the same mail thread in clients like Gmail and Outlook.
+
+## Filtering inbound senders
+
+Use `allowed_senders` to restrict who can trigger the bot.
+
+```toml
+[messaging.email]
+allowed_senders = ["@example.com", "vip@customer.com", "partner.org"]
+```
+
+- `"@example.com"` allows the whole domain
+- `"vip@customer.com"` allows one exact sender
+- `"partner.org"` is treated as a domain rule (`@partner.org`)
+
+## Folders and polling
+
+Poll multiple folders by setting `folders`:
+
+```toml
+[messaging.email]
+folders = ["INBOX", "Support", "Escalations"]
+poll_interval_secs = 30
+```
+
+Use a longer interval if your provider rate limits IMAP polling.
+
+## Verify it's working
+
+1. Send an email to the configured mailbox from an allowed sender.
+2. Confirm a new channel appears in Spacebot with a subject-based name.
+3. Reply in the same thread and confirm Spacebot replies in-thread.
+
+## Troubleshooting
+
+| Symptom | Likely cause | Fix |
+|---------|--------------|-----|
+| Adapter won't connect to IMAP | Wrong host/port or IMAP disabled | Recheck provider IMAP settings; verify `imap_host`, `imap_port`, TLS mode |
+| SMTP send fails | Bad SMTP credentials or blocked auth | Use provider app password; verify `smtp_host`, `smtp_port`, STARTTLS |
+| No inbound messages | Folder not polled or sender blocked | Add folder to `folders`; check `allowed_senders` rules |
+| Bot ignores automated mails | Auto-response headers detected | Expected behavior; Spacebot skips auto-generated mail loops |
+| Replies create a new thread | Missing/rewritten message headers upstream | Check provider/forwarder preserves `Message-ID`, `In-Reply-To`, `References` |

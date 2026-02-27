@@ -1,6 +1,6 @@
 ---
 title: Messaging
-description: How Spacebot connects to Discord, Slack, Telegram, Twitch, and webhooks.
+description: How Spacebot connects to Discord, Slack, Telegram, Twitch, Email, and webhooks.
 ---
 
 # Messaging
@@ -15,8 +15,8 @@ Spacebot connects to chat platforms so your agent can talk to people where they 
 | [Slack](/docs/slack-setup) | Supported | Bot token + app token via Socket Mode |
 | [Telegram](/docs/telegram-setup) | Supported | Bot token via BotFather |
 | [Twitch](/docs/twitch-setup) | Supported | OAuth token via Twitch IRC |
+| [Email](/docs/email-setup) | Supported | IMAP polling + SMTP replies |
 | Webhook | Supported | HTTP endpoint for programmatic access |
-| Email | Coming soon | IMAP/SMTP |
 | WhatsApp | Coming soon | Meta Cloud API |
 | Matrix | Coming soon | Decentralized chat protocol |
 | iMessage | Coming soon | macOS only |
@@ -25,10 +25,12 @@ Spacebot connects to chat platforms so your agent can talk to people where they 
 
 1. You connect a platform by adding your tokens in the dashboard or config
 2. Spacebot opens a persistent connection to that platform
-3. When someone sends a message, Spacebot receives it, thinks, and replies
+3. When someone sends a message, Spacebot receives it and decides whether to reply, skip, or delegate work
 4. Each conversation (channel, thread, DM) gets its own isolated history
 
 You can connect multiple platforms at the same time. An agent on Discord and Slack simultaneously is just two bindings pointing at the same agent.
+
+For Email specifically, Spacebot treats inbound mail as intake-first by default: triage, memory capture for meaningful non-spam messages, and escalation to other channels for urgent items. Inbound email channels do not auto-reply. When the Email adapter is configured, intentional outbound email can still be initiated from other channels using an explicit target such as `email:alice@example.com`.
 
 ## Bindings
 
@@ -41,7 +43,7 @@ Go to **Settings** → **Bindings** tab to create and manage bindings.
 
 Each binding specifies:
 - Which **agent** handles the messages
-- Which **platform** (Discord, Slack, Telegram)
+- Which **platform** (Discord, Slack, Telegram, Twitch, Email)
 - Optionally which **server/workspace/chat** to scope it to
 - Optionally which **channels** within that server
 
@@ -121,6 +123,7 @@ Each chat context maps to its own Spacebot conversation with isolated history:
 | Slack | Each channel, each thread, each DM |
 | Telegram | Each chat (group, DM, or channel) |
 | Twitch | Each channel |
+| Email | Each email thread |
 | Webhook | Each unique conversation ID in the request |
 
 Threads are first-class on Discord and Slack — a thread gets its own conversation, separate from the parent channel.
@@ -141,4 +144,4 @@ curl -X POST http://localhost:18789/webhook \
 
 ## Hot Reloading
 
-Changes to bindings and permissions (channel filters, DM allowed users) take effect within a couple seconds — no restart needed. Token changes require a restart, or you can re-save from the dashboard which reconnects automatically.
+Changes to bindings and permissions (channel filters, DM allowed users) take effect within a couple seconds — no restart needed. Token and credential changes are applied by reconnecting the adapter.

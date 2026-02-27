@@ -503,11 +503,13 @@ Contributions welcome. Read [RUST_STYLE_GUIDE.md](RUST_STYLE_GUIDE.md) before wr
 
 1. Fork the repo
 2. Create a feature branch
-3. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
-4. Make your changes
-5. Submit a PR
+3. Install `just` (https://github.com/casey/just) if it is not already available (for example: `brew install just` or `cargo install just --locked`)
+4. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
+5. Make your changes
+6. Run `just preflight` and `just gate-pr`
+7. Submit a PR
 
-Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit.
+Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit. `just gate-pr` mirrors the CI gate and includes migration safety, compile checks, and test verification.
 
 ---
 

@@ -238,25 +238,28 @@ pub async fn add_channel_tools(
     replied_flag: RepliedFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
+    allow_direct_reply: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
-    let agent_display_name = state
-        .deps
-        .agent_names
-        .get(state.deps.agent_id.as_ref())
-        .cloned()
-        .unwrap_or_else(|| state.deps.agent_id.to_string());
-    handle
-        .add_tool(ReplyTool::new(
-            response_tx.clone(),
-            conversation_id.clone(),
-            state.conversation_logger.clone(),
-            state.channel_id.clone(),
-            replied_flag.clone(),
-            agent_display_name,
-        ))
-        .await?;
+    if allow_direct_reply {
+        let agent_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
+        handle
+            .add_tool(ReplyTool::new(
+                response_tx.clone(),
+                conversation_id.clone(),
+                state.conversation_logger.clone(),
+                state.channel_id.clone(),
+                replied_flag.clone(),
+                agent_display_name,
+            ))
+            .await?;
+    }
     handle.add_tool(BranchTool::new(state.clone())).await?;
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
@@ -306,8 +309,11 @@ fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<Str
 /// tools from being invoked with dead senders.
 pub async fn remove_channel_tools(
     handle: &ToolServerHandle,
+    allow_direct_reply: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.remove_tool(ReplyTool::NAME).await?;
+    if allow_direct_reply {
+        handle.remove_tool(ReplyTool::NAME).await?;
+    }
     handle.remove_tool(BranchTool::NAME).await?;
     handle.remove_tool(SpawnWorkerTool::NAME).await?;
     handle.remove_tool(RouteTool::NAME).await?;

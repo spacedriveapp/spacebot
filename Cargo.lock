@@ -255,6 +255,12 @@ checksum = "76a2e8124351fda1ef8aaaa3bbd7ebbcb486bbcd4225aca0aa0d84bb2db8fecb"
 
 [[package]]
 name = "arrayvec"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "23b62fc65de8e4e7f52534fb52b0f3ed04746ae267519eef2a83941e8085068b"
+
+[[package]]
+name = "arrayvec"
 version = "0.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7c02d123df017efcdfbd739ef81735b36c5ba83ec3c59c80a9d7ecc718f92e50"
@@ -345,7 +351,7 @@ dependencies = [
  "chrono",
  "comfy-table",
  "half",
- "lexical-core",
+ "lexical-core 1.0.6",
  "num-traits",
  "ryu",
 ]
@@ -409,7 +415,7 @@ dependencies = [
  "half",
  "indexmap 2.13.0",
  "itoa",
- "lexical-core",
+ "lexical-core 1.0.6",
  "memchr",
  "num-traits",
  "ryu",
@@ -636,7 +642,7 @@ dependencies = [
  "aligned",
  "anyhow",
  "arg_enum_proc_macro",
- "arrayvec",
+ "arrayvec 0.7.6",
  "log",
  "num-rational",
  "num-traits",
@@ -654,7 +660,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8cfddb07216410377231960af4fcab838eaa12e013417781b78bd95ee22077f8"
 dependencies = [
  "anyhow",
- "arrayvec",
+ "arrayvec 0.7.6",
  "log",
  "nom 8.0.0",
  "num-rational",
@@ -667,7 +673,7 @@ version = "0.8.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "375082f007bd67184fb9c0374614b29f9aaa604ec301635f72338bb65386a53d"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.7.6",
 ]
 
 [[package]]
@@ -849,7 +855,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2468ef7d57b3fb7e16b576e8377cdbde2320c60e1491e961d11da40fc4f02a2d"
 dependencies = [
  "arrayref",
- "arrayvec",
+ "arrayvec 0.7.6",
  "cc",
  "cfg-if",
  "constant_time_eq 0.4.2",
@@ -943,7 +949,7 @@ version = "3.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "89ec27229c38ed0eb3c0feee3d2c1d6a4379ae44f418a29a658890e062d8f365"
 dependencies = [
- "darling 0.21.3",
+ "darling 0.23.0",
  "ident_case",
  "prettyplease",
  "proc-macro2",
@@ -982,6 +988,12 @@ dependencies = [
  "memchr",
  "serde",
 ]
+
+[[package]]
+name = "bufstream"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40e38929add23cdf8a366df9b0e088953150724bcbe5fc330b0d8eb3b328eec8"
 
 [[package]]
 name = "built"
@@ -1136,6 +1148,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
+name = "charset"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1f927b07c74ba84c7e5fe4db2baeb3e996ab2688992e39ac68ce3220a677c7e"
+dependencies = [
+ "base64 0.22.1",
+ "encoding_rs",
+]
+
+[[package]]
 name = "chromiumoxide"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1223,6 +1245,16 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf 0.12.1",
+]
+
+[[package]]
+name = "chumsky"
+version = "0.9.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eebd66744a15ded14960ab4ccdbfb51ad3b81f51f3f04a80adac98c985396c9"
+dependencies = [
+ "hashbrown 0.14.5",
+ "stacker",
 ]
 
 [[package]]
@@ -2425,7 +2457,7 @@ version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "eddada51c8576df9d6a8450c351ff63042b092c9458b8ac7d20f89cbd0ffd313"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.7.6",
  "proc-macro2",
  "quote",
  "strsim 0.10.0",
@@ -2670,6 +2702,22 @@ checksum = "48c757948c5ede0e46177b7add2e67155f70e33c07fea8284df6576da70b3719"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "email-encoding"
+version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9298e6504d9b9e780ed3f7dfd43a61be8cd0e09eb07f7706a945b0072b6670b6"
+dependencies = [
+ "base64 0.22.1",
+ "memchr",
+]
+
+[[package]]
+name = "email_address"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e079f19b08ca6239f47f8ba8509c11cf3ea30095831f7fed61441475edd8c449"
 
 [[package]]
 name = "emojis"
@@ -3595,6 +3643,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "hostname"
+version = "0.4.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "617aaa3557aef3810a6369d0a99fac8a080891b68bd9f9812a1eeda0c0730cbd"
+dependencies = [
+ "cfg-if",
+ "libc",
+ "windows-link 0.2.1",
+]
+
+[[package]]
 name = "htmlescape"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4074,6 +4133,31 @@ checksum = "525e9ff3e1a4be2fbea1fdf0e98686a6d98b4d8f937e1bf7402245af1909e8c3"
 dependencies = [
  "byteorder-lite",
  "quick-error",
+]
+
+[[package]]
+name = "imap"
+version = "2.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c617c55def8c42129e0dd503f11d7ee39d73f5c7e01eff55768b3879ff1d107d"
+dependencies = [
+ "base64 0.13.1",
+ "bufstream",
+ "chrono",
+ "imap-proto",
+ "lazy_static",
+ "native-tls",
+ "nom 5.1.3",
+ "regex",
+]
+
+[[package]]
+name = "imap-proto"
+version = "0.10.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "16a6def1d5ac8975d70b3fd101d57953fe3278ef2ee5d7816cba54b1d1dfc22f"
+dependencies = [
+ "nom 5.1.3",
 ]
 
 [[package]]
@@ -5003,10 +5087,51 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7a79a3332a6609480d7d0c9eab957bca6b455b91bb84e66d19f5ff66294b85b8"
 
 [[package]]
+name = "lettre"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9e13e10e8818f8b2a60f52cb127041d388b89f3a96a62be9ceaffa22262fef7f"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chumsky",
+ "email-encoding",
+ "email_address",
+ "fastrand",
+ "futures-io",
+ "futures-util",
+ "hostname",
+ "httpdate",
+ "idna",
+ "mime",
+ "native-tls",
+ "nom 8.0.0",
+ "percent-encoding",
+ "quoted_printable",
+ "socket2 0.6.2",
+ "tokio",
+ "tokio-native-tls",
+ "url",
+]
+
+[[package]]
 name = "levenshtein_automata"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c2cdeb66e45e9f36bfad5bbdb4d2384e70936afbee843c6f6543f0c551ebb25"
+
+[[package]]
+name = "lexical-core"
+version = "0.7.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6607c62aa161d23d17a9072cc5da0be67cdfc89d3afb1e8d9c842bebc2525ffe"
+dependencies = [
+ "arrayvec 0.5.2",
+ "bitflags 1.3.2",
+ "cfg-if",
+ "ryu",
+ "static_assertions",
+]
 
 [[package]]
 name = "lexical-core"
@@ -5277,6 +5402,17 @@ name = "macro_rules_attribute-proc_macro"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "670fdfda89751bc4a84ac13eaa63e205cf0fd22b4c9a5fbfa085b63c1f1d3a30"
+
+[[package]]
+name = "mailparse"
+version = "0.16.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60819a97ddcb831a5614eb3b0174f3620e793e97e09195a395bfa948fd68ed2f"
+dependencies = [
+ "charset",
+ "data-encoding",
+ "quoted_printable",
+]
 
 [[package]]
 name = "matchers"
@@ -5574,6 +5710,17 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+]
+
+[[package]]
+name = "nom"
+version = "5.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08959a387a676302eebf4ddbcbc611da04285579f76f88ee0506c63b1a61dd4b"
+dependencies = [
+ "lexical-core 0.7.6",
+ "memchr",
+ "version_check",
 ]
 
 [[package]]
@@ -6713,6 +6860,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "quoted_printable"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "640c9bd8497b02465aeef5375144c26062e0dcd5939dfcbb0f5db76cb8c17c73"
+
+[[package]]
 name = "r-efi"
 version = "5.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6840,7 +6993,7 @@ dependencies = [
  "aligned-vec",
  "arbitrary",
  "arg_enum_proc_macro",
- "arrayvec",
+ "arrayvec 0.7.6",
  "av-scenechange",
  "av1-grain",
  "bitstream-io",
@@ -7550,7 +7703,7 @@ dependencies = [
  "security-framework 3.5.1",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -7952,7 +8105,7 @@ version = "0.12.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9bde37f42765dfdc34e2a039e0c84afbf79a3101c1941763b0beb816c2f17541"
 dependencies = [
- "arrayvec",
+ "arrayvec 0.7.6",
  "async-trait",
  "base64 0.22.1",
  "bitflags 2.10.0",
@@ -8263,13 +8416,17 @@ dependencies = [
  "futures",
  "hex",
  "ignore",
+ "imap",
  "indoc",
  "lance-index",
  "lancedb",
+ "lettre",
  "libc",
+ "mailparse",
  "mime_guess",
  "minijinja",
  "moka",
+ "native-tls",
  "notify",
  "open",
  "opentelemetry",

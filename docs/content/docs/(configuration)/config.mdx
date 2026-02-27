@@ -593,6 +593,29 @@ If a configured timezone is invalid, Spacebot logs a warning and falls back to s
 | `token` | string | None | Bot token from @BotFather (or `env:VAR_NAME`). Falls back to `TELEGRAM_BOT_TOKEN` env var |
 | `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot. Empty = DMs from anyone accepted |
 
+### `[messaging.email]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Email adapter |
+| `imap_host` | string | None | IMAP host (or `env:VAR_NAME`) |
+| `imap_port` | integer | 993 | IMAP port |
+| `imap_username` | string | None | IMAP username (or `env:VAR_NAME`) |
+| `imap_password` | string | None | IMAP password (or `env:VAR_NAME`) |
+| `imap_use_tls` | bool | true | Use direct TLS for IMAP |
+| `smtp_host` | string | None | SMTP host (or `env:VAR_NAME`) |
+| `smtp_port` | integer | 587 | SMTP port |
+| `smtp_username` | string | None | SMTP username (or `env:VAR_NAME`) |
+| `smtp_password` | string | None | SMTP password (or `env:VAR_NAME`) |
+| `smtp_use_starttls` | bool | true | Use STARTTLS for SMTP |
+| `from_address` | string | None | Sender address for outgoing replies (or `env:VAR_NAME`) |
+| `from_name` | string | None | Optional sender display name |
+| `poll_interval_secs` | integer | 30 | How often to check for new email |
+| `folders` | string[] | `["INBOX"]` | IMAP folders to poll |
+| `allowed_senders` | string[] | `[]` | Optional allowlist for inbound senders (empty = all) |
+| `max_body_bytes` | integer | 262144 | Max inbound body bytes before truncation |
+| `max_attachment_bytes` | integer | 10485760 | Max attachment bytes to process metadata for |
+
 ### `[messaging.webhook]`
 
 | Key | Type | Default | Description |
@@ -608,7 +631,7 @@ Routes platform conversations to agents. Checked in order; first match wins. Unm
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `agent_id` | string | **required** | Which agent handles matched messages |
-| `channel` | string | **required** | Platform name (`discord`, `webhook`) |
+| `channel` | string | **required** | Platform name (`discord`, `slack`, `telegram`, `twitch`, `email`, `webhook`) |
 | `guild_id` | string | None | Discord guild filter |
 | `chat_id` | string | None | Telegram chat filter |
 | `channel_ids` | string[] | [] | Discord channel ID filter (includes threads in those channels) |
