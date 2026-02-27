@@ -96,6 +96,7 @@ impl SshManager {
     pub async fn stop(&mut self) -> Result<()> {
         if let Some(mut child) = self.child.take() {
             child.kill().await.context("failed to kill sshd")?;
+            child.wait().await.context("failed to wait for sshd")?;
             tracing::info!("sshd stopped");
         }
         Ok(())
