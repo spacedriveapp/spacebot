@@ -73,6 +73,12 @@ pub(super) async fn set_authorized_key(
     Json(request): Json<SetAuthorizedKeyRequest>,
 ) -> Result<Json<SetAuthorizedKeyResponse>, StatusCode> {
     let pubkey = request.public_key.trim();
+    if pubkey.contains('\n') || pubkey.contains('\r') {
+        return Ok(Json(SetAuthorizedKeyResponse {
+            success: false,
+            message: "public_key must be a single line".to_string(),
+        }));
+    }
     if pubkey.is_empty() {
         return Ok(Json(SetAuthorizedKeyResponse {
             success: false,
