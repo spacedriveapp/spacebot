@@ -216,6 +216,12 @@ pub async fn request_device_code() -> Result<DeviceCodeResponse> {
         .await
         .context("failed to read OpenAI device-code usercode response")?;
 
+    if status == reqwest::StatusCode::NOT_FOUND {
+        anyhow::bail!(
+            "Device code login is not enabled. Please enable it in your ChatGPT security settings at https://chatgpt.com/security-settings and try again."
+        );
+    }
+
     if !status.is_success() {
         anyhow::bail!(
             "OpenAI device-code usercode request failed ({}): {}",

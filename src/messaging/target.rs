@@ -101,6 +101,23 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 }
             }
         }
+        "email" => {
+            let reply_to = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("email_reply_to"))
+                .and_then(json_value_to_string);
+            let from = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("email_from"))
+                .and_then(json_value_to_string);
+
+            reply_to
+                .as_deref()
+                .and_then(normalize_email_target)
+                .or_else(|| from.as_deref().and_then(normalize_email_target))?
+        }
         _ => return None,
     };
 
@@ -123,6 +140,7 @@ fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "slack" => normalize_slack_target(trimmed),
         "telegram" => normalize_telegram_target(trimmed),
         "twitch" => normalize_twitch_target(trimmed),
+        "email" => normalize_email_target(trimmed),
         _ => Some(trimmed.to_string()),
     }
 }
@@ -193,6 +211,26 @@ fn normalize_twitch_target(raw_target: &str) -> Option<String> {
     } else {
         Some(channel_login.to_string())
     }
+}
+
+fn normalize_email_target(raw_target: &str) -> Option<String> {
+    let target = strip_repeated_prefix(raw_target, "email").trim();
+    if target.is_empty() {
+        return None;
+    }
+
+    if let Some((_, address)) = target.rsplit_once('<') {
+        let address = address.trim_end_matches('>').trim();
+        if address.contains('@') && !address.contains(char::is_whitespace) {
+            return Some(address.to_string());
+        }
+    }
+
+    if target.contains('@') && !target.contains(char::is_whitespace) {
+        return Some(target.to_string());
+    }
+
+    None
 }
 
 fn strip_repeated_prefix<'a>(raw_target: &'a str, adapter: &str) -> &'a str {
@@ -280,6 +318,49 @@ mod tests {
             Some(super::BroadcastTarget {
                 adapter: "twitch".to_string(),
                 target: "jamiepinelive".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_email_target_with_prefix() {
+        let parsed = parse_delivery_target("email:alice@example.com");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "email".to_string(),
+                target: "alice@example.com".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_email_target_with_display_name() {
+        let parsed = parse_delivery_target("email:Alice <alice@example.com>");
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "email".to_string(),
+                target: "alice@example.com".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn resolve_email_target_falls_back_when_reply_to_invalid() {
+        let mut channel = test_channel_info("email:acct:thread", "email");
+        channel.platform_meta = Some(serde_json::json!({
+            "email_reply_to": "not-an-email",
+            "email_from": "valid@example.com"
+        }));
+
+        let resolved = resolve_broadcast_target(&channel);
+
+        assert_eq!(
+            resolved,
+            Some(super::BroadcastTarget {
+                adapter: "email".to_string(),
+                target: "valid@example.com".to_string(),
             })
         );
     }

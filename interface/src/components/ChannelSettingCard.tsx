@@ -22,7 +22,7 @@ import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faChevronDown} from "@fortawesome/free-solid-svg-icons";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
 
 interface ChannelSettingCardProps {
 	platform: Platform;
@@ -212,6 +212,53 @@ export function ChannelSettingCard({
 				twitch_client_id: credentialInputs.twitch_client_id?.trim(),
 				twitch_client_secret: credentialInputs.twitch_client_secret?.trim(),
 				twitch_refresh_token: credentialInputs.twitch_refresh_token?.trim(),
+			};
+		} else if (platform === "email") {
+			if (
+				!credentialInputs.email_imap_host?.trim() ||
+				!credentialInputs.email_imap_username?.trim() ||
+				!credentialInputs.email_imap_password ||
+				!credentialInputs.email_smtp_host?.trim() ||
+				!credentialInputs.email_smtp_username?.trim() ||
+				!credentialInputs.email_smtp_password ||
+				!credentialInputs.email_from_address?.trim()
+			)
+				return;
+
+			const parsePort = (rawPort?: string): number | undefined => {
+				const value = rawPort?.trim();
+				if (!value) return undefined;
+				if (!/^\d+$/.test(value)) return Number.NaN;
+
+				const port = Number(value);
+				if (!Number.isInteger(port) || port < 1 || port > 65535)
+					return Number.NaN;
+
+				return port;
+			};
+
+			const parsedImapPort = parsePort(credentialInputs.email_imap_port);
+			const parsedSmtpPort = parsePort(credentialInputs.email_smtp_port);
+
+			if (Number.isNaN(parsedImapPort) || Number.isNaN(parsedSmtpPort)) {
+				setMessage({
+					text: "Ports must be integers between 1 and 65535.",
+					type: "error",
+				});
+				return;
+			}
+
+			request.platform_credentials = {
+				email_imap_host: credentialInputs.email_imap_host.trim(),
+				email_imap_port: parsedImapPort,
+				email_imap_username: credentialInputs.email_imap_username.trim(),
+				email_imap_password: credentialInputs.email_imap_password,
+				email_smtp_host: credentialInputs.email_smtp_host.trim(),
+				email_smtp_port: parsedSmtpPort,
+				email_smtp_username: credentialInputs.email_smtp_username.trim(),
+				email_smtp_password: credentialInputs.email_smtp_password,
+				email_from_address: credentialInputs.email_from_address.trim(),
+				email_from_name: credentialInputs.email_from_name?.trim() || undefined,
 			};
 		}
 		saveCreds.mutate(request);
@@ -704,6 +751,189 @@ function CredentialsSection({
 						<a href="https://docs.spacebot.sh/twitch-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
 							Read the Twitch setup docs &rarr;
 						</a>
+					</p>
+				</>
+			)}
+
+			{platform === "email" && (
+				<>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								IMAP Host
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_imap_host ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_imap_host: e.target.value,
+									})
+								}
+								placeholder="imap.example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								IMAP Port
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_imap_port ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_imap_port: e.target.value,
+									})
+								}
+								placeholder="993"
+							/>
+						</div>
+					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								IMAP Username
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_imap_username ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_imap_username: e.target.value,
+									})
+								}
+								placeholder="inbox@example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								IMAP Password
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.email_imap_password ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_imap_password: e.target.value,
+									})
+								}
+								placeholder={configured ? "Enter new password to update" : "App password"}
+							/>
+						</div>
+					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								SMTP Host
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_smtp_host ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_smtp_host: e.target.value,
+									})
+								}
+								placeholder="smtp.example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								SMTP Port
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_smtp_port ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_smtp_port: e.target.value,
+									})
+								}
+								placeholder="587"
+							/>
+						</div>
+					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								SMTP Username
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_smtp_username ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_smtp_username: e.target.value,
+									})
+								}
+								placeholder="inbox@example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								SMTP Password
+							</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.email_smtp_password ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_smtp_password: e.target.value,
+									})
+								}
+								placeholder={configured ? "Enter new password to update" : "App password"}
+								onKeyDown={(e) => {
+									if (e.key === "Enter") onSave();
+								}}
+							/>
+						</div>
+					</div>
+					<div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								From Address
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_from_address ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_from_address: e.target.value,
+									})
+								}
+								placeholder="bot@example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">
+								From Name (optional)
+							</label>
+							<Input
+								size="lg"
+								value={credentialInputs.email_from_name ?? ""}
+								onChange={(e) =>
+									setCredentialInputs({
+										...credentialInputs,
+										email_from_name: e.target.value,
+									})
+								}
+								placeholder="Spacebot"
+							/>
+						</div>
+					</div>
+					<p className="text-xs text-ink-faint">
+						Use provider app passwords where possible. If ports are omitted, Spacebot defaults to IMAP 993 and SMTP 587.
 					</p>
 				</>
 			)}

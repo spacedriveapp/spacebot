@@ -30,13 +30,24 @@ docker run -d \
 
 See [Docker deployment](/docs/docker) for image variants, compose files, and configuration options.
 
+To update Docker installs, pull and recreate the container:
+
+```bash
+docker pull ghcr.io/spacedriveapp/spacebot:latest
+docker stop spacebot && docker rm spacebot
+# re-run your docker run command
+```
+
+If you mount `/var/run/docker.sock`, the web UI can apply Docker updates directly from the update banner.
+You can also manage updates from **Settings → Updates** in the web UI.
+
 ## Build from source
 
 ### Prerequisites
 
 - **Rust 1.85+** — `rustup update stable`
 - **Bun** (optional, for the web UI) — `curl -fsSL https://bun.sh/install | bash`
-- **An LLM API key** — Anthropic, OpenAI, or OpenRouter
+- **An LLM API key** — Anthropic, OpenAI, OpenRouter, Kilo Gateway, or OpenCode Go
 
 ### Install
 
@@ -77,6 +88,8 @@ Create `~/.spacebot/config.toml`:
 [llm]
 anthropic_key = "sk-ant-..."
 # or: openrouter_key = "sk-or-..."
+# or: kilo_key = "sk-..."
+# or: opencode_go_key = "..."
 # or: openai_key = "sk-..."
 # Keys also support env references: anthropic_key = "env:ANTHROPIC_API_KEY"
 

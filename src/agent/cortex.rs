@@ -9,11 +9,13 @@
 //! The cortex also observes system-wide activity via signals for future use in
 //! health monitoring and memory consolidation.
 
+use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
 use crate::llm::SpacebotModel;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
+use crate::tasks::{TaskStatus, UpdateTaskInput};
 use crate::{AgentDeps, ProcessEvent, ProcessType};
 
 use rig::agent::AgentBuilder;
@@ -587,7 +589,56 @@ async fn gather_bulletin_sections(deps: &AgentDeps) -> String {
         output.push('\n');
     }
 
+    // Append active tasks (non-done) from the task store.
+    match gather_active_tasks(deps).await {
+        Ok(section) if !section.is_empty() => output.push_str(&section),
+        Err(error) => {
+            tracing::warn!(%error, "failed to gather active tasks for bulletin");
+        }
+        _ => {}
+    }
+
     output
+}
+
+/// Query the task store for non-done tasks and format them as a bulletin section.
+async fn gather_active_tasks(deps: &AgentDeps) -> anyhow::Result<String> {
+    use crate::tasks::TaskStatus;
+
+    let mut all_tasks = Vec::new();
+    for status in &[
+        TaskStatus::InProgress,
+        TaskStatus::Ready,
+        TaskStatus::Backlog,
+        TaskStatus::PendingApproval,
+    ] {
+        let tasks = deps
+            .task_store
+            .list(&deps.agent_id, Some(*status), None, 20)
+            .await?;
+        all_tasks.extend(tasks);
+    }
+
+    if all_tasks.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut output = String::from("### Active Tasks\n\n");
+    for task in &all_tasks {
+        let subtask_progress = if task.subtasks.is_empty() {
+            String::new()
+        } else {
+            let done = task.subtasks.iter().filter(|s| s.completed).count();
+            format!(" [{}/{}]", done, task.subtasks.len())
+        };
+        output.push_str(&format!(
+            "- #{} [{}] ({}) {}{}\n",
+            task.task_number, task.status, task.priority, task.title, subtask_progress,
+        ));
+    }
+    output.push('\n');
+
+    Ok(output)
 }
 
 /// Generate a memory bulletin and store it in RuntimeConfig.
@@ -933,6 +984,237 @@ pub fn spawn_association_loop(
             tracing::error!(%error, "cortex association loop exited with error");
         }
     })
+}
+
+/// Spawn a background loop that picks up ready tasks when idle.
+pub fn spawn_ready_task_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(error) = run_ready_task_loop(&deps, &logger).await {
+            tracing::error!(%error, "cortex ready-task loop exited with error");
+        }
+    })
+}
+
+async fn run_ready_task_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    tracing::info!("cortex ready-task loop started");
+
+    // Let startup settle before first pickup attempt.
+    tokio::time::sleep(Duration::from_secs(10)).await;
+
+    loop {
+        let interval = deps.runtime_config.cortex.load().tick_interval_secs;
+        tokio::time::sleep(Duration::from_secs(interval.max(5))).await;
+
+        if let Err(error) = pickup_one_ready_task(deps, logger).await {
+            tracing::warn!(%error, "ready-task pickup pass failed");
+        }
+    }
+}
+
+async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    let Some(task) = deps.task_store.claim_next_ready(&deps.agent_id).await? else {
+        return Ok(());
+    };
+
+    logger.log(
+        "task_pickup_started",
+        &format!("Picked up ready task #{}", task.task_number),
+        Some(serde_json::json!({
+            "task_number": task.task_number,
+            "title": task.title,
+        })),
+    );
+
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let worker_system_prompt = prompt_engine
+        .render_worker_prompt(
+            &deps.runtime_config.instance_dir.display().to_string(),
+            &deps.runtime_config.workspace_dir.display().to_string(),
+        )
+        .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
+
+    let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
+    if let Some(description) = &task.description {
+        task_prompt.push_str("\n\nDescription:\n");
+        task_prompt.push_str(description);
+    }
+    if !task.subtasks.is_empty() {
+        task_prompt.push_str("\n\nSubtasks:\n");
+        for (index, subtask) in task.subtasks.iter().enumerate() {
+            let marker = if subtask.completed { "[x]" } else { "[ ]" };
+            task_prompt.push_str(&format!("{}. {} {}\n", index + 1, marker, subtask.title));
+        }
+    }
+
+    let screenshot_dir = deps
+        .runtime_config
+        .workspace_dir
+        .join(".spacebot")
+        .join("screenshots");
+    let logs_dir = deps
+        .runtime_config
+        .workspace_dir
+        .join(".spacebot")
+        .join("logs");
+    if let Err(error) = std::fs::create_dir_all(&screenshot_dir) {
+        tracing::warn!(%error, path = %screenshot_dir.display(), "failed to create screenshot directory");
+    }
+    if let Err(error) = std::fs::create_dir_all(&logs_dir) {
+        tracing::warn!(%error, path = %logs_dir.display(), "failed to create logs directory");
+    }
+
+    let browser_config = (**deps.runtime_config.browser_config.load()).clone();
+    let brave_search_key = (**deps.runtime_config.brave_search_key.load()).clone();
+    let worker = Worker::new(
+        None,
+        task_prompt,
+        worker_system_prompt,
+        deps.clone(),
+        browser_config,
+        screenshot_dir,
+        brave_search_key,
+        logs_dir,
+    );
+
+    let worker_id = worker.id;
+    deps.task_store
+        .update(
+            &deps.agent_id,
+            task.task_number,
+            UpdateTaskInput {
+                worker_id: Some(worker_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+    let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
+        agent_id: deps.agent_id.clone(),
+        task_number: task.task_number,
+        status: "in_progress".to_string(),
+        action: "updated".to_string(),
+    });
+
+    let task_description = format!("task #{}: {}", task.task_number, task.title);
+
+    let _ = deps.event_tx.send(ProcessEvent::WorkerStarted {
+        agent_id: deps.agent_id.clone(),
+        worker_id,
+        channel_id: None,
+        task: task_description.clone(),
+        worker_type: "task".to_string(),
+    });
+
+    // Log to worker_runs directly — task workers have no parent channel, so the
+    // channel event handler won't persist them.
+    let run_logger = crate::conversation::history::ProcessRunLogger::new(deps.sqlite_pool.clone());
+    run_logger.log_worker_started(None, worker_id, &task_description, "task", &deps.agent_id);
+
+    let task_store = deps.task_store.clone();
+    let agent_id = deps.agent_id.to_string();
+    let event_tx = deps.event_tx.clone();
+    let logger = logger.clone();
+    tokio::spawn(async move {
+        match worker.run().await {
+            Ok(result_text) => {
+                let db_updated = task_store
+                    .update(
+                        &agent_id,
+                        task.task_number,
+                        UpdateTaskInput {
+                            status: Some(TaskStatus::Done),
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
+                if let Err(ref error) = db_updated {
+                    tracing::warn!(%error, task_number = task.task_number, "failed to mark picked-up task done");
+                }
+
+                run_logger.log_worker_completed(worker_id, &result_text, true);
+
+                // Only emit task SSE event if the DB write succeeded.
+                if db_updated.is_ok() {
+                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: Arc::from(agent_id.as_str()),
+                        task_number: task.task_number,
+                        status: "done".to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
+
+                logger.log(
+                    "task_pickup_completed",
+                    &format!("Completed picked-up task #{}", task.task_number),
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "worker_id": worker_id.to_string(),
+                    })),
+                );
+
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id.as_str()),
+                    worker_id,
+                    channel_id: None,
+                    result: result_text,
+                    notify: true,
+                    success: true,
+                });
+            }
+            Err(error) => {
+                let error_message = format!("Worker failed: {error}");
+                run_logger.log_worker_completed(worker_id, &error_message, false);
+
+                let requeue_result = task_store
+                    .update(
+                        &agent_id,
+                        task.task_number,
+                        UpdateTaskInput {
+                            status: Some(TaskStatus::Ready),
+                            clear_worker_id: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+
+                if let Err(ref update_error) = requeue_result {
+                    tracing::warn!(%update_error, task_number = task.task_number, "failed to return task to ready after failure");
+                }
+
+                // Only emit task SSE event if the DB write succeeded.
+                if requeue_result.is_ok() {
+                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                        agent_id: Arc::from(agent_id.as_str()),
+                        task_number: task.task_number,
+                        status: "ready".to_string(),
+                        action: "updated".to_string(),
+                    });
+                }
+
+                logger.log(
+                    "task_pickup_failed",
+                    &format!("Picked-up task #{} failed: {error}", task.task_number),
+                    Some(serde_json::json!({
+                        "task_number": task.task_number,
+                        "worker_id": worker_id.to_string(),
+                        "error": error.to_string(),
+                    })),
+                );
+
+                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: Arc::from(agent_id.as_str()),
+                    worker_id,
+                    channel_id: None,
+                    result: format!("Worker failed: {error}"),
+                    notify: true,
+                    success: false,
+                });
+            }
+        }
+    });
+
+    Ok(())
 }
 
 async fn run_association_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {

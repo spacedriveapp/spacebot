@@ -17,12 +17,20 @@ pub async fn init_providers(config: &LlmConfig) -> Result<()> {
         tracing::info!("OpenAI provider configured");
     }
 
+    if config.kilo_key.is_some() {
+        tracing::info!("Kilo Gateway provider configured");
+    }
+
     if config.ollama_base_url.is_some() || config.ollama_key.is_some() {
         tracing::info!("Ollama provider configured");
     }
 
     if config.opencode_zen_key.is_some() {
         tracing::info!("OpenCode Zen provider configured");
+    }
+
+    if config.opencode_go_key.is_some() {
+        tracing::info!("OpenCode Go provider configured");
     }
 
     if config.minimax_key.is_some() {

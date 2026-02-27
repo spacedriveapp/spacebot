@@ -1,4 +1,4 @@
 {
   "title": "Features",
-  "pages": ["workers", "opencode", "tools", "mcp", "browser", "cron", "skills", "ingestion"]
+  "pages": ["workers", "tasks", "opencode", "tools", "mcp", "browser", "cron", "skills", "ingestion"]
 }

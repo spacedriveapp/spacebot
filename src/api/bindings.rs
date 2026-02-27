@@ -61,6 +61,26 @@ pub(super) struct PlatformCredentials {
     #[serde(default)]
     telegram_token: Option<String>,
     #[serde(default)]
+    email_imap_host: Option<String>,
+    #[serde(default)]
+    email_imap_port: Option<u16>,
+    #[serde(default)]
+    email_imap_username: Option<String>,
+    #[serde(default)]
+    email_imap_password: Option<String>,
+    #[serde(default)]
+    email_smtp_host: Option<String>,
+    #[serde(default)]
+    email_smtp_port: Option<u16>,
+    #[serde(default)]
+    email_smtp_username: Option<String>,
+    #[serde(default)]
+    email_smtp_password: Option<String>,
+    #[serde(default)]
+    email_from_address: Option<String>,
+    #[serde(default)]
+    email_from_name: Option<String>,
+    #[serde(default)]
     twitch_username: Option<String>,
     #[serde(default)]
     twitch_oauth_token: Option<String>,
@@ -193,6 +213,7 @@ pub(super) async fn create_binding(
     let mut new_discord_token: Option<String> = None;
     let mut new_slack_tokens: Option<(String, String)> = None;
     let mut new_telegram_token: Option<String> = None;
+    let mut new_email_configured = false;
     let mut new_twitch_creds: Option<(String, String)> = None;
 
     if let Some(credentials) = &request.platform_credentials {
@@ -255,6 +276,91 @@ pub(super) async fn create_binding(
             telegram["token"] = toml_edit::value(token.as_str());
             new_telegram_token = Some(token.clone());
         }
+
+        let email_imap_host = credentials
+            .email_imap_host
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let email_imap_username = credentials
+            .email_imap_username
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let email_imap_password = credentials
+            .email_imap_password
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        let email_smtp_host = credentials
+            .email_smtp_host
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let email_smtp_username = credentials
+            .email_smtp_username
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let email_smtp_password = credentials
+            .email_smtp_password
+            .as_deref()
+            .unwrap_or("")
+            .to_string();
+        let email_from_address = credentials
+            .email_from_address
+            .as_deref()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+
+        if !email_imap_host.is_empty()
+            && !email_imap_username.is_empty()
+            && !email_imap_password.is_empty()
+            && !email_smtp_host.is_empty()
+            && !email_smtp_username.is_empty()
+            && !email_smtp_password.is_empty()
+            && !email_from_address.is_empty()
+        {
+            if doc.get("messaging").is_none() {
+                doc["messaging"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let messaging = doc["messaging"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            if !messaging.contains_key("email") {
+                messaging["email"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            let email = messaging["email"]
+                .as_table_mut()
+                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+            email["enabled"] = toml_edit::value(true);
+            email["imap_host"] = toml_edit::value(email_imap_host);
+            email["imap_port"] =
+                toml_edit::value(i64::from(credentials.email_imap_port.unwrap_or(993)));
+            email["imap_username"] = toml_edit::value(email_imap_username);
+            email["imap_password"] = toml_edit::value(email_imap_password);
+            email["smtp_host"] = toml_edit::value(email_smtp_host);
+            email["smtp_port"] =
+                toml_edit::value(i64::from(credentials.email_smtp_port.unwrap_or(587)));
+            email["smtp_username"] = toml_edit::value(email_smtp_username);
+            email["smtp_password"] = toml_edit::value(email_smtp_password);
+            email["from_address"] = toml_edit::value(email_from_address);
+
+            if let Some(from_name) = &credentials.email_from_name {
+                let from_name = from_name.trim();
+                if !from_name.is_empty() {
+                    email["from_name"] = toml_edit::value(from_name);
+                }
+            }
+
+            new_email_configured = true;
+        }
+
         if let Some(username) = &credentials.twitch_username {
             let oauth_token = credentials.twitch_oauth_token.as_deref().unwrap_or("");
             let client_id = credentials.twitch_client_id.as_deref().unwrap_or("");
@@ -463,6 +569,24 @@ pub(super) async fn create_binding(
                     crate::messaging::telegram::TelegramAdapter::new(&token, telegram_perms);
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start telegram adapter");
+                }
+            }
+
+            if new_email_configured {
+                let Some(email_config) = new_config.messaging.email.as_ref() else {
+                    tracing::error!("email config missing despite credentials being provided");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                };
+
+                match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                    Ok(adapter) => {
+                        if let Err(error) = manager.register_and_start(adapter).await {
+                            tracing::error!(%error, "failed to hot-start email adapter");
+                        }
+                    }
+                    Err(error) => {
+                        tracing::error!(%error, "failed to build email adapter");
+                    }
                 }
             }
 

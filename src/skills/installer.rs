@@ -63,7 +63,15 @@ pub async fn install_from_github(spec: &str, target_dir: &Path) -> Result<Vec<St
     drop(file);
 
     // Extract and install
-    let installed = extract_and_install(&zip_path, target_dir, skill_path.as_deref()).await?;
+    let mut source_repo = format!("{owner}/{repo}");
+    source_repo.retain(|ch| ch != '\n' && ch != '\r');
+    let installed = extract_and_install(
+        &zip_path,
+        target_dir,
+        skill_path.as_deref(),
+        Some(&source_repo),
+    )
+    .await?;
 
     tracing::info!(
         installed = ?installed,
@@ -84,7 +92,7 @@ pub async fn install_from_file(skill_file: &Path, target_dir: &Path) -> Result<V
         "installing skill from file"
     );
 
-    let installed = extract_and_install(skill_file, target_dir, None).await?;
+    let installed = extract_and_install(skill_file, target_dir, None, None).await?;
 
     tracing::info!(
         installed = ?installed,
@@ -102,6 +110,7 @@ async fn extract_and_install(
     zip_path: &Path,
     target_dir: &Path,
     skill_path: Option<&str>,
+    source_repo: Option<&str>,
 ) -> Result<Vec<String>> {
     let file = std::fs::File::open(zip_path).context("failed to open zip file")?;
 
@@ -176,6 +185,32 @@ async fn extract_and_install(
         // Copy skill directory
         copy_dir_recursive(&skill_dir, &target_skill_dir).await?;
 
+        // Write source_repo into SKILL.md frontmatter so we can track provenance
+        if let Some(repo) = source_repo {
+            let skill_md = target_skill_dir.join("SKILL.md");
+            if skill_md.exists() {
+                match fs::read_to_string(&skill_md).await {
+                    Ok(content) => {
+                        let patched = inject_source_repo(&content, repo);
+                        if let Err(error) = fs::write(&skill_md, patched).await {
+                            tracing::warn!(
+                                skill = %skill_name,
+                                %error,
+                                "failed to write source_repo to SKILL.md"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            skill = %skill_name,
+                            %error,
+                            "failed to read SKILL.md for source_repo injection"
+                        );
+                    }
+                }
+            }
+        }
+
         installed.push(skill_name.to_string());
 
         tracing::debug!(
@@ -186,6 +221,42 @@ async fn extract_and_install(
     }
 
     Ok(installed)
+}
+
+/// Inject or update `source_repo` in SKILL.md frontmatter.
+fn inject_source_repo(content: &str, repo: &str) -> String {
+    let trimmed = content.trim_start();
+    let line = format!("source_repo: {repo}");
+
+    if !trimmed.starts_with("---") {
+        // No frontmatter — add one
+        return format!("---\n{line}\n---\n{content}");
+    }
+
+    let after_opening = &trimmed[3..];
+    let Some((end_pos, delimiter_len)) = after_opening
+        .find("\n---\n")
+        .map(|pos| (pos, 5))
+        .or_else(|| after_opening.find("\n---").map(|pos| (pos, 4)))
+    else {
+        // Malformed frontmatter, prepend
+        return format!("---\n{line}\n---\n{content}");
+    };
+
+    let fm_block = &after_opening[..end_pos];
+    let body = &after_opening[end_pos + delimiter_len..];
+
+    // Remove any existing source_repo line
+    let filtered: Vec<&str> = fm_block
+        .lines()
+        .filter(|l| !l.trim_start().starts_with("source_repo:"))
+        .collect();
+
+    let mut new_fm = filtered.join("\n");
+    new_fm.push('\n');
+    new_fm.push_str(&line);
+
+    format!("---{new_fm}\n---\n{body}")
 }
 
 /// Parse a GitHub spec: `owner/repo` or `owner/repo/skill-name`
@@ -307,5 +378,66 @@ mod tests {
     fn test_parse_github_spec_invalid() {
         assert!(parse_github_spec("invalid").is_err());
         assert!(parse_github_spec("too/many/slashes/here").is_err());
+    }
+
+    #[test]
+    fn test_inject_source_repo_into_existing_frontmatter() {
+        let content = "---\nname: weather\ndescription: Get weather\n---\n\n# Weather\n";
+        let result = inject_source_repo(content, "anthropics/skills");
+        assert!(result.contains("source_repo: anthropics/skills"));
+        assert!(result.contains("name: weather"));
+        assert!(result.contains("# Weather"));
+        // source_repo should be inside the frontmatter delimiters
+        let after_first = result.split_once("---").unwrap().1;
+        let fm = after_first.split("\n---").next().unwrap();
+        assert!(fm.contains("source_repo: anthropics/skills"));
+    }
+
+    #[test]
+    fn test_inject_source_repo_no_frontmatter() {
+        let content = "# Just markdown\n\nNo frontmatter here.";
+        let result = inject_source_repo(content, "owner/repo");
+        assert!(result.starts_with("---\nsource_repo: owner/repo\n---\n"));
+        assert!(result.contains("# Just markdown"));
+    }
+
+    #[test]
+    fn test_inject_source_repo_updates_existing() {
+        let content = "---\nname: weather\nsource_repo: old/repo\ndescription: foo\n---\n\nBody\n";
+        let result = inject_source_repo(content, "new/repo");
+        assert!(result.contains("source_repo: new/repo"));
+        assert!(!result.contains("old/repo"));
+        // Should only have one source_repo line
+        assert_eq!(result.matches("source_repo:").count(), 1);
+    }
+
+    #[test]
+    fn test_inject_source_repo_malformed_frontmatter() {
+        let content = "---\nname: broken\nno closing delimiter";
+        let result = inject_source_repo(content, "owner/repo");
+        // Falls back to prepending new frontmatter
+        assert!(result.starts_with("---\nsource_repo: owner/repo\n---\n"));
+        assert!(result.contains("no closing delimiter"));
+    }
+
+    #[test]
+    fn test_inject_source_repo_preserves_delimiter_body_newline() {
+        let content = "---\nname: weather\n---\n# Weather\n";
+        let patched = inject_source_repo(content, "anthropics/skills");
+        assert!(patched.contains("\n---\n# Weather\n"));
+    }
+
+    #[test]
+    fn test_inject_source_repo_roundtrip_with_parse() {
+        use crate::skills::parse_frontmatter;
+        let content = "---\nname: weather\ndescription: Get weather\n---\n\n# Weather\n";
+        let patched = inject_source_repo(content, "anthropics/skills");
+        let (fm, body) = parse_frontmatter(&patched).unwrap();
+        assert_eq!(
+            fm.get("source_repo").unwrap(),
+            &"anthropics/skills".to_string()
+        );
+        assert_eq!(fm.get("name").unwrap(), &"weather".to_string());
+        assert!(body.contains("# Weather"));
     }
 }

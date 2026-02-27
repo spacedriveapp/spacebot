@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -29,6 +30,8 @@ pub(super) struct CreateCronRequest {
     agent_id: String,
     id: String,
     prompt: String,
+    #[serde(default)]
+    cron_expr: Option<String>,
     #[serde(default = "default_interval")]
     interval_secs: u64,
     delivery_target: String,
@@ -75,6 +78,7 @@ pub(super) struct ToggleCronRequest {
 struct CronJobWithStats {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: u64,
     delivery_target: String,
     enabled: bool,
@@ -130,6 +134,7 @@ pub(super) async fn list_cron_jobs(
         jobs.push(CronJobWithStats {
             id: config.id,
             prompt: config.prompt,
+            cron_expr: config.cron_expr,
             interval_secs: config.interval_secs,
             delivery_target: config.delivery_target,
             enabled: config.enabled,
@@ -177,18 +182,133 @@ pub(super) async fn cron_executions(
     Ok(Json(CronExecutionsResponse { executions }))
 }
 
+const MIN_CRON_INTERVAL_SECS: u64 = 60;
+const MAX_CRON_PROMPT_LENGTH: usize = 10_000;
+
+fn validate_cron_request(request: &CreateCronRequest) -> Result<(), (StatusCode, String)> {
+    if request.id.is_empty()
+        || request.id.len() > 50
+        || !request
+            .id
+            .chars()
+            .all(|c| c.is_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "id must be 1-50 alphanumeric/hyphen/underscore characters".into(),
+        ));
+    }
+
+    let cron_expr = request
+        .cron_expr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if cron_expr.is_none() && request.interval_secs < MIN_CRON_INTERVAL_SECS {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "interval_secs must be at least {MIN_CRON_INTERVAL_SECS} (got {})",
+                request.interval_secs
+            ),
+        ));
+    }
+
+    if let Some(expr) = cron_expr {
+        let field_count = expr.split_whitespace().count();
+        if field_count != 5 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("cron_expr must have exactly 5 fields (got {field_count}): '{expr}'"),
+            ));
+        }
+        cron::Schedule::from_str(expr).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid cron_expr '{expr}': {error}"),
+            )
+        })?;
+    }
+
+    if request.prompt.len() > MAX_CRON_PROMPT_LENGTH {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "prompt exceeds maximum length of {MAX_CRON_PROMPT_LENGTH} characters (got {})",
+                request.prompt.len()
+            ),
+        ));
+    }
+
+    if !request.delivery_target.contains(':') {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "delivery_target must be in 'adapter:target' format".into(),
+        ));
+    }
+
+    if let Some(start) = request.active_start_hour
+        && start > 23
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "active_start_hour must be 0-23".into(),
+        ));
+    }
+    if let Some(end) = request.active_end_hour
+        && end > 23
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "active_end_hour must be 0-23".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 /// Create or update a cron job.
 pub(super) async fn create_or_update_cron(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateCronRequest>,
-) -> Result<Json<CronActionResponse>, StatusCode> {
+) -> Result<Json<CronActionResponse>, (StatusCode, Json<CronActionResponse>)> {
+    if let Err((status, message)) = validate_cron_request(&request) {
+        tracing::warn!(agent_id = %request.agent_id, cron_id = %request.id, %message, "cron validation failed");
+        return Err((
+            status,
+            Json(CronActionResponse {
+                success: false,
+                message,
+            }),
+        ));
+    }
+
     let stores = state.cron_stores.load();
     let schedulers = state.cron_schedulers.load();
 
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let scheduler = schedulers
-        .get(&request.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let cron_err = |status: StatusCode, message: String| {
+        (
+            status,
+            Json(CronActionResponse {
+                success: false,
+                message,
+            }),
+        )
+    };
+
+    let store = stores.get(&request.agent_id).ok_or_else(|| {
+        cron_err(
+            StatusCode::NOT_FOUND,
+            format!("agent '{}' not found", request.agent_id),
+        )
+    })?;
+    let scheduler = schedulers.get(&request.agent_id).ok_or_else(|| {
+        cron_err(
+            StatusCode::NOT_FOUND,
+            format!("agent '{}' not found", request.agent_id),
+        )
+    })?;
 
     let active_hours = match (request.active_start_hour, request.active_end_hour) {
         (Some(start), Some(end)) => Some((start, end)),
@@ -198,6 +318,12 @@ pub(super) async fn create_or_update_cron(
     let config = crate::cron::CronConfig {
         id: request.id.clone(),
         prompt: request.prompt,
+        cron_expr: request
+            .cron_expr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
         interval_secs: request.interval_secs,
         delivery_target: request.delivery_target,
         active_hours,
@@ -208,12 +334,12 @@ pub(super) async fn create_or_update_cron(
 
     store.save(&config).await.map_err(|error| {
         tracing::warn!(%error, agent_id = %request.agent_id, cron_id = %request.id, "failed to save cron job");
-        StatusCode::INTERNAL_SERVER_ERROR
+        cron_err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to save: {error}"))
     })?;
 
     scheduler.register(config).await.map_err(|error| {
         tracing::warn!(%error, agent_id = %request.agent_id, cron_id = %request.id, "failed to register cron job");
-        StatusCode::INTERNAL_SERVER_ERROR
+        cron_err(StatusCode::INTERNAL_SERVER_ERROR, format!("failed to register: {error}"))
     })?;
 
     Ok(Json(CronActionResponse {

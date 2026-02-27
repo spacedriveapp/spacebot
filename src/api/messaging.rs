@@ -17,6 +17,7 @@ pub(super) struct MessagingStatusResponse {
     discord: PlatformStatus,
     slack: PlatformStatus,
     telegram: PlatformStatus,
+    email: PlatformStatus,
     webhook: PlatformStatus,
     twitch: PlatformStatus,
 }
@@ -38,7 +39,7 @@ pub(super) async fn messaging_status(
 ) -> Result<Json<MessagingStatusResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (discord, slack, telegram, webhook, twitch) = if config_path.exists() {
+    let (discord, slack, telegram, email, webhook, twitch) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|error| {
@@ -107,6 +108,45 @@ pub(super) async fn messaging_status(
                 enabled: false,
             });
 
+        let email_status = doc
+            .get("messaging")
+            .and_then(|m| m.get("email"))
+            .map(|email| {
+                let has_imap_host = email
+                    .get("imap_host")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let has_imap_username = email
+                    .get("imap_username")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let has_imap_password = email
+                    .get("imap_password")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let has_smtp_host = email
+                    .get("smtp_host")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+
+                let configured =
+                    has_imap_host && has_imap_username && has_imap_password && has_smtp_host;
+
+                let enabled = email
+                    .get("enabled")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
+
+                PlatformStatus {
+                    configured,
+                    enabled: configured && enabled,
+                }
+            })
+            .unwrap_or(PlatformStatus {
+                configured: false,
+                enabled: false,
+            });
+
         let telegram_status = doc
             .get("messaging")
             .and_then(|m| m.get("telegram"))
@@ -153,6 +193,7 @@ pub(super) async fn messaging_status(
             discord_status,
             slack_status,
             telegram_status,
+            email_status,
             webhook_status,
             twitch_status,
         )
@@ -166,6 +207,7 @@ pub(super) async fn messaging_status(
             default.clone(),
             default.clone(),
             default.clone(),
+            default.clone(),
             default,
         )
     };
@@ -174,6 +216,7 @@ pub(super) async fn messaging_status(
         discord,
         slack,
         telegram,
+        email,
         webhook,
         twitch,
     }))
@@ -241,6 +284,24 @@ pub(super) async fn disconnect_platform(
         && let Err(error) = manager.remove_adapter(platform).await
     {
         tracing::warn!(%error, platform = %platform, "failed to shut down adapter during disconnect");
+    }
+
+    if platform == "twitch" {
+        let instance_dir = state.instance_dir.load();
+        let token_path = instance_dir.join("twitch_token.json");
+        match tokio::fs::remove_file(&token_path).await {
+            Ok(()) => {
+                tracing::info!(path = %token_path.display(), "twitch token file deleted");
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    path = %token_path.display(),
+                    "failed to delete twitch token file"
+                );
+            }
+        }
     }
 
     tracing::info!(platform = %platform, "platform disconnected via API");
@@ -378,6 +439,20 @@ pub(super) async fn toggle_platform(
                         );
                         if let Err(error) = manager.register_and_start(adapter).await {
                             tracing::error!(%error, "failed to start telegram adapter on toggle");
+                        }
+                    }
+                }
+                "email" => {
+                    if let Some(email_config) = &new_config.messaging.email {
+                        match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                            Ok(adapter) => {
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, "failed to start email adapter on toggle");
+                                }
+                            }
+                            Err(error) => {
+                                tracing::error!(%error, "failed to build email adapter on toggle");
+                            }
                         }
                     }
                 }

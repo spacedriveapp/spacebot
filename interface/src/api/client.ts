@@ -320,6 +320,8 @@ export interface UpdateStatus {
 	release_notes: string | null;
 	deployment: Deployment;
 	can_apply: boolean;
+	cannot_apply_reason: string | null;
+	docker_image: string | null;
 	checked_at: string | null;
 	error: string | null;
 }
@@ -590,6 +592,11 @@ export interface BrowserSection {
 	evaluate_enabled: boolean;
 }
 
+export interface SandboxSection {
+	mode: "enabled" | "disabled";
+	writable_paths: string[];
+}
+
 export interface DiscordSection {
 	enabled: boolean;
 	allow_bot_messages: boolean;
@@ -604,6 +611,7 @@ export interface AgentConfigResponse {
 	memory_persistence: MemoryPersistenceSection;
 	browser: BrowserSection;
 	discord: DiscordSection;
+	sandbox: SandboxSection;
 }
 
 // Partial update types - all fields are optional
@@ -666,6 +674,11 @@ export interface BrowserUpdate {
 	evaluate_enabled?: boolean;
 }
 
+export interface SandboxUpdate {
+	mode?: "enabled" | "disabled";
+	writable_paths?: string[];
+}
+
 export interface DiscordUpdate {
 	allow_bot_messages?: boolean;
 }
@@ -680,6 +693,7 @@ export interface AgentConfigUpdateRequest {
 	memory_persistence?: MemoryPersistenceUpdate;
 	browser?: BrowserUpdate;
 	discord?: DiscordUpdate;
+	sandbox?: SandboxUpdate;
 }
 
 // -- Cron Types --
@@ -738,6 +752,7 @@ export interface ProviderStatus {
 	openai: boolean;
 	openai_chatgpt: boolean;
 	openrouter: boolean;
+	kilo: boolean;
 	zhipu: boolean;
 	groq: boolean;
 	together: boolean;
@@ -748,6 +763,7 @@ export interface ProviderStatus {
 	gemini: boolean;
 	ollama: boolean;
 	opencode_zen: boolean;
+	opencode_go: boolean;
 	nvidia: boolean;
 	minimax: boolean;
 	minimax_cn: boolean;
@@ -837,6 +853,7 @@ export interface SkillInfo {
 	file_path: string;
 	base_dir: string;
 	source: "instance" | "workspace";
+	source_repo?: string;
 }
 
 export interface SkillsListResponse {
@@ -872,18 +889,86 @@ export interface RegistrySkill {
 	skillId: string;
 	name: string;
 	installs: number;
+	description?: string;
 	id?: string;
 }
 
 export interface RegistryBrowseResponse {
 	skills: RegistrySkill[];
 	has_more: boolean;
+	total?: number;
 }
 
 export interface RegistrySearchResponse {
 	skills: RegistrySkill[];
 	query: string;
 	count: number;
+}
+
+// -- Task Types --
+
+export type TaskStatus = "pending_approval" | "backlog" | "ready" | "in_progress" | "done";
+export type TaskPriority = "critical" | "high" | "medium" | "low";
+
+export interface TaskSubtask {
+	title: string;
+	completed: boolean;
+}
+
+export interface TaskItem {
+	id: string;
+	agent_id: string;
+	task_number: number;
+	title: string;
+	description?: string;
+	status: TaskStatus;
+	priority: TaskPriority;
+	subtasks: TaskSubtask[];
+	metadata: Record<string, unknown>;
+	source_memory_id?: string;
+	worker_id?: string;
+	created_by: string;
+	approved_at?: string;
+	approved_by?: string;
+	created_at: string;
+	updated_at: string;
+	completed_at?: string;
+}
+
+export interface TaskListResponse {
+	tasks: TaskItem[];
+}
+
+export interface TaskResponse {
+	task: TaskItem;
+}
+
+export interface TaskActionResponse {
+	success: boolean;
+	message: string;
+}
+
+export interface CreateTaskRequest {
+	title: string;
+	description?: string;
+	status?: TaskStatus;
+	priority?: TaskPriority;
+	subtasks?: TaskSubtask[];
+	metadata?: Record<string, unknown>;
+	source_memory_id?: string;
+	created_by?: string;
+}
+
+export interface UpdateTaskRequest {
+	title?: string;
+	description?: string;
+	status?: TaskStatus;
+	priority?: TaskPriority;
+	subtasks?: TaskSubtask[];
+	metadata?: Record<string, unknown>;
+	complete_subtask?: number;
+	worker_id?: string;
+	approved_by?: string;
 }
 
 // -- Messaging / Bindings Types --
@@ -899,6 +984,7 @@ export interface MessagingStatusResponse {
 	telegram: PlatformStatus;
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
+	email: PlatformStatus;
 }
 
 export interface BindingInfo {
@@ -929,6 +1015,17 @@ export interface CreateBindingRequest {
 		discord_token?: string;
 		slack_bot_token?: string;
 		slack_app_token?: string;
+		telegram_token?: string;
+		email_imap_host?: string;
+		email_imap_port?: number;
+		email_imap_username?: string;
+		email_imap_password?: string;
+		email_smtp_host?: string;
+		email_smtp_port?: number;
+		email_smtp_username?: string;
+		email_smtp_password?: string;
+		email_from_address?: string;
+		email_from_name?: string;
 		twitch_username?: string;
 		twitch_oauth_token?: string;
 		twitch_client_id?: string;
@@ -1763,6 +1860,60 @@ export const api = {
 
 	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
+
+	// Tasks API
+	listTasks: (agentId: string, params?: { status?: TaskStatus; priority?: TaskPriority; limit?: number }) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (params?.status) search.set("status", params.status);
+		if (params?.priority) search.set("priority", params.priority);
+		if (params?.limit) search.set("limit", String(params.limit));
+		return fetchJson<TaskListResponse>(`/agents/tasks?${search}`);
+	},
+	getTask: (agentId: string, taskNumber: number) =>
+		fetchJson<TaskResponse>(`/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`),
+	createTask: async (agentId: string, request: CreateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	updateTask: async (agentId: string, taskNumber: number, request: UpdateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	deleteTask: async (agentId: string, taskNumber: number): Promise<TaskActionResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskActionResponse>;
+	},
+	approveTask: async (agentId: string, taskNumber: number, approvedBy?: string): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/approve`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, approved_by: approvedBy }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	executeTask: async (agentId: string, taskNumber: number): Promise<TaskResponse> => {
+		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/execute`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
 
 	eventsUrl: `${API_BASE}/events`,
 };

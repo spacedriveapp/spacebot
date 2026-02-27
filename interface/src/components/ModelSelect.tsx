@@ -15,6 +15,7 @@ interface ModelSelectProps {
 const PROVIDER_LABELS: Record<string, string> = {
   anthropic: "Anthropic",
   openrouter: "OpenRouter",
+  kilo: "Kilo Gateway",
   openai: "OpenAI",
   "openai-chatgpt": "ChatGPT Plus (OAuth)",
   deepseek: "DeepSeek",
@@ -27,6 +28,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   zhipu: "Z.ai (GLM)",
   ollama: "Ollama",
   "opencode-zen": "OpenCode Zen",
+  "opencode-go": "OpenCode Go",
   minimax: "MiniMax",
   "minimax-cn": "MiniMax CN",
 };
@@ -128,6 +130,7 @@ export function ModelSelect({
 
   const providerOrder = [
     "openrouter",
+    "kilo",
     "anthropic",
     "openai",
     "openai-chatgpt",
@@ -141,12 +144,16 @@ export function ModelSelect({
     "fireworks",
     "zhipu",
     "opencode-zen",
+    "opencode-go",
     "minimax",
     "minimax-cn",
   ];
+  const providerRank = (provider: string) => {
+    const index = providerOrder.indexOf(provider);
+    return index === -1 ? Number.MAX_SAFE_INTEGER : index;
+  };
   const sortedProviders = Object.keys(grouped).sort(
-    (a, b) =>
-      (providerOrder.indexOf(a) ?? 99) - (providerOrder.indexOf(b) ?? 99),
+    (a, b) => providerRank(a) - providerRank(b),
   );
 
   return (

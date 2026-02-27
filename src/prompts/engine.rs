@@ -1,8 +1,22 @@
 use crate::error::Result;
 use anyhow::Context;
 use minijinja::{Environment, Value, context};
+use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// A completed background process result, passed to the retrigger template.
+#[derive(Clone, Debug, Serialize)]
+pub struct RetriggerResult {
+    /// "branch" or "worker"
+    pub process_type: String,
+    /// The branch or worker ID (short UUID).
+    pub process_id: String,
+    /// Whether the process completed successfully.
+    pub success: bool,
+    /// The result/conclusion text from the process.
+    pub result: String,
+}
 
 /// Template engine for rendering system prompts with dynamic variables.
 ///
@@ -55,6 +69,12 @@ impl PromptEngine {
             crate::prompts::text::get("cortex_profile"),
         )?;
 
+        // Adapter-specific prompt fragments
+        env.add_template(
+            "adapters/email",
+            crate::prompts::text::get("adapters/email"),
+        )?;
+
         // Fragment templates
         env.add_template(
             "fragments/worker_capabilities",
@@ -79,10 +99,6 @@ impl PromptEngine {
         env.add_template(
             "fragments/org_context",
             crate::prompts::text::get("fragments/org_context"),
-        )?;
-        env.add_template(
-            "fragments/link_context",
-            crate::prompts::text::get("fragments/link_context"),
         )?;
 
         // System message fragments
@@ -125,6 +141,10 @@ impl PromptEngine {
         env.add_template(
             "fragments/system/tool_syntax_correction",
             crate::prompts::text::get("fragments/system/tool_syntax_correction"),
+        )?;
+        env.add_template(
+            "fragments/system/worker_time_context",
+            crate::prompts::text::get("fragments/system/worker_time_context"),
         )?;
         env.add_template(
             "fragments/coalesce_hint",
@@ -266,14 +286,37 @@ impl PromptEngine {
         )
     }
 
-    /// Convenience method for rendering system retrigger message.
-    pub fn render_system_retrigger(&self) -> Result<String> {
-        self.render_static("fragments/system/retrigger")
+    /// Render the retrigger message with specific process results embedded.
+    ///
+    /// Each result includes the process type, ID, and full result text so the
+    /// LLM knows exactly what completed and what to relay to the user.
+    pub fn render_system_retrigger(&self, results: &[RetriggerResult]) -> Result<String> {
+        self.render(
+            "fragments/system/retrigger",
+            context! {
+                results => results,
+            },
+        )
     }
 
     /// Correction message when the LLM outputs tool call syntax as plain text.
     pub fn render_system_tool_syntax_correction(&self) -> Result<String> {
         self.render_static("fragments/system/tool_syntax_correction")
+    }
+
+    /// Render worker task time-context preamble.
+    pub fn render_system_worker_time_context(
+        &self,
+        current_local_datetime: &str,
+        current_utc_datetime: &str,
+    ) -> Result<String> {
+        self.render(
+            "fragments/system/worker_time_context",
+            context! {
+                current_local_datetime => current_local_datetime,
+                current_utc_datetime => current_utc_datetime,
+            },
+        )
     }
 
     /// Convenience method for rendering truncation marker.
@@ -410,6 +453,25 @@ impl PromptEngine {
         )
     }
 
+    /// Render optional adapter-specific channel guidance.
+    pub fn render_channel_adapter_prompt(&self, adapter: &str) -> Option<String> {
+        let template_name = match adapter {
+            "email" => "adapters/email",
+            _ => return None,
+        };
+
+        match self.render_static(template_name) {
+            Ok(value) => {
+                let value = value.trim().to_string();
+                if value.is_empty() { None } else { Some(value) }
+            }
+            Err(error) => {
+                tracing::error!(template_name, %error, "failed to render adapter prompt template");
+                None
+            }
+        }
+    }
+
     /// Render the cortex chat system prompt with optional channel context.
     pub fn render_cortex_chat_prompt(
         &self,
@@ -439,17 +501,7 @@ impl PromptEngine {
         )
     }
 
-    /// Render the link context fragment for an internal agent-to-agent channel.
-    pub fn render_link_context(&self, link_context: LinkContext) -> Result<String> {
-        self.render(
-            "fragments/link_context",
-            context! {
-                link_context => link_context,
-            },
-        )
-    }
-
-    /// Render the channel system prompt with all dynamic components including org/link context.
+    /// Render the channel system prompt with all dynamic components including org context.
     #[allow(clippy::too_many_arguments)]
     pub fn render_channel_prompt_with_links(
         &self,
@@ -462,7 +514,7 @@ impl PromptEngine {
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
         org_context: Option<String>,
-        link_context: Option<String>,
+        adapter_prompt: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -476,7 +528,7 @@ impl PromptEngine {
                 coalesce_hint => coalesce_hint,
                 available_channels => available_channels,
                 org_context => org_context,
-                link_context => link_context,
+                adapter_prompt => adapter_prompt,
             },
         )
     }
@@ -502,13 +554,6 @@ pub struct LinkedAgent {
     pub id: String,
     /// Whether this is a human (true) or an agent (false).
     pub is_human: bool,
-}
-
-/// Context for the current link channel.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct LinkContext {
-    pub agent_name: String,
-    pub relationship: String,
 }
 
 /// Information about a skill for template rendering.

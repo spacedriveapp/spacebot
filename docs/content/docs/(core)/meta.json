@@ -2,6 +2,7 @@
   "title": "Core Concepts",
   "pages": [
     "philosophy",
+    "architecture",
     "agents",
     "memory",
     "routing",

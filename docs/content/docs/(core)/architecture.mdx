@@ -1,0 +1,407 @@
+---
+title: Architecture
+description: System-level overview of how Spacebot's processes, databases, and messaging layer fit together.
+---
+
+# Architecture
+
+Spacebot is a single binary that runs multiple concurrent AI processes, each with a dedicated role. There's no server to install, no message broker, no external database. Everything is embedded -- the LLM orchestration, the databases, the messaging adapters, the control API, and the web UI all run inside one process.
+
+This page is the system-level view. It explains how the pieces connect. For deep dives into individual subsystems, see the linked pages throughout.
+
+## The Problem
+
+Most AI agent systems use a single LLM session for everything -- conversation, thinking, tool execution, memory retrieval, and context management all happen in one thread. This creates fundamental bottlenecks:
+
+- **Blocking:** When the agent is running a tool or compacting context, the user waits.
+- **Context pollution:** Tool outputs, internal reasoning, and raw search results fill the context window alongside conversation.
+- **No specialization:** The same prompt and model handle tasks that have very different requirements.
+- **No concurrency:** One thing happens at a time.
+
+Spacebot's architecture is designed around one principle: **delegation is the only way work gets done.**
+
+## Process Model
+
+Five process types, each implemented as a Rig `Agent<SpacebotModel, SpacebotHook>`. They differ in system prompt, available tools, history management, and hooks.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                        Channel                          │
+│  User-facing conversation. Has personality and soul.    │
+│  Never blocks. Delegates everything.                    │
+│                                                         │
+│  Tools: reply, branch, spawn_worker, route, cancel,     │
+│         skip, react, cron, send_file, send_message      │
+├────────────┬────────────────────────┬───────────────────┤
+│            │                        │                   │
+│     ┌──────▼──────┐         ┌──────▼──────┐            │
+│     │   Branch    │         │   Worker    │            │
+│     │             │         │             │            │
+│     │ Fork of     │         │ Independent │            │
+│     │ channel     │         │ task. No    │            │
+│     │ context.    │         │ channel     │            │
+│     │ Thinks,     │         │ context.    │            │
+│     │ recalls,    │         │ Executes.   │            │
+│     │ returns a   │         │             │            │
+│     │ conclusion. │         │ Shell, file,│            │
+│     │             │         │ exec, browse│            │
+│     │ Memory      │         │             │            │
+│     │ tools only. │         │ Fire-and-   │            │
+│     └─────────────┘         │ forget or   │            │
+│                             │ interactive.│            │
+│                             └─────────────┘            │
+├─────────────────────────────────────────────────────────┤
+│                      Compactor                          │
+│  Programmatic monitor. NOT an LLM process.              │
+│  Watches context size, triggers compaction workers.     │
+│  80% → background, 85% → aggressive, 95% → emergency   │
+├─────────────────────────────────────────────────────────┤
+│                       Cortex                            │
+│  System-level observer. Sees across all channels.       │
+│  Generates the memory bulletin — an LLM-curated         │
+│  briefing injected into every channel's prompt.         │
+└─────────────────────────────────────────────────────────┘
+```
+
+### How Delegation Works
+
+The channel never searches memories, executes shell commands, or does heavy work. When it needs to think, it creates a **branch** -- a fork of its conversation context that goes off to reason, recall memories, and return a conclusion. When it needs work done, it spawns a **worker** -- an independent process with task tools and no conversation context.
+
+The channel is always responsive. Branches and workers run concurrently in `tokio::spawn`. Multiple branches can run simultaneously (configurable limit). Multiple workers can run simultaneously. The channel continues accepting messages while they work.
+
+```
+User message arrives
+  → Channel LLM turn
+    → Decides it needs to think → spawns Branch
+    → Decides it needs code written → spawns Worker
+    → Replies to user immediately
+  → Branch finishes → result injected into channel history → channel retriggered
+  → Worker finishes → status update injected → channel retriggered
+```
+
+For detailed coverage of each process type, see [Agents](/docs/agents), [Compaction](/docs/compaction), and [Cortex](/docs/cortex).
+
+## Inter-Process Communication
+
+All processes within an agent communicate through a `broadcast::channel<ProcessEvent>` -- a multi-producer, multi-consumer event bus. The channel, all branches, and all workers share the same bus.
+
+### Event Types
+
+| Event | Producer | Consumer | Purpose |
+|-------|----------|----------|---------|
+| `BranchStarted` | Channel | Status block | Branch is running |
+| `BranchResult` | Branch | Channel | Conclusion ready, retrigger |
+| `WorkerStarted` | Channel | Status block | Worker is running |
+| `WorkerStatus` | Worker | Channel, Status block | Progress update via `set_status` |
+| `WorkerComplete` | Worker | Channel | Task done, retrigger |
+| `ToolStarted` | Hook | Channel, UI | Tool call in progress |
+| `ToolCompleted` | Hook | Channel, UI | Tool call finished |
+| `MemorySaved` | Branch, Cortex | UI | New memory created |
+| `CompactionTriggered` | Compactor | Channel | Context compacted |
+| `StatusUpdate` | Various | UI (SSE) | Typing indicators, lifecycle |
+| `TaskUpdated` | Branch, Worker | UI | Task board change |
+| `AgentMessageSent` | Channel | Link routing | Inter-agent message |
+| `AgentMessageReceived` | Link routing | Channel | Inbound inter-agent message |
+
+### Retriggering
+
+When a branch or worker completes, the channel doesn't poll for results. The completion event **retriggers** the channel -- it runs another LLM turn with the result injected into its history. This keeps the channel reactive without polling loops.
+
+Retrigger events are debounced. If multiple branches complete within a short window, the channel batches them into a single turn. A retrigger limit (default: 3 per turn) prevents infinite cascades where a branch result triggers a new branch that triggers another retrigger.
+
+### Status Block
+
+Every turn, the channel receives a live snapshot of all active processes:
+
+```markdown
+## Currently Active
+
+### Workers
+- **[code-review]** (running, 45s) — "Reviewing changes in src/memory/store.rs"
+- **[test-runner]** (waiting for input, 2m) — "Tests passed. Awaiting further instructions."
+
+### Recently Completed
+- **[search]** completed 30s ago — "Found 3 relevant files for the query."
+```
+
+Workers set their own status via the `set_status` tool. Short branches (< 3 seconds) are invisible in the status block to avoid noise. The status block is injected into the system prompt, giving the LLM awareness of concurrent activity.
+
+## Data Layer
+
+Three embedded databases, each purpose-built. No server processes, no network connections. Everything lives in the agent's data directory.
+
+```
+~/.spacebot/agents/{agent_id}/data/
+├── spacebot.db          # SQLite — relational data
+├── lancedb/             # LanceDB — vector embeddings, full-text search
+└── config.redb          # redb — key-value settings, encrypted secrets
+```
+
+### SQLite (via sqlx)
+
+The primary database. Stores everything that benefits from relational queries:
+
+| Table | Purpose |
+|-------|---------|
+| `memories` | Memory content, types, importance scores, timestamps |
+| `associations` | Graph edges between memories (weighted, typed) |
+| `conversation_messages` | Persistent conversation history per channel |
+| `channels` | Active channel registry with platform metadata |
+| `cron_jobs` | Scheduled task definitions |
+| `cron_executions` | Execution history for cron jobs |
+| `worker_runs` | Worker execution history with transcripts |
+| `branch_runs` | Branch execution history |
+| `cortex_events` | Cortex action log (bulletin generations, maintenance) |
+| `cortex_chat_messages` | Persistent admin chat with cortex |
+| `tasks` | Structured task board (backlog → in_progress → done) |
+| `ingestion_progress` | Chunk-level progress for file ingestion |
+| `agent_profile` | Cortex-generated personality data |
+
+Migrations are in `migrations/` and are **immutable once committed**. Schema changes always go in new migration files. See [Memory](/docs/memory) for the memory graph schema.
+
+### LanceDB
+
+Vector storage and search. Paired with SQLite on memory ID.
+
+- **Embeddings** stored in Lance columnar format with HNSW indexing
+- **Full-text search** via built-in Tantivy integration
+- **Hybrid search** combines vector similarity and keyword matching via Reciprocal Rank Fusion (RRF)
+
+The embedding model runs locally via FastEmbed -- no external API calls for embeddings. See [Memory](/docs/memory) for search details.
+
+### redb
+
+Embedded key-value store for configuration and secrets.
+
+- **Settings** — runtime key-value pairs (e.g., UI preferences, feature flags)
+- **Encrypted secrets** — API keys and tokens encrypted with AES-256-GCM before storage
+
+Separated from SQLite so credentials can be managed and backed up independently.
+
+## Messaging Layer
+
+Spacebot connects to multiple messaging platforms simultaneously. All adapters implement the same `Messaging` trait and feed into a unified inbound message stream.
+
+```
+Discord ─┐
+Slack ───┤
+Telegram ┼──→ MessagingManager ──→ InboundMessage stream ──→ main.rs event loop
+Twitch ──┤                                                        │
+Webhook ─┤                                                        ▼
+WebChat ─┘                                              Channel.handle_message()
+                                                                  │
+                                                                  ▼
+                                                          OutboundResponse
+                                                                  │
+                                                   ┌──────────────┼──────────────┐
+                                                   ▼              ▼              ▼
+                                                Discord        Slack        Telegram
+```
+
+### Inbound Flow
+
+1. Platform adapter receives a message (Discord event, Slack webhook, Telegram update, etc.)
+2. Adapter converts to `InboundMessage` — a unified type with text, media, sender info, conversation ID, and platform metadata
+3. `MessagingManager` fans all adapters into a single `mpsc::channel`
+4. `main.rs` event loop receives the message, resolves the target agent via message bindings, and routes to the appropriate `Channel`
+5. If no `Channel` exists for this conversation ID, one is created and its event loop spawned
+
+### Outbound Flow
+
+1. Channel tools (reply, react, send_file) produce `OutboundResponse` values
+2. Each channel has an outbound routing task that receives responses via `mpsc::channel`
+3. The routing task determines the platform from the channel ID prefix (`discord:`, `slack:`, `telegram:`, etc.)
+4. `MessagingManager::broadcast()` delivers the response to the correct platform adapter
+5. Responses are also forwarded to SSE clients (WebChat, dashboard) for real-time UI updates
+
+### Message Bindings
+
+Each agent declares which messaging channels route to it:
+
+```toml
+[[agents]]
+id = "main"
+
+[[agents.bindings.discord]]
+guild_id = "1323900500600422472"
+channel_ids = ["1471388652562284626"]
+
+[[agents.bindings.telegram]]
+chat_ids = [551234, -1001234567890]
+
+[[agents.bindings.webhook]]
+endpoints = ["github-ci", "monitoring"]
+```
+
+When a message arrives, the binding resolver matches the conversation ID against all agent bindings. If no specific binding matches, the message goes to the default agent (if one is configured). See [Messaging](/docs/messaging) and the individual platform setup guides for configuration details.
+
+## LLM Integration
+
+Spacebot uses [Rig](https://github.com/0xPlaygrounds/rig) as the agentic loop framework. Every process is a Rig `Agent` with a custom `CompletionModel` implementation that routes through Spacebot's `LlmManager`.
+
+### Custom Model Layer
+
+Spacebot doesn't use Rig's built-in provider clients. Instead, `SpacebotModel` implements `CompletionModel` and delegates to `LlmManager`, which handles:
+
+- **Provider routing** — resolving model names to provider clients (Anthropic, OpenAI, Google, etc.)
+- **Process-type defaults** — different models for channels, branches, workers, compactor, cortex
+- **Task-type overrides** — specific models for coding, summarization, deep reasoning tasks
+- **Fallback chains** — automatic fallback to alternative models on failure
+
+```
+Channel LLM call
+  → SpacebotModel.completion(messages, tools)
+    → LlmManager.resolve_model("anthropic/claude-sonnet-4-20250514")
+      → Anthropic client
+        → API call with prompt caching, custom parameters
+```
+
+See [Routing](/docs/routing) for the full routing configuration.
+
+### Agent Construction
+
+```rust
+let agent = AgentBuilder::new(model.clone())
+    .preamble(&system_prompt)
+    .hook(SpacebotHook::new(process_id, process_type, event_tx.clone()))
+    .tool_server_handle(tools.clone())
+    .default_max_turns(50)
+    .build();
+```
+
+### Hooks
+
+Two hook implementations control process behavior:
+
+**`SpacebotHook`** (channels, branches, workers) — sends `ProcessEvent`s for real-time status, tracks token usage, enforces cancellation signals, implements tool nudging (prompts the LLM to use tools if it responds with text instead of tool calls in early iterations), and runs leak detection on tool outputs.
+
+**`CortexHook`** (cortex only) — lighter implementation for system observation, no tool nudging.
+
+Hooks return `Continue`, `Terminate`, or `Skip` after each LLM turn, giving the system fine-grained control over process lifecycle.
+
+### Max Turns
+
+Rig defaults to 0 (single call). Spacebot sets explicit limits per process type:
+
+| Process | Max Turns | Rationale |
+|---------|-----------|-----------|
+| Channel | 5 | Typically 1-3 turns. Prevents runaway conversations. |
+| Branch | 10 | A few iterations to think, recall, and conclude. |
+| Worker | 50 | Many iterations for complex tasks. Segmented into 25-turn blocks. |
+| Compactor | 10 | Summarize and extract memories. Bounded. |
+| Cortex | 10 | Bulletin generation. Single-pass with tool calls. |
+
+## Control API
+
+An embedded Axum HTTP server provides the control API for the dashboard and external integrations. Default port: `19898`.
+
+### Key Endpoint Groups
+
+| Group | Prefix | Purpose |
+|-------|--------|---------|
+| Agents | `/api/agents` | CRUD for agent definitions |
+| Channels | `/api/channels` | Channel listing, history, deletion |
+| Workers | `/api/workers` | Worker status, history, timeline |
+| Cortex | `/api/cortex` | Bulletin, profile, cortex chat |
+| Memory | `/api/memories` | Memory CRUD, graph queries |
+| Config | `/api/config` | Runtime configuration read/write |
+| Providers | `/api/providers` | LLM provider key management |
+| Links | `/api/links` | Communication graph management |
+| Tasks | `/api/tasks` | Task board CRUD |
+| Cron | `/api/cron` | Scheduled task management |
+| System | `/api/system` | Health, version, metrics |
+| WebChat | `/api/webchat` | Embedded chat interface |
+| Models | `/api/models` | Available model listing |
+| Topology | `/api/topology` | Full communication graph |
+
+The dashboard UI is a React SPA embedded in the binary via `rust-embed` and served at the root path. It communicates with these API endpoints for all operations.
+
+### Real-Time Updates
+
+The API supports Server-Sent Events (SSE) for real-time streaming to connected clients. Status updates, tool call progress, worker lifecycle events, and memory changes are all pushed via SSE, giving the dashboard and WebChat live visibility into agent activity.
+
+## Startup Sequence
+
+```
+CLI (clap) → parse args
+  → Load config.toml
+  → Optionally daemonize (Unix socket for IPC)
+  → Build tokio runtime
+  → Initialize tracing + OpenTelemetry (optional)
+  → run()
+    → Start IPC server (stop/status commands)
+    → Start Axum API server
+    → Initialize shared resources:
+        LlmManager, EmbeddingModel, PromptEngine, agent links
+    → For each agent:
+        → Run SQLite migrations
+        → Initialize MemoryStore, LanceDB tables
+        → Initialize MessagingManager (start all platform adapters)
+        → Initialize CronScheduler
+        → Start Cortex (warmup → first bulletin)
+        → Register agent in active agents map
+    → Enter main event loop (tokio::select!)
+        → Inbound messages → route to Channel instances
+        → Agent registration/removal
+        → Provider setup events
+        → Shutdown signal → graceful shutdown
+```
+
+All long-running loops respect a shutdown signal via `broadcast::channel`. On shutdown, active workers are cancelled, channels are flushed, and database connections are closed cleanly.
+
+## Module Structure
+
+The crate uses the sibling file module pattern -- `src/memory.rs` is the module root for `src/memory/`, never `mod.rs`.
+
+```
+src/
+├── main.rs              — CLI entry, config, startup, event loop
+├── lib.rs               — module declarations, shared types
+├── config.rs            — configuration loading and validation
+├── error.rs             — top-level Error enum
+├── db.rs                — database connection bundle
+│
+├── agent/               — process implementations
+│   ├── channel.rs       — user-facing conversation
+│   ├── branch.rs        — forked thinking process
+│   ├── worker.rs        — task execution
+│   ├── compactor.rs     — context monitor
+│   ├── cortex.rs        — system observer
+│   └── status.rs        — live status snapshot
+│
+├── tools/               — 27 tool implementations (one per file)
+├── memory/              — memory graph, search, embeddings
+├── llm/                 — model routing, provider clients
+├── messaging/           — platform adapters
+├── conversation/        — history persistence, context assembly
+├── prompts/             — template engine
+├── hooks/               — PromptHook implementations
+├── cron/                — scheduled tasks
+├── api/                 — 21 Axum endpoint modules
+├── identity/            — identity file loading
+├── secrets/             — encrypted credential storage
+├── settings/            — key-value settings
+├── tasks/               — task board
+├── links/               — communication graph types
+├── skills/              — skill management
+├── opencode/            — OpenCode worker integration
+├── sandbox/             — command sandboxing
+├── telemetry/           — metrics (feature-gated)
+└── update/              — self-update checker
+```
+
+## Design Principles
+
+**Never block the channel.** The channel never waits on branches, workers, or compaction. If something takes time, it runs concurrently and retriggers the channel when done.
+
+**Raw data never reaches the channel.** Memory recall goes through a branch, which curates. The channel gets clean conclusions, not raw database rows.
+
+**Workers have no channel context.** A worker gets a task description and tools. If something needs conversation context, it's a branch, not a worker.
+
+**The compactor is not an LLM.** It's a programmatic monitor that watches a number and spawns workers. The LLM work happens in the workers it spawns.
+
+**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, USER.md, ROLE.md) are loaded from the agent's workspace directory.
+
+**Three databases, three purposes.** SQLite for relational queries, LanceDB for vector search, redb for key-value config. Each doing what it's best at.
+
+**Graceful everything.** All loops respect shutdown signals. Errors are propagated, not silenced. The only exception is `.ok()` on channel sends where the receiver may already be dropped.

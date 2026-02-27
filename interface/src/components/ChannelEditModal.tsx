@@ -18,7 +18,7 @@ import {
 import {PlatformIcon} from "@/lib/platformIcons";
 import {TagInput} from "@/components/TagInput";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
 
 interface ChannelEditModalProps {
 	platform: Platform;

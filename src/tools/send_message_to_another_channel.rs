@@ -66,16 +66,30 @@ impl Tool for SendMessageTool {
     type Output = SendMessageOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let email_adapter_available = self.messaging_manager.has_adapter("email").await;
+
+        let mut description =
+            crate::prompts::text::get("tools/send_message_to_another_channel").to_string();
+        let mut target_description = "The target channel name, channel ID, or user identifier. Use a channel name like 'general' or a full channel ID from the available channels list.".to_string();
+
+        if email_adapter_available {
+            description.push_str(
+                " Email delivery is enabled: for intentional outbound email you may target `email:alice@example.com` (or bare `alice@example.com`).",
+            );
+            target_description.push_str(
+                " With email enabled, explicit email targets are also allowed: `email:alice@example.com` or `alice@example.com`.",
+            );
+        }
+
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/send_message_to_another_channel")
-                .to_string(),
+            description,
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "target": {
                         "type": "string",
-                        "description": "The target channel name, channel ID, or user identifier. Use a channel name like 'general' or a full channel ID from the available channels list."
+                        "description": target_description
                     },
                     "message": {
                         "type": "string",
@@ -94,6 +108,29 @@ impl Tool for SendMessageTool {
             "send_message_to_another_channel tool called"
         );
 
+        if let Some(explicit_target) = parse_explicit_email_target(&args.target) {
+            self.messaging_manager
+                .broadcast(
+                    &explicit_target.adapter,
+                    &explicit_target.target,
+                    crate::OutboundResponse::Text(args.message),
+                )
+                .await
+                .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
+
+            tracing::info!(
+                adapter = %explicit_target.adapter,
+                broadcast_target = %explicit_target.target,
+                "message sent via explicit target"
+            );
+
+            return Ok(SendMessageOutput {
+                success: true,
+                target: explicit_target.target,
+                platform: explicit_target.adapter,
+            });
+        }
+
         let channel = self
             .channel_store
             .find_by_name(&args.target)
@@ -101,7 +138,7 @@ impl Tool for SendMessageTool {
             .map_err(|error| SendMessageError(format!("failed to search channels: {error}")))?
             .ok_or_else(|| {
                 SendMessageError(format!(
-                    "no channel found matching '{}'. Use a channel name or ID from the available channels list.",
+                    "no channel found matching '{}'. Use a channel name/ID from the available channels list or an explicit email target like email:alice@example.com.",
                     args.target
                 ))
             })?;
@@ -136,5 +173,58 @@ impl Tool for SendMessageTool {
             target: channel.display_name.unwrap_or_else(|| channel.id.clone()),
             platform: broadcast_target.adapter,
         })
+    }
+}
+
+fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::BroadcastTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(parsed) = crate::messaging::target::parse_delivery_target(trimmed) {
+        return (parsed.adapter == "email").then_some(parsed);
+    }
+
+    if !trimmed.contains('@') {
+        return None;
+    }
+
+    crate::messaging::target::parse_delivery_target(&format!("email:{trimmed}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_explicit_email_target;
+
+    #[test]
+    fn parses_prefixed_email_target() {
+        let target = parse_explicit_email_target("email:alice@example.com").expect("email target");
+        assert_eq!(target.adapter, "email");
+        assert_eq!(target.target, "alice@example.com");
+    }
+
+    #[test]
+    fn parses_bare_email_target() {
+        let target = parse_explicit_email_target("alice@example.com").expect("email target");
+        assert_eq!(target.adapter, "email");
+        assert_eq!(target.target, "alice@example.com");
+    }
+
+    #[test]
+    fn parses_display_name_email_target() {
+        let target = parse_explicit_email_target("Alice <alice@example.com>").expect("email");
+        assert_eq!(target.adapter, "email");
+        assert_eq!(target.target, "alice@example.com");
+    }
+
+    #[test]
+    fn ignores_non_email_prefixed_target() {
+        assert!(parse_explicit_email_target("discord:123").is_none());
+    }
+
+    #[test]
+    fn ignores_channel_name_target() {
+        assert!(parse_explicit_email_target("general").is_none());
     }
 }

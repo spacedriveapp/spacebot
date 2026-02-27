@@ -12,10 +12,13 @@
 //! - No memory tools — the channel delegates memory work to branches.
 //!
 //! **Branch ToolServer** (one per branch, isolated):
-//! - `memory_save` + `memory_recall` + `memory_delete` — registered at creation
+//! - `memory_save` + `memory_recall` + `memory_delete` + `channel_recall`
+//! - `task_create` + `task_list` + `task_update`
+//! - `spawn_worker` is included for channel-originated branches only
 //!
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file`, `exec` — stateless, registered at creation
+//! - `task_update` — scoped to the worker's assigned task
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
@@ -25,8 +28,8 @@ pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
-pub mod conclude_link;
 pub mod cron;
+pub mod email_search;
 pub mod exec;
 pub mod file;
 pub mod mcp;
@@ -44,6 +47,9 @@ pub mod set_status;
 pub mod shell;
 pub mod skip;
 pub mod spawn_worker;
+pub mod task_create;
+pub mod task_list;
+pub mod task_update;
 pub mod web_search;
 pub mod worker_inspect;
 
@@ -56,11 +62,8 @@ pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
-pub use conclude_link::{
-    ConcludeLinkArgs, ConcludeLinkError, ConcludeLinkFlag, ConcludeLinkOutput, ConcludeLinkSummary,
-    ConcludeLinkTool, new_conclude_link,
-};
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
+pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, EmailSearchTool};
 pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
 pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
@@ -88,6 +91,9 @@ pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTo
 pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
 pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
+pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
+pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
@@ -97,6 +103,7 @@ use crate::agent::channel::ChannelState;
 use crate::config::{BrowserConfig, RuntimeConfig};
 use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
+use crate::tasks::TaskStore;
 use crate::{AgentId, ChannelId, OutboundResponse, ProcessEvent, WorkerId};
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
@@ -181,6 +188,43 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     )
 }
 
+/// Returns true when text looks like structured/tool payloads that should never
+/// be sent to end users as plain chat output.
+pub fn should_block_user_visible_text(value: &str) -> bool {
+    const TOOL_PREFIXES: &[&str] = &[
+        "[reply]",
+        "(reply)",
+        "[react]",
+        "(react)",
+        "[skip]",
+        "(skip)",
+        "[branch]",
+        "(branch)",
+        "[spawn_worker]",
+        "(spawn_worker)",
+        "[route]",
+        "(route)",
+        "[cancel]",
+        "(cancel)",
+    ];
+
+    let trimmed = value.trim_start();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+        return true;
+    }
+
+    let lower = trimmed.to_ascii_lowercase();
+    if TOOL_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+
+    lower.starts_with("<system-reminder>") || lower.starts_with("<path>")
+}
+
 /// Add per-turn tools to a channel's ToolServer.
 ///
 /// Called when a conversation turn begins. These tools hold per-turn state
@@ -196,64 +240,32 @@ pub async fn add_channel_tools(
     replied_flag: RepliedFlag,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
-    conclude_link: Option<(ConcludeLinkFlag, ConcludeLinkSummary)>,
-    message_source: Option<String>,
-    originating_channel_override: Option<String>,
-    originating_source_override: Option<String>,
+    allow_direct_reply: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
-    let is_link_channel = conversation_id.starts_with("link:");
-    let current_link_counterparty =
-        link_counterparty_for_agent(&conversation_id, state.deps.agent_id.as_ref());
-    // In direct link channels, only expose send_agent_message when this agent
-    // can initiate to at least one other linked agent (not the current peer).
-    // This avoids LLM loops where agents try to delegate back to the same peer
-    // or hallucinate unrelated targets instead of using `reply`.
-    let has_other_delegation_targets =
-        if let Some(counterparty_id) = current_link_counterparty.as_deref() {
-            let agent_id = state.deps.agent_id.as_ref();
-            let links = state.deps.links.load();
 
-            links.iter().any(|link| {
-                let (target_id, can_initiate) = if link.from_agent_id == agent_id {
-                    (&link.to_agent_id, true)
-                } else if link.to_agent_id == agent_id {
-                    (
-                        &link.from_agent_id,
-                        link.direction == crate::links::LinkDirection::TwoWay,
-                    )
-                } else {
-                    return false;
-                };
-
-                can_initiate
-                    && target_id != counterparty_id
-                    && state.deps.agent_names.contains_key(target_id)
-            })
-        } else {
-            true
-        };
-
-    let agent_display_name = state
-        .deps
-        .agent_names
-        .get(state.deps.agent_id.as_ref())
-        .cloned()
-        .unwrap_or_else(|| state.deps.agent_id.to_string());
-    handle
-        .add_tool(ReplyTool::new(
-            response_tx.clone(),
-            conversation_id.clone(),
-            state.conversation_logger.clone(),
-            state.channel_id.clone(),
-            replied_flag.clone(),
-            agent_display_name,
-        ))
-        .await?;
+    if allow_direct_reply {
+        let agent_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
+        handle
+            .add_tool(ReplyTool::new(
+                response_tx.clone(),
+                conversation_id.clone(),
+                state.conversation_logger.clone(),
+                state.channel_id.clone(),
+                replied_flag.clone(),
+                agent_display_name,
+            ))
+            .await?;
+    }
     handle.add_tool(BranchTool::new(state.clone())).await?;
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
-    if !is_link_channel && let Some(messaging_manager) = &state.deps.messaging_manager {
+    if let Some(messaging_manager) = &state.deps.messaging_manager {
         handle
             .add_tool(SendMessageTool::new(
                 messaging_manager.clone(),
@@ -272,42 +284,25 @@ pub async fn add_channel_tools(
         .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
         .await?;
     handle.add_tool(ReactTool::new(response_tx.clone())).await?;
-    if let Some(cron) = cron_tool {
-        handle.add_tool(cron).await?;
+    if let Some(cron_tool) = cron_tool {
+        let cron_tool = cron_tool.with_default_delivery_target(
+            default_delivery_target_for_conversation(&conversation_id),
+        );
+        handle.add_tool(cron_tool).await?;
     }
-    if let Some(mut agent_msg) = send_agent_message_tool
-        && has_other_delegation_targets
-    {
-        // Bind per-turn state so the tool auto-ends the turn after sending and
-        // propagates the correct adapter name for conclusion routing.
+    if let Some(mut agent_msg) = send_agent_message_tool {
         agent_msg = agent_msg.with_skip_flag(skip_flag.clone());
-        if let Some(originating_channel) = originating_channel_override {
-            agent_msg = agent_msg.with_originating_channel(originating_channel);
-        }
-        // Prefer the upstream originating_source (for multi-hop chains) over
-        // the current message source (which is "internal" on link channels).
-        let effective_source = originating_source_override.or(message_source);
-        if let Some(source) = effective_source {
-            agent_msg = agent_msg.with_originating_source(source);
-        }
         handle.add_tool(agent_msg).await?;
-    }
-    if let Some((flag, summary)) = conclude_link {
-        handle
-            .add_tool(ConcludeLinkTool::new(flag, summary, response_tx))
-            .await?;
     }
     Ok(())
 }
 
-fn link_counterparty_for_agent(conversation_id: &str, agent_id: &str) -> Option<String> {
-    let rest = conversation_id.strip_prefix("link:")?;
-    let (self_id, counterparty_id) = rest.split_once(':')?;
-    if self_id == agent_id {
-        Some(counterparty_id.to_string())
-    } else {
-        None
+fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<String> {
+    let parsed = crate::messaging::target::parse_delivery_target(conversation_id)?;
+    if parsed.adapter != "discord" {
+        return None;
     }
+    Some(parsed.to_string())
 }
 
 /// Remove per-channel tools from a running ToolServer.
@@ -316,8 +311,11 @@ fn link_counterparty_for_agent(conversation_id: &str, agent_id: &str) -> Option<
 /// tools from being invoked with dead senders.
 pub async fn remove_channel_tools(
     handle: &ToolServerHandle,
+    allow_direct_reply: bool,
 ) -> Result<(), rig::tool::server::ToolServerError> {
-    handle.remove_tool(ReplyTool::NAME).await?;
+    if allow_direct_reply {
+        handle.remove_tool(ReplyTool::NAME).await?;
+    }
     handle.remove_tool(BranchTool::NAME).await?;
     handle.remove_tool(SpawnWorkerTool::NAME).await?;
     handle.remove_tool(RouteTool::NAME).await?;
@@ -325,11 +323,10 @@ pub async fn remove_channel_tools(
     handle.remove_tool(SkipTool::NAME).await?;
     handle.remove_tool(SendFileTool::NAME).await?;
     handle.remove_tool(ReactTool::NAME).await?;
-    // Cron, send_message, send_agent_message, and conclude_link removal is best-effort since not all channels have them
+    // Cron, send_message, and send_agent_message removal is best-effort since not all channels have them
     let _ = handle.remove_tool(CronTool::NAME).await;
     let _ = handle.remove_tool(SendMessageTool::NAME).await;
     let _ = handle.remove_tool(SendAgentMessageTool::NAME).await;
-    let _ = handle.remove_tool(ConcludeLinkTool::NAME).await;
     Ok(())
 }
 
@@ -338,20 +335,37 @@ pub async fn remove_channel_tools(
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
 /// visible to the channel. Both `memory_save` and `memory_recall` are
 /// registered at creation.
+#[allow(clippy::too_many_arguments)]
 pub fn create_branch_tool_server(
+    state: Option<ChannelState>,
+    agent_id: AgentId,
+    task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    runtime_config: Arc<RuntimeConfig>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
-    agent_id: &str,
 ) -> ToolServerHandle {
-    ToolServer::new()
+    let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(EmailSearchTool::new(runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
-        .run()
+        .tool(TaskCreateTool::new(
+            task_store.clone(),
+            agent_id.to_string(),
+            "branch",
+        ))
+        .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
+        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+
+    if let Some(state) = state {
+        server = server.tool(SpawnWorkerTool::new(state));
+    }
+
+    server.run()
 }
 
 /// Create a per-worker ToolServer with task-appropriate tools.
@@ -367,6 +381,7 @@ pub fn create_worker_tool_server(
     agent_id: AgentId,
     worker_id: WorkerId,
     channel_id: Option<ChannelId>,
+    task_store: Arc<TaskStore>,
     event_tx: broadcast::Sender<ProcessEvent>,
     browser_config: BrowserConfig,
     screenshot_dir: PathBuf,
@@ -380,6 +395,11 @@ pub fn create_worker_tool_server(
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(workspace, sandbox))
+        .tool(TaskUpdateTool::for_worker(
+            task_store,
+            agent_id.clone(),
+            worker_id,
+        ))
         .tool(SetStatusTool::new(
             agent_id, worker_id, channel_id, event_tx,
         ))
@@ -417,11 +437,12 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
 #[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
+    agent_id: AgentId,
+    task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
-    agent_id: &str,
     browser_config: BrowserConfig,
     screenshot_dir: PathBuf,
     brave_search_key: Option<String>,
@@ -434,6 +455,13 @@ pub fn create_cortex_chat_tool_server(
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
+        .tool(TaskCreateTool::new(
+            task_store.clone(),
+            agent_id.to_string(),
+            "cortex",
+        ))
+        .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
+        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
         .tool(FileTool::new(workspace.clone()))
         .tool(ExecTool::new(workspace, sandbox));
@@ -492,5 +520,23 @@ mod tests {
         let args: exec::ExecArgs =
             serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
         assert_eq!(args.timeout_seconds, 90);
+    }
+
+    #[test]
+    fn blocks_json_bracket_and_tool_syntax_output() {
+        assert!(should_block_user_visible_text("{\"content\":\"hello\"}"));
+        assert!(should_block_user_visible_text("[\"one\",\"two\"]"));
+        assert!(should_block_user_visible_text(
+            "[reply]\n{\"content\":\"hello\"}"
+        ));
+        assert!(should_block_user_visible_text(
+            "<system-reminder>hidden</system-reminder>"
+        ));
+    }
+
+    #[test]
+    fn allows_normal_plaintext_output() {
+        assert!(!should_block_user_visible_text("hello team"));
+        assert!(!should_block_user_visible_text("- first\n- second"));
     }
 }

@@ -85,7 +85,7 @@ Add:
 
 ### Messaging config structs
 
-For each platform with token-based auth (Discord, Telegram, Slack, Twitch):
+For each platform (Discord, Telegram, Slack, Twitch, Email, Webhook):
 
 - Keep existing singleton fields (`token`, `bot_token`, `app_token`, etc.)
 - Add optional `instances: Vec<...InstanceConfig>` with:
@@ -157,10 +157,44 @@ Response payloads should include adapter instance identity so UI can render mult
 
 ## UI Changes
 
-- Keep current quick setup flow for default token
-- Add “Add another token” flow that requires a name
-- Settings display becomes list of adapter instances per platform
-- Binding editor adds optional adapter selector (default preselected)
+Two-column layout replacing the current single-column platform accordion.
+
+### Layout
+
+```
+┌───────────────────────┬────────────────────────────────────────┐
+│  Available            │  Configured Instances                  │
+│                       │                                        │
+│  [Discord        ＋]  │  ┌─ discord ───────────────────────┐   │
+│  [Slack          ＋]  │  │ Discord (default)       ● on    │   │
+│  [Telegram       ＋]  │  │ Bindings: 2                     │   │
+│  [Twitch         ＋]  │  │ [Edit] [Disable] [Remove]       │   │
+│  [Email          ＋]  │  └──────────────────────────────────┘   │
+│  [Webhook        ＋]  │  ┌─ telegram ──────────────────────┐   │
+│                       │  │ Telegram (default)       ● on   │   │
+│  Coming Soon          │  │ Bindings: 1                     │   │
+│  WhatsApp             │  │ [Edit] [Disable] [Remove]       │   │
+│  Matrix               │  └──────────────────────────────────┘   │
+│  iMessage             │  ┌─ telegram:support ──────────────┐   │
+│  IRC                  │  │ Telegram "support"       ● on   │   │
+│  Lark                 │  │ Bindings: 1                     │   │
+│  DingTalk             │  │ [Edit] [Disable] [Remove]       │   │
+│                       │  └──────────────────────────────────┘   │
+│                       │                                        │
+│                       │  (empty state when nothing configured) │
+└───────────────────────┴────────────────────────────────────────┘
+```
+
+- **Left column:** Platform catalog. Each platform has a "+" button to add an instance. Coming-soon platforms listed but disabled. Always visible regardless of configured count.
+- **Right column:** Configured adapter instances as expandable summary cards. Compact view shows platform icon, instance name (or "default"), enabled status, binding count. Expands to show credentials, full binding list, and controls.
+
+### Interaction model
+
+- **Add instance:** Clicking "+" on a platform creates a new card inline in the right column in editing state. Name input (required for non-default), credential fields. Save creates the instance and collapses to summary.
+- **First instance:** When a platform has no instances, the first "+" creates the default instance. No name input required — same single-token paste flow as today.
+- **Subsequent instances:** "+" when a platform already has the default instance creates a named instance. Name input is required.
+- **Instance cards:** Expandable accordions. Click to expand, showing credentials (masked), bindings section, enable/disable toggle, disconnect/remove button.
+- **Bindings:** Edited per-instance inside each expanded card. Each instance card contains its own bindings section with add/edit/remove. Binding form auto-populates the `adapter` field.
 
 The common single-token path remains one step.
 
@@ -193,40 +227,62 @@ No migration required for existing users.
 
 ### Phase 1: Config and binding model
 
-1. Add `adapter` to binding structs and TOML parsing
-2. Add per-platform `instances` config parsing
-3. Add validation rules (names, existence, duplicates)
-4. Update docs for config reference
+1. Add `adapter: Option<String>` to `Binding` (`config.rs:~1153`) and `TomlBinding` (`config.rs:~2302`)
+2. Add per-platform instance config structs: `DiscordInstanceConfig`, `SlackInstanceConfig`, `TelegramInstanceConfig`, `TwitchInstanceConfig`, `EmailInstanceConfig`, `WebhookInstanceConfig` — each with `name: String`, `enabled: bool`, and the same credential fields as the parent platform config
+3. Add `instances: Vec<XInstanceConfig>` to all platform configs: `DiscordConfig`, `SlackConfig`, `TelegramConfig`, `TwitchConfig`, `EmailConfig`, `WebhookConfig`
+4. Add matching TOML deser structs (`TomlXInstanceConfig`) for `[[messaging.<platform>.instances]]` array-of-tables
+5. Add validation: no duplicate instance names within a platform, no empty or `"default"` names, `binding.adapter` must reference an existing configured instance
+6. Update `Binding::matches()` (`config.rs:~1170`) to accept adapter identity parameter
 
 ### Phase 2: Runtime adapter identity
 
-1. Refactor `MessagingManager` keying from platform name to runtime adapter key
-2. Instantiate default + named adapters per platform
-3. Attach adapter identity to inbound messages
-4. Route outbound operations via inbound adapter identity
+1. Define runtime key format — `"telegram"` for default, `"telegram:support"` for named — as a type alias or newtype
+2. Refactor `MessagingManager` `HashMap<String, Arc<dyn MessagingDyn>>` (`manager.rs:~17`) to key by runtime key instead of `adapter.name()`. Update `register()`, `register_and_start()`, `remove_adapter()`, `respond()`, `has_adapter()`
+3. Make adapter constructors accept an optional instance name so `name()` / `runtime_key()` returns the full key. Or add `runtime_key()` to the `Messaging` trait
+4. Add `adapter: String` field to `InboundMessage` carrying the runtime adapter key
+5. Update startup to instantiate default adapter from root config + one adapter per `instances` entry, all registered with the manager
+6. Update `respond()` (`manager.rs:~203`) to route outbound by adapter runtime key captured on inbound, not `message.source`
 
 ### Phase 3: Binding resolution and permissions
 
-1. Extend binding match logic with adapter selector
-2. Build per-adapter permission sets from filtered bindings
-3. Ensure hot-reload updates per-adapter permissions correctly
+1. Extend `Binding::matches()` to check `binding.adapter` against inbound adapter identity. `None` matches default adapter only. `Some("x")` matches named adapter `"x"` only
+2. Build per-adapter permission sets by filtering bindings on `(platform, adapter)` when constructing each platform's permission struct
+3. Update hot-reload to rebuild and `ArcSwap` permissions per adapter instance independently
 
-### Phase 4: API and UI
+### Phase 4: API
 
-1. Extend bindings API payloads with optional `adapter`
-2. Extend messaging status/toggle/disconnect APIs for adapter instances
-3. Update dashboard settings and binding editor for named instances
-4. Preserve platform-only behavior for default adapter paths
+1. Refactor `GET /api/messaging/status` (`api/messaging.rs:~16-23`) from hardcoded per-platform struct to `Vec<AdapterInstanceStatus>` with `{platform, name, configured, enabled}`
+2. Add optional `adapter: Option<String>` to `TogglePlatformRequest` and `DisconnectPlatformRequest` (`api/messaging.rs`). Omitted = default instance
+3. Add adapter instance CRUD: `POST /api/messaging/instances` (create named instance with credentials), `DELETE /api/messaging/instances` (remove named instance + associated bindings)
+4. Add optional `adapter` to bindings CRUD payloads (`api/bindings.rs`): `CreateBindingRequest`, `UpdateBindingRequest`, `DeleteBindingRequest`. Old payloads without `adapter` remain valid
 
-### Phase 5: Test coverage and rollout docs
+### Phase 5: UI
 
-1. Add config parsing/validation tests for named instances
-2. Add routing tests for adapter-specific bindings
-3. Add API tests for backward compatible payloads
-4. Add setup docs for multi-bot per platform scenarios
+1. Update TypeScript types (`interface/src/api/client.ts`): new `AdapterInstance` type, update `MessagingStatusResponse` to return instance list, add `adapter` to `BindingInfo` and binding request types
+2. Replace `ChannelsSection` (`interface/src/routes/Settings.tsx:~785`) single-column layout with two-column: left platform catalog, right configured instances
+3. Build platform catalog (left column): platform list with "+" buttons, coming-soon platforms grayed out
+4. Refactor `ChannelSettingCard` (`interface/src/components/ChannelSettingCard.tsx`) into expandable instance summary cards: platform icon, instance name, status badge, binding count. Expand for credentials, bindings, controls
+5. Build add-instance flow: "+" creates inline card in editing state, name input for non-default instances, credential fields, save calls instance API
+6. Scope binding editor per-instance: existing `BindingsSection` logic scoped to the instance's adapter, binding form auto-populates `adapter` field
+7. Default instance UX: first instance of any platform = default, no name required, same single-token paste experience as today. Only second+ instances require a name
 
-## Open Questions
+### Phase 6: Tests
 
-- Should adapter identity be surfaced as a first-class field on `InboundMessage` instead of metadata?
-- For Slack, should named instances support independent app-level settings beyond tokens in this phase?
-- Should proactive broadcast endpoints require explicit adapter for platforms with multiple configured instances, or keep default fallback?
+1. Config parsing/validation tests: valid instance arrays, empty names, duplicate names, `"default"` name rejection
+2. Binding match tests: default adapter match, named adapter match, mismatch rejection, adapter-less binding matches default only
+3. API backward compat tests: payloads without `adapter` field work unchanged
+4. Permission filtering tests: per-adapter permission sets built correctly from filtered bindings
+
+## Risk Notes
+
+**Phase 2 is the most invasive.** Changing how `MessagingManager` keys adapters touches every adapter, startup, hot-reload, and outbound routing. Most bugs will surface here. Consider landing Phase 2 as its own PR with focused review.
+
+**`ChannelEditModal` duplication.** The current UI has duplicated adapter logic between `ChannelSettingCard` and `ChannelEditModal`. The Phase 5 refactor is a good opportunity to consolidate, but optional — updating `ChannelSettingCard` alone is sufficient if the modal is used elsewhere.
+
+**Build order is backend-first.** Phases 1-4 are Rust. Phase 5 is React. This avoids building UI against speculative API contracts.
+
+## Resolved Questions
+
+- **Adapter identity on `InboundMessage`:** Yes, first-class `adapter: String` field, not metadata. Binding resolution and outbound routing both depend on it directly.
+- **Slack app-level settings beyond tokens:** No, not in this phase. Named Slack instances share the same config shape (bot_token + app_token). Independent app-level settings can be added later if needed.
+- **Proactive broadcast with multiple instances:** Keep default fallback. Broadcast targets the default adapter unless the caller explicitly specifies a runtime key. This matches existing behavior and avoids breaking proactive sends for users who add named instances alongside their default.

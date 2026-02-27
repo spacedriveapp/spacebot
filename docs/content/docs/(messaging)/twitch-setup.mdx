@@ -5,29 +5,83 @@ description: Connect Spacebot to Twitch chat.
 
 # Twitch Setup
 
-Connect Spacebot to Twitch chat. Takes about 5 minutes.
+Connect Spacebot to Twitch chat. Takes about 10 minutes.
 
-You need a **Twitch account** for the bot and an **OAuth token**.
+You need a **Twitch account** for the bot and a **Twitch application** registered at dev.twitch.tv.
 
 ## Step 1: Create a Twitch Account
 
 Create a Twitch account for your bot (or use an existing one). The bot will send messages as this account.
 
-## Step 2: Get an OAuth Token
+## Step 2: Register a Twitch Application
 
-The TwitchApps TMI token generator has been discontinued.
-
-For quick setup, use [Twitch Token Generator by swiftyspiffy](https://twitchtokengenerator.com/) and authorize with the bot account using `chat:read` and `chat:edit` scopes.
-
-The site returns an **ACCESS TOKEN**, **REFRESH TOKEN**, and **CLIENT ID**. For Spacebot, use the **ACCESS TOKEN** and prefix it with `oauth:`.
-
-Example: if the generator shows `abc123def456`, set `oauth_token` to `oauth:abc123def456`.
+1. Go to [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) and log in with **any** Twitch account (doesn't need to be the bot account)
+2. Click **Register Your Application**
+3. Fill in the form:
+   - **Name:** anything (e.g. "My Spacebot")
+   - **OAuth Redirect URL:** `http://localhost:3000`
+   - **Category:** Chat Bot
+4. Click **Create**
+5. Click **Manage** on your new app
+6. Copy the **Client ID**
+7. Click **New Secret** and copy the **Client Secret**
 
 <Callout type="warning">
-If you're building an app or service for other users, don't rely on third-party token generators. Create your own Twitch OAuth app at [dev.twitch.tv/console/apps](https://dev.twitch.tv/console/apps) and run the OAuth flow directly in your product.
+Keep the client secret safe. If you lose it, you can generate a new one from the app management page, but the old one is immediately invalidated.
 </Callout>
 
-## Step 3: Add Credentials to Spacebot
+## Step 3: Get an OAuth Token
+
+You need to authorize the bot account with `chat:read` and `chat:edit` scopes. The easiest way is the Twitch CLI, but you can also do it manually.
+
+<Tabs items={["Twitch CLI", "Manual (curl)"]}>
+<Tab value="Twitch CLI">
+
+Install the [Twitch CLI](https://dev.twitch.tv/docs/cli/) and configure it with your app credentials:
+
+```bash
+twitch configure
+# Enter your Client ID and Client Secret when prompted
+```
+
+Then generate a user token. This opens a browser where you log in as the **bot account**:
+
+```bash
+twitch token -u -s 'chat:read chat:edit'
+```
+
+The CLI prints the **access token** and **refresh token**. Copy both.
+
+</Tab>
+<Tab value="Manual (curl)">
+
+**1. Open this URL in a browser where you're logged in as the bot account** (replace `YOUR_CLIENT_ID`):
+
+```
+https://id.twitch.tv/oauth2/authorize?client_id=YOUR_CLIENT_ID&redirect_uri=http://localhost:3000&response_type=code&scope=chat:read+chat:edit
+```
+
+**2. Authorize the app.** You'll be redirected to `http://localhost:3000?code=AUTHORIZATION_CODE`. The page won't load — that's fine. Copy the `code` parameter from the URL.
+
+**3. Exchange the code for tokens:**
+
+```bash
+curl -X POST 'https://id.twitch.tv/oauth2/token' \
+  -d 'client_id=YOUR_CLIENT_ID' \
+  -d 'client_secret=YOUR_CLIENT_SECRET' \
+  -d 'code=AUTHORIZATION_CODE' \
+  -d 'grant_type=authorization_code' \
+  -d 'redirect_uri=http://localhost:3000'
+```
+
+The response contains `access_token` and `refresh_token`. Copy both.
+
+</Tab>
+</Tabs>
+
+## Step 4: Add Credentials to Spacebot
+
+Spacebot needs your **username**, **OAuth token**, **client ID**, **client secret**, and **refresh token**. With all five, Spacebot automatically refreshes expired tokens.
 
 <Tabs items={["Spacebot UI", "TOML Config"]}>
 <Tab value="Spacebot UI">
@@ -35,7 +89,7 @@ If you're building an app or service for other users, don't rely on third-party 
 1. Open your Spacebot dashboard
 2. Go to **Settings** → **Messaging Platforms**
 3. Click **Setup** on the Twitch card
-4. Enter the bot's **username** and **OAuth token**
+4. Enter the bot's **username**, **OAuth token**, **client ID**, **client secret**, and **refresh token**
 5. Click **Save**
 
 Spacebot connects immediately — no restart needed.
@@ -48,8 +102,13 @@ Spacebot connects immediately — no restart needed.
 enabled = true
 username = "my_bot"
 oauth_token = "oauth:abc123def456..."
+client_id = "your_client_id"
+client_secret = "your_client_secret"
+refresh_token = "your_refresh_token"
 channels = ["somechannel", "anotherchannel"]
 ```
+
+Prefix the access token with `oauth:`. For example, if the token is `abc123def456`, set `oauth_token` to `oauth:abc123def456`.
 
 You can also reference environment variables:
 
@@ -58,6 +117,9 @@ You can also reference environment variables:
 enabled = true
 username = "env:TWITCH_BOT_USERNAME"
 oauth_token = "env:TWITCH_OAUTH_TOKEN"
+client_id = "env:TWITCH_CLIENT_ID"
+client_secret = "env:TWITCH_CLIENT_SECRET"
+refresh_token = "env:TWITCH_REFRESH_TOKEN"
 channels = ["somechannel"]
 ```
 
@@ -66,7 +128,7 @@ Token changes in config require a restart.
 </Tab>
 </Tabs>
 
-## Step 4: Join Channels
+## Step 5: Join Channels
 
 Specify which Twitch channels the bot should join. Channel names are case-insensitive and should not include the `#` prefix.
 
@@ -211,7 +273,7 @@ Each Twitch channel maps to a single conversation (`twitch:<channel_name>`). Unl
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| `Login authentication failed` | Invalid OAuth token | Generate a fresh token using [Twitch Token Generator](https://twitchtokengenerator.com/) or your own OAuth app |
+| `Login authentication failed` | Invalid or expired OAuth token | Re-run the token flow from Step 3. If you have `client_id`, `client_secret`, and `refresh_token` configured, Spacebot refreshes automatically — check that all three are set. |
 | Bot connects but doesn't respond | Trigger prefix set | Messages must start with the configured prefix (e.g. `!ask`) |
 | Bot responds to everything | No trigger prefix | Set `trigger_prefix` in the config to limit when the bot responds |
 | Messages getting dropped | Rate limit | Reduce response frequency or get the bot account verified |

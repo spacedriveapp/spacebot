@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
+const USER_TIMEZONE_ENV_VAR: &str = "SPACEBOT_USER_TIMEZONE";
 
 /// OpenTelemetry export configuration.
 ///
@@ -137,9 +138,13 @@ impl Default for MetricsConfig {
 /// API types supported by LLM providers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiType {
-    /// OpenAI Completions API (https://api.openai.com/v1/completions)
+    /// OpenAI Chat Completions API (`/v1/chat/completions`)
     OpenAiCompletions,
-    /// OpenAI Responses API (https://api.openai.com/v1/chat/completions)
+    /// OpenAI-compatible Chat Completions API (`/chat/completions`)
+    OpenAiChatCompletions,
+    /// Kilo Gateway API (`/chat/completions`) with required gateway headers
+    KiloGateway,
+    /// OpenAI Responses API (`/v1/responses`)
     OpenAiResponses,
     /// Anthropic Messages API (https://api.anthropic.com/v1/messages)
     Anthropic,
@@ -154,12 +159,14 @@ impl<'de> serde::Deserialize<'de> for ApiType {
         let s = String::deserialize(deserializer)?;
         match s.as_str() {
             "openai_completions" => Ok(Self::OpenAiCompletions),
+            "openai_chat_completions" => Ok(Self::OpenAiChatCompletions),
+            "kilo_gateway" => Ok(Self::KiloGateway),
             "openai_responses" => Ok(Self::OpenAiResponses),
             "anthropic" => Ok(Self::Anthropic),
             "gemini" => Ok(Self::Gemini),
             other => Err(serde::de::Error::invalid_value(
                 serde::de::Unexpected::Str(other),
-                &"one of \"openai_completions\", \"openai_responses\", \"anthropic\", or \"gemini\"",
+                &"one of \"openai_completions\", \"openai_chat_completions\", \"kilo_gateway\", \"openai_responses\", \"anthropic\", or \"gemini\"",
             )),
         }
     }
@@ -172,6 +179,10 @@ pub struct ProviderConfig {
     pub base_url: String,
     pub api_key: String,
     pub name: Option<String>,
+    /// When true, use `Authorization: Bearer` instead of `x-api-key` for
+    /// Anthropic requests. Set automatically when the key originates from
+    /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
+    pub use_bearer_auth: bool,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -181,6 +192,7 @@ impl std::fmt::Debug for ProviderConfig {
             .field("base_url", &self.base_url)
             .field("api_key", &"[REDACTED]")
             .field("name", &self.name)
+            .field("use_bearer_auth", &self.use_bearer_auth)
             .finish()
     }
 }
@@ -191,6 +203,7 @@ pub struct LlmConfig {
     pub anthropic_key: Option<String>,
     pub openai_key: Option<String>,
     pub openrouter_key: Option<String>,
+    pub kilo_key: Option<String>,
     pub zhipu_key: Option<String>,
     pub groq_key: Option<String>,
     pub together_key: Option<String>,
@@ -202,6 +215,7 @@ pub struct LlmConfig {
     pub ollama_key: Option<String>,
     pub ollama_base_url: Option<String>,
     pub opencode_zen_key: Option<String>,
+    pub opencode_go_key: Option<String>,
     pub nvidia_key: Option<String>,
     pub minimax_key: Option<String>,
     pub minimax_cn_key: Option<String>,
@@ -225,6 +239,7 @@ impl std::fmt::Debug for LlmConfig {
                 "openrouter_key",
                 &self.openrouter_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("kilo_key", &self.kilo_key.as_ref().map(|_| "[REDACTED]"))
             .field("zhipu_key", &self.zhipu_key.as_ref().map(|_| "[REDACTED]"))
             .field("groq_key", &self.groq_key.as_ref().map(|_| "[REDACTED]"))
             .field(
@@ -258,6 +273,10 @@ impl std::fmt::Debug for LlmConfig {
                 &self.opencode_zen_key.as_ref().map(|_| "[REDACTED]"),
             )
             .field(
+                "opencode_go_key",
+                &self.opencode_go_key.as_ref().map(|_| "[REDACTED]"),
+            )
+            .field(
                 "nvidia_key",
                 &self.nvidia_key.as_ref().map(|_| "[REDACTED]"),
             )
@@ -284,6 +303,7 @@ impl LlmConfig {
         self.anthropic_key.is_some()
             || self.openai_key.is_some()
             || self.openrouter_key.is_some()
+            || self.kilo_key.is_some()
             || self.zhipu_key.is_some()
             || self.groq_key.is_some()
             || self.together_key.is_some()
@@ -295,6 +315,7 @@ impl LlmConfig {
             || self.ollama_key.is_some()
             || self.ollama_base_url.is_some()
             || self.opencode_zen_key.is_some()
+            || self.opencode_go_key.is_some()
             || self.nvidia_key.is_some()
             || self.minimax_key.is_some()
             || self.minimax_cn_key.is_some()
@@ -307,7 +328,9 @@ impl LlmConfig {
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
+const KILO_PROVIDER_BASE_URL: &str = "https://api.kilo.ai/api/gateway";
 const OPENCODE_ZEN_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen";
+const OPENCODE_GO_PROVIDER_BASE_URL: &str = "https://opencode.ai/zen/go";
 const MINIMAX_PROVIDER_BASE_URL: &str = "https://api.minimax.io/anthropic";
 const MINIMAX_CN_PROVIDER_BASE_URL: &str = "https://api.minimaxi.com/anthropic";
 const MOONSHOT_PROVIDER_BASE_URL: &str = "https://api.moonshot.ai";
@@ -323,6 +346,173 @@ const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.com";
 const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
+
+/// Returns the default ProviderConfig for a provider ID and API key.
+/// Used by API tests and other code that needs provider configs without duplicating metadata.
+pub(crate) fn default_provider_config(
+    provider_id: &str,
+    api_key: impl Into<String>,
+) -> Option<ProviderConfig> {
+    let api_key = api_key.into();
+    Some(match provider_id {
+        "anthropic" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: ANTHROPIC_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "openrouter" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "kilo" => ProviderConfig {
+            api_type: ApiType::KiloGateway,
+            base_url: KILO_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: Some("Kilo Gateway".to_string()),
+            use_bearer_auth: false,
+        },
+        "zhipu" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: Some("Z.AI (GLM)".to_string()),
+            use_bearer_auth: false,
+        },
+        "groq" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: GROQ_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "together" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "fireworks" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "deepseek" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "xai" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: XAI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "mistral" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "gemini" => ProviderConfig {
+            api_type: ApiType::Gemini,
+            base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-zen" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "opencode-go" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "nvidia" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "minimax-cn" => ProviderConfig {
+            api_type: ApiType::Anthropic,
+            base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "moonshot" => ProviderConfig {
+            api_type: ApiType::OpenAiCompletions,
+            base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
+            api_key,
+            name: None,
+            use_bearer_auth: false,
+        },
+        "zai-coding-plan" => ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
+            api_key,
+            name: Some("Z.AI Coding Plan".to_string()),
+            use_bearer_auth: false,
+        },
+        _ => return None,
+    })
+}
+
+fn add_shorthand_provider(
+    providers: &mut std::collections::HashMap<String, ProviderConfig>,
+    provider_id: &str,
+    key: Option<String>,
+    api_type: ApiType,
+    base_url: &str,
+    name: Option<&str>,
+    use_bearer_auth: bool,
+) {
+    if let Some(api_key) = key {
+        providers
+            .entry(provider_id.to_string())
+            .or_insert_with(|| ProviderConfig {
+                api_type,
+                base_url: base_url.to_string(),
+                api_key,
+                name: name.map(str::to_string),
+                use_bearer_auth,
+            });
+    }
+}
 
 /// Defaults inherited by all agents. Individual agents can override any field.
 #[derive(Clone)]
@@ -345,6 +535,8 @@ pub struct DefaultsConfig {
     pub brave_search_key: Option<String>,
     /// Default timezone used when evaluating cron active hours.
     pub cron_timezone: Option<String>,
+    /// Default timezone for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
@@ -373,6 +565,8 @@ impl std::fmt::Debug for DefaultsConfig {
                 "brave_search_key",
                 &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("cron_timezone", &self.cron_timezone)
+            .field("user_timezone", &self.user_timezone)
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -764,6 +958,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
+    /// Optional timezone override for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Cron job definitions for this agent.
@@ -775,6 +971,9 @@ pub struct AgentConfig {
 pub struct CronDef {
     pub id: String,
     pub prompt: String,
+    /// Optional cron expression (wall-clock schedule) in standard 5-field format.
+    /// When set, this takes precedence over `interval_secs`.
+    pub cron_expr: Option<String>,
     pub interval_secs: u64,
     /// Delivery target in "adapter:target" format (e.g. "discord:123456789").
     pub delivery_target: String,
@@ -812,6 +1011,7 @@ pub struct ResolvedAgentConfig {
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: crate::sandbox::SandboxConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
@@ -838,6 +1038,7 @@ impl Default for DefaultsConfig {
             mcp: Vec::new(),
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
@@ -850,6 +1051,17 @@ impl AgentConfig {
     /// Resolve this agent config against instance defaults and base paths.
     pub fn resolve(&self, instance_dir: &Path, defaults: &DefaultsConfig) -> ResolvedAgentConfig {
         let agent_root = instance_dir.join("agents").join(&self.id);
+        let resolved_cron_timezone = resolve_cron_timezone(
+            &self.id,
+            self.cron_timezone.as_deref(),
+            defaults.cron_timezone.as_deref(),
+        );
+        let resolved_user_timezone = resolve_user_timezone(
+            &self.id,
+            self.user_timezone.as_deref(),
+            defaults.user_timezone.as_deref(),
+            resolved_cron_timezone.as_deref(),
+        );
 
         ResolvedAgentConfig {
             id: self.id.clone(),
@@ -891,11 +1103,8 @@ impl AgentConfig {
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
-            cron_timezone: resolve_cron_timezone(
-                &self.id,
-                self.cron_timezone.as_deref(),
-                defaults.cron_timezone.as_deref(),
-            ),
+            cron_timezone: resolved_cron_timezone,
+            user_timezone: resolved_user_timezone,
             sandbox: self.sandbox.clone().unwrap_or_default(),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
@@ -1092,6 +1301,7 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
 }
@@ -1308,6 +1518,53 @@ impl std::fmt::Debug for TelegramConfig {
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
     }
 }
@@ -1598,6 +1855,7 @@ struct TomlLlmConfigFields {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1609,6 +1867,7 @@ struct TomlLlmConfigFields {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1626,6 +1885,7 @@ struct TomlLlmConfig {
     anthropic_key: Option<String>,
     openai_key: Option<String>,
     openrouter_key: Option<String>,
+    kilo_key: Option<String>,
     zhipu_key: Option<String>,
     groq_key: Option<String>,
     together_key: Option<String>,
@@ -1637,6 +1897,7 @@ struct TomlLlmConfig {
     ollama_key: Option<String>,
     ollama_base_url: Option<String>,
     opencode_zen_key: Option<String>,
+    opencode_go_key: Option<String>,
     nvidia_key: Option<String>,
     minimax_key: Option<String>,
     minimax_cn_key: Option<String>,
@@ -1679,6 +1940,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             anthropic_key: fields.anthropic_key,
             openai_key: fields.openai_key,
             openrouter_key: fields.openrouter_key,
+            kilo_key: fields.kilo_key,
             zhipu_key: fields.zhipu_key,
             groq_key: fields.groq_key,
             together_key: fields.together_key,
@@ -1690,6 +1952,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
             ollama_key: fields.ollama_key,
             ollama_base_url: fields.ollama_base_url,
             opencode_zen_key: fields.opencode_zen_key,
+            opencode_go_key: fields.opencode_go_key,
             nvidia_key: fields.nvidia_key,
             minimax_key: fields.minimax_key,
             minimax_cn_key: fields.minimax_cn_key,
@@ -1719,6 +1982,7 @@ struct TomlDefaultsConfig {
     mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
 }
@@ -1864,6 +2128,7 @@ struct TomlAgentConfig {
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -1873,6 +2138,7 @@ struct TomlAgentConfig {
 struct TomlCronDef {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: Option<u64>,
     delivery_target: String,
     active_start_hour: Option<u8>,
@@ -1893,6 +2159,7 @@ struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
     telegram: Option<TomlTelegramConfig>,
+    email: Option<TomlEmailConfig>,
     webhook: Option<TomlWebhookConfig>,
     twitch: Option<TomlTwitchConfig>,
 }
@@ -1937,6 +2204,38 @@ struct TomlTelegramConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlEmailConfig {
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+}
+
+#[derive(Deserialize)]
 struct TomlWebhookConfig {
     #[serde(default)]
     enabled: bool,
@@ -1966,6 +2265,38 @@ fn default_webhook_port() -> u16 {
 }
 fn default_webhook_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn default_email_imap_port() -> u16 {
+    993
+}
+
+fn default_email_imap_use_tls() -> bool {
+    true
+}
+
+fn default_email_smtp_port() -> u16 {
+    587
+}
+
+fn default_email_smtp_use_starttls() -> bool {
+    true
+}
+
+fn default_email_poll_interval_secs() -> u64 {
+    30
+}
+
+fn default_email_folders() -> Vec<String> {
+    vec!["INBOX".to_string()]
+}
+
+fn default_email_max_body_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_email_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 #[derive(Deserialize)]
@@ -2005,27 +2336,67 @@ fn resolve_cron_timezone(
     agent_timezone: Option<&str>,
     default_timezone: Option<&str>,
 ) -> Option<String> {
-    let timezone = agent_timezone
-        .and_then(normalize_timezone)
-        .or_else(|| default_timezone.and_then(normalize_timezone))
-        .or_else(|| {
-            std::env::var(CRON_TIMEZONE_ENV_VAR)
-                .ok()
-                .and_then(|value| normalize_timezone(&value))
-        });
+    let env_timezone = std::env::var(CRON_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
 
-    let timezone = timezone?;
+    for timezone in [
+        agent_timezone.and_then(normalize_timezone),
+        default_timezone.and_then(normalize_timezone),
+        env_timezone,
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
 
-    if timezone.parse::<Tz>().is_err() {
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+
         tracing::warn!(
             agent_id,
             cron_timezone = %timezone,
             "invalid cron timezone configured, falling back to system local timezone"
         );
-        return None;
     }
 
-    Some(timezone)
+    None
+}
+
+fn resolve_user_timezone(
+    agent_id: &str,
+    agent_timezone: Option<&str>,
+    default_timezone: Option<&str>,
+    fallback_timezone: Option<&str>,
+) -> Option<String> {
+    let env_timezone = std::env::var(USER_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
+
+    for (source, timezone) in [
+        ("agent", agent_timezone.and_then(normalize_timezone)),
+        ("defaults", default_timezone.and_then(normalize_timezone)),
+        ("env", env_timezone),
+        (
+            "cron_or_system",
+            fallback_timezone.and_then(normalize_timezone),
+        ),
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+        tracing::warn!(
+            agent_id,
+            user_timezone = %timezone,
+            user_timezone_source = source,
+            "invalid user timezone configured, trying next fallback"
+        );
+    }
+
+    None
 }
 
 fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> {
@@ -2204,6 +2575,7 @@ impl Config {
         let has_legacy_keys = std::env::var("ANTHROPIC_API_KEY").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
+            || std::env::var("KILO_API_KEY").is_ok()
             || std::env::var("ZHIPU_API_KEY").is_ok()
             || std::env::var("GROQ_API_KEY").is_ok()
             || std::env::var("TOGETHER_API_KEY").is_ok()
@@ -2215,7 +2587,9 @@ impl Config {
             || std::env::var("OLLAMA_API_KEY").is_ok()
             || std::env::var("OLLAMA_BASE_URL").is_ok()
             || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
             || std::env::var("MINIMAX_API_KEY").is_ok()
+            || std::env::var("MINIMAX_CN_API_KEY").is_ok()
             || std::env::var("MOONSHOT_API_KEY").is_ok()
             || std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok();
 
@@ -2236,7 +2610,10 @@ impl Config {
             || std::env::var("ANTHROPIC_OAUTH_TOKEN").is_ok()
             || std::env::var("OPENAI_API_KEY").is_ok()
             || std::env::var("OPENROUTER_API_KEY").is_ok()
-            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok();
+            || std::env::var("KILO_API_KEY").is_ok()
+            || std::env::var("OPENCODE_ZEN_API_KEY").is_ok()
+            || std::env::var("OPENCODE_GO_API_KEY").is_ok()
+            || std::env::var("MINIMAX_CN_API_KEY").is_ok();
 
         !has_provider_env_vars && !has_legacy_bootstrap_vars
     }
@@ -2245,11 +2622,17 @@ impl Config {
     pub fn load() -> Result<Self> {
         let instance_dir = Self::default_instance_dir();
 
+        Self::load_for_instance(&instance_dir)
+    }
+
+    /// Load configuration for a specific instance directory.
+    pub fn load_for_instance(instance_dir: &Path) -> Result<Self> {
         let config_path = instance_dir.join("config.toml");
+
         if config_path.exists() {
             Self::load_from_path(&config_path)
         } else {
-            Self::load_from_env(&instance_dir)
+            Self::load_from_env(instance_dir)
         }
     }
 
@@ -2271,12 +2654,15 @@ impl Config {
 
     /// Load from environment variables only (no config file).
     pub fn load_from_env(instance_dir: &Path) -> Result<Self> {
+        let anthropic_from_auth_token = std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
         let mut llm = LlmConfig {
             anthropic_key: std::env::var("ANTHROPIC_API_KEY")
                 .ok()
                 .or_else(|| std::env::var("ANTHROPIC_AUTH_TOKEN").ok()),
             openai_key: std::env::var("OPENAI_API_KEY").ok(),
             openrouter_key: std::env::var("OPENROUTER_API_KEY").ok(),
+            kilo_key: std::env::var("KILO_API_KEY").ok(),
             zhipu_key: std::env::var("ZHIPU_API_KEY").ok(),
             groq_key: std::env::var("GROQ_API_KEY").ok(),
             together_key: std::env::var("TOGETHER_API_KEY").ok(),
@@ -2288,6 +2674,7 @@ impl Config {
             ollama_key: std::env::var("OLLAMA_API_KEY").ok(),
             ollama_base_url: std::env::var("OLLAMA_BASE_URL").ok(),
             opencode_zen_key: std::env::var("OPENCODE_ZEN_API_KEY").ok(),
+            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok(),
             nvidia_key: std::env::var("NVIDIA_API_KEY").ok(),
             minimax_key: std::env::var("MINIMAX_API_KEY").ok(),
             minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
@@ -2307,17 +2694,7 @@ impl Config {
                     base_url,
                     api_key: anthropic_key,
                     name: None,
-                });
-        }
-
-        if let Some(openai_key) = llm.openai_key.clone() {
-            llm.providers
-                .entry("openai".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
-                    api_key: openai_key,
-                    name: None,
+                    use_bearer_auth: anthropic_from_auth_token,
                 });
         }
 
@@ -2329,41 +2706,57 @@ impl Config {
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-zen",
+            llm.opencode_zen_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_ZEN_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
-        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
-            llm.providers
-                .entry("opencode-zen".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_zen_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-go",
+            llm.opencode_go_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_GO_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
             llm.providers
@@ -2373,6 +2766,7 @@ impl Config {
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2384,6 +2778,107 @@ impl Config {
                     base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_cn_key,
                     name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(openai_key) = llm.openai_key.clone() {
+            llm.providers
+                .entry("openai".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
+                    api_key: openai_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(openrouter_key) = llm.openrouter_key.clone() {
+            llm.providers
+                .entry("openrouter".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
+                    api_key: openrouter_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
+
+        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
+            llm.providers
+                .entry("opencode-zen".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_zen_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(opencode_go_key) = llm.opencode_go_key.clone() {
+            llm.providers
+                .entry("opencode-go".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::OpenAiCompletions,
+                    base_url: OPENCODE_GO_PROVIDER_BASE_URL.to_string(),
+                    api_key: opencode_go_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(minimax_key) = llm.minimax_key.clone() {
+            llm.providers
+                .entry("minimax".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_key,
+                    name: None,
+                    use_bearer_auth: false,
+                });
+        }
+
+        if let Some(minimax_cn_key) = llm.minimax_cn_key.clone() {
+            llm.providers
+                .entry("minimax-cn".to_string())
+                .or_insert_with(|| ProviderConfig {
+                    api_type: ApiType::Anthropic,
+                    base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
+                    api_key: minimax_cn_key,
+                    name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2395,6 +2890,7 @@ impl Config {
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2406,6 +2902,7 @@ impl Config {
                     base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
                     api_key: nvidia_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2417,6 +2914,7 @@ impl Config {
                     base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
                     api_key: fireworks_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2428,6 +2926,7 @@ impl Config {
                     base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
                     api_key: deepseek_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2439,6 +2938,7 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2450,6 +2950,7 @@ impl Config {
                     base_url: GROQ_PROVIDER_BASE_URL.to_string(),
                     api_key: groq_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2461,6 +2962,7 @@ impl Config {
                     base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
                     api_key: together_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2472,6 +2974,7 @@ impl Config {
                     base_url: XAI_PROVIDER_BASE_URL.to_string(),
                     api_key: xai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2483,6 +2986,7 @@ impl Config {
                     base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
                     api_key: mistral_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2497,6 +3001,7 @@ impl Config {
                         .unwrap_or_else(|| "http://localhost:11434".to_string()),
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2505,6 +3010,7 @@ impl Config {
 
         // Env-only routing: check for env overrides on channel/worker models.
         // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
+        // ANTHROPIC_MODEL sets all anthropic/* models to the specified value.
         let mut routing = RoutingConfig::default();
         if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
             routing.channel = model.clone();
@@ -2512,6 +3018,19 @@ impl Config {
             routing.worker = model.clone();
             routing.compactor = model.clone();
             routing.cortex = model;
+        }
+        if let Ok(anthropic_model) = std::env::var("ANTHROPIC_MODEL") {
+            // ANTHROPIC_MODEL sets all anthropic/* routes to the specified model
+            let channel = format!("anthropic/{}", anthropic_model);
+            let branch = format!("anthropic/{}", anthropic_model);
+            let worker = format!("anthropic/{}", anthropic_model);
+            let compactor = format!("anthropic/{}", anthropic_model);
+            let cortex = format!("anthropic/{}", anthropic_model);
+            routing.channel = channel;
+            routing.branch = branch;
+            routing.worker = worker;
+            routing.compactor = compactor;
+            routing.cortex = cortex;
         }
         if let Ok(channel_model) = std::env::var("SPACEBOT_CHANNEL_MODEL") {
             routing.channel = channel_model;
@@ -2545,6 +3064,7 @@ impl Config {
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             sandbox: None,
             cron: Vec::new(),
         }];
@@ -2619,6 +3139,13 @@ impl Config {
             }
         }
 
+        let toml_llm_anthropic_key_was_none = toml
+            .llm
+            .anthropic_key
+            .as_deref()
+            .and_then(resolve_env_value)
+            .is_none();
+
         let mut llm = LlmConfig {
             anthropic_key: toml
                 .llm
@@ -2639,6 +3166,9 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENROUTER_API_KEY").ok()),
+            kilo_key: std::env::var("KILO_API_KEY")
+                .ok()
+                .or_else(|| toml.llm.kilo_key.as_deref().and_then(resolve_env_value)),
             zhipu_key: toml
                 .llm
                 .zhipu_key
@@ -2705,6 +3235,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("OPENCODE_ZEN_API_KEY").ok()),
+            opencode_go_key: std::env::var("OPENCODE_GO_API_KEY").ok().or_else(|| {
+                toml.llm
+                    .opencode_go_key
+                    .as_deref()
+                    .and_then(resolve_env_value)
+            }),
             nvidia_key: toml
                 .llm
                 .nvidia_key
@@ -2750,11 +3286,20 @@ impl Config {
                             base_url: config.base_url,
                             api_key,
                             name: config.name,
+                            use_bearer_auth: false,
                         },
                     ))
                 })
                 .collect::<anyhow::Result<_>>()?,
         };
+
+        // Detect if the Anthropic key came from ANTHROPIC_AUTH_TOKEN (proxy auth).
+        // In from_toml, the key may come from toml config, ANTHROPIC_API_KEY, or
+        // ANTHROPIC_AUTH_TOKEN (in that priority order). We only set use_bearer_auth
+        // if AUTH_TOKEN was the actual source.
+        let anthropic_from_auth_token = toml_llm_anthropic_key_was_none
+            && std::env::var("ANTHROPIC_API_KEY").is_err()
+            && std::env::var("ANTHROPIC_AUTH_TOKEN").is_ok();
 
         if let Some(anthropic_key) = llm.anthropic_key.clone() {
             let base_url = std::env::var("ANTHROPIC_BASE_URL")
@@ -2766,6 +3311,7 @@ impl Config {
                     base_url,
                     api_key: anthropic_key,
                     name: None,
+                    use_bearer_auth: anthropic_from_auth_token,
                 });
         }
 
@@ -2777,6 +3323,7 @@ impl Config {
                     base_url: OPENAI_PROVIDER_BASE_URL.to_string(),
                     api_key: openai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2788,41 +3335,57 @@ impl Config {
                     base_url: OPENROUTER_PROVIDER_BASE_URL.to_string(),
                     api_key: openrouter_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
-        if let Some(zhipu_key) = llm.zhipu_key.clone() {
-            llm.providers
-                .entry("zhipu".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZHIPU_PROVIDER_BASE_URL.to_string(),
-                    api_key: zhipu_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "kilo",
+            llm.kilo_key.clone(),
+            ApiType::KiloGateway,
+            KILO_PROVIDER_BASE_URL,
+            Some("Kilo Gateway"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zhipu",
+            llm.zhipu_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZHIPU_PROVIDER_BASE_URL,
+            Some("Z.AI (GLM)"),
+            false,
+        );
+        add_shorthand_provider(
+            &mut llm.providers,
+            "zai-coding-plan",
+            llm.zai_coding_plan_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            ZAI_CODING_PLAN_BASE_URL,
+            Some("Z.AI Coding Plan"),
+            false,
+        );
 
-        if let Some(zai_coding_plan_key) = llm.zai_coding_plan_key.clone() {
-            llm.providers
-                .entry("zai-coding-plan".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: ZAI_CODING_PLAN_BASE_URL.to_string(),
-                    api_key: zai_coding_plan_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-zen",
+            llm.opencode_zen_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_ZEN_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
-        if let Some(opencode_zen_key) = llm.opencode_zen_key.clone() {
-            llm.providers
-                .entry("opencode-zen".to_string())
-                .or_insert_with(|| ProviderConfig {
-                    api_type: ApiType::OpenAiCompletions,
-                    base_url: OPENCODE_ZEN_PROVIDER_BASE_URL.to_string(),
-                    api_key: opencode_zen_key,
-                    name: None,
-                });
-        }
+        add_shorthand_provider(
+            &mut llm.providers,
+            "opencode-go",
+            llm.opencode_go_key.clone(),
+            ApiType::OpenAiCompletions,
+            OPENCODE_GO_PROVIDER_BASE_URL,
+            None,
+            false,
+        );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
             llm.providers
@@ -2832,6 +3395,7 @@ impl Config {
                     base_url: MINIMAX_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2843,6 +3407,7 @@ impl Config {
                     base_url: MINIMAX_CN_PROVIDER_BASE_URL.to_string(),
                     api_key: minimax_cn_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2854,6 +3419,7 @@ impl Config {
                     base_url: MOONSHOT_PROVIDER_BASE_URL.to_string(),
                     api_key: moonshot_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2865,6 +3431,7 @@ impl Config {
                     base_url: NVIDIA_PROVIDER_BASE_URL.to_string(),
                     api_key: nvidia_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2876,6 +3443,7 @@ impl Config {
                     base_url: FIREWORKS_PROVIDER_BASE_URL.to_string(),
                     api_key: fireworks_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2887,6 +3455,7 @@ impl Config {
                     base_url: DEEPSEEK_PROVIDER_BASE_URL.to_string(),
                     api_key: deepseek_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2898,6 +3467,7 @@ impl Config {
                     base_url: GEMINI_PROVIDER_BASE_URL.to_string(),
                     api_key: gemini_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2909,6 +3479,7 @@ impl Config {
                     base_url: GROQ_PROVIDER_BASE_URL.to_string(),
                     api_key: groq_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2920,6 +3491,7 @@ impl Config {
                     base_url: TOGETHER_PROVIDER_BASE_URL.to_string(),
                     api_key: together_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2931,6 +3503,7 @@ impl Config {
                     base_url: XAI_PROVIDER_BASE_URL.to_string(),
                     api_key: xai_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2942,6 +3515,7 @@ impl Config {
                     base_url: MISTRAL_PROVIDER_BASE_URL.to_string(),
                     api_key: mistral_key,
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -2956,6 +3530,7 @@ impl Config {
                         .unwrap_or_else(|| "http://localhost:11434".to_string()),
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
+                    use_bearer_auth: false,
                 });
         }
 
@@ -3124,6 +3699,11 @@ impl Config {
                 .cron_timezone
                 .as_deref()
                 .and_then(resolve_env_value),
+            user_timezone: toml
+                .defaults
+                .user_timezone
+                .as_deref()
+                .and_then(resolve_env_value),
             history_backfill_count: base_defaults.history_backfill_count,
             cron: Vec::new(),
             opencode: toml
@@ -3180,6 +3760,7 @@ impl Config {
                     .map(|h| CronDef {
                         id: h.id,
                         prompt: h.prompt,
+                        cron_expr: h.cron_expr,
                         interval_secs: h.interval_secs.unwrap_or(3600),
                         delivery_target: h.delivery_target,
                         active_hours: match (h.active_start_hour, h.active_end_hour) {
@@ -3307,6 +3888,7 @@ impl Config {
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
+                    user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
                     cron,
                 })
@@ -3336,6 +3918,7 @@ impl Config {
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
+                user_timezone: None,
                 sandbox: None,
                 cron: Vec::new(),
             });
@@ -3398,6 +3981,62 @@ impl Config {
                     enabled: t.enabled,
                     token,
                     dm_allowed_users: t.dm_allowed_users,
+                })
+            }),
+            email: toml.messaging.email.and_then(|email| {
+                let imap_host = std::env::var("EMAIL_IMAP_HOST")
+                    .ok()
+                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value))?;
+                let imap_username = std::env::var("EMAIL_IMAP_USERNAME")
+                    .ok()
+                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value))?;
+                let imap_password = std::env::var("EMAIL_IMAP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value))?;
+
+                let smtp_host = std::env::var("EMAIL_SMTP_HOST")
+                    .ok()
+                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value))?;
+                let smtp_username = std::env::var("EMAIL_SMTP_USERNAME")
+                    .ok()
+                    .or_else(|| email.smtp_username.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_username.clone());
+                let smtp_password = std::env::var("EMAIL_SMTP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.smtp_password.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_password.clone());
+
+                let from_address = std::env::var("EMAIL_FROM_ADDRESS")
+                    .ok()
+                    .or_else(|| email.from_address.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| smtp_username.clone());
+                let from_name = std::env::var("EMAIL_FROM_NAME")
+                    .ok()
+                    .or_else(|| email.from_name.as_deref().and_then(resolve_env_value));
+
+                Some(EmailConfig {
+                    enabled: email.enabled,
+                    imap_host,
+                    imap_port: email.imap_port,
+                    imap_username,
+                    imap_password,
+                    imap_use_tls: email.imap_use_tls,
+                    smtp_host,
+                    smtp_port: email.smtp_port,
+                    smtp_username,
+                    smtp_password,
+                    smtp_use_starttls: email.smtp_use_starttls,
+                    from_address,
+                    from_name,
+                    poll_interval_secs: email.poll_interval_secs,
+                    folders: if email.folders.is_empty() {
+                        vec!["INBOX".to_string()]
+                    } else {
+                        email.folders
+                    },
+                    allowed_senders: email.allowed_senders,
+                    max_body_bytes: email.max_body_bytes,
+                    max_attachment_bytes: email.max_attachment_bytes,
                 })
             }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
@@ -3610,6 +4249,7 @@ pub struct RuntimeConfig {
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cron_timezone: ArcSwap<Option<String>>,
+    pub user_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
     pub warmup: ArcSwap<WarmupConfig>,
     /// Current warmup lifecycle status for API and observability.
@@ -3670,6 +4310,7 @@ impl RuntimeConfig {
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
+            user_timezone: ArcSwap::from_pointee(agent_config.user_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             warmup: ArcSwap::from_pointee(agent_config.warmup),
             warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
@@ -3757,6 +4398,7 @@ impl RuntimeConfig {
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
+        self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
         // sandbox config is not hot-reloaded here because the Sandbox instance
@@ -4087,6 +4729,21 @@ pub fn spawn_file_watcher(
                                 }
                             }
 
+                        // Email: start if enabled and not already running
+                        if let Some(email_config) = &config.messaging.email
+                            && email_config.enabled && !manager.has_adapter("email").await {
+                                match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                                    Ok(adapter) => {
+                                        if let Err(error) = manager.register_and_start(adapter).await {
+                                            tracing::error!(%error, "failed to hot-start email adapter from config change");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "failed to build email adapter from config change");
+                                    }
+                                }
+                            }
+
                         // Twitch: start if enabled and not already running
                         if let Some(twitch_config) = &config.messaging.twitch
                             && twitch_config.enabled && !manager.has_adapter("twitch").await {
@@ -4189,11 +4846,14 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         "DeepSeek",
         "xAI (Grok)",
         "Mistral AI",
+        "Gemini",
         "Ollama",
         "OpenCode Zen",
+        "OpenCode Go",
         "MiniMax",
         "Moonshot AI (Kimi)",
         "Z.AI Coding Plan",
+        "Kilo Gateway",
     ];
     let provider_idx = Select::new()
         .with_prompt("Which LLM provider do you want to use?")
@@ -4250,13 +4910,15 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         10 => ("Google Gemini API key", "gemini_key", "gemini"),
         11 => ("Ollama base URL (optional)", "ollama_base_url", "ollama"),
         12 => ("OpenCode Zen API key", "opencode_zen_key", "opencode-zen"),
-        13 => ("MiniMax API key", "minimax_key", "minimax"),
-        14 => ("Moonshot API key", "moonshot_key", "moonshot"),
-        15 => (
+        13 => ("OpenCode Go API key", "opencode_go_key", "opencode-go"),
+        14 => ("MiniMax API key", "minimax_key", "minimax"),
+        15 => ("Moonshot API key", "moonshot_key", "moonshot"),
+        16 => (
             "Z.AI Coding Plan API key",
             "zai_coding_plan_key",
             "zai-coding-plan",
         ),
+        17 => ("Kilo Gateway API key", "kilo_key", "kilo"),
         _ => unreachable!(),
     };
     let is_secret = provider_id != "ollama";
@@ -4469,14 +5131,16 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 22] = [
+            const KEYS: [&str; 26] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
+                "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
+                "KILO_API_KEY",
                 "ZHIPU_API_KEY",
                 "GROQ_API_KEY",
                 "TOGETHER_API_KEY",
@@ -4489,7 +5153,9 @@ mod tests {
                 "OLLAMA_API_KEY",
                 "OLLAMA_BASE_URL",
                 "OPENCODE_ZEN_API_KEY",
+                "OPENCODE_GO_API_KEY",
                 "MINIMAX_API_KEY",
+                "MINIMAX_CN_API_KEY",
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
             ];
@@ -4548,22 +5214,40 @@ api_key = "test-key"
         assert_eq!(result1.unwrap().api_type, ApiType::OpenAiCompletions);
 
         let toml2 = r#"
-api_type = "openai_responses"
-base_url = "https://api.openai.com"
+api_type = "openai_chat_completions"
+base_url = "https://api.example.com"
 api_key = "test-key"
 "#;
         let result2: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml2);
         assert!(result2.is_ok(), "Error: {:?}", result2.err());
-        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiResponses);
+        assert_eq!(result2.unwrap().api_type, ApiType::OpenAiChatCompletions);
 
         let toml3 = r#"
-api_type = "anthropic"
-base_url = "https://api.anthropic.com"
+api_type = "kilo_gateway"
+base_url = "https://api.kilo.ai/api/gateway"
 api_key = "test-key"
 "#;
         let result3: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml3);
         assert!(result3.is_ok(), "Error: {:?}", result3.err());
-        assert_eq!(result3.unwrap().api_type, ApiType::Anthropic);
+        assert_eq!(result3.unwrap().api_type, ApiType::KiloGateway);
+
+        let toml4 = r#"
+api_type = "openai_responses"
+base_url = "https://api.openai.com"
+api_key = "test-key"
+"#;
+        let result4: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml4);
+        assert!(result4.is_ok(), "Error: {:?}", result4.err());
+        assert_eq!(result4.unwrap().api_type, ApiType::OpenAiResponses);
+
+        let toml5 = r#"
+api_type = "anthropic"
+base_url = "https://api.anthropic.com"
+api_key = "test-key"
+"#;
+        let result5: StdResult<TomlProviderConfig, toml::de::Error> = toml::from_str(toml5);
+        assert!(result5.is_ok(), "Error: {:?}", result5.err());
+        assert_eq!(result5.unwrap().api_type, ApiType::Anthropic);
     }
 
     #[test]
@@ -4574,6 +5258,8 @@ api_key = "test-key"
         let error = result.unwrap_err();
         assert!(error.to_string().contains("invalid value"));
         assert!(error.to_string().contains("openai_completions"));
+        assert!(error.to_string().contains("openai_chat_completions"));
+        assert!(error.to_string().contains("kilo_gateway"));
         assert!(error.to_string().contains("openai_responses"));
         assert!(error.to_string().contains("anthropic"));
     }
@@ -5032,6 +5718,159 @@ id = "main"
     }
 
     #[test]
+    fn test_cron_timezone_invalid_default_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_resolution_precedence() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+user_timezone = "Europe/Berlin"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Europe/Berlin"));
+
+        let toml_without_agent_override = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_agent_override).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("America/New_York"));
+
+        let toml_without_default = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_default).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.cron_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_config_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
     fn ollama_base_url_registers_provider() {
         let toml = r#"
 [llm]
@@ -5293,6 +6132,7 @@ startup_delay_secs = 2
             ("anthropic_key", "test-key", "anthropic", "anthropic.com"),
             ("openai_key", "test-key", "openai", "openai.com"),
             ("openrouter_key", "test-key", "openrouter", "openrouter.ai"),
+            ("kilo_key", "test-key", "kilo", "api.kilo.ai"),
             ("deepseek_key", "test-key", "deepseek", "deepseek.com"),
             ("minimax_key", "test-key", "minimax", "minimax.io"),
             ("minimax_cn_key", "test-key", "minimax-cn", "minimaxi.com"),
@@ -5305,6 +6145,18 @@ startup_delay_secs = 2
             ("together_key", "test-key", "together", "together"),
             ("xai_key", "test-key", "xai", "x.ai"),
             ("mistral_key", "test-key", "mistral", "mistral.ai"),
+            (
+                "opencode_zen_key",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "opencode_go_key",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
             (
                 "ollama_base_url",
                 "http://localhost:11434",
@@ -5356,6 +6208,7 @@ startup_delay_secs = 2
                 "openrouter",
                 "openrouter.ai",
             ),
+            ("KILO_API_KEY", "test-key", "kilo", "api.kilo.ai"),
             ("DEEPSEEK_API_KEY", "test-key", "deepseek", "deepseek.com"),
             ("MINIMAX_API_KEY", "test-key", "minimax", "minimax.io"),
             ("NVIDIA_API_KEY", "test-key", "nvidia", "nvidia.com"),
@@ -5366,6 +6219,18 @@ startup_delay_secs = 2
             ("TOGETHER_API_KEY", "test-key", "together", "together"),
             ("XAI_API_KEY", "test-key", "xai", "x.ai"),
             ("MISTRAL_API_KEY", "test-key", "mistral", "mistral.ai"),
+            (
+                "OPENCODE_ZEN_API_KEY",
+                "test-key",
+                "opencode-zen",
+                "opencode.ai/zen",
+            ),
+            (
+                "OPENCODE_GO_API_KEY",
+                "test-key",
+                "opencode-go",
+                "opencode.ai/zen/go",
+            ),
             (
                 "OLLAMA_BASE_URL",
                 "http://localhost:11434",
