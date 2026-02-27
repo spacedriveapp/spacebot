@@ -29,6 +29,7 @@ pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
 pub mod cron;
+pub mod email_search;
 pub mod exec;
 pub mod file;
 pub mod mcp;
@@ -62,6 +63,7 @@ pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
+pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, EmailSearchTool};
 pub use exec::{EnvVar, ExecArgs, ExecError, ExecOutput, ExecResult, ExecTool};
 pub use file::{FileArgs, FileEntry, FileEntryOutput, FileError, FileOutput, FileTool, FileType};
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
@@ -264,10 +266,18 @@ pub async fn add_channel_tools(
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
     if let Some(messaging_manager) = &state.deps.messaging_manager {
+        let send_message_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(SendMessageTool::new(
                 messaging_manager.clone(),
                 state.channel_store.clone(),
+                state.conversation_logger.clone(),
+                send_message_display_name,
             ))
             .await?;
     }
@@ -333,11 +343,13 @@ pub async fn remove_channel_tools(
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
 /// visible to the channel. Both `memory_save` and `memory_recall` are
 /// registered at creation.
+#[allow(clippy::too_many_arguments)]
 pub fn create_branch_tool_server(
     state: Option<ChannelState>,
     agent_id: AgentId,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    runtime_config: Arc<RuntimeConfig>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
@@ -347,6 +359,7 @@ pub fn create_branch_tool_server(
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(EmailSearchTool::new(runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
             task_store.clone(),

@@ -1,6 +1,7 @@
 //! Twitch chat messaging adapter using twitch-irc.
 
 use crate::config::TwitchPermissions;
+use crate::messaging::apply_runtime_adapter_to_conversation_id;
 use crate::messaging::traits::{InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse};
 
@@ -40,38 +41,30 @@ impl TokenStorage for TwitchTokenStorage {
 
     async fn load_token(&mut self) -> Result<UserAccessToken, Self::LoadError> {
         let mut created_at = Utc::now();
-        let mut expires_at = None;
 
-        if let Some(path) = &self.token_path {
-            if let Ok(data) = std::fs::read_to_string(path)
-                && let Ok(file) = serde_json::from_str::<TwitchTokenFile>(&data)
-            {
-                self.access_token = file.access_token;
-                self.refresh_token = file.refresh_token;
-                if let Some(stored_created) = file.created_at {
-                    created_at = stored_created;
-                }
-                expires_at = file.expires_at;
-            }
-            if !self.refresh_token.is_empty() && expires_at.is_none() {
-                expires_at = Some(created_at + chrono::Duration::hours(1));
-            }
-            let file = TwitchTokenFile {
-                access_token: self.access_token.clone(),
-                refresh_token: self.refresh_token.clone(),
-                created_at: Some(created_at),
-                expires_at,
-            };
-            if let Ok(data) = serde_json::to_string_pretty(&file) {
-                let _ = std::fs::write(path, data);
+        if let Some(path) = &self.token_path
+            && let Ok(data) = std::fs::read_to_string(path)
+            && let Ok(file) = serde_json::from_str::<TwitchTokenFile>(&data)
+        {
+            self.access_token = file.access_token;
+            self.refresh_token = file.refresh_token;
+            if let Some(stored_created) = file.created_at {
+                created_at = stored_created;
             }
         }
 
+        // Never return expires_at from load_token. The twitch-irc library's
+        // RefreshingLoginCredentials will attempt an OAuth token refresh
+        // whenever it sees an expired/near-expired token, and if the refresh
+        // credentials are invalid it spin-loops with no backoff. By always
+        // returning expires_at = None here, we treat the access token as
+        // non-expiring on load. Real expiry data is only set via
+        // update_token() after a *successful* library-driven refresh.
         Ok(UserAccessToken {
             access_token: self.access_token.clone(),
             refresh_token: self.refresh_token.clone(),
             created_at,
-            expires_at,
+            expires_at: None,
         })
     }
 
@@ -100,6 +93,7 @@ type IrcClient = TwitchIRCClient<SecureTCPTransport, TwitchCredentials>;
 
 /// Twitch chat adapter state.
 pub struct TwitchAdapter {
+    runtime_key: String,
     username: String,
     oauth_token: String,
     client_id: Option<String>,
@@ -119,6 +113,7 @@ const MAX_MESSAGE_LENGTH: usize = 500;
 impl TwitchAdapter {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
+        runtime_key: impl Into<String>,
         username: impl Into<String>,
         oauth_token: impl Into<String>,
         client_id: Option<String>,
@@ -130,6 +125,7 @@ impl TwitchAdapter {
         permissions: Arc<ArcSwap<TwitchPermissions>>,
     ) -> Self {
         Self {
+            runtime_key: runtime_key.into(),
             username: username.into(),
             oauth_token: oauth_token.into(),
             client_id,
@@ -147,7 +143,7 @@ impl TwitchAdapter {
 
 impl Messaging for TwitchAdapter {
     fn name(&self) -> &str {
-        "twitch"
+        &self.runtime_key
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
@@ -163,15 +159,26 @@ impl Messaging for TwitchAdapter {
             .unwrap_or(&self.oauth_token)
             .to_string();
 
+        let refresh_token = self.refresh_token.clone().unwrap_or_default();
+        let client_id = self.client_id.clone().unwrap_or_default();
+        let client_secret = self.client_secret.clone().unwrap_or_default();
+
+        if refresh_token.is_empty() || client_id.is_empty() || client_secret.is_empty() {
+            tracing::info!(
+                adapter = %self.runtime_key,
+                "twitch token refresh disabled (missing client_id, client_secret, or refresh_token)"
+            );
+        }
+
         let storage = TwitchTokenStorage {
             access_token: token,
-            refresh_token: self.refresh_token.clone().unwrap_or_default(),
+            refresh_token,
             token_path: self.token_path.clone(),
         };
         let credentials = TwitchCredentials::init_with_username(
             Some(self.username.clone()),
-            self.client_id.clone().unwrap_or_default(),
-            self.client_secret.clone().unwrap_or_default(),
+            client_id,
+            client_secret,
             storage,
         );
         let config = ClientConfig::new_simple(credentials);
@@ -198,6 +205,7 @@ impl Messaging for TwitchAdapter {
         let permissions = self.permissions.clone();
         let bot_username = self.username.to_lowercase();
         let trigger_prefix = self.trigger_prefix.clone();
+        let runtime_key = self.runtime_key.clone();
 
         tokio::spawn(async move {
             loop {
@@ -249,7 +257,11 @@ impl Messaging for TwitchAdapter {
                         }
 
                         let channel_login = privmsg.channel_login.clone();
-                        let conversation_id = format!("twitch:{channel_login}");
+                        let base_conversation_id = format!("twitch:{channel_login}");
+                        let conversation_id = apply_runtime_adapter_to_conversation_id(
+                            &runtime_key,
+                            base_conversation_id,
+                        );
 
                         let mut metadata = HashMap::new();
                         metadata.insert(
@@ -282,6 +294,7 @@ impl Messaging for TwitchAdapter {
                         let inbound = InboundMessage {
                             id: privmsg.message_id.clone(),
                             source: "twitch".into(),
+                            adapter: Some(runtime_key.clone()),
                             conversation_id,
                             sender_id: privmsg.sender.id.clone(),
                             agent_id: None,

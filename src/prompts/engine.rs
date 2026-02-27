@@ -100,10 +100,6 @@ impl PromptEngine {
             "fragments/org_context",
             crate::prompts::text::get("fragments/org_context"),
         )?;
-        env.add_template(
-            "fragments/link_context",
-            crate::prompts::text::get("fragments/link_context"),
-        )?;
 
         // System message fragments
         env.add_template(
@@ -145,6 +141,10 @@ impl PromptEngine {
         env.add_template(
             "fragments/system/tool_syntax_correction",
             crate::prompts::text::get("fragments/system/tool_syntax_correction"),
+        )?;
+        env.add_template(
+            "fragments/system/worker_time_context",
+            crate::prompts::text::get("fragments/system/worker_time_context"),
         )?;
         env.add_template(
             "fragments/coalesce_hint",
@@ -304,6 +304,21 @@ impl PromptEngine {
         self.render_static("fragments/system/tool_syntax_correction")
     }
 
+    /// Render worker task time-context preamble.
+    pub fn render_system_worker_time_context(
+        &self,
+        current_local_datetime: &str,
+        current_utc_datetime: &str,
+    ) -> Result<String> {
+        self.render(
+            "fragments/system/worker_time_context",
+            context! {
+                current_local_datetime => current_local_datetime,
+                current_utc_datetime => current_utc_datetime,
+            },
+        )
+    }
+
     /// Convenience method for rendering truncation marker.
     pub fn render_system_truncation(&self, remove_count: usize) -> Result<String> {
         self.render(
@@ -445,10 +460,16 @@ impl PromptEngine {
             _ => return None,
         };
 
-        self.render_static(template_name)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
+        match self.render_static(template_name) {
+            Ok(value) => {
+                let value = value.trim().to_string();
+                if value.is_empty() { None } else { Some(value) }
+            }
+            Err(error) => {
+                tracing::error!(template_name, %error, "failed to render adapter prompt template");
+                None
+            }
+        }
     }
 
     /// Render the cortex chat system prompt with optional channel context.

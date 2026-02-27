@@ -10,6 +10,7 @@ use std::sync::Arc;
 pub(super) struct BindingResponse {
     agent_id: String,
     channel: String,
+    adapter: Option<String>,
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
@@ -33,6 +34,8 @@ pub(super) struct BindingsQuery {
 pub(super) struct CreateBindingRequest {
     agent_id: String,
     channel: String,
+    #[serde(default)]
+    adapter: Option<String>,
     #[serde(default)]
     guild_id: Option<String>,
     #[serde(default)]
@@ -105,6 +108,8 @@ pub(super) struct DeleteBindingRequest {
     agent_id: String,
     channel: String,
     #[serde(default)]
+    adapter: Option<String>,
+    #[serde(default)]
     guild_id: Option<String>,
     #[serde(default)]
     workspace_id: Option<String>,
@@ -123,6 +128,8 @@ pub(super) struct UpdateBindingRequest {
     original_agent_id: String,
     original_channel: String,
     #[serde(default)]
+    original_adapter: Option<String>,
+    #[serde(default)]
     original_guild_id: Option<String>,
     #[serde(default)]
     original_workspace_id: Option<String>,
@@ -131,6 +138,8 @@ pub(super) struct UpdateBindingRequest {
 
     agent_id: String,
     channel: String,
+    #[serde(default)]
+    adapter: Option<String>,
     #[serde(default)]
     guild_id: Option<String>,
     #[serde(default)]
@@ -172,6 +181,7 @@ pub(super) async fn list_bindings(
         .map(|b| BindingResponse {
             agent_id: b.agent_id,
             channel: b.channel,
+            adapter: b.adapter,
             guild_id: b.guild_id,
             workspace_id: b.workspace_id,
             chat_id: b.chat_id,
@@ -406,6 +416,14 @@ pub(super) async fn create_binding(
     let mut binding_table = toml_edit::Table::new();
     binding_table["agent_id"] = toml_edit::value(&request.agent_id);
     binding_table["channel"] = toml_edit::value(&request.channel);
+    if let Some(adapter) = request
+        .adapter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding_table["adapter"] = toml_edit::value(adapter);
+    }
     if let Some(guild_id) = &request.guild_id {
         binding_table["guild_id"] = toml_edit::value(guild_id.as_str());
     }
@@ -500,7 +518,11 @@ pub(super) async fn create_binding(
                         }
                     }
                 };
-                let adapter = crate::messaging::discord::DiscordAdapter::new(&token, discord_perms);
+                let adapter = crate::messaging::discord::DiscordAdapter::new(
+                    "discord",
+                    &token,
+                    discord_perms,
+                );
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start discord adapter");
                 }
@@ -537,6 +559,7 @@ pub(super) async fn create_binding(
                     .map(|s| s.commands.clone())
                     .unwrap_or_default();
                 match crate::messaging::slack::SlackAdapter::new(
+                    "slack",
                     &bot_token,
                     &app_token,
                     slack_perms,
@@ -565,8 +588,11 @@ pub(super) async fn create_binding(
                     );
                     std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
                 };
-                let adapter =
-                    crate::messaging::telegram::TelegramAdapter::new(&token, telegram_perms);
+                let adapter = crate::messaging::telegram::TelegramAdapter::new(
+                    "telegram",
+                    &token,
+                    telegram_perms,
+                );
                 if let Err(error) = manager.register_and_start(adapter).await {
                     tracing::error!(%error, "failed to hot-start telegram adapter");
                 }
@@ -605,6 +631,7 @@ pub(super) async fn create_binding(
                 let instance_dir = state.instance_dir.load();
                 let token_path = instance_dir.join("twitch_token.json");
                 let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                    "twitch",
                     &username,
                     &oauth_token,
                     twitch_config.client_id.clone(),
@@ -665,6 +692,13 @@ pub(super) async fn update_binding(
             .get("channel")
             .and_then(|v| v.as_str())
             .is_some_and(|v| v == request.original_channel);
+        let matches_adapter = match &request.original_adapter {
+            Some(adapter) => table
+                .get("adapter")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v == adapter),
+            None => table.get("adapter").is_none(),
+        };
         let matches_guild = match &request.original_guild_id {
             Some(gid) => table
                 .get("guild_id")
@@ -686,7 +720,13 @@ pub(super) async fn update_binding(
                 .is_some_and(|v| v == cid),
             None => table.get("chat_id").is_none(),
         };
-        if matches_agent && matches_channel && matches_guild && matches_workspace && matches_chat {
+        if matches_agent
+            && matches_channel
+            && matches_adapter
+            && matches_guild
+            && matches_workspace
+            && matches_chat
+        {
             match_idx = Some(i);
             break;
         }
@@ -706,9 +746,19 @@ pub(super) async fn update_binding(
     binding["agent_id"] = toml_edit::value(&request.agent_id);
     binding["channel"] = toml_edit::value(&request.channel);
 
+    binding.remove("adapter");
     binding.remove("guild_id");
     binding.remove("workspace_id");
     binding.remove("chat_id");
+
+    if let Some(adapter) = request
+        .adapter
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding["adapter"] = toml_edit::value(adapter);
+    }
 
     if let Some(ref guild_id) = request.guild_id
         && !guild_id.is_empty()
@@ -836,6 +886,13 @@ pub(super) async fn delete_binding(
             .get("channel")
             .and_then(|v: &toml_edit::Item| v.as_str())
             .is_some_and(|v| v == request.channel);
+        let matches_adapter = match &request.adapter {
+            Some(adapter) => table
+                .get("adapter")
+                .and_then(|v: &toml_edit::Item| v.as_str())
+                .is_some_and(|v| v == adapter),
+            None => table.get("adapter").is_none(),
+        };
         let matches_guild = match &request.guild_id {
             Some(gid) => table
                 .get("guild_id")
@@ -857,7 +914,13 @@ pub(super) async fn delete_binding(
                 .is_some_and(|v| v == cid),
             None => table.get("chat_id").is_none(),
         };
-        if matches_agent && matches_channel && matches_guild && matches_workspace && matches_chat {
+        if matches_agent
+            && matches_channel
+            && matches_adapter
+            && matches_guild
+            && matches_workspace
+            && matches_chat
+        {
             match_idx = Some(i);
             break;
         }

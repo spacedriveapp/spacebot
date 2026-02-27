@@ -99,6 +99,18 @@ When the Email adapter is configured, you can intentionally send email from a no
 
 This keeps email channels inbound-only while still allowing deliberate outbound send workflows.
 
+## Search mailbox content (`email_search`)
+
+Branches can use `email_search` to query IMAP directly when you ask for exact read-back details.
+
+Examples:
+
+- "Find emails from Alice about renewal in the last 14 days"
+- "Search unread emails mentioning invoice"
+- "Look for subject containing Q1 roadmap"
+
+Use specific filters (`from`, `subject`, `query`, `since_days`) to avoid broad mailbox scans.
+
 ## Thread behavior
 
 Spacebot keeps one conversation per email thread. It uses `References`, `In-Reply-To`, and `Message-ID` headers to map replies back to the correct conversation.
@@ -134,7 +146,8 @@ Use a longer interval if your provider rate limits IMAP polling.
 
 1. Send an email to the configured mailbox from an allowed sender.
 2. Confirm a new channel appears in Spacebot with a subject-based name.
-3. Reply in the same thread and confirm Spacebot replies in-thread.
+3. Reply in the same thread and confirm the message is ingested into the same conversation thread (no automated reply by default).
+4. If direct email replies are explicitly enabled in your setup, verify outbound replies preserve threading headers.
 
 ## Troubleshooting
 

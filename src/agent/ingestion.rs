@@ -476,6 +476,7 @@ async fn process_chunk(
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        deps.runtime_config.clone(),
         conversation_logger,
         channel_store,
         crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),

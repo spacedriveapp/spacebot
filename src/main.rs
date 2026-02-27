@@ -1207,6 +1207,30 @@ async fn run(
 
 /// Initialize agents, messaging adapters, cron, cortex, and ingestion.
 /// Extracted so it can be called either at startup or after providers are configured.
+async fn wait_for_startup_warmup_tasks(
+    startup_warmup: &mut tokio::task::JoinSet<()>,
+    timeout: std::time::Duration,
+) -> bool {
+    let wait_all = async {
+        while let Some(result) = startup_warmup.join_next().await {
+            if let Err(error) = result {
+                if error.is_cancelled() {
+                    tracing::warn!(%error, "startup warmup task cancelled");
+                } else {
+                    tracing::error!(%error, "startup warmup task panicked");
+                }
+            }
+        }
+    };
+
+    if tokio::time::timeout(timeout, wait_all).await.is_err() {
+        startup_warmup.abort_all();
+        true
+    } else {
+        false
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn initialize_agents(
     config: &spacebot::config::Config,
@@ -1451,6 +1475,50 @@ async fn initialize_agents(
         api_state.set_instance_dir(config.instance_dir.clone());
     }
 
+    // Run a startup warmup pass for every agent before adapters begin receiving
+    // inbound traffic. This reduces first-message cold-start latency.
+    {
+        const STARTUP_WARMUP_WAIT_SECS: u64 = 30;
+        let mut startup_warmup = tokio::task::JoinSet::new();
+
+        for (agent_id, agent) in agents.iter() {
+            let deps = agent.deps.clone();
+            let sqlite_pool = agent.db.sqlite.clone();
+            let agent_id = agent_id.clone();
+            startup_warmup.spawn(async move {
+                let logger = spacebot::agent::cortex::CortexLogger::new(sqlite_pool);
+                spacebot::agent::cortex::run_warmup_once(
+                    &deps,
+                    &logger,
+                    "startup_pre_adapter",
+                    false,
+                )
+                .await;
+                let status = deps.runtime_config.warmup_status.load().as_ref().clone();
+                tracing::info!(
+                    agent_id = %agent_id,
+                    state = ?status.state,
+                    embedding_ready = status.embedding_ready,
+                    bulletin_age_secs = ?status.bulletin_age_secs,
+                    last_error = ?status.last_error,
+                    "startup warmup pass finished"
+                );
+            });
+        }
+
+        if wait_for_startup_warmup_tasks(
+            &mut startup_warmup,
+            std::time::Duration::from_secs(STARTUP_WARMUP_WAIT_SECS),
+        )
+        .await
+        {
+            tracing::warn!(
+                timeout_secs = STARTUP_WARMUP_WAIT_SECS,
+                "startup warmup wait timed out; cancelled unfinished startup warmup tasks and continuing startup"
+            );
+        }
+    }
+
     // Initialize messaging adapters
     let new_messaging_manager = spacebot::messaging::MessagingManager::new();
 
@@ -1467,13 +1535,43 @@ async fn initialize_agents(
     if let Some(discord_config) = &config.messaging.discord
         && discord_config.enabled
     {
-        let adapter = spacebot::messaging::discord::DiscordAdapter::new(
-            &discord_config.token,
-            discord_permissions.clone().ok_or_else(|| {
-                anyhow::anyhow!("discord permissions not initialized when discord is enabled")
-            })?,
-        );
-        new_messaging_manager.register(adapter).await;
+        if !discord_config.token.is_empty() {
+            let adapter = spacebot::messaging::discord::DiscordAdapter::new(
+                "discord",
+                &discord_config.token,
+                discord_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("discord permissions not initialized when discord is enabled")
+                })?,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+
+        for instance in discord_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled discord instance with empty token");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "discord",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::DiscordPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            let adapter = spacebot::messaging::discord::DiscordAdapter::new(
+                runtime_key,
+                &instance.token,
+                perms,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
     }
 
     // Shared Slack permissions (hot-reloadable via file watcher)
@@ -1488,19 +1586,57 @@ async fn initialize_agents(
     if let Some(slack_config) = &config.messaging.slack
         && slack_config.enabled
     {
-        match spacebot::messaging::slack::SlackAdapter::new(
-            &slack_config.bot_token,
-            &slack_config.app_token,
-            slack_permissions.clone().ok_or_else(|| {
-                anyhow::anyhow!("slack permissions not initialized when slack is enabled")
-            })?,
-            slack_config.commands.clone(),
-        ) {
-            Ok(adapter) => {
-                new_messaging_manager.register(adapter).await;
+        if !slack_config.bot_token.is_empty() && !slack_config.app_token.is_empty() {
+            match spacebot::messaging::slack::SlackAdapter::new(
+                "slack",
+                &slack_config.bot_token,
+                &slack_config.app_token,
+                slack_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("slack permissions not initialized when slack is enabled")
+                })?,
+                slack_config.commands.clone(),
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build slack adapter");
+                }
             }
-            Err(error) => {
-                tracing::error!(%error, "failed to build slack adapter");
+        }
+
+        for instance in slack_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.bot_token.is_empty() || instance.app_token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled slack instance with missing tokens");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "slack",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::SlackPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            match spacebot::messaging::slack::SlackAdapter::new(
+                runtime_key,
+                &instance.bot_token,
+                &instance.app_token,
+                perms,
+                instance.commands.clone(),
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, adapter = %instance.name, "failed to build named slack adapter");
+                }
             }
         }
     }
@@ -1515,24 +1651,82 @@ async fn initialize_agents(
     if let Some(telegram_config) = &config.messaging.telegram
         && telegram_config.enabled
     {
-        let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
-            &telegram_config.token,
-            telegram_permissions.clone().ok_or_else(|| {
-                anyhow::anyhow!("telegram permissions not initialized when telegram is enabled")
-            })?,
-        );
-        new_messaging_manager.register(adapter).await;
+        if !telegram_config.token.is_empty() {
+            let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
+                "telegram",
+                &telegram_config.token,
+                telegram_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("telegram permissions not initialized when telegram is enabled")
+                })?,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+
+        for instance in telegram_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled telegram instance with empty token");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "telegram",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::TelegramPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
+                runtime_key,
+                &instance.token,
+                perms,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
     }
 
     if let Some(email_config) = &config.messaging.email
         && email_config.enabled
     {
-        match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
-            Ok(adapter) => {
-                new_messaging_manager.register(adapter).await;
+        if !email_config.imap_host.is_empty() {
+            match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build email adapter");
+                }
             }
-            Err(error) => {
-                tracing::error!(%error, "failed to build email adapter");
+        }
+
+        for instance in email_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.imap_host.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled email instance with empty credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "email",
+                Some(instance.name.as_str()),
+            );
+            match spacebot::messaging::email::EmailAdapter::from_instance_config(
+                runtime_key,
+                instance,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, adapter = %instance.name, "failed to build named email adapter");
+                }
             }
         }
     }
@@ -1559,20 +1753,72 @@ async fn initialize_agents(
         && twitch_config.enabled
     {
         let twitch_token_path = config.instance_dir.join("twitch_token.json");
-        let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
-            &twitch_config.username,
-            &twitch_config.oauth_token,
-            twitch_config.client_id.clone(),
-            twitch_config.client_secret.clone(),
-            twitch_config.refresh_token.clone(),
-            Some(twitch_token_path),
-            twitch_config.channels.clone(),
-            twitch_config.trigger_prefix.clone(),
-            twitch_permissions.clone().ok_or_else(|| {
-                anyhow::anyhow!("twitch permissions not initialized when twitch is enabled")
-            })?,
-        );
-        new_messaging_manager.register(adapter).await;
+        if !twitch_config.username.is_empty() && !twitch_config.oauth_token.is_empty() {
+            let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
+                "twitch",
+                &twitch_config.username,
+                &twitch_config.oauth_token,
+                twitch_config.client_id.clone(),
+                twitch_config.client_secret.clone(),
+                twitch_config.refresh_token.clone(),
+                Some(twitch_token_path),
+                twitch_config.channels.clone(),
+                twitch_config.trigger_prefix.clone(),
+                twitch_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("twitch permissions not initialized when twitch is enabled")
+                })?,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+
+        for instance in twitch_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.username.is_empty() || instance.oauth_token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled twitch instance with missing credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "twitch",
+                Some(instance.name.as_str()),
+            );
+            let token_file_name = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                instance.name.hash(&mut hasher);
+                let name_hash = hasher.finish();
+                format!(
+                    "twitch_token_{}_{name_hash:016x}.json",
+                    instance
+                        .name
+                        .chars()
+                        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+                        .collect::<String>()
+                )
+            };
+            let token_path = config.instance_dir.join(token_file_name);
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::TwitchPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
+                runtime_key,
+                &instance.username,
+                &instance.oauth_token,
+                instance.client_id.clone(),
+                instance.client_secret.clone(),
+                instance.refresh_token.clone(),
+                Some(token_path),
+                instance.channels.clone(),
+                instance.trigger_prefix.clone(),
+                perms,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
     }
 
     let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new());
@@ -1608,6 +1854,7 @@ async fn initialize_agents(
             let cron_config = spacebot::cron::CronConfig {
                 id: cron_def.id.clone(),
                 prompt: cron_def.prompt.clone(),
+                cron_expr: cron_def.cron_expr.clone(),
                 interval_secs: cron_def.interval_secs,
                 delivery_target: cron_def.delivery_target.clone(),
                 active_hours: cron_def.active_hours,
@@ -1745,4 +1992,71 @@ async fn initialize_agents(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::wait_for_startup_warmup_tasks;
+    use std::future::pending;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn startup_warmup_wait_returns_false_when_tasks_finish_in_time() {
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async {});
+        let timed_out = wait_for_startup_warmup_tasks(&mut tasks, Duration::from_millis(50)).await;
+        assert!(!timed_out);
+    }
+
+    #[tokio::test]
+    async fn startup_warmup_wait_returns_true_when_timeout_expires() {
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        });
+        let timed_out = wait_for_startup_warmup_tasks(&mut tasks, Duration::from_millis(5)).await;
+        assert!(timed_out);
+    }
+
+    #[tokio::test]
+    async fn startup_warmup_wait_aborts_timed_out_task_and_releases_lock() {
+        let warmup_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let mut tasks = tokio::task::JoinSet::new();
+        let warmup_lock_for_task = Arc::clone(&warmup_lock);
+        let (locked_tx, locked_rx) = tokio::sync::oneshot::channel();
+        tasks.spawn(async move {
+            let _guard = warmup_lock_for_task.lock().await;
+            locked_tx.send(()).ok();
+            pending::<()>().await;
+        });
+
+        tokio::time::timeout(Duration::from_millis(50), locked_rx)
+            .await
+            .expect("task should acquire lock")
+            .expect("lock signal should send");
+
+        let timed_out = wait_for_startup_warmup_tasks(&mut tasks, Duration::from_millis(5)).await;
+        assert!(timed_out);
+
+        let _guard = tokio::time::timeout(Duration::from_millis(50), warmup_lock.lock())
+            .await
+            .expect("startup warmup timeout should cancel blocked task and release lock");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn startup_warmup_wait_timeout_stays_bounded_for_non_cooperative_task() {
+        let mut tasks = tokio::task::JoinSet::new();
+        tasks.spawn(async {
+            std::thread::sleep(Duration::from_millis(100));
+        });
+
+        let started = std::time::Instant::now();
+        let timed_out = wait_for_startup_warmup_tasks(&mut tasks, Duration::from_millis(5)).await;
+        assert!(timed_out);
+        assert!(
+            started.elapsed() < Duration::from_millis(80),
+            "startup warmup timeout should return without waiting for non-cooperative task"
+        );
+    }
 }

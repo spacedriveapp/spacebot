@@ -158,7 +158,16 @@ impl StatusBlock {
 
     /// Render the status block as a string for context injection.
     pub fn render(&self) -> String {
+        self.render_with_time_context(None)
+    }
+
+    /// Render the status block with optional current time context.
+    pub fn render_with_time_context(&self, current_time_line: Option<&str>) -> String {
         let mut output = String::new();
+
+        if let Some(current_time_line) = current_time_line {
+            output.push_str(&format!("Current date/time: {current_time_line}\n\n"));
+        }
 
         // Active workers
         if !self.active_workers.is_empty() {
@@ -267,5 +276,17 @@ impl StatusBlock {
     pub fn remove_link_conversation(&mut self, peer_agent: &str) {
         self.active_link_conversations
             .retain(|l| l.peer_agent != peer_agent);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::StatusBlock;
+
+    #[test]
+    fn render_with_time_context_renders_current_time_when_empty() {
+        let status = StatusBlock::new();
+        let rendered = status.render_with_time_context(Some("2026-02-26 12:00:00 UTC"));
+        assert!(rendered.contains("Current date/time: 2026-02-26 12:00:00 UTC"));
     }
 }

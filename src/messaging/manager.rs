@@ -125,6 +125,21 @@ impl MessagingManager {
         self.adapters.read().await.contains_key(name)
     }
 
+    /// Returns true if any adapter exists for the given platform.
+    pub async fn has_platform_adapters(&self, platform: &str) -> bool {
+        let prefix = format!("{platform}:");
+        self.adapters
+            .read()
+            .await
+            .keys()
+            .any(|name| name == platform || name.starts_with(&prefix))
+    }
+
+    /// List registered adapter runtime keys.
+    pub async fn adapter_names(&self) -> Vec<String> {
+        self.adapters.read().await.keys().cloned().collect()
+    }
+
     /// Spawn a background task that retries starting a failed adapter with exponential backoff.
     ///
     /// Once the adapter starts successfully, its stream is forwarded into the
@@ -206,9 +221,10 @@ impl MessagingManager {
         response: OutboundResponse,
     ) -> crate::Result<()> {
         let adapters = self.adapters.read().await;
+        let adapter_key = message.adapter_key();
         let adapter = adapters
-            .get(&message.source)
-            .with_context(|| format!("no messaging adapter named '{}'", message.source))?;
+            .get(adapter_key)
+            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
         adapter.respond(message, response).await
     }
 
@@ -219,9 +235,10 @@ impl MessagingManager {
         status: StatusUpdate,
     ) -> crate::Result<()> {
         let adapters = self.adapters.read().await;
+        let adapter_key = message.adapter_key();
         let adapter = adapters
-            .get(&message.source)
-            .with_context(|| format!("no messaging adapter named '{}'", message.source))?;
+            .get(adapter_key)
+            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
         adapter.send_status(message, status).await
     }
 
@@ -246,9 +263,10 @@ impl MessagingManager {
         limit: usize,
     ) -> crate::Result<Vec<HistoryMessage>> {
         let adapters = self.adapters.read().await;
+        let adapter_key = message.adapter_key();
         let adapter = adapters
-            .get(&message.source)
-            .with_context(|| format!("no messaging adapter named '{}'", message.source))?;
+            .get(adapter_key)
+            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
         adapter.fetch_history(message, limit).await
     }
 
@@ -259,6 +277,26 @@ impl MessagingManager {
             adapter.shutdown().await?;
             tracing::info!(adapter = %name, "adapter removed and shut down");
         }
+        Ok(())
+    }
+
+    /// Remove and shut down all adapters for a platform (default + named).
+    pub async fn remove_platform_adapters(&self, platform: &str) -> crate::Result<()> {
+        let mut names = Vec::new();
+        {
+            let adapters = self.adapters.read().await;
+            let prefix = format!("{platform}:");
+            for name in adapters.keys() {
+                if name == platform || name.starts_with(&prefix) {
+                    names.push(name.clone());
+                }
+            }
+        }
+
+        for name in names {
+            self.remove_adapter(&name).await?;
+        }
+
         Ok(())
     }
 

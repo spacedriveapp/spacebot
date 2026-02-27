@@ -164,6 +164,10 @@ pub async fn start_http_server(
         )
         .route("/messaging/toggle", post(messaging::toggle_platform))
         .route(
+            "/messaging/instances",
+            post(messaging::create_messaging_instance).delete(messaging::delete_messaging_instance),
+        )
+        .route(
             "/bindings",
             get(bindings::list_bindings)
                 .post(bindings::create_binding)

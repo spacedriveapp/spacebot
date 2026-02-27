@@ -69,6 +69,7 @@ uuid = { version = "1.15", features = ["v4", "serde"] }
 # Time handling
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
+cron = "0.12"
 
 # Regular expressions (for leak detection)
 regex = "1.11"

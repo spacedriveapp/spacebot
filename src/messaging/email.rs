@@ -5,7 +5,7 @@ use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse};
 
 use anyhow::Context as _;
-use chrono::{TimeZone as _, Utc};
+use chrono::{Duration as ChronoDuration, TimeZone as _, Utc};
 use lettre::message::header::ContentType;
 use lettre::message::{Attachment as EmailAttachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
@@ -36,6 +36,7 @@ struct EmailPollConfig {
     poll_interval: Duration,
     allowed_senders: Vec<String>,
     max_body_bytes: usize,
+    runtime_key: String,
 }
 
 struct HistoryEntry {
@@ -43,8 +44,34 @@ struct HistoryEntry {
     message: HistoryMessage,
 }
 
+/// Query filters for direct IMAP mailbox search.
+#[derive(Debug, Clone, Default)]
+pub struct EmailSearchQuery {
+    pub text: Option<String>,
+    pub from: Option<String>,
+    pub subject: Option<String>,
+    pub unread_only: bool,
+    pub since_days: Option<u32>,
+    pub folders: Vec<String>,
+    pub limit: usize,
+}
+
+/// A single match returned by `search_mailbox`.
+#[derive(Debug, Clone)]
+pub struct EmailSearchHit {
+    pub folder: String,
+    pub uid: u32,
+    pub from: String,
+    pub subject: String,
+    pub date: Option<String>,
+    pub message_id: Option<String>,
+    pub body: String,
+    pub attachment_names: Vec<String>,
+}
+
 /// Email adapter state.
 pub struct EmailAdapter {
+    runtime_key: String,
     imap_host: String,
     imap_port: u16,
     imap_username: String,
@@ -91,6 +118,39 @@ impl std::fmt::Debug for EmailAdapter {
 
 impl EmailAdapter {
     pub fn from_config(config: &EmailConfig) -> crate::Result<Self> {
+        Self::build("email".to_string(), config)
+    }
+
+    pub fn from_instance_config(
+        runtime_key: impl Into<String>,
+        config: &crate::config::EmailInstanceConfig,
+    ) -> crate::Result<Self> {
+        // Build a temporary EmailConfig to reuse build_smtp_transport and shared logic.
+        let email_config = EmailConfig {
+            enabled: config.enabled,
+            imap_host: config.imap_host.clone(),
+            imap_port: config.imap_port,
+            imap_username: config.imap_username.clone(),
+            imap_password: config.imap_password.clone(),
+            imap_use_tls: config.imap_use_tls,
+            smtp_host: config.smtp_host.clone(),
+            smtp_port: config.smtp_port,
+            smtp_username: config.smtp_username.clone(),
+            smtp_password: config.smtp_password.clone(),
+            smtp_use_starttls: config.smtp_use_starttls,
+            from_address: config.from_address.clone(),
+            from_name: config.from_name.clone(),
+            poll_interval_secs: config.poll_interval_secs,
+            folders: config.folders.clone(),
+            allowed_senders: config.allowed_senders.clone(),
+            max_body_bytes: config.max_body_bytes,
+            max_attachment_bytes: config.max_attachment_bytes,
+            instances: Vec::new(),
+        };
+        Self::build(runtime_key.into(), &email_config)
+    }
+
+    fn build(runtime_key: String, config: &EmailConfig) -> crate::Result<Self> {
         let folders = config
             .folders
             .iter()
@@ -107,6 +167,7 @@ impl EmailAdapter {
         let smtp_transport = build_smtp_transport(config)?;
 
         Ok(Self {
+            runtime_key,
             imap_host: config.imap_host.clone(),
             imap_port: config.imap_port,
             imap_username: config.imap_username.clone(),
@@ -142,6 +203,7 @@ impl EmailAdapter {
             poll_interval: self.poll_interval,
             allowed_senders: self.allowed_senders.clone(),
             max_body_bytes: self.max_body_bytes,
+            runtime_key: self.runtime_key.clone(),
         }
     }
 
@@ -217,7 +279,7 @@ impl EmailAdapter {
 
 impl Messaging for EmailAdapter {
     fn name(&self) -> &str {
-        "email"
+        &self.runtime_key
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
@@ -812,6 +874,7 @@ fn parse_inbound_email(
     Ok(Some(InboundMessage {
         id: message_id,
         source: "email".into(),
+        adapter: Some(config.runtime_key.clone()),
         conversation_id,
         sender_id: sender_email,
         agent_id: None,
@@ -985,6 +1048,228 @@ fn fetch_history_from_imap(
     entries.truncate(limit);
 
     Ok(entries.into_iter().map(|entry| entry.message).collect())
+}
+
+/// Search the configured mailbox directly via IMAP.
+///
+/// Results are returned newest-first across searched folders.
+pub fn search_mailbox(
+    config: &EmailConfig,
+    query: EmailSearchQuery,
+) -> crate::Result<Vec<EmailSearchHit>> {
+    let mut session = open_imap_session(&EmailPollConfig {
+        imap_host: config.imap_host.clone(),
+        imap_port: config.imap_port,
+        imap_username: config.imap_username.clone(),
+        imap_password: config.imap_password.clone(),
+        imap_use_tls: config.imap_use_tls,
+        from_address: config.from_address.clone(),
+        smtp_username: config.smtp_username.clone(),
+        folders: config.folders.clone(),
+        poll_interval: Duration::from_secs(config.poll_interval_secs.max(5)),
+        allowed_senders: config.allowed_senders.clone(),
+        max_body_bytes: config.max_body_bytes.max(1024),
+        runtime_key: "email".to_string(),
+    })?;
+
+    let limit = query.limit.clamp(1, 50);
+    let criterion = build_imap_search_criterion(&query);
+    let folders = normalize_search_folders(&query.folders, &config.folders);
+    let max_body_bytes = config.max_body_bytes.max(1024);
+    let mut seen_message_ids = HashSet::new();
+    let mut ranked_results: Vec<(i64, EmailSearchHit)> = Vec::new();
+
+    for folder in folders {
+        if let Err(error) = session.select(folder.as_str()) {
+            tracing::warn!(folder, %error, "failed to select IMAP folder for search");
+            continue;
+        }
+
+        let mut message_uids: Vec<u32> = match session.uid_search(&criterion) {
+            Ok(uids) => uids.into_iter().collect(),
+            Err(error) => {
+                tracing::warn!(
+                    folder,
+                    criterion_len = criterion.len(),
+                    has_text = query.text.is_some(),
+                    has_from = query.from.is_some(),
+                    has_subject = query.subject.is_some(),
+                    unread_only = query.unread_only,
+                    since_days = query.since_days,
+                    %error,
+                    "failed IMAP mailbox search"
+                );
+                continue;
+            }
+        };
+
+        message_uids.sort_unstable_by(|left, right| right.cmp(left));
+
+        for uid in message_uids {
+            let fetches = match session.uid_fetch(uid.to_string(), "(UID RFC822)") {
+                Ok(fetches) => fetches,
+                Err(error) => {
+                    tracing::warn!(folder, uid, %error, "failed IMAP mailbox fetch");
+                    continue;
+                }
+            };
+
+            for fetch in &fetches {
+                let current_uid = fetch.uid.unwrap_or(uid);
+                let Some(raw_email) = fetch.body() else {
+                    continue;
+                };
+
+                let parsed = match mailparse::parse_mail(raw_email) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        tracing::warn!(folder, uid = current_uid, %error, "failed to parse searched email MIME");
+                        continue;
+                    }
+                };
+
+                let headers = parsed.headers.as_slice();
+                let message_id = headers
+                    .get_first_value("Message-ID")
+                    .map(|value| normalize_message_id(&value))
+                    .filter(|value| !value.is_empty());
+
+                if let Some(message_id) = &message_id
+                    && !seen_message_ids.insert(message_id.clone())
+                {
+                    continue;
+                }
+
+                let from = headers.get_first_value("From").unwrap_or_default();
+                let subject = headers
+                    .get_first_value("Subject")
+                    .unwrap_or_else(|| "(No subject)".to_string());
+                let date = headers.get_first_value("Date");
+                let sort_timestamp = date
+                    .as_deref()
+                    .and_then(|value| mailparse::dateparse(value).ok())
+                    .unwrap_or(i64::MIN);
+                let (body, attachment_names) =
+                    extract_text_and_attachments(&parsed, max_body_bytes);
+
+                ranked_results.push((
+                    sort_timestamp,
+                    EmailSearchHit {
+                        folder: folder.clone(),
+                        uid: current_uid,
+                        from,
+                        subject,
+                        date,
+                        message_id,
+                        body,
+                        attachment_names,
+                    },
+                ));
+            }
+        }
+    }
+
+    let results = sort_and_limit_search_hits(ranked_results, limit);
+
+    if let Err(error) = session.logout() {
+        tracing::debug!(%error, "IMAP logout failed after mailbox search");
+    }
+
+    Ok(results)
+}
+
+fn sort_and_limit_search_hits(
+    mut ranked_results: Vec<(i64, EmailSearchHit)>,
+    limit: usize,
+) -> Vec<EmailSearchHit> {
+    ranked_results.sort_unstable_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.uid.cmp(&left.1.uid))
+    });
+
+    ranked_results
+        .into_iter()
+        .map(|(_, hit)| hit)
+        .take(limit)
+        .collect()
+}
+
+fn normalize_search_folders(requested: &[String], fallback: &[String]) -> Vec<String> {
+    let mut folders = requested
+        .iter()
+        .map(|folder| folder.trim().to_string())
+        .filter(|folder| !folder.is_empty())
+        .collect::<Vec<_>>();
+
+    if folders.is_empty() {
+        folders = fallback
+            .iter()
+            .map(|folder| folder.trim().to_string())
+            .filter(|folder| !folder.is_empty())
+            .collect::<Vec<_>>();
+    }
+
+    if folders.is_empty() {
+        folders.push("INBOX".to_string());
+    }
+
+    folders.sort();
+    folders.dedup();
+    folders
+}
+
+fn build_imap_search_criterion(query: &EmailSearchQuery) -> String {
+    let mut clauses = Vec::new();
+
+    if query.unread_only {
+        clauses.push("UNSEEN".to_string());
+    }
+
+    if let Some(from) = sanitize_imap_search_value(query.from.as_deref()) {
+        clauses.push(format!("FROM {}", quote_imap_search_value(&from)));
+    }
+
+    if let Some(subject) = sanitize_imap_search_value(query.subject.as_deref()) {
+        clauses.push(format!("SUBJECT {}", quote_imap_search_value(&subject)));
+    }
+
+    if let Some(text) = sanitize_imap_search_value(query.text.as_deref()) {
+        clauses.push(format!("TEXT {}", quote_imap_search_value(&text)));
+    }
+
+    if let Some(since_days) = query.since_days.filter(|days| *days > 0) {
+        let since_date = (Utc::now() - ChronoDuration::days(since_days as i64))
+            .format("%d-%b-%Y")
+            .to_string();
+        clauses.push(format!("SINCE {since_date}"));
+    }
+
+    if clauses.is_empty() {
+        "ALL".to_string()
+    } else {
+        clauses.join(" ")
+    }
+}
+
+fn sanitize_imap_search_value(value: Option<&str>) -> Option<String> {
+    let value = value?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let normalized = value.replace(['\r', '\n'], " ").trim().to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
+}
+
+fn quote_imap_search_value(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
 }
 
 fn is_auto_generated_email(headers: &[mailparse::MailHeader<'_>]) -> bool {
@@ -1329,8 +1614,9 @@ struct EmailReplyContext {
 #[cfg(test)]
 mod tests {
     use super::{
-        derive_thread_key, extract_message_ids, normalize_email_target, normalize_reply_subject,
-        parse_primary_mailbox,
+        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, derive_thread_key,
+        extract_message_ids, normalize_email_target, normalize_reply_subject,
+        normalize_search_folders, parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
     #[test]
@@ -1392,5 +1678,85 @@ mod tests {
         );
 
         assert_eq!(from_references, from_root_only);
+    }
+
+    #[test]
+    fn build_imap_search_criterion_defaults_to_all() {
+        let criterion = build_imap_search_criterion(&EmailSearchQuery::default());
+        assert_eq!(criterion, "ALL");
+    }
+
+    #[test]
+    fn build_imap_search_criterion_escapes_values() {
+        let criterion = build_imap_search_criterion(&EmailSearchQuery {
+            text: Some("release \\\"candidate\\\"".to_string()),
+            from: Some("Alice <alice@example.com>".to_string()),
+            subject: Some("Q1 update".to_string()),
+            unread_only: true,
+            since_days: None,
+            folders: Vec::new(),
+            limit: 10,
+        });
+
+        assert!(criterion.contains("UNSEEN"));
+        assert!(criterion.contains("FROM \"Alice <alice@example.com>\""));
+        assert!(criterion.contains("SUBJECT \"Q1 update\""));
+        assert!(criterion.contains("TEXT \"release \\\\\\\"candidate\\\\\\\"\""));
+    }
+
+    #[test]
+    fn normalize_search_folders_falls_back_to_inbox() {
+        let folders = normalize_search_folders(&[], &[]);
+        assert_eq!(folders, vec!["INBOX".to_string()]);
+    }
+
+    #[test]
+    fn sort_and_limit_search_hits_orders_globally_newest_first() {
+        let ranked = vec![
+            (
+                100,
+                EmailSearchHit {
+                    folder: "INBOX".to_string(),
+                    uid: 10,
+                    from: "a@example.com".to_string(),
+                    subject: "old".to_string(),
+                    date: None,
+                    message_id: Some("m1".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+            (
+                300,
+                EmailSearchHit {
+                    folder: "Support".to_string(),
+                    uid: 20,
+                    from: "b@example.com".to_string(),
+                    subject: "newest".to_string(),
+                    date: None,
+                    message_id: Some("m2".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+            (
+                200,
+                EmailSearchHit {
+                    folder: "Escalations".to_string(),
+                    uid: 30,
+                    from: "c@example.com".to_string(),
+                    subject: "middle".to_string(),
+                    date: None,
+                    message_id: Some("m3".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+        ];
+
+        let results = sort_and_limit_search_hits(ranked, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].subject, "newest");
+        assert_eq!(results[1].subject, "middle");
     }
 }

@@ -22,6 +22,7 @@
 //! - DM broadcast via `conversations.open`
 
 use crate::config::{SlackCommandConfig, SlackPermissions};
+use crate::messaging::apply_runtime_adapter_to_conversation_id;
 use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
 use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate};
 
@@ -35,6 +36,7 @@ use tokio::sync::{RwLock, mpsc};
 /// State shared with socket mode callbacks via `SlackClientEventsUserState`.
 struct SlackAdapterState {
     inbound_tx: mpsc::Sender<InboundMessage>,
+    runtime_key: String,
     permissions: Arc<ArcSwap<SlackPermissions>>,
     bot_token: String,
     bot_user_id: String,
@@ -55,6 +57,7 @@ struct SlackUserIdentity {
 
 /// Slack adapter.
 pub struct SlackAdapter {
+    runtime_key: String,
     bot_token: String,
     app_token: String,
     permissions: Arc<ArcSwap<SlackPermissions>>,
@@ -73,11 +76,13 @@ pub struct SlackAdapter {
 
 impl SlackAdapter {
     pub fn new(
+        runtime_key: impl Into<String>,
         bot_token: impl Into<String>,
         app_token: impl Into<String>,
         permissions: Arc<ArcSwap<SlackPermissions>>,
         commands: Vec<SlackCommandConfig>,
     ) -> anyhow::Result<Self> {
+        let runtime_key = runtime_key.into();
         let bot_token = bot_token.into();
         let client = Arc::new(SlackClient::new(
             SlackClientHyperConnector::new().context("failed to create slack HTTP connector")?,
@@ -88,6 +93,7 @@ impl SlackAdapter {
             .map(|c| (c.command, c.agent_id))
             .collect();
         Ok(Self {
+            runtime_key,
             bot_token,
             app_token: app_token.into(),
             permissions,
@@ -150,8 +156,14 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     states: SlackClientEventsUserState,
 ) -> UserCallbackResult<()> {
-    // Skip message edits / deletes / bot_message subtypes
-    if msg_event.subtype.is_some() {
+    // Skip message edits / deletes / bot_message subtypes, but allow file-related
+    // subtypes so user-uploaded images and documents are processed.
+    if let Some(ref subtype) = msg_event.subtype
+        && !matches!(
+            subtype,
+            SlackMessageEventType::FileShare | SlackMessageEventType::FileShared
+        )
+    {
         return Ok(());
     }
 
@@ -225,13 +237,15 @@ async fn handle_message_event(
         }
     }
 
-    let conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
+    let base_conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
         format!("slack:{}:{}:{}", team_id_str, channel_id, thread_ts.0)
     } else {
         format!("slack:{}:{}", team_id_str, channel_id)
     };
+    let conversation_id =
+        apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
-    let content = extract_message_content(&msg_event.content);
+    let content = extract_message_content(&msg_event.content, &adapter_state.bot_token);
 
     let (metadata, formatted_author) = build_metadata_and_author(
         &team_id_str,
@@ -249,6 +263,7 @@ async fn handle_message_event(
 
     send_inbound(
         &adapter_state.inbound_tx,
+        &adapter_state.runtime_key,
         ts,
         conversation_id,
         user_id.unwrap_or_default(),
@@ -308,11 +323,13 @@ async fn handle_app_mention_event(
         return Ok(());
     }
 
-    let conversation_id = if let Some(ref thread_ts) = mention.origin.thread_ts {
+    let base_conversation_id = if let Some(ref thread_ts) = mention.origin.thread_ts {
         format!("slack:{}:{}:{}", team_id_str, channel_id, thread_ts.0)
     } else {
         format!("slack:{}:{}", team_id_str, channel_id)
     };
+    let conversation_id =
+        apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
     // Strip the leading @-mention from the text so the agent sees clean input
     let raw_text = mention.content.text.clone().unwrap_or_default();
@@ -336,6 +353,7 @@ async fn handle_app_mention_event(
 
     send_inbound(
         &adapter_state.inbound_tx,
+        &adapter_state.runtime_key,
         ts,
         conversation_id,
         user_id,
@@ -444,7 +462,9 @@ async fn handle_command_event(
 
     let agent_id = adapter_state.commands[&command_str].clone();
 
-    let conversation_id = format!("slack:{}:{}", team_id, channel_id);
+    let base_conversation_id = format!("slack:{}:{}", team_id, channel_id);
+    let conversation_id =
+        apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -483,6 +503,7 @@ async fn handle_command_event(
     let inbound = InboundMessage {
         id: msg_id,
         source: "slack".into(),
+        adapter: Some(adapter_state.runtime_key.clone()),
         conversation_id,
         sender_id: user_id.clone(),
         agent_id: None,
@@ -579,11 +600,13 @@ async fn handle_interaction_event(
     // Use trigger_id as the unique message id for this interaction turn.
     let msg_id = block_actions.trigger_id.0.clone();
 
-    let conversation_id = if let Some(ref ts) = message_ts {
+    let base_conversation_id = if let Some(ref ts) = message_ts {
         format!("slack:{}:{}:{}", team_id, channel_id, ts)
     } else {
         format!("slack:{}:{}", team_id, channel_id)
     };
+    let conversation_id =
+        apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
     // Process each action in the payload as a separate inbound message.
     // In practice Slack sends one action per interaction, but the API allows many.
@@ -663,6 +686,7 @@ async fn handle_interaction_event(
         let inbound = InboundMessage {
             id,
             source: "slack".into(),
+            adapter: Some(adapter_state.runtime_key.clone()),
             conversation_id: conversation_id.clone(),
             sender_id: user_id.clone(),
             agent_id: None,
@@ -686,7 +710,7 @@ async fn handle_interaction_event(
 
 impl Messaging for SlackAdapter {
     fn name(&self) -> &str {
-        "slack"
+        &self.runtime_key
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
@@ -706,6 +730,7 @@ impl Messaging for SlackAdapter {
 
         let adapter_state = Arc::new(SlackAdapterState {
             inbound_tx,
+            runtime_key: self.runtime_key.clone(),
             permissions: self.permissions.clone(),
             bot_token: self.bot_token.clone(),
             bot_user_id,
@@ -1259,7 +1284,10 @@ fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
 }
 
 /// Extract `MessageContent` from an optional `SlackMessageContent`.
-fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageContent {
+fn extract_message_content(
+    content: &Option<SlackMessageContent>,
+    bot_token: &str,
+) -> MessageContent {
     let Some(msg_content) = content else {
         return MessageContent::Text(String::new());
     };
@@ -1274,6 +1302,7 @@ fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageCont
                     mime_type: f.mimetype.as_ref().map(|m| m.0.clone()).unwrap_or_default(),
                     url: url.to_string(),
                     size_bytes: None,
+                    auth_header: Some(format!("Bearer {}", bot_token)),
                 })
             })
             .collect();
@@ -1426,8 +1455,10 @@ async fn build_metadata_and_author(
 }
 
 /// Dispatch a fully-constructed `InboundMessage` to the inbound channel.
+#[allow(clippy::too_many_arguments)]
 async fn send_inbound(
     tx: &mpsc::Sender<InboundMessage>,
+    runtime_key: &str,
     ts: String,
     conversation_id: String,
     sender_id: String,
@@ -1438,6 +1469,7 @@ async fn send_inbound(
     let inbound = InboundMessage {
         id: ts,
         source: "slack".into(),
+        adapter: Some(runtime_key.to_string()),
         conversation_id,
         sender_id,
         agent_id: None,
