@@ -1,6 +1,8 @@
 //! Send message tool for cross-channel messaging and DMs.
 
+use crate::ChannelId;
 use crate::conversation::ChannelStore;
+use crate::conversation::history::ConversationLogger;
 use crate::messaging::MessagingManager;
 
 use rig::completion::ToolDefinition;
@@ -13,11 +15,14 @@ use std::sync::Arc;
 ///
 /// Resolves targets by name or ID via the channel store, extracts the
 /// platform-specific target from channel metadata, and delivers via
-/// `MessagingManager::broadcast()`.
+/// `MessagingManager::broadcast()`. Logs the sent message to the destination
+/// channel's conversation history so it appears in future transcripts.
 #[derive(Clone)]
 pub struct SendMessageTool {
     messaging_manager: Arc<MessagingManager>,
     channel_store: ChannelStore,
+    conversation_logger: ConversationLogger,
+    agent_display_name: String,
 }
 
 impl std::fmt::Debug for SendMessageTool {
@@ -27,10 +32,17 @@ impl std::fmt::Debug for SendMessageTool {
 }
 
 impl SendMessageTool {
-    pub fn new(messaging_manager: Arc<MessagingManager>, channel_store: ChannelStore) -> Self {
+    pub fn new(
+        messaging_manager: Arc<MessagingManager>,
+        channel_store: ChannelStore,
+        conversation_logger: ConversationLogger,
+        agent_display_name: String,
+    ) -> Self {
         Self {
             messaging_manager,
             channel_store,
+            conversation_logger,
+            agent_display_name,
         }
     }
 }
@@ -124,6 +136,7 @@ impl Tool for SendMessageTool {
                 "message sent via explicit target"
             );
 
+            // Email targets don't have a channel to log to.
             return Ok(SendMessageOutput {
                 success: true,
                 target: explicit_target.target,
@@ -156,16 +169,26 @@ impl Tool for SendMessageTool {
             .broadcast(
                 &broadcast_target.adapter,
                 &broadcast_target.target,
-                crate::OutboundResponse::Text(args.message),
+                crate::OutboundResponse::Text(args.message.clone()),
             )
             .await
             .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
+
+        // Log the sent message to the destination channel's conversation history
+        // so it appears in future transcripts and channel recall.
+        let destination_channel_id: ChannelId = Arc::from(channel.id.as_str());
+        self.conversation_logger.log_bot_message_with_name(
+            &destination_channel_id,
+            &args.message,
+            Some(&self.agent_display_name),
+        );
 
         tracing::info!(
             adapter = %broadcast_target.adapter,
             broadcast_target = %broadcast_target.target,
             channel_name = channel.display_name.as_deref().unwrap_or("unknown"),
-            "message sent to channel"
+            destination_channel_id = %channel.id,
+            "message sent to channel and logged to destination history"
         );
 
         Ok(SendMessageOutput {
