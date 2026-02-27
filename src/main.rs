@@ -32,6 +32,9 @@ enum Command {
         /// Run in the foreground instead of daemonizing
         #[arg(short, long)]
         foreground: bool,
+        /// Internal flag used by detached background child processes.
+        #[arg(long, hide = true)]
+        daemon_child: bool,
     },
     /// Stop the running daemon
     Stop,
@@ -132,14 +135,20 @@ fn main() -> anyhow::Result<()> {
         .map_err(|_| anyhow::anyhow!("failed to install rustls crypto provider"))?;
 
     let cli = Cli::parse();
-    let command = cli.command.unwrap_or(Command::Start { foreground: false });
+    let command = cli.command.unwrap_or(Command::Start {
+        foreground: false,
+        daemon_child: false,
+    });
 
     match command {
-        Command::Start { foreground } => cmd_start(cli.config, cli.debug, foreground),
+        Command::Start {
+            foreground,
+            daemon_child,
+        } => cmd_start(cli.config, cli.debug, foreground, daemon_child),
         Command::Stop => cmd_stop(),
         Command::Restart { foreground } => {
             cmd_stop_if_running();
-            cmd_start(cli.config, cli.debug, foreground)
+            cmd_start(cli.config, cli.debug, foreground, false)
         }
         Command::Status => cmd_status(),
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
@@ -151,6 +160,7 @@ fn cmd_start(
     config_path: Option<std::path::PathBuf>,
     debug: bool,
     foreground: bool,
+    daemon_child: bool,
 ) -> anyhow::Result<()> {
     let paths = spacebot::daemon::DaemonPaths::from_default();
 
@@ -160,8 +170,9 @@ fn cmd_start(
         std::process::exit(1);
     }
 
-    // Run onboarding interactively before daemonizing
-    let resolved_config_path = if config_path.is_some() {
+    // Run onboarding interactively before daemonizing. Background child
+    // processes skip this because the parent already handled it.
+    let resolved_config_path = if daemon_child || config_path.is_some() {
         config_path.clone()
     } else if spacebot::config::Config::needs_onboarding() {
         // Returns Some(path) if CLI wizard ran, None if user chose the UI.
@@ -173,7 +184,7 @@ fn cmd_start(
     // Validate config loads successfully before forking
     let config = load_config(&resolved_config_path)?;
 
-    if !foreground {
+    if !foreground && !daemon_child {
         // Fork the process before creating any Tokio runtime. After daemonize()
         // returns, we are in the child process — the parent has exited. Any
         // runtime created before this point would be in a broken state inside
@@ -181,7 +192,11 @@ fn cmd_start(
         // which is why tracing init (and the OTLP batch exporter it creates)
         // must happen *after* this call.
         let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
-        spacebot::daemon::daemonize(&paths)?;
+        let daemon_options = spacebot::daemon::DaemonStartOptions {
+            config_path: resolved_config_path.clone(),
+            debug,
+        };
+        spacebot::daemon::daemonize(&paths, &daemon_options)?;
     }
 
     // Build a fresh Tokio runtime in this process (the child after daemonize,

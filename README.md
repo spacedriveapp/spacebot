@@ -453,6 +453,8 @@ spacebot status               # show pid and uptime
 spacebot auth login           # authenticate via Anthropic OAuth
 ```
 
+On Unix, daemon control uses a Unix domain socket in the instance directory. On Windows, it uses a local named pipe with the same `start`/`stop`/`status` CLI flow.
+
 The binary creates all databases and directories automatically on first run. See the [quickstart guide](docs/content/docs/(getting-started)/quickstart.mdx) for more detail.
 
 ### Authentication

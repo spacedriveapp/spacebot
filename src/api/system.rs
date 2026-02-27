@@ -13,6 +13,10 @@ use std::io::Write as _;
 use std::path::Component;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+#[cfg(windows)]
+use std::os::windows::ffi::OsStrExt as _;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
@@ -160,28 +164,71 @@ pub(super) async fn storage_status(
 }
 
 fn read_filesystem_usage(path: &Path) -> anyhow::Result<StorageStatus> {
-    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-    let path_cstring = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
+    #[cfg(unix)]
+    {
+        let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let path_cstring = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
 
-    let result = unsafe { libc::statvfs(path_cstring.as_ptr(), stats.as_mut_ptr()) };
-    if result != 0 {
-        return Err(anyhow::anyhow!("statvfs call failed"));
+        let result = unsafe { libc::statvfs(path_cstring.as_ptr(), stats.as_mut_ptr()) };
+        if result != 0 {
+            return Err(anyhow::anyhow!("statvfs call failed"));
+        }
+
+        let stats = unsafe { stats.assume_init() };
+        let block_size = stats.f_frsize as u128;
+        let total_blocks = stats.f_blocks as u128;
+        let avail_blocks = stats.f_bavail as u128;
+
+        let total_bytes = (block_size * total_blocks) as u64;
+        let used_bytes = directory_size_bytes(path)?;
+        let available_bytes = (block_size * avail_blocks) as u64;
+
+        return Ok(StorageStatus {
+            used_bytes,
+            total_bytes,
+            available_bytes,
+        });
     }
 
-    let stats = unsafe { stats.assume_init() };
-    let block_size = stats.f_frsize as u128;
-    let total_blocks = stats.f_blocks as u128;
-    let avail_blocks = stats.f_bavail as u128;
+    #[cfg(not(unix))]
+    {
+        #[cfg(windows)]
+        {
+            let mut available_bytes = 0u64;
+            let mut total_bytes = 0u64;
+            let mut free_bytes = 0u64;
+            let mut path_wide: Vec<u16> = path.as_os_str().encode_wide().collect();
+            path_wide.push(0);
 
-    let total_bytes = (block_size * total_blocks) as u64;
-    let used_bytes = directory_size_bytes(path)?;
-    let available_bytes = (block_size * avail_blocks) as u64;
+            let result = unsafe {
+                GetDiskFreeSpaceExW(
+                    path_wide.as_ptr(),
+                    &mut available_bytes,
+                    &mut total_bytes,
+                    &mut free_bytes,
+                )
+            };
+            if result == 0 {
+                return Err(anyhow::anyhow!("GetDiskFreeSpaceExW call failed"));
+            }
 
-    Ok(StorageStatus {
-        used_bytes,
-        total_bytes,
-        available_bytes,
-    })
+            let used_bytes = directory_size_bytes(path)?;
+            return Ok(StorageStatus {
+                used_bytes,
+                total_bytes,
+                available_bytes,
+            });
+        }
+
+        #[cfg(not(windows))]
+        let used_bytes = directory_size_bytes(path)?;
+        #[cfg(not(windows))]
+        Ok(StorageStatus {
+            used_bytes,
+            total_bytes: 0,
+            available_bytes: 0,
+        })
+    }
 }
 
 fn directory_size_bytes(root: &Path) -> anyhow::Result<u64> {

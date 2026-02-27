@@ -86,8 +86,7 @@ rmcp = { version = "0.16", features = ["client", "reqwest", "transport-child-pro
 clap = { version = "4.5", features = ["derive"] }
 dialoguer = { version = "0.11", features = ["password"] }
 
-# Daemonization
-daemonize = "0.5"
+# Daemonization / low-level OS calls
 libc = "0.2"
 ignore = "0.4"
 
@@ -156,6 +155,12 @@ moka = "0.12.13"
 
 [features]
 metrics = ["dep:prometheus"]
+
+[target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading"] }
 
 [lints.clippy]
 dbg_macro = "deny"

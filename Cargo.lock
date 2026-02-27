@@ -8481,6 +8481,7 @@ dependencies = [
  "twitch-irc",
  "urlencoding",
  "uuid",
+ "windows-sys 0.59.0",
  "zip",
 ]
 
