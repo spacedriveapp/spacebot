@@ -1089,10 +1089,17 @@ pub(super) async fn toggle_platform(
                 _ => {}
             }
         }
-    } else if let Some(manager) = manager
-        && let Err(error) = manager.remove_platform_adapters(platform).await
-    {
-        tracing::warn!(%error, platform = %platform, "failed to shut down adapter on toggle");
+    } else if let Some(manager) = manager {
+        if let Some(ref adapter_name) = request.adapter {
+            // Shut down only the specific named instance.
+            let runtime_key =
+                crate::config::binding_runtime_adapter_key(platform, Some(adapter_name.trim()));
+            if let Err(error) = manager.remove_adapter(&runtime_key).await {
+                tracing::warn!(%error, adapter = %runtime_key, "failed to shut down named adapter on toggle");
+            }
+        } else if let Err(error) = manager.remove_platform_adapters(platform).await {
+            tracing::warn!(%error, platform = %platform, "failed to shut down adapters on toggle");
+        }
     }
 
     let action = if request.enabled {

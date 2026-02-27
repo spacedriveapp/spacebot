@@ -1149,6 +1149,13 @@ impl ResolvedAgentConfig {
     }
 }
 
+/// Normalize an adapter selector: trim whitespace, return `None` if empty.
+fn normalize_adapter(adapter: Option<String>) -> Option<String> {
+    adapter
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 /// Routes a messaging platform conversation to a specific agent.
 #[derive(Debug, Clone)]
 pub struct Binding {
@@ -1353,13 +1360,8 @@ fn validate_named_messaging_adapters(
             ))
         })?;
 
-        let normalized_adapter = binding
-            .adapter
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty());
-
-        match normalized_adapter {
+        // adapter is already normalized at ingest time via normalize_adapter().
+        match binding.adapter.as_deref() {
             Some(adapter_name) => {
                 if !state.named_instances.contains(adapter_name) {
                     return Err(ConfigError::Invalid(format!(
@@ -1478,7 +1480,10 @@ fn build_adapter_validation_states(
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present = !email.imap_host.trim().is_empty();
+        let default_present = !email.imap_host.trim().is_empty()
+            && !email.imap_username.trim().is_empty()
+            && !email.imap_password.trim().is_empty()
+            && !email.smtp_host.trim().is_empty();
         validate_runtime_keys("email", default_present, &named_instances)?;
         states.insert(
             "email",
@@ -1961,7 +1966,7 @@ pub struct EmailConfig {
 }
 
 /// Per-instance config for a named email adapter.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct EmailInstanceConfig {
     pub name: String,
     pub enabled: bool,
@@ -1982,6 +1987,32 @@ pub struct EmailInstanceConfig {
     pub allowed_senders: Vec<String>,
     pub max_body_bytes: usize,
     pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for EmailInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
 }
 
 impl std::fmt::Debug for EmailConfig {
@@ -4921,7 +4952,7 @@ impl Config {
             .map(|b| Binding {
                 agent_id: b.agent_id,
                 channel: b.channel,
-                adapter: b.adapter,
+                adapter: normalize_adapter(b.adapter),
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
@@ -7684,5 +7715,17 @@ guild_id = "123456"
         let config = Config::load_from_path(&config_path).unwrap();
         assert!(config.bindings[0].adapter.is_none());
         assert_eq!(config.bindings[0].guild_id.as_deref(), Some("123456"));
+    }
+
+    #[test]
+    fn normalize_adapter_trims_and_clears_empty() {
+        assert_eq!(normalize_adapter(None), None);
+        assert_eq!(normalize_adapter(Some("".into())), None);
+        assert_eq!(normalize_adapter(Some("   ".into())), None);
+        assert_eq!(
+            normalize_adapter(Some(" support ".into())),
+            Some("support".into())
+        );
+        assert_eq!(normalize_adapter(Some("ops".into())), Some("ops".into()));
     }
 }

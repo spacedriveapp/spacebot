@@ -38,10 +38,6 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 	webhook: "Webhook",
 };
 
-function platformSupportsNamedAdapters(platform: string): boolean {
-	return platform === "discord" || platform === "slack" || platform === "telegram" || platform === "twitch" || platform === "email" || platform === "webhook";
-}
-
 const DOC_LINKS: Partial<Record<Platform, string>> = {
 	discord: "https://docs.spacebot.sh/discord-setup",
 	slack: "https://docs.spacebot.sh/slack-setup",
@@ -336,13 +332,10 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 					<div className="flex items-center gap-2">
 						<span className="text-sm font-medium text-ink">
 							{PLATFORM_LABELS[platform]}
-							{instance.name && <span className="text-ink-dull"> "{instance.name}"</span>}
 						</span>
-						{!instance.name && (
-							<span className="rounded bg-app-selected/60 px-1.5 py-0.5 text-[10px] font-medium uppercase leading-none text-ink-faint">
-								default
-							</span>
-						)}
+						<span className="rounded bg-app-selected/60 px-1.5 py-0.5 text-[10px] font-medium uppercase leading-none text-ink-faint">
+							{instance.name || "default"}
+						</span>
 						<span className={`text-tiny ${instance.enabled ? "text-green-400" : "text-ink-faint"}`}>
 							{instance.enabled ? "● Active" : "○ Disabled"}
 						</span>
@@ -505,8 +498,7 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 							)}
 
 							{/* Remove instance */}
-							{(
-								<div className="border-t border-app-line/50 pt-3">
+							<div className="border-t border-app-line/50 pt-3">
 									{!confirmRemove ? (
 										<Button
 											variant="outline"
@@ -537,7 +529,6 @@ export function InstanceCard({instance, expanded, onToggleExpand}: InstanceCardP
 										</div>
 									)}
 								</div>
-							)}
 						</div>
 					</motion.div>
 				)}
