@@ -62,6 +62,7 @@ context_window = 128000        # context window size in tokens
 history_backfill_count = 50    # messages to fetch from platform on new channel
 worker_log_mode = "errors_only" # "errors_only", "all_separate", or "all_combined"
 cron_timezone = "UTC"          # optional default timezone for cron active hours
+user_timezone = "UTC"          # optional default timezone for channel/worker time context
 
 # Model routing per process type.
 [defaults.routing]
@@ -116,6 +117,7 @@ id = "main"
 default = true
 workspace = "/custom/workspace/path"   # optional, defaults to ~/.spacebot/agents/{id}/workspace
 cron_timezone = "America/Los_Angeles"  # optional per-agent cron timezone override
+user_timezone = "America/Los_Angeles"  # optional per-agent timezone override for channel/worker time context
 
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
@@ -130,7 +132,7 @@ writable_paths = ["/home/user/projects/myapp"] # additional writable directories
 [[agents.cron]]
 id = "daily-check"
 prompt = "Check in on ongoing projects and report status."
-interval_secs = 86400
+cron_expr = "0 9 * * *"
 delivery_target = "discord:123456789"
 active_start_hour = 9
 active_end_hour = 17
@@ -417,6 +419,7 @@ At least one provider (legacy key or custom provider) must be configured.
 | `history_backfill_count` | integer | 50 | Messages to fetch from platform on new channel |
 | `worker_log_mode` | string | `"errors_only"` | Worker log persistence: `"errors_only"`, `"all_separate"`, or `"all_combined"` |
 | `cron_timezone` | string | None | Default timezone for cron active-hours evaluation (IANA name like `UTC` or `America/New_York`) |
+| `user_timezone` | string | inherits `cron_timezone` | Default timezone for channel/worker temporal context (IANA name) |
 
 ### `[defaults.routing]`
 
@@ -522,6 +525,7 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `default` | bool | false | Whether this is the default agent |
 | `workspace` | string | `~/.spacebot/agents/{id}/workspace` | Custom workspace path |
 | `cron_timezone` | string | inherits | Per-agent timezone override for cron active-hours evaluation |
+| `user_timezone` | string | inherits | Per-agent timezone override for channel/worker temporal context |
 | `max_concurrent_branches` | integer | inherits | Override instance default |
 | `max_turns` | integer | inherits | Override instance default |
 | `context_window` | integer | inherits | Override instance default |
@@ -562,6 +566,7 @@ writable_paths = ["/home/user/projects/myapp", "/var/data/shared"]
 |-----|------|---------|-------------|
 | `id` | string | **required** | Cron job identifier |
 | `prompt` | string | **required** | Prompt sent to a fresh channel on each tick |
+| `cron_expr` | string | None | Strict wall-clock schedule (cron expression, e.g. `0 9 * * *`) |
 | `interval_secs` | integer | 3600 | Seconds between firings |
 | `delivery_target` | string | **required** | Where to send results (`adapter:target`) |
 | `active_start_hour` | integer | None | Start of active hours window (24h format) |
@@ -576,6 +581,14 @@ Cron timezone precedence is:
 4. server local timezone
 
 If a configured timezone is invalid, Spacebot logs a warning and falls back to server local time.
+
+Channel/worker temporal context timezone precedence is:
+
+1. `agents.user_timezone`
+2. `defaults.user_timezone`
+3. `SPACEBOT_USER_TIMEZONE`
+4. resolved cron timezone (from `agents.cron_timezone` / `defaults.cron_timezone` / `SPACEBOT_CRON_TIMEZONE`)
+5. server local timezone
 
 ### `[messaging.discord]`
 
@@ -593,6 +606,29 @@ If a configured timezone is invalid, Spacebot logs a warning and falls back to s
 | `token` | string | None | Bot token from @BotFather (or `env:VAR_NAME`). Falls back to `TELEGRAM_BOT_TOKEN` env var |
 | `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot. Empty = DMs from anyone accepted |
 
+### `[messaging.email]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Email adapter |
+| `imap_host` | string | None | IMAP host (or `env:VAR_NAME`) |
+| `imap_port` | integer | 993 | IMAP port |
+| `imap_username` | string | None | IMAP username (or `env:VAR_NAME`) |
+| `imap_password` | string | None | IMAP password (or `env:VAR_NAME`) |
+| `imap_use_tls` | bool | true | Use direct TLS for IMAP |
+| `smtp_host` | string | None | SMTP host (or `env:VAR_NAME`) |
+| `smtp_port` | integer | 587 | SMTP port |
+| `smtp_username` | string | None | SMTP username (or `env:VAR_NAME`) |
+| `smtp_password` | string | None | SMTP password (or `env:VAR_NAME`) |
+| `smtp_use_starttls` | bool | true | Use STARTTLS for SMTP |
+| `from_address` | string | None | Sender address for outgoing replies (or `env:VAR_NAME`) |
+| `from_name` | string | None | Optional sender display name |
+| `poll_interval_secs` | integer | 30 | How often to check for new email |
+| `folders` | string[] | `["INBOX"]` | IMAP folders to poll |
+| `allowed_senders` | string[] | `[]` | Optional allowlist for inbound senders (empty = all) |
+| `max_body_bytes` | integer | 262144 | Max inbound body bytes before truncation |
+| `max_attachment_bytes` | integer | 10485760 | Max attachment bytes to process metadata for |
+
 ### `[messaging.webhook]`
 
 | Key | Type | Default | Description |
@@ -608,7 +644,7 @@ Routes platform conversations to agents. Checked in order; first match wins. Unm
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `agent_id` | string | **required** | Which agent handles matched messages |
-| `channel` | string | **required** | Platform name (`discord`, `webhook`) |
+| `channel` | string | **required** | Platform name (`discord`, `slack`, `telegram`, `twitch`, `email`, `webhook`) |
 | `guild_id` | string | None | Discord guild filter |
 | `chat_id` | string | None | Telegram chat filter |
 | `channel_ids` | string[] | [] | Discord channel ID filter (includes threads in those channels) |

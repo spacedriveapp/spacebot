@@ -13,6 +13,8 @@ use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
     ProcessType, WorkerId,
 };
+use chrono::{DateTime, Local, Utc};
+use chrono_tz::Tz;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use rig::message::{ImageMediaType, MimeType, UserContent};
@@ -32,6 +34,124 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// Maximum retriggers allowed since the last real user message. Prevents
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
+
+#[derive(Debug, Clone)]
+enum TemporalTimezone {
+    Named { timezone_name: String, timezone: Tz },
+    SystemLocal,
+}
+
+#[derive(Debug, Clone)]
+struct TemporalContext {
+    now_utc: DateTime<Utc>,
+    timezone: TemporalTimezone,
+}
+
+impl TemporalContext {
+    fn from_runtime(runtime_config: &crate::config::RuntimeConfig) -> Self {
+        let now_utc = Utc::now();
+        let user_timezone = runtime_config.user_timezone.load().as_ref().clone();
+        let cron_timezone = runtime_config.cron_timezone.load().as_ref().clone();
+
+        Self {
+            now_utc,
+            timezone: Self::resolve_timezone_from_names(user_timezone, cron_timezone),
+        }
+    }
+
+    fn resolve_timezone_from_names(
+        user_timezone: Option<String>,
+        cron_timezone: Option<String>,
+    ) -> TemporalTimezone {
+        if let Some(timezone_name) = user_timezone {
+            match timezone_name.parse::<Tz>() {
+                Ok(timezone) => {
+                    return TemporalTimezone::Named {
+                        timezone_name,
+                        timezone,
+                    };
+                }
+                Err(_) => {
+                    let cron_timezone_candidate =
+                        cron_timezone.as_deref().unwrap_or("none configured");
+                    tracing::warn!(
+                        timezone = %timezone_name,
+                        cron_timezone = %cron_timezone_candidate,
+                        "invalid runtime timezone for channel temporal context, will try cron_timezone then fall back to system local"
+                    );
+                }
+            }
+        }
+
+        if let Some(timezone_name) = cron_timezone {
+            match timezone_name.parse::<Tz>() {
+                Ok(timezone) => {
+                    return TemporalTimezone::Named {
+                        timezone_name,
+                        timezone,
+                    };
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        timezone = %timezone_name,
+                        error = %error,
+                        "invalid cron_timezone for channel temporal context, falling back to system local"
+                    );
+                }
+            }
+        }
+
+        TemporalTimezone::SystemLocal
+    }
+
+    fn format_timestamp(&self, timestamp: DateTime<Utc>) -> String {
+        match &self.timezone {
+            TemporalTimezone::Named {
+                timezone_name,
+                timezone,
+            } => {
+                let local_timestamp = timestamp.with_timezone(timezone);
+                format!(
+                    "{} ({}, UTC{})",
+                    local_timestamp.format("%Y-%m-%d %H:%M:%S %Z"),
+                    timezone_name,
+                    local_timestamp.format("%:z")
+                )
+            }
+            TemporalTimezone::SystemLocal => {
+                let local_timestamp = timestamp.with_timezone(&Local);
+                format!(
+                    "{} (system local, UTC{})",
+                    local_timestamp.format("%Y-%m-%d %H:%M:%S %Z"),
+                    local_timestamp.format("%:z")
+                )
+            }
+        }
+    }
+
+    fn current_time_line(&self) -> String {
+        format!(
+            "{}; UTC {}",
+            self.format_timestamp(self.now_utc),
+            self.now_utc.format("%Y-%m-%d %H:%M:%S UTC")
+        )
+    }
+
+    fn worker_task_preamble(&self, prompt_engine: &crate::prompts::PromptEngine) -> Result<String> {
+        let local_time = self.format_timestamp(self.now_utc);
+        let utc_time = self.now_utc.format("%Y-%m-%d %H:%M:%S UTC").to_string();
+        prompt_engine.render_system_worker_time_context(&local_time, &utc_time)
+    }
+}
+
+fn build_worker_task_with_temporal_context(
+    task: &str,
+    temporal_context: &TemporalContext,
+    prompt_engine: &crate::prompts::PromptEngine,
+) -> Result<String> {
+    let preamble = temporal_context.worker_task_preamble(prompt_engine)?;
+    Ok(format!("{preamble}\n\n{task}"))
+}
 
 /// A background process result waiting to be relayed to the user via retrigger.
 ///
@@ -145,6 +265,8 @@ pub struct Channel {
     pub self_tx: mpsc::Sender<InboundMessage>,
     /// Conversation ID from the first message (for synthetic re-trigger messages).
     pub conversation_id: Option<String>,
+    /// Adapter source captured from the first non-system message.
+    pub source_adapter: Option<String>,
     /// Conversation context (platform, channel name, server) captured from the first message.
     pub conversation_context: Option<String>,
     /// Context monitor that triggers background compaction.
@@ -257,6 +379,7 @@ impl Channel {
             response_tx,
             self_tx,
             conversation_id: None,
+            source_adapter: None,
             conversation_context: None,
             compactor,
             message_count: 0,
@@ -282,6 +405,21 @@ impl Channel {
             .get(self.deps.agent_id.as_ref())
             .map(String::as_str)
             .unwrap_or(self.deps.agent_id.as_ref())
+    }
+
+    fn current_adapter(&self) -> Option<&str> {
+        self.source_adapter
+            .as_deref()
+            .or_else(|| {
+                self.conversation_id
+                    .as_deref()
+                    .and_then(|conversation_id| conversation_id.split(':').next())
+            })
+            .filter(|adapter| !adapter.is_empty())
+    }
+
+    fn suppress_plaintext_fallback(&self) -> bool {
+        matches!(self.current_adapter(), Some("email"))
     }
 
     /// Run the channel event loop.
@@ -463,15 +601,17 @@ impl Channel {
     #[tracing::instrument(skip(self, messages), fields(channel_id = %self.id, agent_id = %self.deps.agent_id, message_count = messages.len()))]
     async fn handle_message_batch(&mut self, messages: Vec<InboundMessage>) -> Result<()> {
         let message_count = messages.len();
-        let first_timestamp = messages
-            .first()
-            .map(|m| m.timestamp)
+        let batch_start_timestamp = messages
+            .iter()
+            .map(|message| message.timestamp)
+            .min()
             .unwrap_or_else(chrono::Utc::now);
-        let last_timestamp = messages
-            .last()
-            .map(|m| m.timestamp)
-            .unwrap_or(first_timestamp);
-        let elapsed = last_timestamp.signed_duration_since(first_timestamp);
+        let batch_tail_timestamp = messages
+            .iter()
+            .map(|message| message.timestamp)
+            .max()
+            .unwrap_or(batch_start_timestamp);
+        let elapsed = batch_tail_timestamp.signed_duration_since(batch_start_timestamp);
         let elapsed_secs = elapsed.num_milliseconds() as f64 / 1000.0;
 
         tracing::info!(
@@ -491,6 +631,13 @@ impl Channel {
             && let Some(first) = messages.first()
         {
             self.conversation_id = Some(first.conversation_id.clone());
+        }
+
+        if self.source_adapter.is_none()
+            && let Some(first) = messages.first()
+            && first.source != "system"
+        {
+            self.source_adapter = Some(first.source.clone());
         }
 
         // Capture conversation context from the first message
@@ -528,6 +675,7 @@ impl Channel {
         // Persist each message to conversation log (individual audit trail)
         let mut user_contents: Vec<UserContent> = Vec::new();
         let mut conversation_id = String::new();
+        let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
 
         for message in &messages {
             if message.source != "system" {
@@ -561,11 +709,11 @@ impl Channel {
 
                 conversation_id = message.conversation_id.clone();
 
-                // Format with relative timestamp
-                let relative_secs = message
-                    .timestamp
-                    .signed_duration_since(first_timestamp)
-                    .num_seconds();
+                // Include both absolute and relative time context.
+                let relative_secs = batch_tail_timestamp
+                    .signed_duration_since(message.timestamp)
+                    .num_seconds()
+                    .max(0);
                 let relative_text = if relative_secs < 1 {
                     "just now".to_string()
                 } else if relative_secs < 60 {
@@ -573,15 +721,16 @@ impl Channel {
                 } else {
                     format!("{}m ago", relative_secs / 60)
                 };
+                let absolute_timestamp = temporal_context.format_timestamp(message.timestamp);
 
-                let display_name = message
-                    .metadata
-                    .get("sender_display_name")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(&message.sender_id);
+                let display_name = message_display_name(message);
 
-                let formatted_text =
-                    format!("[{}] ({}): {}", display_name, relative_text, raw_text);
+                let formatted_text = format_batched_user_message(
+                    display_name,
+                    &absolute_timestamp,
+                    &relative_text,
+                    &raw_text,
+                );
 
                 // Download attachments for this message
                 if !attachments.is_empty() {
@@ -669,9 +818,11 @@ impl Channel {
             opencode_enabled,
         )?;
 
+        let temporal_context = TemporalContext::from_runtime(rc.as_ref());
+        let current_time_line = temporal_context.current_time_line();
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render()
+            status.render_with_time_context(Some(&current_time_line))
         };
 
         // Render coalesce hint
@@ -683,6 +834,10 @@ impl Channel {
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
+
+        let adapter_prompt = self
+            .current_adapter()
+            .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -696,6 +851,7 @@ impl Channel {
             coalesce_hint,
             available_channels,
             org_context,
+            adapter_prompt,
         )
     }
 
@@ -717,6 +873,10 @@ impl Channel {
             self.conversation_id = Some(message.conversation_id.clone());
         }
 
+        if self.source_adapter.is_none() && message.source != "system" {
+            self.source_adapter = Some(message.source.clone());
+        }
+
         let (raw_text, attachments) = match &message.content {
             crate::MessageContent::Text(text) => (text.clone(), Vec::new()),
             crate::MessageContent::Media { text, attachments } => {
@@ -726,7 +886,9 @@ impl Channel {
             crate::MessageContent::Interaction { .. } => (message.content.to_string(), Vec::new()),
         };
 
-        let user_text = format_user_message(&raw_text, &message);
+        let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
+        let message_timestamp = temporal_context.format_timestamp(message.timestamp);
+        let user_text = format_user_message(&raw_text, &message, &message_timestamp);
 
         let attachment_content = if !attachments.is_empty() {
             download_attachments(&self.deps, &attachments).await
@@ -958,14 +1120,20 @@ impl Channel {
             opencode_enabled,
         )?;
 
+        let temporal_context = TemporalContext::from_runtime(rc.as_ref());
+        let current_time_line = temporal_context.current_time_line();
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render()
+            status.render_with_time_context(Some(&current_time_line))
         };
 
         let available_channels = self.build_available_channels().await;
 
         let org_context = self.build_org_context(&prompt_engine);
+
+        let adapter_prompt = self
+            .current_adapter()
+            .and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -979,6 +1147,7 @@ impl Channel {
             None, // coalesce_hint - only set for batched messages
             available_channels,
             org_context,
+            adapter_prompt,
         )
     }
 
@@ -1001,6 +1170,7 @@ impl Channel {
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
+        let allow_direct_reply = !self.suppress_plaintext_fallback();
 
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
@@ -1011,6 +1181,7 @@ impl Channel {
             replied_flag.clone(),
             self.deps.cron_tool.clone(),
             self.send_agent_message_tool.clone(),
+            allow_direct_reply,
         )
         .await
         {
@@ -1102,7 +1273,9 @@ impl Channel {
             );
         }
 
-        if let Err(error) = crate::tools::remove_channel_tools(&self.tool_server).await {
+        if let Err(error) =
+            crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
+        {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
@@ -1127,6 +1300,8 @@ impl Channel {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
                 let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
+                let suppress_plaintext_fallback = self.suppress_plaintext_fallback();
+                let adapter = self.current_adapter().unwrap_or("unknown");
 
                 if skipped && is_retrigger {
                     // The LLM skipped on a retrigger turn. This means a worker
@@ -1139,6 +1314,12 @@ impl Channel {
                             tracing::warn!(
                                 channel_id = %self.id,
                                 "blocked retrigger fallback output containing structured or tool syntax"
+                            );
+                        } else if suppress_plaintext_fallback {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                adapter,
+                                "suppressing retrigger plaintext fallback for adapter; explicit reply tool call required"
                             );
                         } else {
                             tracing::info!(
@@ -1193,6 +1374,12 @@ impl Channel {
                                 channel_id = %self.id,
                                 "blocked retrigger output containing structured or tool syntax"
                             );
+                        } else if suppress_plaintext_fallback {
+                            tracing::info!(
+                                channel_id = %self.id,
+                                adapter,
+                                "suppressing retrigger plaintext output for adapter; explicit reply tool call required"
+                            );
                         } else {
                             tracing::info!(
                                 channel_id = %self.id,
@@ -1238,6 +1425,12 @@ impl Channel {
                         tracing::warn!(
                             channel_id = %self.id,
                             "blocked fallback output containing structured or tool syntax"
+                        );
+                    } else if suppress_plaintext_fallback {
+                        tracing::info!(
+                            channel_id = %self.id,
+                            adapter,
+                            "suppressing plaintext fallback for adapter; explicit reply tool call required"
                         );
                     } else {
                         let extracted = extract_reply_from_tool_syntax(text);
@@ -1626,8 +1819,10 @@ impl Channel {
 
     /// Get the current status block as a string.
     pub async fn get_status(&self) -> String {
+        let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
+        let current_time_line = temporal_context.current_time_line();
         let status = self.state.status_block.read().await;
-        status.render()
+        status.render_with_time_context(Some(&current_time_line))
     }
 
     /// Check if a memory persistence branch should be spawned based on message count.
@@ -1791,6 +1986,7 @@ async fn spawn_branch(
         state.deps.agent_id.clone(),
         state.deps.task_store.clone(),
         state.deps.memory_search.clone(),
+        state.deps.runtime_config.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
         crate::conversation::ProcessRunLogger::new(state.deps.sqlite_pool.clone()),
@@ -1884,6 +2080,10 @@ pub async fn spawn_worker_from_state(
 
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
+    let temporal_context = TemporalContext::from_runtime(rc.as_ref());
+    let worker_task =
+        build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
+            .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &rc.instance_dir.display().to_string(),
@@ -1911,7 +2111,7 @@ pub async fn spawn_worker_from_state(
     let worker = if interactive {
         let (worker, input_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
-            &task,
+            &worker_task,
             &system_prompt,
             state.deps.clone(),
             browser_config.clone(),
@@ -1929,7 +2129,7 @@ pub async fn spawn_worker_from_state(
     } else {
         Worker::new(
             Some(state.channel_id.clone()),
-            &task,
+            &worker_task,
             &system_prompt,
             state.deps.clone(),
             browser_config,
@@ -1996,6 +2196,11 @@ pub async fn spawn_opencode_worker_from_state(
     let directory = std::path::PathBuf::from(directory);
 
     let rc = &state.deps.runtime_config;
+    let prompt_engine = rc.prompts.load();
+    let temporal_context = TemporalContext::from_runtime(rc.as_ref());
+    let worker_task =
+        build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
+            .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let opencode_config = rc.opencode.load();
 
     if !opencode_config.enabled {
@@ -2010,7 +2215,7 @@ pub async fn spawn_opencode_worker_from_state(
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
-            &task,
+            &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
@@ -2026,7 +2231,7 @@ pub async fn spawn_opencode_worker_from_state(
         crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
-            &task,
+            &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
@@ -2195,7 +2400,20 @@ fn extract_reply_from_tool_syntax(text: &str) -> Option<String> {
 ///
 /// In multi-user channels, this lets the LLM distinguish who said what.
 /// System-generated messages (re-triggers) are passed through as-is.
-fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
+fn message_display_name(message: &InboundMessage) -> &str {
+    message
+        .formatted_author
+        .as_deref()
+        .or_else(|| {
+            message
+                .metadata
+                .get("sender_display_name")
+                .and_then(|v| v.as_str())
+        })
+        .unwrap_or(&message.sender_id)
+}
+
+fn format_user_message(raw_text: &str, message: &InboundMessage, timestamp_text: &str) -> String {
     if message.source == "system" {
         // System messages should never be empty, but guard against it
         return if raw_text.trim().is_empty() {
@@ -2205,17 +2423,7 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         };
     }
 
-    // Use platform-formatted author if available, fall back to metadata
-    let display_name = message
-        .formatted_author
-        .as_deref()
-        .or_else(|| {
-            message
-                .metadata
-                .get("sender_display_name")
-                .and_then(|v| v.as_str())
-        })
-        .unwrap_or(&message.sender_id);
+    let display_name = message_display_name(message);
 
     let bot_tag = if message
         .metadata
@@ -2255,7 +2463,21 @@ fn format_user_message(raw_text: &str, message: &InboundMessage) -> String {
         raw_text
     };
 
-    format!("{display_name}{bot_tag}{reply_context}: {text_content}")
+    format!("{display_name}{bot_tag}{reply_context} [{timestamp_text}]: {text_content}")
+}
+
+fn format_batched_user_message(
+    display_name: &str,
+    absolute_timestamp: &str,
+    relative_text: &str,
+    raw_text: &str,
+) -> String {
+    let text_content = if raw_text.trim().is_empty() {
+        "[attachment or empty message]"
+    } else {
+        raw_text
+    };
+    format!("[{display_name}] ({absolute_timestamp}; {relative_text}): {text_content}")
 }
 
 fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
@@ -3126,7 +3348,7 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let formatted = format_user_message("", &message);
+        let formatted = format_user_message("", &message, "2026-02-26 12:00:00 UTC");
         assert!(
             !formatted.trim().is_empty(),
             "formatted message should not be empty"
@@ -3137,7 +3359,7 @@ mod tests {
         );
 
         // Test whitespace-only text
-        let formatted_ws = format_user_message("   ", &message);
+        let formatted_ws = format_user_message("   ", &message, "2026-02-26 12:00:00 UTC");
         assert!(
             formatted_ws.contains("[attachment or empty message]"),
             "should use placeholder for whitespace-only text"
@@ -3156,21 +3378,173 @@ mod tests {
             timestamp: Utc::now(),
         };
 
-        let formatted_sys = format_user_message("", &system_message);
+        let formatted_sys = format_user_message("", &system_message, "2026-02-26 12:00:00 UTC");
         assert_eq!(
             formatted_sys, "[system event]",
             "system messages should use [system event] placeholder"
         );
 
         // Test normal message with text
-        let formatted_normal = format_user_message("hello", &message);
+        let formatted_normal = format_user_message("hello", &message, "2026-02-26 12:00:00 UTC");
         assert!(
             formatted_normal.contains("hello"),
             "normal messages should preserve text"
         );
         assert!(
+            formatted_normal.contains("[2026-02-26 12:00:00 UTC]"),
+            "normal messages should include absolute timestamp context"
+        );
+        assert!(
             !formatted_normal.contains("[attachment or empty message]"),
             "normal messages should not use placeholder"
+        );
+    }
+
+    #[test]
+    fn message_display_name_uses_consistent_fallback_order() {
+        use super::message_display_name;
+        use crate::{Arc, InboundMessage};
+        use chrono::Utc;
+        use std::collections::HashMap;
+
+        let mut metadata_only = HashMap::new();
+        metadata_only.insert(
+            "sender_display_name".to_string(),
+            serde_json::Value::String("Metadata User".to_string()),
+        );
+        let metadata_message = InboundMessage {
+            id: "metadata".to_string(),
+            agent_id: Some(Arc::from("test_agent")),
+            sender_id: "sender123".to_string(),
+            conversation_id: "conv".to_string(),
+            content: crate::MessageContent::Text("hello".to_string()),
+            source: "discord".to_string(),
+            metadata: metadata_only,
+            formatted_author: None,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(message_display_name(&metadata_message), "Metadata User");
+
+        let mut both_metadata = HashMap::new();
+        both_metadata.insert(
+            "sender_display_name".to_string(),
+            serde_json::Value::String("Metadata User".to_string()),
+        );
+        let formatted_author_message = InboundMessage {
+            id: "formatted".to_string(),
+            agent_id: Some(Arc::from("test_agent")),
+            sender_id: "sender123".to_string(),
+            conversation_id: "conv".to_string(),
+            content: crate::MessageContent::Text("hello".to_string()),
+            source: "discord".to_string(),
+            metadata: both_metadata,
+            formatted_author: Some("Formatted Author".to_string()),
+            timestamp: Utc::now(),
+        };
+        assert_eq!(
+            message_display_name(&formatted_author_message),
+            "Formatted Author"
+        );
+
+        let sender_fallback_message = InboundMessage {
+            id: "fallback".to_string(),
+            agent_id: Some(Arc::from("test_agent")),
+            sender_id: "sender123".to_string(),
+            conversation_id: "conv".to_string(),
+            content: crate::MessageContent::Text("hello".to_string()),
+            source: "discord".to_string(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+            timestamp: Utc::now(),
+        };
+        assert_eq!(message_display_name(&sender_fallback_message), "sender123");
+    }
+
+    #[test]
+    fn worker_task_temporal_context_preamble_includes_absolute_dates() {
+        let prompt_engine =
+            crate::prompts::PromptEngine::new("en").expect("prompt engine should initialize");
+        let temporal_context = super::TemporalContext {
+            now_utc: chrono::DateTime::parse_from_rfc3339("2026-02-26T20:30:00Z")
+                .expect("valid RFC3339 timestamp")
+                .with_timezone(&chrono::Utc),
+            timezone: super::TemporalTimezone::Named {
+                timezone_name: "America/New_York".to_string(),
+                timezone: "America/New_York"
+                    .parse()
+                    .expect("valid timezone identifier"),
+            },
+        };
+
+        let worker_task = super::build_worker_task_with_temporal_context(
+            "Run the migration checks",
+            &temporal_context,
+            &prompt_engine,
+        )
+        .expect("worker task preamble should render");
+        assert!(
+            worker_task.contains("Current local date/time:"),
+            "worker task should include local time context"
+        );
+        assert!(
+            worker_task.contains("Current UTC date/time:"),
+            "worker task should include UTC time context"
+        );
+        assert!(
+            worker_task.contains("Run the migration checks"),
+            "worker task should preserve the original task body"
+        );
+    }
+
+    #[test]
+    fn temporal_context_uses_cron_timezone_when_user_timezone_is_invalid() {
+        let resolved = super::TemporalContext::resolve_timezone_from_names(
+            Some("Not/A-Real-Tz".to_string()),
+            Some("America/Los_Angeles".to_string()),
+        );
+        match resolved {
+            super::TemporalTimezone::Named { timezone_name, .. } => {
+                assert_eq!(timezone_name, "America/Los_Angeles");
+            }
+            super::TemporalTimezone::SystemLocal => {
+                panic!("expected cron timezone fallback, got system local")
+            }
+        }
+    }
+
+    #[test]
+    fn format_batched_message_includes_absolute_and_relative_time() {
+        let formatted = super::format_batched_user_message(
+            "alice",
+            "2026-02-26 15:04:05 PST (America/Los_Angeles, UTC-08:00)",
+            "12s ago",
+            "ship it",
+        );
+        assert!(
+            formatted.contains("2026-02-26 15:04:05 PST"),
+            "batched formatting should include absolute timestamp"
+        );
+        assert!(
+            formatted.contains("12s ago"),
+            "batched formatting should include relative timestamp hint"
+        );
+        assert!(
+            formatted.contains("ship it"),
+            "batched formatting should include original message text"
+        );
+    }
+
+    #[test]
+    fn format_batched_message_uses_placeholder_for_empty_text() {
+        let formatted = super::format_batched_user_message(
+            "alice",
+            "2026-02-26 15:04:05 PST (America/Los_Angeles, UTC-08:00)",
+            "just now",
+            "   ",
+        );
+        assert!(
+            formatted.contains("[attachment or empty message]"),
+            "batched formatting should use placeholder for empty/whitespace text"
         );
     }
 }

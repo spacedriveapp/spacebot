@@ -4,6 +4,7 @@ use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -29,6 +30,8 @@ pub(super) struct CreateCronRequest {
     agent_id: String,
     id: String,
     prompt: String,
+    #[serde(default)]
+    cron_expr: Option<String>,
     #[serde(default = "default_interval")]
     interval_secs: u64,
     delivery_target: String,
@@ -75,6 +78,7 @@ pub(super) struct ToggleCronRequest {
 struct CronJobWithStats {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: u64,
     delivery_target: String,
     enabled: bool,
@@ -130,6 +134,7 @@ pub(super) async fn list_cron_jobs(
         jobs.push(CronJobWithStats {
             id: config.id,
             prompt: config.prompt,
+            cron_expr: config.cron_expr,
             interval_secs: config.interval_secs,
             delivery_target: config.delivery_target,
             enabled: config.enabled,
@@ -194,7 +199,13 @@ fn validate_cron_request(request: &CreateCronRequest) -> Result<(), (StatusCode,
         ));
     }
 
-    if request.interval_secs < MIN_CRON_INTERVAL_SECS {
+    let cron_expr = request
+        .cron_expr
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    if cron_expr.is_none() && request.interval_secs < MIN_CRON_INTERVAL_SECS {
         return Err((
             StatusCode::BAD_REQUEST,
             format!(
@@ -202,6 +213,22 @@ fn validate_cron_request(request: &CreateCronRequest) -> Result<(), (StatusCode,
                 request.interval_secs
             ),
         ));
+    }
+
+    if let Some(expr) = cron_expr {
+        let field_count = expr.split_whitespace().count();
+        if field_count != 5 {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("cron_expr must have exactly 5 fields (got {field_count}): '{expr}'"),
+            ));
+        }
+        cron::Schedule::from_str(expr).map_err(|error| {
+            (
+                StatusCode::BAD_REQUEST,
+                format!("invalid cron_expr '{expr}': {error}"),
+            )
+        })?;
     }
 
     if request.prompt.len() > MAX_CRON_PROMPT_LENGTH {
@@ -291,6 +318,12 @@ pub(super) async fn create_or_update_cron(
     let config = crate::cron::CronConfig {
         id: request.id.clone(),
         prompt: request.prompt,
+        cron_expr: request
+            .cron_expr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string),
         interval_secs: request.interval_secs,
         delivery_target: request.delivery_target,
         active_hours,

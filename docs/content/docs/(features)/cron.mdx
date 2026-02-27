@@ -44,6 +44,7 @@ The configuration table. One row per cron job.
 CREATE TABLE cron_jobs (
     id TEXT PRIMARY KEY,
     prompt TEXT NOT NULL,
+    cron_expr TEXT,
     interval_secs INTEGER NOT NULL DEFAULT 3600,
     delivery_target TEXT NOT NULL,
     active_start_hour INTEGER,
@@ -57,6 +58,7 @@ CREATE TABLE cron_jobs (
 |--------|-------------|
 | `id` | Short unique name (e.g. "check-email", "daily-summary") |
 | `prompt` | The instruction to execute on each run |
+| `cron_expr` | Optional strict wall-clock schedule (cron expression, e.g. `0 9 * * *`) |
 | `interval_secs` | Seconds between runs (3600 = hourly, 86400 = daily) |
 | `delivery_target` | Where to send results, format `adapter:target` (e.g. `discord:123456789`) |
 | `active_start_hour` | Optional start of active window (0-23, 24h local time) |
@@ -113,6 +115,12 @@ active_start_hour = 9
 active_end_hour = 10
 
 [[agents.cron]]
+id = "daily-standup"
+prompt = "Post a standup reminder."
+cron_expr = "0 9 * * 1-5"
+delivery_target = "discord:123456789012345678"
+
+[[agents.cron]]
 id = "check-inbox"
 prompt = "Check the inbox for anything that needs attention."
 interval_secs = 1800
@@ -130,6 +138,7 @@ A user says "check my email every day at 9am" and the channel LLM calls the `cro
   "action": "create",
   "id": "check-email",
   "prompt": "Check the user's email inbox and summarize any important messages.",
+  "cron_expr": "0 9 * * *",
   "interval_secs": 86400,
   "delivery_target": "discord:123456789",
   "active_start_hour": 9,
@@ -164,7 +173,7 @@ If active hours are not set, the cron job runs at all hours.
 
 If a configured timezone is invalid, Spacebot logs a warning and falls back to server local timezone.
 
-Active hours don't affect the timer interval — the timer still ticks at `interval_secs`. When a tick lands outside the active window, it's skipped. The next tick happens at the normal interval, not "as soon as the window opens."
+For cron-expression jobs, active hours are evaluated at fire time and can further gate delivery. For legacy interval jobs, active hours don't change tick cadence — ticks outside the window are skipped.
 
 ## Circuit Breaker
 
@@ -279,7 +288,7 @@ pub struct CronContext {
 
 ## What's Not Implemented Yet
 
-- **Cron expressions** — only fixed intervals for now. A cron job that should run "at 9am daily" currently uses `interval_secs: 86400` with `active_start_hour: 9, active_end_hour: 10`. Real cron scheduling would be more precise.
+- **Cron expressions in config/tool/API are now supported** and are preferred for exact local-time schedules.
 - **Error backoff** — on failure, the next attempt happens at the normal interval. Progressive backoff (30s → 1m → 5m → 15m → 60m) would reduce cost during outages.
 - **Cross-run context** — each cron job starts with a blank history. A cron job that needs to know what it found last time would need to use memory recall.
 - **Cortex management** — the cortex should be able to observe cron job health, re-enable circuit-broken jobs, and create new cron jobs based on patterns.

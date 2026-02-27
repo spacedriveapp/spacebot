@@ -796,11 +796,11 @@ function ChannelsSection() {
 		{ platform: "slack" as const, name: "Slack", description: "Slack bot integration" },
 		{ platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration" },
 		{ platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration" },
+		{ platform: "email" as const, name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
 		{ platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver" },
 	] as const;
 
 	const COMING_SOON = [
-		{ platform: "email", name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
 		{ platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration" },
 		{ platform: "matrix", name: "Matrix", description: "Decentralized chat protocol" },
 		{ platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge" },

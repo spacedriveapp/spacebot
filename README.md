@@ -119,7 +119,8 @@ Every memory has a type, an importance score, and graph edges connecting it to r
 Cron jobs created and managed from conversation or config:
 
 - **Natural scheduling** — "check my inbox every 30 minutes" becomes a cron job with a delivery target
-- **Clock-aligned intervals** — sub-daily intervals snap to UTC boundaries so jobs fire on clean marks (e.g. every 30 min fires at :00 and :30)
+- **Strict wall-clock schedules** — use cron expressions for exact local-time execution (for example, `0 9 * * *` for 9:00 every day)
+- **Legacy interval compatibility** — existing `interval_secs` jobs still run and remain configurable
 - **Configurable timeouts** — per-job `timeout_secs` to cap execution time (defaults to 120s)
 - **Active hours** — restrict jobs to specific time windows (supports midnight wrapping)
 - **Circuit breaker** — auto-disables after 3 consecutive failures
@@ -236,6 +237,26 @@ transport = "http"
 url = "https://mcp.sentry.io"
 headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
 ```
+
+### Security
+
+Workers execute arbitrary shell commands and subprocesses on your behalf. Spacebot uses defense-in-depth to contain what those processes can do:
+
+- **Process sandbox** — shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the entire filesystem is read-only except the agent's workspace and any explicitly configured writable paths. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. No amount of LLM creativity can write outside the sandbox — it's kernel-enforced, not string-filtered
+- **Workspace isolation** — file tools canonicalize all paths and reject anything outside the agent's workspace. Symlinks that escape the workspace are blocked
+- **Leak detection** — a hook scans every tool argument before execution and every tool result after execution for secret patterns (API keys, tokens, PEM private keys) across plaintext, URL-encoded, base64, and hex encodings. Leaked secrets in arguments skip the tool call; leaked secrets in output terminate the agent
+- **Library injection blocking** — the exec tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, etc.) that could hijack child process loading
+- **SSRF protection** — the browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
+- **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, and `USER.md` are blocked at the application level
+- **Secret encryption** — credentials stored via the secrets system are encrypted at rest with AES-256-GCM
+
+```toml
+[agents.sandbox]
+mode = "enabled"                              # "enabled" (default) or "disabled"
+writable_paths = ["/home/user/projects/myapp"] # additional writable dirs beyond workspace
+```
+
+On the hosted platform, sandbox mode is always forced to `enabled` regardless of user config.
 
 ---
 
@@ -355,9 +376,9 @@ Memories are structured objects, not files. Every memory is a row in SQLite with
 
 Scheduled recurring tasks. Each cron job gets a fresh short-lived channel with full branching and worker capabilities.
 
-- Multiple cron jobs run independently at different intervals
+- Multiple cron jobs run independently on wall-clock schedules (or legacy intervals)
 - Stored in the database, created via config, conversation, or programmatically
-- Clock-aligned intervals snap to UTC boundaries for predictable firing times
+- Cron expressions execute against the resolved cron timezone for predictable local-time firing
 - Per-job `timeout_secs` to cap execution time
 - Circuit breaker auto-disables after 3 consecutive failures
 - Active hours support with midnight wrapping
@@ -503,11 +524,13 @@ Contributions welcome. Read [RUST_STYLE_GUIDE.md](RUST_STYLE_GUIDE.md) before wr
 
 1. Fork the repo
 2. Create a feature branch
-3. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
-4. Make your changes
-5. Submit a PR
+3. Install `just` (https://github.com/casey/just) if it is not already available (for example: `brew install just` or `cargo install just --locked`)
+4. Run `./scripts/install-git-hooks.sh` once (installs pre-commit formatting hook)
+5. Make your changes
+6. Run `just preflight` and `just gate-pr`
+7. Submit a PR
 
-Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit.
+Formatting is still enforced in CI, but the hook catches it earlier by running `cargo fmt --all` before each commit. `just gate-pr` mirrors the CI gate and includes migration safety, compile checks, and test verification.
 
 ---
 

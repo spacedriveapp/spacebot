@@ -221,6 +221,7 @@ async fn dump_channel_context() {
         replied_flag,
         None,
         None,
+        true,
     )
     .await
     .expect("failed to add channel tools");
@@ -278,6 +279,7 @@ async fn dump_branch_context() {
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        deps.runtime_config.clone(),
         conversation_logger,
         channel_store,
         run_logger,
@@ -439,6 +441,7 @@ async fn dump_all_contexts() {
         replied_flag,
         None,
         None,
+        true,
     )
     .await
     .expect("failed to add channel tools");
@@ -465,6 +468,7 @@ async fn dump_all_contexts() {
         deps.agent_id.clone(),
         deps.task_store.clone(),
         deps.memory_search.clone(),
+        deps.runtime_config.clone(),
         conversation_logger,
         channel_store,
         run_logger,

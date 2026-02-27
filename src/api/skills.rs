@@ -27,6 +27,8 @@ pub(super) struct SkillInfo {
     file_path: String,
     base_dir: String,
     source: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_repo: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -145,6 +147,7 @@ pub(super) async fn list_skills(
                 crate::skills::SkillSource::Instance => "instance".to_string(),
                 crate::skills::SkillSource::Workspace => "workspace".to_string(),
             },
+            source_repo: s.source_repo,
         })
         .collect();
 

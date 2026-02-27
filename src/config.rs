@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
+const USER_TIMEZONE_ENV_VAR: &str = "SPACEBOT_USER_TIMEZONE";
 
 /// OpenTelemetry export configuration.
 ///
@@ -534,6 +535,8 @@ pub struct DefaultsConfig {
     pub brave_search_key: Option<String>,
     /// Default timezone used when evaluating cron active hours.
     pub cron_timezone: Option<String>,
+    /// Default timezone for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     pub history_backfill_count: usize,
     pub cron: Vec<CronDef>,
     pub opencode: OpenCodeConfig,
@@ -562,6 +565,8 @@ impl std::fmt::Debug for DefaultsConfig {
                 "brave_search_key",
                 &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field("cron_timezone", &self.cron_timezone)
+            .field("user_timezone", &self.user_timezone)
             .field("history_backfill_count", &self.history_backfill_count)
             .field("cron", &self.cron)
             .field("opencode", &self.opencode)
@@ -953,6 +958,8 @@ pub struct AgentConfig {
     pub brave_search_key: Option<String>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
+    /// Optional timezone override for channel/worker temporal context.
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: Option<crate::sandbox::SandboxConfig>,
     /// Cron job definitions for this agent.
@@ -964,6 +971,9 @@ pub struct AgentConfig {
 pub struct CronDef {
     pub id: String,
     pub prompt: String,
+    /// Optional cron expression (wall-clock schedule) in standard 5-field format.
+    /// When set, this takes precedence over `interval_secs`.
+    pub cron_expr: Option<String>,
     pub interval_secs: u64,
     /// Delivery target in "adapter:target" format (e.g. "discord:123456789").
     pub delivery_target: String,
@@ -1001,6 +1011,7 @@ pub struct ResolvedAgentConfig {
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
+    pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
     pub sandbox: crate::sandbox::SandboxConfig,
     /// Number of messages to fetch from the platform when a new channel is created.
@@ -1027,6 +1038,7 @@ impl Default for DefaultsConfig {
             mcp: Vec::new(),
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             history_backfill_count: 50,
             cron: Vec::new(),
             opencode: OpenCodeConfig::default(),
@@ -1039,6 +1051,17 @@ impl AgentConfig {
     /// Resolve this agent config against instance defaults and base paths.
     pub fn resolve(&self, instance_dir: &Path, defaults: &DefaultsConfig) -> ResolvedAgentConfig {
         let agent_root = instance_dir.join("agents").join(&self.id);
+        let resolved_cron_timezone = resolve_cron_timezone(
+            &self.id,
+            self.cron_timezone.as_deref(),
+            defaults.cron_timezone.as_deref(),
+        );
+        let resolved_user_timezone = resolve_user_timezone(
+            &self.id,
+            self.user_timezone.as_deref(),
+            defaults.user_timezone.as_deref(),
+            resolved_cron_timezone.as_deref(),
+        );
 
         ResolvedAgentConfig {
             id: self.id.clone(),
@@ -1080,11 +1103,8 @@ impl AgentConfig {
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
-            cron_timezone: resolve_cron_timezone(
-                &self.id,
-                self.cron_timezone.as_deref(),
-                defaults.cron_timezone.as_deref(),
-            ),
+            cron_timezone: resolved_cron_timezone,
+            user_timezone: resolved_user_timezone,
             sandbox: self.sandbox.clone().unwrap_or_default(),
             history_backfill_count: defaults.history_backfill_count,
             cron: self.cron.clone(),
@@ -1281,6 +1301,7 @@ pub struct MessagingConfig {
     pub discord: Option<DiscordConfig>,
     pub slack: Option<SlackConfig>,
     pub telegram: Option<TelegramConfig>,
+    pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
 }
@@ -1497,6 +1518,53 @@ impl std::fmt::Debug for TelegramConfig {
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct EmailConfig {
+    pub enabled: bool,
+    pub imap_host: String,
+    pub imap_port: u16,
+    pub imap_username: String,
+    pub imap_password: String,
+    pub imap_use_tls: bool,
+    pub smtp_host: String,
+    pub smtp_port: u16,
+    pub smtp_username: String,
+    pub smtp_password: String,
+    pub smtp_use_starttls: bool,
+    pub from_address: String,
+    pub from_name: Option<String>,
+    pub poll_interval_secs: u64,
+    pub folders: Vec<String>,
+    pub allowed_senders: Vec<String>,
+    pub max_body_bytes: usize,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for EmailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmailConfig")
+            .field("enabled", &self.enabled)
+            .field("imap_host", &self.imap_host)
+            .field("imap_port", &self.imap_port)
+            .field("imap_username", &"[REDACTED]")
+            .field("imap_password", &"[REDACTED]")
+            .field("imap_use_tls", &self.imap_use_tls)
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_username", &"[REDACTED]")
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_use_starttls", &self.smtp_use_starttls)
+            .field("from_address", &"[REDACTED]")
+            .field("from_name", &self.from_name)
+            .field("poll_interval_secs", &self.poll_interval_secs)
+            .field("folders", &self.folders)
+            .field("allowed_senders", &"[REDACTED]")
+            .field("max_body_bytes", &self.max_body_bytes)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
     }
 }
@@ -1914,6 +1982,7 @@ struct TomlDefaultsConfig {
     mcp: Vec<TomlMcpServerConfig>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     opencode: Option<TomlOpenCodeConfig>,
     worker_log_mode: Option<String>,
 }
@@ -2059,6 +2128,7 @@ struct TomlAgentConfig {
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
     cron_timezone: Option<String>,
+    user_timezone: Option<String>,
     sandbox: Option<crate::sandbox::SandboxConfig>,
     #[serde(default)]
     cron: Vec<TomlCronDef>,
@@ -2068,6 +2138,7 @@ struct TomlAgentConfig {
 struct TomlCronDef {
     id: String,
     prompt: String,
+    cron_expr: Option<String>,
     interval_secs: Option<u64>,
     delivery_target: String,
     active_start_hour: Option<u8>,
@@ -2088,6 +2159,7 @@ struct TomlMessagingConfig {
     discord: Option<TomlDiscordConfig>,
     slack: Option<TomlSlackConfig>,
     telegram: Option<TomlTelegramConfig>,
+    email: Option<TomlEmailConfig>,
     webhook: Option<TomlWebhookConfig>,
     twitch: Option<TomlTwitchConfig>,
 }
@@ -2132,6 +2204,38 @@ struct TomlTelegramConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlEmailConfig {
+    #[serde(default)]
+    enabled: bool,
+    imap_host: Option<String>,
+    #[serde(default = "default_email_imap_port")]
+    imap_port: u16,
+    imap_username: Option<String>,
+    imap_password: Option<String>,
+    #[serde(default = "default_email_imap_use_tls")]
+    imap_use_tls: bool,
+    smtp_host: Option<String>,
+    #[serde(default = "default_email_smtp_port")]
+    smtp_port: u16,
+    smtp_username: Option<String>,
+    smtp_password: Option<String>,
+    #[serde(default = "default_email_smtp_use_starttls")]
+    smtp_use_starttls: bool,
+    from_address: Option<String>,
+    from_name: Option<String>,
+    #[serde(default = "default_email_poll_interval_secs")]
+    poll_interval_secs: u64,
+    #[serde(default = "default_email_folders")]
+    folders: Vec<String>,
+    #[serde(default)]
+    allowed_senders: Vec<String>,
+    #[serde(default = "default_email_max_body_bytes")]
+    max_body_bytes: usize,
+    #[serde(default = "default_email_max_attachment_bytes")]
+    max_attachment_bytes: usize,
+}
+
+#[derive(Deserialize)]
 struct TomlWebhookConfig {
     #[serde(default)]
     enabled: bool,
@@ -2161,6 +2265,38 @@ fn default_webhook_port() -> u16 {
 }
 fn default_webhook_bind() -> String {
     "127.0.0.1".into()
+}
+
+fn default_email_imap_port() -> u16 {
+    993
+}
+
+fn default_email_imap_use_tls() -> bool {
+    true
+}
+
+fn default_email_smtp_port() -> u16 {
+    587
+}
+
+fn default_email_smtp_use_starttls() -> bool {
+    true
+}
+
+fn default_email_poll_interval_secs() -> u64 {
+    30
+}
+
+fn default_email_folders() -> Vec<String> {
+    vec!["INBOX".to_string()]
+}
+
+fn default_email_max_body_bytes() -> usize {
+    256 * 1024
+}
+
+fn default_email_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
 }
 
 #[derive(Deserialize)]
@@ -2200,27 +2336,67 @@ fn resolve_cron_timezone(
     agent_timezone: Option<&str>,
     default_timezone: Option<&str>,
 ) -> Option<String> {
-    let timezone = agent_timezone
-        .and_then(normalize_timezone)
-        .or_else(|| default_timezone.and_then(normalize_timezone))
-        .or_else(|| {
-            std::env::var(CRON_TIMEZONE_ENV_VAR)
-                .ok()
-                .and_then(|value| normalize_timezone(&value))
-        });
+    let env_timezone = std::env::var(CRON_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
 
-    let timezone = timezone?;
+    for timezone in [
+        agent_timezone.and_then(normalize_timezone),
+        default_timezone.and_then(normalize_timezone),
+        env_timezone,
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
 
-    if timezone.parse::<Tz>().is_err() {
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+
         tracing::warn!(
             agent_id,
             cron_timezone = %timezone,
             "invalid cron timezone configured, falling back to system local timezone"
         );
-        return None;
     }
 
-    Some(timezone)
+    None
+}
+
+fn resolve_user_timezone(
+    agent_id: &str,
+    agent_timezone: Option<&str>,
+    default_timezone: Option<&str>,
+    fallback_timezone: Option<&str>,
+) -> Option<String> {
+    let env_timezone = std::env::var(USER_TIMEZONE_ENV_VAR)
+        .ok()
+        .and_then(|value| normalize_timezone(&value));
+
+    for (source, timezone) in [
+        ("agent", agent_timezone.and_then(normalize_timezone)),
+        ("defaults", default_timezone.and_then(normalize_timezone)),
+        ("env", env_timezone),
+        (
+            "cron_or_system",
+            fallback_timezone.and_then(normalize_timezone),
+        ),
+    ] {
+        let Some(timezone) = timezone else {
+            continue;
+        };
+        if timezone.parse::<Tz>().is_ok() {
+            return Some(timezone);
+        }
+        tracing::warn!(
+            agent_id,
+            user_timezone = %timezone,
+            user_timezone_source = source,
+            "invalid user timezone configured, trying next fallback"
+        );
+    }
+
+    None
 }
 
 fn parse_otlp_headers(value: Option<String>) -> Result<HashMap<String, String>> {
@@ -2446,11 +2622,17 @@ impl Config {
     pub fn load() -> Result<Self> {
         let instance_dir = Self::default_instance_dir();
 
+        Self::load_for_instance(&instance_dir)
+    }
+
+    /// Load configuration for a specific instance directory.
+    pub fn load_for_instance(instance_dir: &Path) -> Result<Self> {
         let config_path = instance_dir.join("config.toml");
+
         if config_path.exists() {
             Self::load_from_path(&config_path)
         } else {
-            Self::load_from_env(&instance_dir)
+            Self::load_from_env(instance_dir)
         }
     }
 
@@ -2882,6 +3064,7 @@ impl Config {
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
+            user_timezone: None,
             sandbox: None,
             cron: Vec::new(),
         }];
@@ -3516,6 +3699,11 @@ impl Config {
                 .cron_timezone
                 .as_deref()
                 .and_then(resolve_env_value),
+            user_timezone: toml
+                .defaults
+                .user_timezone
+                .as_deref()
+                .and_then(resolve_env_value),
             history_backfill_count: base_defaults.history_backfill_count,
             cron: Vec::new(),
             opencode: toml
@@ -3572,6 +3760,7 @@ impl Config {
                     .map(|h| CronDef {
                         id: h.id,
                         prompt: h.prompt,
+                        cron_expr: h.cron_expr,
                         interval_secs: h.interval_secs.unwrap_or(3600),
                         delivery_target: h.delivery_target,
                         active_hours: match (h.active_start_hour, h.active_end_hour) {
@@ -3699,6 +3888,7 @@ impl Config {
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
+                    user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
                     cron,
                 })
@@ -3728,6 +3918,7 @@ impl Config {
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,
+                user_timezone: None,
                 sandbox: None,
                 cron: Vec::new(),
             });
@@ -3790,6 +3981,62 @@ impl Config {
                     enabled: t.enabled,
                     token,
                     dm_allowed_users: t.dm_allowed_users,
+                })
+            }),
+            email: toml.messaging.email.and_then(|email| {
+                let imap_host = std::env::var("EMAIL_IMAP_HOST")
+                    .ok()
+                    .or_else(|| email.imap_host.as_deref().and_then(resolve_env_value))?;
+                let imap_username = std::env::var("EMAIL_IMAP_USERNAME")
+                    .ok()
+                    .or_else(|| email.imap_username.as_deref().and_then(resolve_env_value))?;
+                let imap_password = std::env::var("EMAIL_IMAP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.imap_password.as_deref().and_then(resolve_env_value))?;
+
+                let smtp_host = std::env::var("EMAIL_SMTP_HOST")
+                    .ok()
+                    .or_else(|| email.smtp_host.as_deref().and_then(resolve_env_value))?;
+                let smtp_username = std::env::var("EMAIL_SMTP_USERNAME")
+                    .ok()
+                    .or_else(|| email.smtp_username.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_username.clone());
+                let smtp_password = std::env::var("EMAIL_SMTP_PASSWORD")
+                    .ok()
+                    .or_else(|| email.smtp_password.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| imap_password.clone());
+
+                let from_address = std::env::var("EMAIL_FROM_ADDRESS")
+                    .ok()
+                    .or_else(|| email.from_address.as_deref().and_then(resolve_env_value))
+                    .unwrap_or_else(|| smtp_username.clone());
+                let from_name = std::env::var("EMAIL_FROM_NAME")
+                    .ok()
+                    .or_else(|| email.from_name.as_deref().and_then(resolve_env_value));
+
+                Some(EmailConfig {
+                    enabled: email.enabled,
+                    imap_host,
+                    imap_port: email.imap_port,
+                    imap_username,
+                    imap_password,
+                    imap_use_tls: email.imap_use_tls,
+                    smtp_host,
+                    smtp_port: email.smtp_port,
+                    smtp_username,
+                    smtp_password,
+                    smtp_use_starttls: email.smtp_use_starttls,
+                    from_address,
+                    from_name,
+                    poll_interval_secs: email.poll_interval_secs,
+                    folders: if email.folders.is_empty() {
+                        vec!["INBOX".to_string()]
+                    } else {
+                        email.folders
+                    },
+                    allowed_senders: email.allowed_senders,
+                    max_body_bytes: email.max_body_bytes,
+                    max_attachment_bytes: email.max_attachment_bytes,
                 })
             }),
             webhook: toml.messaging.webhook.map(|w| WebhookConfig {
@@ -4002,6 +4249,7 @@ pub struct RuntimeConfig {
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
     pub cron_timezone: ArcSwap<Option<String>>,
+    pub user_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
     pub warmup: ArcSwap<WarmupConfig>,
     /// Current warmup lifecycle status for API and observability.
@@ -4062,6 +4310,7 @@ impl RuntimeConfig {
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
+            user_timezone: ArcSwap::from_pointee(agent_config.user_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             warmup: ArcSwap::from_pointee(agent_config.warmup),
             warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
@@ -4149,6 +4398,7 @@ impl RuntimeConfig {
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
+        self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
         // sandbox config is not hot-reloaded here because the Sandbox instance
@@ -4476,6 +4726,21 @@ pub fn spawn_file_watcher(
                                 );
                                 if let Err(error) = manager.register_and_start(adapter).await {
                                     tracing::error!(%error, "failed to hot-start telegram adapter from config change");
+                                }
+                            }
+
+                        // Email: start if enabled and not already running
+                        if let Some(email_config) = &config.messaging.email
+                            && email_config.enabled && !manager.has_adapter("email").await {
+                                match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                                    Ok(adapter) => {
+                                        if let Err(error) = manager.register_and_start(adapter).await {
+                                            tracing::error!(%error, "failed to hot-start email adapter from config change");
+                                        }
+                                    }
+                                    Err(error) => {
+                                        tracing::error!(%error, "failed to build email adapter from config change");
+                                    }
                                 }
                             }
 
@@ -4866,10 +5131,11 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            const KEYS: [&str; 25] = [
+            const KEYS: [&str; 26] = [
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
+                "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
@@ -5449,6 +5715,159 @@ id = "main"
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
         let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
         assert_eq!(resolved.cron_timezone, None);
+    }
+
+    #[test]
+    fn test_cron_timezone_invalid_default_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(CRON_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.cron_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_resolution_precedence() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+user_timezone = "Europe/Berlin"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Europe/Berlin"));
+
+        let toml_without_agent_override = r#"
+[defaults]
+user_timezone = "America/New_York"
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_agent_override).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("America/New_York"));
+
+        let toml_without_default = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(toml_without_default).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
+    }
+
+    #[test]
+    fn test_user_timezone_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.cron_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_falls_back_to_cron_timezone() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(
+            resolved.user_timezone.as_deref(),
+            Some("America/Los_Angeles")
+        );
+    }
+
+    #[test]
+    fn test_user_timezone_invalid_config_uses_env_fallback() {
+        let _lock = env_test_lock()
+            .lock()
+            .expect("failed to lock env test mutex");
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var(USER_TIMEZONE_ENV_VAR, "Asia/Tokyo");
+        }
+
+        let toml = r#"
+[defaults]
+cron_timezone = "America/Los_Angeles"
+user_timezone = "Not/A-Real-Tz"
+
+[[agents]]
+id = "main"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+        assert_eq!(resolved.user_timezone.as_deref(), Some("Asia/Tokyo"));
     }
 
     #[test]

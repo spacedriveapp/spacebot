@@ -6,6 +6,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 use std::sync::Arc;
 
 /// Minimum allowed interval between cron job runs (seconds).
@@ -51,6 +52,10 @@ pub struct CronArgs {
     /// Required for "create": the prompt/instruction to execute on each run.
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Optional for "create": strict wall-clock cron expression (5-field syntax).
+    /// When provided, this takes precedence over interval-based scheduling.
+    #[serde(default)]
+    pub cron_expr: Option<String>,
     /// Required for "create": interval in seconds between runs.
     #[serde(default)]
     pub interval_secs: Option<u64>,
@@ -88,6 +93,7 @@ pub struct CronOutput {
 pub struct CronEntry {
     pub id: String,
     pub prompt: String,
+    pub cron_expr: Option<String>,
     pub interval_secs: u64,
     pub delivery_target: String,
     pub run_once: bool,
@@ -120,6 +126,10 @@ impl Tool for CronTool {
                     "prompt": {
                         "type": "string",
                         "description": "For 'create': the instruction to execute on each run."
+                    },
+                    "cron_expr": {
+                        "type": "string",
+                        "description": "For 'create': strict wall-clock schedule in cron format (e.g. '0 9 * * *' for daily at 09:00)."
                     },
                     "interval_secs": {
                         "type": "integer",
@@ -177,9 +187,13 @@ impl CronTool {
         let prompt = args
             .prompt
             .ok_or_else(|| CronError("'prompt' is required for create".into()))?;
-        let interval_secs = args
-            .interval_secs
-            .ok_or_else(|| CronError("'interval_secs' is required for create".into()))?;
+        let cron_expr = args
+            .cron_expr
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string);
+        let interval_secs = args.interval_secs.unwrap_or(3600);
         let delivery_target = args
             .delivery_target
             .as_deref()
@@ -208,10 +222,21 @@ impl CronTool {
         }
 
         // Prevent excessively short intervals that could cause resource exhaustion
-        if interval_secs < MIN_CRON_INTERVAL_SECS {
+        if cron_expr.is_none() && interval_secs < MIN_CRON_INTERVAL_SECS {
             return Err(CronError(format!(
                 "'interval_secs' must be at least {MIN_CRON_INTERVAL_SECS} (got {interval_secs})"
             )));
+        }
+
+        if let Some(expr) = cron_expr.as_deref() {
+            let field_count = expr.split_whitespace().count();
+            if field_count != 5 {
+                return Err(CronError(format!(
+                    "'cron_expr' must have exactly 5 fields (got {field_count}): '{expr}'"
+                )));
+            }
+            cron::Schedule::from_str(expr)
+                .map_err(|error| CronError(format!("invalid 'cron_expr' '{expr}': {error}")))?;
         }
 
         // Cap prompt length to prevent context flooding
@@ -244,6 +269,7 @@ impl CronTool {
         let config = CronConfig {
             id: id.clone(),
             prompt: prompt.clone(),
+            cron_expr: cron_expr.clone(),
             interval_secs,
             delivery_target: delivery_target.clone(),
             active_hours,
@@ -264,12 +290,15 @@ impl CronTool {
             .await
             .map_err(|error| CronError(format!("failed to register: {error}")))?;
 
-        let interval_desc = format_interval(interval_secs);
+        let schedule_desc = cron_expr
+            .as_deref()
+            .map(|expr| format!("on schedule `{expr}`"))
+            .unwrap_or_else(|| format_interval(interval_secs));
         let timezone = self.scheduler.cron_timezone_label();
         let mut message = if run_once {
-            format!("Cron job '{id}' created. First run {interval_desc}; it then disables itself.")
+            format!("Cron job '{id}' created. First run {schedule_desc}; it then disables itself.")
         } else {
-            format!("Cron job '{id}' created. Runs {interval_desc}.")
+            format!("Cron job '{id}' created. Runs {schedule_desc}.")
         };
         if let Some((start, end)) = active_hours {
             if timezone == "system" {
@@ -306,6 +335,7 @@ impl CronTool {
             .map(|config| CronEntry {
                 id: config.id,
                 prompt: config.prompt,
+                cron_expr: config.cron_expr,
                 interval_secs: config.interval_secs,
                 delivery_target: config.delivery_target,
                 run_once: config.run_once,

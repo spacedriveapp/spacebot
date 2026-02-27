@@ -1509,6 +1509,19 @@ async fn initialize_agents(
         new_messaging_manager.register(adapter).await;
     }
 
+    if let Some(email_config) = &config.messaging.email
+        && email_config.enabled
+    {
+        match spacebot::messaging::email::EmailAdapter::from_config(email_config) {
+            Ok(adapter) => {
+                new_messaging_manager.register(adapter).await;
+            }
+            Err(error) => {
+                tracing::error!(%error, "failed to build email adapter");
+            }
+        }
+    }
+
     if let Some(webhook_config) = &config.messaging.webhook
         && webhook_config.enabled
     {
@@ -1580,6 +1593,7 @@ async fn initialize_agents(
             let cron_config = spacebot::cron::CronConfig {
                 id: cron_def.id.clone(),
                 prompt: cron_def.prompt.clone(),
+                cron_expr: cron_def.cron_expr.clone(),
                 interval_secs: cron_def.interval_secs,
                 delivery_target: cron_def.delivery_target.clone(),
                 active_hours: cron_def.active_hours,

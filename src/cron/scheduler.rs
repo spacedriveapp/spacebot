@@ -13,7 +13,9 @@ use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
 use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
 use chrono::Timelike;
 use chrono_tz::Tz;
+use cron::Schedule;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::time::Duration;
@@ -23,6 +25,8 @@ use tokio::time::Duration;
 pub struct CronJob {
     pub id: String,
     pub prompt: String,
+    /// Optional wall-clock cron expression (5-field syntax).
+    pub cron_expr: Option<String>,
     pub interval_secs: u64,
     pub delivery_target: BroadcastTarget,
     pub active_hours: Option<(u8, u8)>,
@@ -39,6 +43,8 @@ pub struct CronJob {
 pub struct CronConfig {
     pub id: String,
     pub prompt: String,
+    /// Optional wall-clock cron expression (5-field syntax).
+    pub cron_expr: Option<String>,
     #[serde(default = "default_interval")]
     pub interval_secs: u64,
     /// Delivery target in "adapter:target" format (e.g. "discord:123456789").
@@ -134,9 +140,11 @@ impl Scheduler {
             ))
         })?;
 
+        let cron_expr = normalize_cron_expr(config.cron_expr.clone())?;
         let job = CronJob {
             id: config.id.clone(),
             prompt: config.prompt,
+            cron_expr,
             interval_secs: config.interval_secs,
             delivery_target,
             active_hours: normalize_active_hours(config.active_hours),
@@ -155,7 +163,13 @@ impl Scheduler {
             self.start_timer(&config.id).await;
         }
 
-        tracing::info!(cron_id = %config.id, interval_secs = config.interval_secs, run_once = config.run_once, "cron job registered");
+        tracing::info!(
+            cron_id = %config.id,
+            interval_secs = config.interval_secs,
+            cron_expr = ?config.cron_expr,
+            run_once = config.run_once,
+            "cron job registered"
+        );
         Ok(())
     }
 
@@ -180,48 +194,65 @@ impl Scheduler {
         }
 
         let handle = tokio::spawn(async move {
-            // Look up interval before entering the loop
-            let interval_secs = {
-                let j = jobs.read().await;
-                j.get(&job_id).map(|j| j.interval_secs).unwrap_or(3600)
-            };
-
-            // For sub-daily intervals that divide evenly into 86400 (e.g. 1800s, 3600s, 21600s),
-            // align the first tick to the next UTC clock boundary so the job fires on clean marks
-            // like :00 and :30 rather than at an arbitrary offset from service start.
-            // Daily/weekly jobs are left on relative timing (interval_at with one interval offset)
-            // to avoid overcomplicating scheduling for jobs with active_hours constraints.
-            let first_tick = if interval_secs < 86400 && 86400 % interval_secs == 0 {
-                let now_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs();
-                let remainder = now_unix % interval_secs;
-                let secs_until = if remainder == 0 {
-                    interval_secs
-                } else {
-                    interval_secs - remainder
-                };
-                tracing::info!(
-                    cron_id = %job_id,
-                    interval_secs,
-                    secs_until_first_tick = secs_until,
-                    "clock-aligned timer: first tick in {secs_until}s"
-                );
-                tokio::time::Instant::now() + Duration::from_secs(secs_until)
-            } else {
-                tokio::time::Instant::now() + Duration::from_secs(interval_secs)
-            };
-
-            let mut ticker =
-                tokio::time::interval_at(first_tick, Duration::from_secs(interval_secs));
-            // Skip catch-up ticks if processing falls behind — maintain original cadence.
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
             let execution_lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let mut interval_first_tick = true;
 
             loop {
-                ticker.tick().await;
+                let job = {
+                    let j = jobs.read().await;
+                    match j.get(&job_id) {
+                        Some(j) if !j.enabled => {
+                            tracing::debug!(cron_id = %job_id, "cron job disabled, stopping timer");
+                            break;
+                        }
+                        Some(j) => j.clone(),
+                        None => {
+                            tracing::debug!(cron_id = %job_id, "cron job removed, stopping timer");
+                            break;
+                        }
+                    }
+                };
+
+                let sleep_duration = if let Some(cron_expr) = job.cron_expr.as_deref() {
+                    match next_fire_duration(&context, &job_id, cron_expr) {
+                        Some((duration, next_fire_utc, timezone)) => {
+                            tracing::debug!(
+                                cron_id = %job_id,
+                                cron_expr,
+                                cron_timezone = %timezone,
+                                next_fire_utc = %next_fire_utc.to_rfc3339(),
+                                sleep_secs = duration.as_secs(),
+                                "wall-clock cron next fire computed"
+                            );
+                            duration
+                        }
+                        None => {
+                            tracing::warn!(
+                                cron_id = %job_id,
+                                cron_expr,
+                                "failed to compute next wall-clock fire; retrying in 60s"
+                            );
+                            Duration::from_secs(60)
+                        }
+                    }
+                } else {
+                    let interval_secs = job.interval_secs;
+                    let delay = if interval_first_tick {
+                        interval_first_tick = false;
+                        interval_initial_delay(interval_secs)
+                    } else {
+                        Duration::from_secs(interval_secs)
+                    };
+                    tracing::debug!(
+                        cron_id = %job_id,
+                        interval_secs,
+                        sleep_secs = delay.as_secs(),
+                        "interval cron next fire computed"
+                    );
+                    delay
+                };
+
+                tokio::time::sleep(sleep_duration).await;
 
                 let job = {
                     let j = jobs.read().await;
@@ -457,6 +488,7 @@ impl Scheduler {
                     CronJob {
                         id: config.id.clone(),
                         prompt: config.prompt,
+                        cron_expr: normalize_cron_expr(config.cron_expr)?,
                         interval_secs: config.interval_secs,
                         delivery_target,
                         active_hours: normalize_active_hours(config.active_hours),
@@ -560,6 +592,102 @@ fn hour_in_active_window(current_hour: u8, start_hour: u8, end_hour: u8) -> bool
 /// Normalize degenerate active_hours where start == end to None (always active).
 fn normalize_active_hours(active_hours: Option<(u8, u8)>) -> Option<(u8, u8)> {
     active_hours.filter(|(start, end)| start != end)
+}
+
+fn normalize_cron_expr(cron_expr: Option<String>) -> Result<Option<String>> {
+    let Some(expr) = cron_expr else {
+        return Ok(None);
+    };
+
+    let trimmed = expr.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+
+    let field_count = trimmed.split_whitespace().count();
+    if field_count != 5 {
+        return Err(crate::error::Error::Other(anyhow::anyhow!(
+            "cron expression must have exactly 5 fields (got {field_count}): '{trimmed}'"
+        )));
+    }
+
+    Schedule::from_str(trimmed).map_err(|error| {
+        crate::error::Error::Other(anyhow::anyhow!(
+            "invalid cron expression '{trimmed}': {error}"
+        ))
+    })?;
+
+    Ok(Some(trimmed.to_string()))
+}
+
+fn interval_initial_delay(interval_secs: u64) -> Duration {
+    if interval_secs < 86400 && 86400 % interval_secs == 0 {
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let remainder = now_unix % interval_secs;
+        let secs_until = if remainder == 0 {
+            interval_secs
+        } else {
+            interval_secs - remainder
+        };
+        Duration::from_secs(secs_until)
+    } else {
+        Duration::from_secs(interval_secs)
+    }
+}
+
+fn resolve_cron_timezone(context: &CronContext) -> (Option<chrono_tz::Tz>, String) {
+    let timezone = context.deps.runtime_config.cron_timezone.load();
+    match timezone.as_deref() {
+        Some(name) => match name.parse::<Tz>() {
+            Ok(timezone) => (Some(timezone), name.to_string()),
+            Err(error) => {
+                tracing::warn!(
+                    agent_id = %context.deps.agent_id,
+                    cron_timezone = %name,
+                    %error,
+                    "invalid cron timezone in runtime config, falling back to system timezone"
+                );
+                (None, SYSTEM_TIMEZONE_LABEL.to_string())
+            }
+        },
+        None => (None, SYSTEM_TIMEZONE_LABEL.to_string()),
+    }
+}
+
+fn next_fire_duration(
+    context: &CronContext,
+    cron_id: &str,
+    cron_expr: &str,
+) -> Option<(Duration, chrono::DateTime<chrono::Utc>, String)> {
+    let schedule = match Schedule::from_str(cron_expr) {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            tracing::warn!(cron_id = %cron_id, cron_expr, %error, "invalid cron expression");
+            return None;
+        }
+    };
+
+    let now_utc = chrono::Utc::now();
+    let (timezone, timezone_label) = resolve_cron_timezone(context);
+    let next_utc = if let Some(timezone) = timezone {
+        let now_local = now_utc.with_timezone(&timezone);
+        schedule
+            .after(&now_local)
+            .next()?
+            .with_timezone(&chrono::Utc)
+    } else {
+        let now_local = chrono::Local::now();
+        schedule
+            .after(&now_local)
+            .next()?
+            .with_timezone(&chrono::Utc)
+    };
+    let delay_ms = (next_utc - now_utc).num_milliseconds().max(1) as u64;
+
+    Some((Duration::from_millis(delay_ms), next_utc, timezone_label))
 }
 
 fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {

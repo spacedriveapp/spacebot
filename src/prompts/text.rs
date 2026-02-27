@@ -65,6 +65,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "ingestion") => include_str!("../../prompts/en/ingestion.md.j2"),
         ("en", "cortex_chat") => include_str!("../../prompts/en/cortex_chat.md.j2"),
 
+        // Adapter-specific prompt fragments
+        ("en", "adapters/email") => include_str!("../../prompts/en/adapters/email.md.j2"),
+
         // Fragment Templates
         ("en", "fragments/worker_capabilities") => {
             include_str!("../../prompts/en/fragments/worker_capabilities.md.j2")
@@ -113,6 +116,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "fragments/system/tool_syntax_correction") => {
             include_str!("../../prompts/en/fragments/system/tool_syntax_correction.md.j2")
         }
+        ("en", "fragments/system/worker_time_context") => {
+            include_str!("../../prompts/en/fragments/system/worker_time_context.md.j2")
+        }
 
         // Agent Communication Fragments
         ("en", "fragments/org_context") => {
@@ -154,6 +160,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         }
         ("en", "tools/channel_recall") => {
             include_str!("../../prompts/en/tools/channel_recall_description.md.j2")
+        }
+        ("en", "tools/email_search") => {
+            include_str!("../../prompts/en/tools/email_search_description.md.j2")
         }
         ("en", "tools/worker_inspect") => {
             include_str!("../../prompts/en/tools/worker_inspect_description.md.j2")

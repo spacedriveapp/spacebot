@@ -827,6 +827,7 @@ export interface SkillInfo {
 	file_path: string;
 	base_dir: string;
 	source: "instance" | "workspace";
+	source_repo?: string;
 }
 
 export interface SkillsListResponse {
@@ -957,6 +958,7 @@ export interface MessagingStatusResponse {
 	telegram: PlatformStatus;
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
+	email: PlatformStatus;
 }
 
 export interface BindingInfo {
@@ -987,6 +989,17 @@ export interface CreateBindingRequest {
 		discord_token?: string;
 		slack_bot_token?: string;
 		slack_app_token?: string;
+		telegram_token?: string;
+		email_imap_host?: string;
+		email_imap_port?: number;
+		email_imap_username?: string;
+		email_imap_password?: string;
+		email_smtp_host?: string;
+		email_smtp_port?: number;
+		email_smtp_username?: string;
+		email_smtp_password?: string;
+		email_from_address?: string;
+		email_from_name?: string;
 		twitch_username?: string;
 		twitch_oauth_token?: string;
 		twitch_client_id?: string;

@@ -69,6 +69,12 @@ impl PromptEngine {
             crate::prompts::text::get("cortex_profile"),
         )?;
 
+        // Adapter-specific prompt fragments
+        env.add_template(
+            "adapters/email",
+            crate::prompts::text::get("adapters/email"),
+        )?;
+
         // Fragment templates
         env.add_template(
             "fragments/worker_capabilities",
@@ -93,10 +99,6 @@ impl PromptEngine {
         env.add_template(
             "fragments/org_context",
             crate::prompts::text::get("fragments/org_context"),
-        )?;
-        env.add_template(
-            "fragments/link_context",
-            crate::prompts::text::get("fragments/link_context"),
         )?;
 
         // System message fragments
@@ -139,6 +141,10 @@ impl PromptEngine {
         env.add_template(
             "fragments/system/tool_syntax_correction",
             crate::prompts::text::get("fragments/system/tool_syntax_correction"),
+        )?;
+        env.add_template(
+            "fragments/system/worker_time_context",
+            crate::prompts::text::get("fragments/system/worker_time_context"),
         )?;
         env.add_template(
             "fragments/coalesce_hint",
@@ -298,6 +304,21 @@ impl PromptEngine {
         self.render_static("fragments/system/tool_syntax_correction")
     }
 
+    /// Render worker task time-context preamble.
+    pub fn render_system_worker_time_context(
+        &self,
+        current_local_datetime: &str,
+        current_utc_datetime: &str,
+    ) -> Result<String> {
+        self.render(
+            "fragments/system/worker_time_context",
+            context! {
+                current_local_datetime => current_local_datetime,
+                current_utc_datetime => current_utc_datetime,
+            },
+        )
+    }
+
     /// Convenience method for rendering truncation marker.
     pub fn render_system_truncation(&self, remove_count: usize) -> Result<String> {
         self.render(
@@ -428,7 +449,27 @@ impl PromptEngine {
             coalesce_hint,
             available_channels,
             None,
+            None,
         )
+    }
+
+    /// Render optional adapter-specific channel guidance.
+    pub fn render_channel_adapter_prompt(&self, adapter: &str) -> Option<String> {
+        let template_name = match adapter {
+            "email" => "adapters/email",
+            _ => return None,
+        };
+
+        match self.render_static(template_name) {
+            Ok(value) => {
+                let value = value.trim().to_string();
+                if value.is_empty() { None } else { Some(value) }
+            }
+            Err(error) => {
+                tracing::error!(template_name, %error, "failed to render adapter prompt template");
+                None
+            }
+        }
     }
 
     /// Render the cortex chat system prompt with optional channel context.
@@ -473,6 +514,7 @@ impl PromptEngine {
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
         org_context: Option<String>,
+        adapter_prompt: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -486,6 +528,7 @@ impl PromptEngine {
                 coalesce_hint => coalesce_hint,
                 available_channels => available_channels,
                 org_context => org_context,
+                adapter_prompt => adapter_prompt,
             },
         )
     }

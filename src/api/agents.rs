@@ -536,6 +536,7 @@ pub(super) async fn create_agent(
         mcp: None,
         brave_search_key: None,
         cron_timezone: None,
+        user_timezone: None,
         sandbox: None,
         cron: Vec::new(),
     };
