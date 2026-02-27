@@ -233,6 +233,43 @@ impl LlmManager {
         }
     }
 
+    /// Force-refresh the OpenAI OAuth token, bypassing the expiry check.
+    ///
+    /// Used when the API returns 401 even though the token appeared valid
+    /// locally (server-side revocation, clock skew, mid-stream expiry).
+    /// Returns `Ok(Some(token))` on successful refresh, `Ok(None)` if no
+    /// credentials are configured, or `Err` if the refresh request itself fails.
+    pub async fn force_refresh_openai_token(&self) -> Result<Option<String>> {
+        let mut creds_guard = self.openai_oauth_credentials.write().await;
+        let Some(creds) = creds_guard.as_ref() else {
+            return Ok(None);
+        };
+
+        tracing::info!("force-refreshing OpenAI OAuth token after 401");
+        match creds.refresh().await {
+            Ok(new_creds) => {
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) =
+                        crate::openai_auth::save_credentials(instance_dir, &new_creds)
+                {
+                    tracing::warn!(%error, "failed to persist refreshed OpenAI OAuth credentials");
+                }
+                let token = new_creds.access_token.clone();
+                *creds_guard = Some(new_creds);
+                tracing::info!("OpenAI OAuth token force-refreshed successfully");
+                Ok(Some(token))
+            }
+            Err(error) => {
+                tracing::error!(%error, "OpenAI OAuth token force-refresh failed");
+                Err(LlmError::ProviderRequest(format!(
+                    "OpenAI OAuth token refresh failed: {error}. \
+                     Re-authenticate via /api/providers/openai-chatgpt/auth"
+                ))
+                .into())
+            }
+        }
+    }
+
     /// Resolve the OpenAI provider config from static API-key configuration.
     ///
     /// OpenAI ChatGPT OAuth is intentionally handled via a separate internal
