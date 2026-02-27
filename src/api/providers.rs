@@ -324,6 +324,7 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
+    let anthropic_oauth_configured = crate::auth::credentials_path(&instance_dir).exists();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
 
     let (
@@ -370,7 +371,7 @@ pub(super) async fn get_providers(
         };
 
         (
-            has_value("anthropic_key", "ANTHROPIC_API_KEY"),
+            has_value("anthropic_key", "ANTHROPIC_API_KEY") || anthropic_oauth_configured,
             has_value("openai_key", "OPENAI_API_KEY"),
             openai_oauth_configured,
             has_value("openrouter_key", "OPENROUTER_API_KEY"),
@@ -395,7 +396,7 @@ pub(super) async fn get_providers(
         )
     } else {
         (
-            std::env::var("ANTHROPIC_API_KEY").is_ok(),
+            std::env::var("ANTHROPIC_API_KEY").is_ok() || anthropic_oauth_configured,
             std::env::var("OPENAI_API_KEY").is_ok(),
             openai_oauth_configured,
             std::env::var("OPENROUTER_API_KEY").is_ok(),
