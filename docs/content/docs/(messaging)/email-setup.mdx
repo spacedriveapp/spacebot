@@ -80,6 +80,16 @@ channel = "email"
 
 If no Email binding exists, inbound email falls back to your default agent.
 
+## Email intake behavior
+
+Email channels are treated as intake streams, not always-on chat threads.
+
+- Spacebot triages inbound mail first.
+- Inbound email channels are reply-disabled by default (no automatic outbound email response).
+- For non-spam mail, it is encouraged to persist key memory (sender, subject, commitments, deadlines, urgency).
+- For urgent mail, it can escalate to another active channel using cross-channel messaging.
+- If you need to send an email intentionally, initiate it from another channel using cross-channel tooling.
+
 ## Thread behavior
 
 Spacebot keeps one conversation per email thread. It uses `References`, `In-Reply-To`, and `Message-ID` headers to map replies back to the correct conversation.

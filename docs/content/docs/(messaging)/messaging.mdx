@@ -25,10 +25,12 @@ Spacebot connects to chat platforms so your agent can talk to people where they 
 
 1. You connect a platform by adding your tokens in the dashboard or config
 2. Spacebot opens a persistent connection to that platform
-3. When someone sends a message, Spacebot receives it, thinks, and replies
+3. When someone sends a message, Spacebot receives it and decides whether to reply, skip, or delegate work
 4. Each conversation (channel, thread, DM) gets its own isolated history
 
 You can connect multiple platforms at the same time. An agent on Discord and Slack simultaneously is just two bindings pointing at the same agent.
+
+For Email specifically, Spacebot treats inbound mail as intake-first by default: triage, memory capture for meaningful non-spam messages, and escalation to other channels for urgent items. Inbound email channels do not auto-reply.
 
 ## Bindings
 

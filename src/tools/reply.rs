@@ -327,9 +327,17 @@ impl Tool for ReplyTool {
             "required": ["content"]
         });
 
+        let source = self.conversation_id.split(':').next().unwrap_or("unknown");
+        let mut description = crate::prompts::text::get("tools/reply").to_string();
+        if source == "email" {
+            description.push_str(
+                " In email conversations this sends an actual outbound email to the sender. Use only when an explicit reply is required; otherwise prefer branch + skip.",
+            );
+        }
+
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/reply").to_string(),
+            description,
             parameters,
         }
     }

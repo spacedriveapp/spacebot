@@ -69,6 +69,12 @@ impl PromptEngine {
             crate::prompts::text::get("cortex_profile"),
         )?;
 
+        // Adapter-specific prompt fragments
+        env.add_template(
+            "adapters/email",
+            crate::prompts::text::get("adapters/email"),
+        )?;
+
         // Fragment templates
         env.add_template(
             "fragments/worker_capabilities",
@@ -428,7 +434,21 @@ impl PromptEngine {
             coalesce_hint,
             available_channels,
             None,
+            None,
         )
+    }
+
+    /// Render optional adapter-specific channel guidance.
+    pub fn render_channel_adapter_prompt(&self, adapter: &str) -> Option<String> {
+        let template_name = match adapter {
+            "email" => "adapters/email",
+            _ => return None,
+        };
+
+        self.render_static(template_name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
     }
 
     /// Render the cortex chat system prompt with optional channel context.
@@ -473,6 +493,7 @@ impl PromptEngine {
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
         org_context: Option<String>,
+        adapter_prompt: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -486,6 +507,7 @@ impl PromptEngine {
                 coalesce_hint => coalesce_hint,
                 available_channels => available_channels,
                 org_context => org_context,
+                adapter_prompt => adapter_prompt,
             },
         )
     }
