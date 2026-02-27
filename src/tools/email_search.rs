@@ -6,6 +6,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 /// Tool for searching mailbox content through IMAP.
@@ -121,8 +122,6 @@ impl Tool for EmailSearchTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let email_config = load_email_config(&self.runtime_config)?;
-
         let query = EmailSearchQuery {
             text: clean_optional(args.query),
             from: clean_optional(args.from),
@@ -135,14 +134,15 @@ impl Tool for EmailSearchTool {
 
         let criteria = format_search_criteria(&query);
 
-        let search_config = email_config.clone();
+        let instance_dir = self.runtime_config.instance_dir.clone();
         let search_query = query.clone();
         let hits = tokio::task::spawn_blocking(move || {
-            crate::messaging::email::search_mailbox(&search_config, search_query)
+            let email_config = load_email_config(&instance_dir)?;
+            crate::messaging::email::search_mailbox(&email_config, search_query)
+                .map_err(|error| EmailSearchError(error.to_string()))
         })
         .await
-        .map_err(|error| EmailSearchError(format!("email search task failed: {error}")))?
-        .map_err(|error| EmailSearchError(error.to_string()))?;
+        .map_err(|error| EmailSearchError(format!("email search task failed: {error}")))??;
 
         let results = hits
             .into_iter()
@@ -166,23 +166,13 @@ impl Tool for EmailSearchTool {
     }
 }
 
-fn load_email_config(runtime_config: &RuntimeConfig) -> Result<EmailConfig, EmailSearchError> {
-    let config_path = runtime_config.instance_dir.join("config.toml");
-    let config = if config_path.exists() {
-        Config::load_from_path(&config_path).map_err(|error| {
-            EmailSearchError(format!(
-                "failed to load config from {}: {error}",
-                config_path.display()
-            ))
-        })?
-    } else {
-        Config::load_from_env(&runtime_config.instance_dir).map_err(|error| {
-            EmailSearchError(format!(
-                "failed to load config from environment for {}: {error}",
-                runtime_config.instance_dir.display()
-            ))
-        })?
-    };
+fn load_email_config(instance_dir: &Path) -> Result<EmailConfig, EmailSearchError> {
+    let config = Config::load_for_instance(instance_dir).map_err(|error| {
+        EmailSearchError(format!(
+            "failed to resolve config for {}: {error}",
+            instance_dir.display()
+        ))
+    })?;
 
     let email = config
         .messaging
@@ -213,7 +203,7 @@ fn format_search_criteria(query: &EmailSearchQuery) -> String {
         parts.push(format!("subject={subject}"));
     }
     if let Some(text) = &query.text {
-        parts.push(format!("text={text}"));
+        parts.push(format!("query={text}"));
     }
     if query.unread_only {
         parts.push("unread_only=true".to_string());

@@ -2618,11 +2618,17 @@ impl Config {
     pub fn load() -> Result<Self> {
         let instance_dir = Self::default_instance_dir();
 
+        Self::load_for_instance(&instance_dir)
+    }
+
+    /// Load configuration for a specific instance directory.
+    pub fn load_for_instance(instance_dir: &Path) -> Result<Self> {
         let config_path = instance_dir.join("config.toml");
+
         if config_path.exists() {
             Self::load_from_path(&config_path)
         } else {
-            Self::load_from_env(&instance_dir)
+            Self::load_from_env(instance_dir)
         }
     }
 

@@ -1038,13 +1038,9 @@ pub fn search_mailbox(
     let folders = normalize_search_folders(&query.folders, &config.folders);
     let max_body_bytes = config.max_body_bytes.max(1024);
     let mut seen_message_ids = HashSet::new();
-    let mut results = Vec::new();
+    let mut ranked_results: Vec<(i64, EmailSearchHit)> = Vec::new();
 
     for folder in folders {
-        if results.len() >= limit {
-            break;
-        }
-
         if let Err(error) = session.select(folder.as_str()) {
             tracing::warn!(folder, %error, "failed to select IMAP folder for search");
             continue;
@@ -1053,7 +1049,17 @@ pub fn search_mailbox(
         let mut message_uids: Vec<u32> = match session.uid_search(&criterion) {
             Ok(uids) => uids.into_iter().collect(),
             Err(error) => {
-                tracing::warn!(folder, criterion, %error, "failed IMAP mailbox search");
+                tracing::warn!(
+                    folder,
+                    criterion_len = criterion.len(),
+                    has_text = query.text.is_some(),
+                    has_from = query.from.is_some(),
+                    has_subject = query.subject.is_some(),
+                    unread_only = query.unread_only,
+                    since_days = query.since_days,
+                    %error,
+                    "failed IMAP mailbox search"
+                );
                 continue;
             }
         };
@@ -1061,10 +1067,6 @@ pub fn search_mailbox(
         message_uids.sort_unstable_by(|left, right| right.cmp(left));
 
         for uid in message_uids {
-            if results.len() >= limit {
-                break;
-            }
-
             let fetches = match session.uid_fetch(uid.to_string(), "(UID RFC822)") {
                 Ok(fetches) => fetches,
                 Err(error) => {
@@ -1074,10 +1076,6 @@ pub fn search_mailbox(
             };
 
             for fetch in &fetches {
-                if results.len() >= limit {
-                    break;
-                }
-
                 let current_uid = fetch.uid.unwrap_or(uid);
                 let Some(raw_email) = fetch.body() else {
                     continue;
@@ -1108,28 +1106,55 @@ pub fn search_mailbox(
                     .get_first_value("Subject")
                     .unwrap_or_else(|| "(No subject)".to_string());
                 let date = headers.get_first_value("Date");
+                let sort_timestamp = date
+                    .as_deref()
+                    .and_then(|value| mailparse::dateparse(value).ok())
+                    .unwrap_or(i64::MIN);
                 let (body, attachment_names) =
                     extract_text_and_attachments(&parsed, max_body_bytes);
 
-                results.push(EmailSearchHit {
-                    folder: folder.clone(),
-                    uid: current_uid,
-                    from,
-                    subject,
-                    date,
-                    message_id,
-                    body,
-                    attachment_names,
-                });
+                ranked_results.push((
+                    sort_timestamp,
+                    EmailSearchHit {
+                        folder: folder.clone(),
+                        uid: current_uid,
+                        from,
+                        subject,
+                        date,
+                        message_id,
+                        body,
+                        attachment_names,
+                    },
+                ));
             }
         }
     }
+
+    let results = sort_and_limit_search_hits(ranked_results, limit);
 
     if let Err(error) = session.logout() {
         tracing::debug!(%error, "IMAP logout failed after mailbox search");
     }
 
     Ok(results)
+}
+
+fn sort_and_limit_search_hits(
+    mut ranked_results: Vec<(i64, EmailSearchHit)>,
+    limit: usize,
+) -> Vec<EmailSearchHit> {
+    ranked_results.sort_unstable_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.uid.cmp(&left.1.uid))
+    });
+
+    ranked_results
+        .into_iter()
+        .map(|(_, hit)| hit)
+        .take(limit)
+        .collect()
 }
 
 fn normalize_search_folders(requested: &[String], fallback: &[String]) -> Vec<String> {
@@ -1550,9 +1575,9 @@ struct EmailReplyContext {
 #[cfg(test)]
 mod tests {
     use super::{
-        EmailSearchQuery, build_imap_search_criterion, derive_thread_key, extract_message_ids,
-        normalize_email_target, normalize_reply_subject, normalize_search_folders,
-        parse_primary_mailbox,
+        EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, derive_thread_key,
+        extract_message_ids, normalize_email_target, normalize_reply_subject,
+        normalize_search_folders, parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
     #[test]
@@ -1644,5 +1669,55 @@ mod tests {
     fn normalize_search_folders_falls_back_to_inbox() {
         let folders = normalize_search_folders(&[], &[]);
         assert_eq!(folders, vec!["INBOX".to_string()]);
+    }
+
+    #[test]
+    fn sort_and_limit_search_hits_orders_globally_newest_first() {
+        let ranked = vec![
+            (
+                100,
+                EmailSearchHit {
+                    folder: "INBOX".to_string(),
+                    uid: 10,
+                    from: "a@example.com".to_string(),
+                    subject: "old".to_string(),
+                    date: None,
+                    message_id: Some("m1".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+            (
+                300,
+                EmailSearchHit {
+                    folder: "Support".to_string(),
+                    uid: 20,
+                    from: "b@example.com".to_string(),
+                    subject: "newest".to_string(),
+                    date: None,
+                    message_id: Some("m2".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+            (
+                200,
+                EmailSearchHit {
+                    folder: "Escalations".to_string(),
+                    uid: 30,
+                    from: "c@example.com".to_string(),
+                    subject: "middle".to_string(),
+                    date: None,
+                    message_id: Some("m3".to_string()),
+                    body: "body".to_string(),
+                    attachment_names: Vec::new(),
+                },
+            ),
+        ];
+
+        let results = sort_and_limit_search_hits(ranked, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].subject, "newest");
+        assert_eq!(results[1].subject, "middle");
     }
 }
