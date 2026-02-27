@@ -802,6 +802,7 @@ fn extract_content(message: &Message) -> MessageContent {
                 mime_type: attachment.content_type.clone().unwrap_or_default(),
                 url: attachment.url.clone(),
                 size_bytes: Some(attachment.size as u64),
+                auth_header: None,
             })
             .collect();
 

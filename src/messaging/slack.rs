@@ -156,8 +156,14 @@ async fn handle_message_event(
     client: Arc<SlackHyperClient>,
     states: SlackClientEventsUserState,
 ) -> UserCallbackResult<()> {
-    // Skip message edits / deletes / bot_message subtypes
-    if msg_event.subtype.is_some() {
+    // Skip message edits / deletes / bot_message subtypes, but allow file-related
+    // subtypes so user-uploaded images and documents are processed.
+    if let Some(ref subtype) = msg_event.subtype
+        && !matches!(
+            subtype,
+            SlackMessageEventType::FileShare | SlackMessageEventType::FileShared
+        )
+    {
         return Ok(());
     }
 
@@ -239,7 +245,7 @@ async fn handle_message_event(
     let conversation_id =
         apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
-    let content = extract_message_content(&msg_event.content);
+    let content = extract_message_content(&msg_event.content, &adapter_state.bot_token);
 
     let (metadata, formatted_author) = build_metadata_and_author(
         &team_id_str,
@@ -1278,7 +1284,10 @@ fn markdown_content(text: impl Into<String>) -> SlackMessageContent {
 }
 
 /// Extract `MessageContent` from an optional `SlackMessageContent`.
-fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageContent {
+fn extract_message_content(
+    content: &Option<SlackMessageContent>,
+    bot_token: &str,
+) -> MessageContent {
     let Some(msg_content) = content else {
         return MessageContent::Text(String::new());
     };
@@ -1293,6 +1302,7 @@ fn extract_message_content(content: &Option<SlackMessageContent>) -> MessageCont
                     mime_type: f.mimetype.as_ref().map(|m| m.0.clone()).unwrap_or_default(),
                     url: url.to_string(),
                     size_bytes: None,
+                    auth_header: Some(format!("Bearer {}", bot_token)),
                 })
             })
             .collect();

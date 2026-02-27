@@ -355,6 +355,10 @@ pub struct Attachment {
     pub mime_type: String,
     pub url: String,
     pub size_bytes: Option<u64>,
+    /// Optional auth header value for private URLs (e.g. Slack's `url_private`).
+    /// Excluded from serialization to prevent credential leakage.
+    #[serde(skip)]
+    pub auth_header: Option<String>,
 }
 
 /// Outbound response to messaging platforms.
