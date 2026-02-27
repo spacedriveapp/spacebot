@@ -59,6 +59,7 @@ pub(super) async fn webchat_send(
     let inbound = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "webchat".into(),
+        adapter: Some("webchat".into()),
         conversation_id: conversation_id.clone(),
         sender_id: request.sender_name.clone(),
         agent_id: Some(request.agent_id.into()),

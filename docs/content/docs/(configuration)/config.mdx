@@ -499,6 +499,8 @@ Thresholds are fractions of `context_window`.
 | `refresh_secs` | integer | 900 | Seconds between background warmup passes |
 | `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
 
+When warmup is enabled, it is the primary bulletin refresh path. The cortex bulletin loop remains as a fallback generator when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+
 Dispatch readiness is derived from warmup runtime state:
 
 - warmup state must be `warm`
@@ -596,7 +598,38 @@ Channel/worker temporal context timezone precedence is:
 |-----|------|---------|-------------|
 | `enabled` | bool | false | Enable Discord adapter |
 | `token` | string | None | Bot token (or `env:VAR_NAME`) |
+| `instances` | table[] | [] | Optional named Discord bot instances |
 | `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot |
+
+### `[[messaging.discord.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `token` | string | **required** | Bot token (or `env:VAR_NAME`) |
+| `dm_allowed_users` | string[] | [] | User IDs allowed to DM this instance |
+| `allow_bot_messages` | bool | false | Whether this instance accepts bot-authored messages |
+
+### `[messaging.slack]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Slack adapter |
+| `bot_token` | string | None | Bot token (or `env:VAR_NAME`) |
+| `app_token` | string | None | App-level token (or `env:VAR_NAME`) |
+| `instances` | table[] | [] | Optional named Slack app instances |
+| `dm_allowed_users` | string[] | [] | Slack user IDs allowed to DM the bot |
+
+### `[[messaging.slack.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `bot_token` | string | **required** | Bot token (or `env:VAR_NAME`) |
+| `app_token` | string | **required** | App-level token (or `env:VAR_NAME`) |
+| `dm_allowed_users` | string[] | [] | Slack user IDs allowed to DM this instance |
 
 ### `[messaging.telegram]`
 
@@ -604,7 +637,39 @@ Channel/worker temporal context timezone precedence is:
 |-----|------|---------|-------------|
 | `enabled` | bool | false | Enable Telegram adapter |
 | `token` | string | None | Bot token from @BotFather (or `env:VAR_NAME`). Falls back to `TELEGRAM_BOT_TOKEN` env var |
+| `instances` | table[] | [] | Optional named Telegram bot instances |
 | `dm_allowed_users` | string[] | [] | User IDs allowed to DM the bot. Empty = DMs from anyone accepted |
+
+### `[[messaging.telegram.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `token` | string | **required** | Bot token (or `env:VAR_NAME`) |
+| `dm_allowed_users` | string[] | [] | User IDs allowed to DM this instance |
+
+### `[messaging.twitch]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `enabled` | bool | false | Enable Twitch adapter |
+| `username` | string | None | Bot login username |
+| `oauth_token` | string | None | OAuth token (`oauth:...` or plain token) |
+| `instances` | table[] | [] | Optional named Twitch bot instances |
+| `channels` | string[] | [] | Channels to join |
+| `trigger_prefix` | string | None | Optional prefix required to trigger replies |
+
+### `[[messaging.twitch.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `username` | string | **required** | Bot login username |
+| `oauth_token` | string | **required** | OAuth token (`oauth:...` or plain token) |
+| `channels` | string[] | [] | Channels to join for this instance |
+| `trigger_prefix` | string | None | Optional prefix required to trigger replies |
 
 ### `[messaging.email]`
 
@@ -629,6 +694,30 @@ Channel/worker temporal context timezone precedence is:
 | `max_body_bytes` | integer | 262144 | Max inbound body bytes before truncation |
 | `max_attachment_bytes` | integer | 10485760 | Max attachment bytes to process metadata for |
 
+### `[[messaging.email.instances]]`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `name` | string | **required** | Instance selector used by bindings (`adapter = "name"`) |
+| `enabled` | bool | true | Enable this named instance |
+| `imap_host` | string | **required** | IMAP host (or `env:VAR_NAME`) |
+| `imap_port` | integer | 993 | IMAP port |
+| `imap_username` | string | **required** | IMAP username (or `env:VAR_NAME`) |
+| `imap_password` | string | **required** | IMAP password (or `env:VAR_NAME`) |
+| `imap_use_tls` | bool | true | Use direct TLS for IMAP |
+| `smtp_host` | string | **required** | SMTP host (or `env:VAR_NAME`) |
+| `smtp_port` | integer | 587 | SMTP port |
+| `smtp_username` | string | None | SMTP username (defaults to IMAP username) |
+| `smtp_password` | string | None | SMTP password (defaults to IMAP password) |
+| `smtp_use_starttls` | bool | true | Use STARTTLS for SMTP |
+| `from_address` | string | None | Sender address (defaults to SMTP username) |
+| `from_name` | string | None | Optional sender display name |
+| `poll_interval_secs` | integer | 30 | How often to check for new email |
+| `folders` | string[] | `["INBOX"]` | IMAP folders to poll |
+| `allowed_senders` | string[] | `[]` | Optional allowlist (empty = all) |
+| `max_body_bytes` | integer | 262144 | Max inbound body bytes |
+| `max_attachment_bytes` | integer | 10485760 | Max attachment bytes |
+
 ### `[messaging.webhook]`
 
 | Key | Type | Default | Description |
@@ -645,6 +734,7 @@ Routes platform conversations to agents. Checked in order; first match wins. Unm
 |-----|------|---------|-------------|
 | `agent_id` | string | **required** | Which agent handles matched messages |
 | `channel` | string | **required** | Platform name (`discord`, `slack`, `telegram`, `twitch`, `email`, `webhook`) |
+| `adapter` | string | None | Optional named adapter selector (e.g. `ops` => `discord:ops`) |
 | `guild_id` | string | None | Discord guild filter |
 | `chat_id` | string | None | Telegram chat filter |
 | `channel_ids` | string[] | [] | Discord channel ID filter (includes threads in those channels) |

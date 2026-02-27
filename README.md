@@ -20,6 +20,8 @@
   <a href="https://discord.gg/gTaF2Z44f5">
     <img src="https://img.shields.io/discord/949090953497567312?label=Discord&color=5865F2" />
   </a>
+
+  [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/spacedriveapp/spacebot)
 </p>
 
 <p align="center">
@@ -434,6 +436,12 @@ token = "env:DISCORD_BOT_TOKEN"
 agent_id = "my-agent"
 channel = "discord"
 guild_id = "your-discord-guild-id"
+
+# Optional: route a named adapter instance
+[[bindings]]
+agent_id = "my-agent"
+channel = "discord"
+adapter = "ops"
 ```
 
 ```bash

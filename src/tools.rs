@@ -266,10 +266,18 @@ pub async fn add_channel_tools(
     handle.add_tool(SpawnWorkerTool::new(state.clone())).await?;
     handle.add_tool(RouteTool::new(state.clone())).await?;
     if let Some(messaging_manager) = &state.deps.messaging_manager {
+        let send_message_display_name = state
+            .deps
+            .agent_names
+            .get(state.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
             .add_tool(SendMessageTool::new(
                 messaging_manager.clone(),
                 state.channel_store.clone(),
+                state.conversation_logger.clone(),
+                send_message_display_name,
             ))
             .await?;
     }

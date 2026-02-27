@@ -928,3 +928,20 @@ pub(super) async fn delete_provider(
         message: format!("Provider '{}' removed", provider),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::build_test_llm_config;
+
+    #[test]
+    fn build_test_llm_config_registers_ollama_provider_from_base_url() {
+        let config = build_test_llm_config("ollama", "http://remote-ollama.local:11434");
+        let provider = config
+            .providers
+            .get("ollama")
+            .expect("ollama provider should be registered");
+
+        assert_eq!(provider.base_url, "http://remote-ollama.local:11434");
+        assert_eq!(provider.api_key, "");
+    }
+}

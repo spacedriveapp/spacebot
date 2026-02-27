@@ -51,6 +51,118 @@ fn should_execute_warmup(warmup_config: crate::config::WarmupConfig, force: bool
     warmup_config.enabled || force
 }
 
+fn should_generate_bulletin_from_bulletin_loop(
+    warmup_config: crate::config::WarmupConfig,
+    status: &crate::config::WarmupStatus,
+) -> bool {
+    // If warmup is disabled, bulletin_loop remains the source of truth.
+    if !warmup_config.enabled {
+        return true;
+    }
+
+    let age_secs = bulletin_age_secs(status.last_refresh_unix_ms).or(status.bulletin_age_secs);
+
+    let Some(age_secs) = age_secs else {
+        // No recorded bulletin refresh yet — let bulletin loop generate one.
+        return true;
+    };
+
+    // Warmup loop already refreshes bulletin on this cadence. If the cached
+    // bulletin is still fresher than warmup cadence, skip duplicate synthesis.
+    age_secs >= warmup_config.refresh_secs.max(1)
+}
+
+fn has_completed_initial_warmup(status: &crate::config::WarmupStatus) -> bool {
+    status.last_refresh_unix_ms.is_some()
+        && matches!(status.state, crate::config::WarmupState::Warm)
+}
+
+fn apply_cancelled_warmup_status(
+    status: &mut crate::config::WarmupStatus,
+    reason: &str,
+    force: bool,
+) -> bool {
+    if !matches!(status.state, crate::config::WarmupState::Warming) {
+        return false;
+    }
+
+    status.state = crate::config::WarmupState::Degraded;
+    status.last_error = Some(format!(
+        "warmup cancelled before completion (reason: {reason}, forced: {force})"
+    ));
+    status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
+    true
+}
+
+struct WarmupRunGuard<'a> {
+    deps: &'a AgentDeps,
+    reason: &'a str,
+    force: bool,
+    committed: bool,
+}
+
+impl<'a> WarmupRunGuard<'a> {
+    fn new(deps: &'a AgentDeps, reason: &'a str, force: bool) -> Self {
+        Self {
+            deps,
+            reason,
+            force,
+            committed: false,
+        }
+    }
+
+    fn mark_committed(&mut self) {
+        self.committed = true;
+    }
+}
+
+impl Drop for WarmupRunGuard<'_> {
+    fn drop(&mut self) {
+        if self.committed {
+            return;
+        }
+
+        update_warmup_status(self.deps, |status| {
+            if apply_cancelled_warmup_status(status, self.reason, self.force) {
+                tracing::warn!(
+                    reason = self.reason,
+                    forced = self.force,
+                    "warmup run ended without terminal status; demoted state to degraded"
+                );
+            }
+        });
+    }
+}
+
+async fn maybe_generate_bulletin_under_lock<F, Fut>(
+    warmup_lock: &tokio::sync::Mutex<()>,
+    warmup_config: &arc_swap::ArcSwap<crate::config::WarmupConfig>,
+    warmup_status: &arc_swap::ArcSwap<crate::config::WarmupStatus>,
+    generate: F,
+) -> bool
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let _warmup_guard = warmup_lock.lock().await;
+    let warmup_config = **warmup_config.load();
+    let status = warmup_status.load().as_ref().clone();
+    let age_secs = bulletin_age_secs(status.last_refresh_unix_ms).or(status.bulletin_age_secs);
+    let refresh_secs = warmup_config.refresh_secs.max(1);
+
+    if should_generate_bulletin_from_bulletin_loop(warmup_config, &status) {
+        generate().await
+    } else {
+        tracing::debug!(
+            warmup_enabled = warmup_config.enabled,
+            age_secs = ?age_secs,
+            refresh_secs,
+            "skipping bulletin loop generation because warmup bulletin is fresh"
+        );
+        true
+    }
+}
+
 /// The cortex observes system-wide activity and maintains the memory bulletin.
 pub struct Cortex {
     pub deps: AgentDeps,
@@ -269,9 +381,11 @@ impl Cortex {
 
 /// Spawn the cortex bulletin loop for an agent.
 ///
-/// Generates a memory bulletin immediately on startup, then refreshes on a
-/// configurable interval. The bulletin is stored in `RuntimeConfig::memory_bulletin`
-/// and injected into every channel's system prompt.
+/// Runs bulletin/profile maintenance on a configurable interval.
+///
+/// When warmup is enabled, warmup is the primary bulletin refresher and this
+/// loop skips duplicate bulletin synthesis while the cached bulletin is fresh.
+/// When warmup is disabled (or stale), this loop generates the bulletin.
 pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         if let Err(error) = run_bulletin_loop(&deps, &logger).await {
@@ -286,7 +400,8 @@ pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task
 pub fn spawn_warmup_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("warmup loop started");
-        let mut completed_initial_pass = false;
+        let mut completed_initial_pass =
+            has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
 
         loop {
             let warmup_config = **deps.runtime_config.warmup.load();
@@ -301,12 +416,25 @@ pub fn spawn_warmup_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::
                 continue;
             }
 
+            if !completed_initial_pass {
+                completed_initial_pass =
+                    has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
+            }
+
             let sleep_secs = if completed_initial_pass {
                 warmup_config.refresh_secs.max(1)
             } else {
                 warmup_config.startup_delay_secs.max(1)
             };
             tokio::time::sleep(Duration::from_secs(sleep_secs)).await;
+
+            if !completed_initial_pass {
+                completed_initial_pass =
+                    has_completed_initial_warmup(deps.runtime_config.warmup_status.load().as_ref());
+                if completed_initial_pass {
+                    continue;
+                }
+            }
 
             let reason = if completed_initial_pass {
                 "scheduled"
@@ -339,6 +467,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
         status.last_error = None;
         status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
     });
+    let mut terminal_state_guard = WarmupRunGuard::new(deps, reason, force);
 
     let mut errors = Vec::new();
     let mut embedding_ready = false;
@@ -371,6 +500,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             status.last_error = None;
             status.bulletin_age_secs = Some(0);
         });
+        terminal_state_guard.mark_committed();
         logger.log(
             "warmup_succeeded",
             "Warmup pass completed",
@@ -388,6 +518,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             status.last_error = Some(last_error.clone());
             status.bulletin_age_secs = bulletin_age_secs(status.last_refresh_unix_ms);
         });
+        terminal_state_guard.mark_committed();
         logger.log(
             "warmup_failed",
             "Warmup pass failed",
@@ -430,10 +561,14 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
     // Run immediately on startup, with retries
     for attempt in 0..=MAX_RETRIES {
-        let bulletin_ok = {
-            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
-            generate_bulletin(deps, logger).await
-        };
+        let bulletin_ok = maybe_generate_bulletin_under_lock(
+            deps.runtime_config.warmup_lock.as_ref(),
+            &deps.runtime_config.warmup,
+            &deps.runtime_config.warmup_status,
+            || generate_bulletin(deps, logger),
+        )
+        .await;
+
         if bulletin_ok {
             break;
         }
@@ -465,10 +600,13 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
 
         tokio::time::sleep(Duration::from_secs(interval)).await;
 
-        {
-            let _warmup_guard = deps.runtime_config.warmup_lock.lock().await;
-            generate_bulletin(deps, logger).await;
-        }
+        maybe_generate_bulletin_under_lock(
+            deps.runtime_config.warmup_lock.as_ref(),
+            &deps.runtime_config.warmup,
+            &deps.runtime_config.warmup_status,
+            || generate_bulletin(deps, logger),
+        )
+        .await;
         generate_profile(deps, logger).await;
     }
 }
@@ -1379,7 +1517,13 @@ async fn fetch_memories_for_association(
 
 #[cfg(test)]
 mod tests {
-    use super::should_execute_warmup;
+    use super::{
+        apply_cancelled_warmup_status, has_completed_initial_warmup,
+        maybe_generate_bulletin_under_lock, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
     fn run_warmup_once_semantics_skip_when_disabled_without_force() {
@@ -1409,5 +1553,168 @@ mod tests {
         };
 
         assert!(should_execute_warmup(warmup_config, false));
+    }
+
+    #[test]
+    fn initial_warmup_completion_detected_when_status_has_refresh_timestamp() {
+        let status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warm,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        assert!(has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn initial_warmup_completion_not_detected_without_refresh_timestamp() {
+        let status = crate::config::WarmupStatus::default();
+
+        assert!(!has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn initial_warmup_completion_not_detected_when_timestamp_exists_but_state_is_not_warm() {
+        let status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Cold,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        assert!(!has_completed_initial_warmup(&status));
+    }
+
+    #[test]
+    fn cancelled_warmup_demotes_warming_state_to_degraded() {
+        let mut status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warming,
+            ..Default::default()
+        };
+
+        let changed = apply_cancelled_warmup_status(&mut status, "startup", false);
+
+        assert!(changed);
+        assert_eq!(status.state, crate::config::WarmupState::Degraded);
+        assert!(
+            status
+                .last_error
+                .as_deref()
+                .is_some_and(|error| error.contains("warmup cancelled before completion"))
+        );
+    }
+
+    #[test]
+    fn cancelled_warmup_does_not_override_terminal_state() {
+        let mut status = crate::config::WarmupStatus {
+            state: crate::config::WarmupState::Warm,
+            last_refresh_unix_ms: Some(1_700_000_000_000),
+            ..Default::default()
+        };
+
+        let changed = apply_cancelled_warmup_status(&mut status, "scheduled", false);
+
+        assert!(!changed);
+        assert_eq!(status.state, crate::config::WarmupState::Warm);
+    }
+
+    #[test]
+    fn bulletin_loop_generation_runs_when_warmup_disabled() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: false,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(0),
+            ..Default::default()
+        };
+
+        assert!(should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[test]
+    fn bulletin_loop_generation_skips_when_warmup_enabled_and_fresh() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: true,
+            refresh_secs: 900,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(10),
+            ..Default::default()
+        };
+
+        assert!(!should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[test]
+    fn bulletin_loop_generation_runs_when_warmup_enabled_and_stale() {
+        let warmup_config = crate::config::WarmupConfig {
+            enabled: true,
+            refresh_secs: 900,
+            ..Default::default()
+        };
+        let status = crate::config::WarmupStatus {
+            bulletin_age_secs: Some(901),
+            ..Default::default()
+        };
+
+        assert!(should_generate_bulletin_from_bulletin_loop(
+            warmup_config,
+            &status
+        ));
+    }
+
+    #[tokio::test]
+    async fn bulletin_loop_generation_lock_snapshot_skips_after_fresh_update() {
+        let warmup_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let warmup_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::config::WarmupConfig::default(),
+        ));
+        let warmup_status = Arc::new(arc_swap::ArcSwap::from_pointee(
+            crate::config::WarmupStatus {
+                bulletin_age_secs: Some(901), // stale at first
+                ..Default::default()
+            },
+        ));
+
+        let calls = Arc::new(AtomicUsize::new(0));
+
+        // Hold lock so we can update status before helper takes its snapshot.
+        let guard = warmup_lock.as_ref().lock().await;
+
+        let warmup_lock_for_task = Arc::clone(&warmup_lock);
+        let warmup_config_for_task = Arc::clone(&warmup_config);
+        let warmup_status_for_task = Arc::clone(&warmup_status);
+        let calls_for_task = Arc::clone(&calls);
+        let task = tokio::spawn(async move {
+            maybe_generate_bulletin_under_lock(
+                warmup_lock_for_task.as_ref(),
+                warmup_config_for_task.as_ref(),
+                warmup_status_for_task.as_ref(),
+                || async {
+                    calls_for_task.fetch_add(1, Ordering::SeqCst);
+                    true
+                },
+            )
+            .await
+        });
+
+        // Warmup refresh lands before lock is released; helper should observe
+        // fresh status and skip generation.
+        warmup_status.store(Arc::new(crate::config::WarmupStatus {
+            bulletin_age_secs: Some(10),
+            ..Default::default()
+        }));
+        drop(guard);
+
+        let result = task.await.expect("task should join");
+        assert!(result);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 }

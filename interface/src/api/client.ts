@@ -952,6 +952,15 @@ export interface PlatformStatus {
 	enabled: boolean;
 }
 
+export interface AdapterInstanceStatus {
+	platform: string;
+	name: string | null;
+	runtime_key: string;
+	configured: boolean;
+	enabled: boolean;
+	binding_count: number;
+}
+
 export interface MessagingStatusResponse {
 	discord: PlatformStatus;
 	slack: PlatformStatus;
@@ -959,11 +968,52 @@ export interface MessagingStatusResponse {
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
 	email: PlatformStatus;
+	instances: AdapterInstanceStatus[];
+}
+
+export interface CreateMessagingInstanceRequest {
+	platform: string;
+	name?: string;
+	enabled?: boolean;
+	credentials: {
+		discord_token?: string;
+		slack_bot_token?: string;
+		slack_app_token?: string;
+		telegram_token?: string;
+		twitch_username?: string;
+		twitch_oauth_token?: string;
+		twitch_client_id?: string;
+		twitch_client_secret?: string;
+		twitch_refresh_token?: string;
+		email_imap_host?: string;
+		email_imap_port?: number;
+		email_imap_username?: string;
+		email_imap_password?: string;
+		email_smtp_host?: string;
+		email_smtp_port?: number;
+		email_smtp_username?: string;
+		email_smtp_password?: string;
+		email_from_address?: string;
+		webhook_port?: number;
+		webhook_bind?: string;
+		webhook_auth_token?: string;
+	};
+}
+
+export interface DeleteMessagingInstanceRequest {
+	platform: string;
+	name?: string;
+}
+
+export interface MessagingInstanceActionResponse {
+	success: boolean;
+	message: string;
 }
 
 export interface BindingInfo {
 	agent_id: string;
 	channel: string;
+	adapter: string | null;
 	guild_id: string | null;
 	workspace_id: string | null;
 	chat_id: string | null;
@@ -979,6 +1029,7 @@ export interface BindingsListResponse {
 export interface CreateBindingRequest {
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -1017,11 +1068,13 @@ export interface CreateBindingResponse {
 export interface UpdateBindingRequest {
 	original_agent_id: string;
 	original_channel: string;
+	original_adapter?: string;
 	original_guild_id?: string;
 	original_workspace_id?: string;
 	original_chat_id?: string;
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -1038,6 +1091,7 @@ export interface UpdateBindingResponse {
 export interface DeleteBindingRequest {
 	agent_id: string;
 	channel: string;
+	adapter?: string;
 	guild_id?: string;
 	workspace_id?: string;
 	chat_id?: string;
@@ -1564,11 +1618,13 @@ export const api = {
 		return response.json() as Promise<DeleteBindingResponse>;
 	},
 
-	togglePlatform: async (platform: string, enabled: boolean) => {
+	togglePlatform: async (platform: string, enabled: boolean, adapter?: string) => {
+		const body: Record<string, unknown> = { platform, enabled };
+		if (adapter) body.adapter = adapter;
 		const response = await fetch(`${API_BASE}/messaging/toggle`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ platform, enabled }),
+			body: JSON.stringify(body),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
@@ -1576,16 +1632,42 @@ export const api = {
 		return response.json() as Promise<{ success: boolean; message: string }>;
 	},
 
-	disconnectPlatform: async (platform: string) => {
+	disconnectPlatform: async (platform: string, adapter?: string) => {
+		const body: Record<string, unknown> = { platform };
+		if (adapter) body.adapter = adapter;
 		const response = await fetch(`${API_BASE}/messaging/disconnect`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ platform }),
+			body: JSON.stringify(body),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<{ success: boolean; message: string }>;
+	},
+
+	createMessagingInstance: async (request: CreateMessagingInstanceRequest) => {
+		const response = await fetch(`${API_BASE}/messaging/instances`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MessagingInstanceActionResponse>;
+	},
+
+	deleteMessagingInstance: async (request: DeleteMessagingInstanceRequest) => {
+		const response = await fetch(`${API_BASE}/messaging/instances`, {
+			method: "DELETE",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(request),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<MessagingInstanceActionResponse>;
 	},
 
 	// Global Settings API

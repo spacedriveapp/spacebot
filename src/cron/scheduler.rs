@@ -760,6 +760,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     let message = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "cron".into(),
+        adapter: None,
         conversation_id: format!("cron:{}", job.id),
         sender_id: "system".into(),
         agent_id: Some(context.deps.agent_id.clone()),

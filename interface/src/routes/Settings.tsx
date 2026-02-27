@@ -3,7 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type GlobalSettingsResponse, type UpdateStatus } from "@/api/client";
 import { Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
 import { useSearch, useNavigate } from "@tanstack/react-router";
-import { ChannelSettingCard, DisabledChannelCard } from "@/components/ChannelSettingCard";
+import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
 import { ModelSelect } from "@/components/ModelSelect";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
@@ -782,8 +782,11 @@ export function Settings() {
 	);
 }
 
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+
 function ChannelsSection() {
-	const [expandedPlatform, setExpandedPlatform] = useState<string | null>(null);
+	const [expandedKey, setExpandedKey] = useState<string | null>(null);
+	const [addingPlatform, setAddingPlatform] = useState<Platform | null>(null);
 
 	const { data: messagingStatus, isLoading } = useQuery({
 		queryKey: ["messaging-status"],
@@ -791,26 +794,22 @@ function ChannelsSection() {
 		staleTime: 5_000,
 	});
 
-	const PLATFORMS = [
-		{ platform: "discord" as const, name: "Discord", description: "Discord bot integration" },
-		{ platform: "slack" as const, name: "Slack", description: "Slack bot integration" },
-		{ platform: "telegram" as const, name: "Telegram", description: "Telegram bot integration" },
-		{ platform: "twitch" as const, name: "Twitch", description: "Twitch chat integration" },
-		{ platform: "email" as const, name: "Email", description: "IMAP polling for inbound, SMTP for outbound" },
-		{ platform: "webhook" as const, name: "Webhook", description: "HTTP webhook receiver" },
-	] as const;
+	const instances = messagingStatus?.instances ?? [];
 
-	const COMING_SOON = [
-		{ platform: "whatsapp", name: "WhatsApp", description: "Meta Cloud API integration" },
-		{ platform: "matrix", name: "Matrix", description: "Decentralized chat protocol" },
-		{ platform: "imessage", name: "iMessage", description: "macOS-only AppleScript bridge" },
-		{ platform: "irc", name: "IRC", description: "TLS socket connection" },
-		{ platform: "lark", name: "Lark", description: "Feishu/Lark webhook integration" },
-		{ platform: "dingtalk", name: "DingTalk", description: "Chinese enterprise webhook integration" },
-	];
+	// Determine whether to show default or named add form
+	function handleAddInstance(platform: Platform) {
+		setAddingPlatform(platform);
+	}
+
+	function isDefaultAdd(): boolean {
+		if (!addingPlatform) return true;
+		return !instances.some(
+			(inst) => inst.platform === addingPlatform && inst.name === null,
+		);
+	}
 
 	return (
-		<div className="mx-auto max-w-2xl px-6 py-6">
+		<div className="mx-auto max-w-3xl px-6 py-6">
 			<div className="mb-6">
 				<h2 className="font-plex text-sm font-semibold text-ink">Messaging Platforms</h2>
 				<p className="mt-1 text-sm text-ink-dull">
@@ -824,21 +823,49 @@ function ChannelsSection() {
 					Loading channels...
 				</div>
 			) : (
-				<div className="flex flex-col gap-3">
-					{PLATFORMS.map(({ platform: p, name: n, description: d }) => (
-						<ChannelSettingCard
-							key={p}
-							platform={p}
-							name={n}
-							description={d}
-							status={messagingStatus?.[p]}
-							expanded={expandedPlatform === p}
-							onToggle={() => setExpandedPlatform(expandedPlatform === p ? null : p)}
-						/>
-					))}
-					{COMING_SOON.map(({ platform: p, name: n, description: d }) => (
-						<DisabledChannelCard key={p} platform={p} name={n} description={d} />
-					))}
+				<div className="grid grid-cols-[200px_1fr] gap-6">
+					{/* Left column: Platform catalog */}
+					<div className="flex-shrink-0">
+						<PlatformCatalog onAddInstance={handleAddInstance} />
+					</div>
+
+					{/* Right column: Configured instances */}
+					<div className="flex flex-col gap-3 min-w-0">
+						{/* Active add-instance card */}
+						{addingPlatform && (
+							<AddInstanceCard
+								platform={addingPlatform}
+								isDefault={isDefaultAdd()}
+								onCancel={() => setAddingPlatform(null)}
+								onCreated={() => setAddingPlatform(null)}
+							/>
+						)}
+
+						{/* Configured instance cards */}
+						{instances.length > 0 ? (
+							instances.map((instance) => (
+								<InstanceCard
+									key={instance.runtime_key}
+									instance={instance}
+									expanded={expandedKey === instance.runtime_key}
+									onToggleExpand={() =>
+										setExpandedKey(
+											expandedKey === instance.runtime_key ? null : instance.runtime_key,
+										)
+									}
+								/>
+							))
+						) : !addingPlatform ? (
+							<div className="rounded-lg border border-app-line border-dashed bg-app-box/50 p-8 text-center">
+								<p className="text-sm text-ink-dull">
+									No messaging platforms configured yet.
+								</p>
+								<p className="mt-1 text-sm text-ink-faint">
+									Click a platform on the left to get started.
+								</p>
+							</div>
+						) : null}
+					</div>
 				</div>
 			)}
 		</div>

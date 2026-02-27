@@ -35,12 +35,13 @@ interface SidebarProps {
 
 interface SortableAgentItemProps {
 	agentId: string;
+	displayName?: string;
 	activity?: { workers: number; branches: number };
 	isActive: boolean;
 	collapsed: boolean;
 }
 
-function SortableAgentItem({ agentId, activity, isActive, collapsed }: SortableAgentItemProps) {
+function SortableAgentItem({ agentId, displayName, activity, isActive, collapsed }: SortableAgentItemProps) {
 	const {
 		attributes,
 		listeners,
@@ -67,9 +68,9 @@ function SortableAgentItem({ agentId, activity, isActive, collapsed }: SortableA
 						isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
 					}`}
 					style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
-					title={agentId}
+					title={displayName ?? agentId}
 				>
-					{agentId.charAt(0).toUpperCase()}
+					{(displayName ?? agentId).charAt(0).toUpperCase()}
 				</Link>
 			</div>
 		);
@@ -87,7 +88,7 @@ function SortableAgentItem({ agentId, activity, isActive, collapsed }: SortableA
 				}`}
 				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
 			>
-				<span className="flex-1 truncate">{agentId}</span>
+				<span className="flex-1 truncate">{displayName ?? agentId}</span>
 				{activity && (activity.workers > 0 || activity.branches > 0) && (
 					<div className="flex items-center gap-1">
 						{activity.workers > 0 && (
@@ -126,6 +127,11 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	const channels = channelsData?.channels ?? [];
 	
 	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
+	const agentDisplayNames = useMemo(() => {
+		const map: Record<string, string | undefined> = {};
+		for (const a of agents) map[a.id] = a.display_name;
+		return map;
+	}, [agents]);
 	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
 
 	const matchRoute = useMatchRoute();
@@ -225,17 +231,18 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					onDragEnd={handleDragEnd}
 				>
 					<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
-						{agentOrder.map((agentId) => {
-							const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
-							return (
-								<SortableAgentItem
-									key={agentId}
-									agentId={agentId}
-									isActive={isActive}
-									collapsed={true}
-								/>
-							);
-						})}
+					{agentOrder.map((agentId) => {
+						const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
+						return (
+							<SortableAgentItem
+								key={agentId}
+								agentId={agentId}
+								displayName={agentDisplayNames[agentId]}
+								isActive={isActive}
+								collapsed={true}
+							/>
+						);
+					})}
 					</SortableContext>
 				</DndContext>
 				<button
@@ -289,20 +296,21 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 							>
 								<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
 									<div className="flex flex-col gap-0.5">
-										{agentOrder.map((agentId) => {
-											const activity = agentActivity[agentId];
-											const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
+									{agentOrder.map((agentId) => {
+										const activity = agentActivity[agentId];
+										const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
 
-											return (
-												<SortableAgentItem
-													key={agentId}
-													agentId={agentId}
-													activity={activity}
-													isActive={isActive}
-													collapsed={false}
-												/>
-											);
-										})}
+										return (
+											<SortableAgentItem
+												key={agentId}
+												agentId={agentId}
+												displayName={agentDisplayNames[agentId]}
+												activity={activity}
+												isActive={isActive}
+												collapsed={false}
+											/>
+										);
+									})}
 									</div>
 								</SortableContext>
 							</DndContext>
