@@ -45,6 +45,9 @@ interface MemoryGraphProps {
 	agentId: string;
 	sort: MemorySort;
 	typeFilter: MemoryType | null;
+	refreshToken?: number;
+	onEditMemory?: (memory: MemoryItem) => void;
+	onDeleteMemory?: (memory: MemoryItem) => void;
 }
 
 interface NodeDetail {
@@ -53,7 +56,14 @@ interface NodeDetail {
 	y: number;
 }
 
-export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
+export function MemoryGraph({
+	agentId,
+	sort,
+	typeFilter,
+	refreshToken,
+	onEditMemory,
+	onDeleteMemory,
+}: MemoryGraphProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const sigmaRef = useRef<Sigma | null>(null);
 	const graphRef = useRef<Graph | null>(null);
@@ -70,8 +80,8 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 
 	// Memoize the graph data key to refetch when filters change
 	const queryKey = useMemo(
-		() => [agentId, sort, typeFilter],
-		[agentId, sort, typeFilter],
+		() => [agentId, sort, typeFilter, refreshToken],
+		[agentId, sort, typeFilter, refreshToken],
 	);
 
 	const cleanup = useCallback(() => {
@@ -479,6 +489,30 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 							{selectedNode.memory.source && (
 								<span>Source: {selectedNode.memory.source}</span>
 							)}
+						</div>
+						<div className="mt-3 flex gap-2">
+							<Button
+								size="sm"
+								variant="secondary"
+								className="flex-1"
+								onClick={() => {
+									onEditMemory?.(selectedNode.memory);
+									setSelectedNode(null);
+								}}
+							>
+								Edit
+							</Button>
+							<Button
+								size="sm"
+								variant="destructive"
+								className="flex-1"
+								onClick={() => {
+									onDeleteMemory?.(selectedNode.memory);
+									setSelectedNode(null);
+								}}
+							>
+								Remove
+							</Button>
 						</div>
 						<Button
 							onClick={() => expandNeighbors(selectedNode.memory.id)}

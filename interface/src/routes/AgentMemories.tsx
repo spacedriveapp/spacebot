@@ -124,6 +124,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [formData, setFormData] = useState<MemoryFormData>(emptyFormData());
 	const [formError, setFormError] = useState<string | null>(null);
 	const [deleteConfirmMemoryId, setDeleteConfirmMemoryId] = useState<string | null>(null);
+	const [graphRefreshToken, setGraphRefreshToken] = useState(0);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -190,6 +191,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		},
 		onSuccess: () => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			setEditorOpen(false);
 			setEditingMemory(null);
 			setFormData(emptyFormData());
@@ -210,6 +212,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		},
 		onSuccess: () => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			setEditorOpen(false);
 			setEditingMemory(null);
 			setFormData(emptyFormData());
@@ -222,6 +225,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		mutationFn: (memoryId: string) => api.deleteMemory(agentId, memoryId),
 		onSuccess: (_response, memoryId) => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			if (expandedId === memoryId) {
 				setExpandedId(null);
 			}
@@ -375,7 +379,14 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			</div>
 
 			{viewMode === "graph" ? (
-				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
+				<MemoryGraph
+					agentId={agentId}
+					sort={sort}
+					typeFilter={typeFilter}
+					refreshToken={graphRefreshToken}
+					onEditMemory={openEditDialog}
+					onDeleteMemory={(memory) => setDeleteConfirmMemoryId(memory.id)}
+				/>
 			) : (
 				<>
 					{/* Table header */}
