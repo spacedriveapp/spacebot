@@ -2627,7 +2627,7 @@ impl Channel {
             .prune_delivered_retrigger_outbox(RETRIGGER_OUTBOX_PRUNE_LIMIT)
             .await
         {
-            tracing::debug!(
+            tracing::warn!(
                 channel_id = %self.id,
                 %error,
                 "failed to prune delivered retrigger outbox rows"
