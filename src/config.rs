@@ -2656,6 +2656,42 @@ struct TomlWorkerConfig {
     max_tool_timeout_secs: Option<u64>,
 }
 
+fn merge_and_validate_worker_config<FIdle, FMax>(
+    worker_override: Option<TomlWorkerConfig>,
+    base_worker: WorkerConfig,
+    idle_timeout_error: FIdle,
+    max_tool_timeout_error: FMax,
+) -> Result<WorkerConfig>
+where
+    FIdle: FnOnce() -> String,
+    FMax: FnOnce() -> String,
+{
+    let Some(worker) = worker_override else {
+        return Ok(base_worker);
+    };
+
+    let merged = WorkerConfig {
+        hard_timeout_secs: worker
+            .hard_timeout_secs
+            .unwrap_or(base_worker.hard_timeout_secs),
+        idle_timeout_secs: worker
+            .idle_timeout_secs
+            .unwrap_or(base_worker.idle_timeout_secs),
+        max_tool_timeout_secs: worker
+            .max_tool_timeout_secs
+            .unwrap_or(base_worker.max_tool_timeout_secs),
+    };
+
+    if merged.idle_timeout_secs == 0 {
+        return Err(ConfigError::Invalid(idle_timeout_error()).into());
+    }
+    if merged.max_tool_timeout_secs == 0 {
+        return Err(ConfigError::Invalid(max_tool_timeout_error()).into());
+    }
+
+    Ok(merged)
+}
+
 #[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
@@ -4365,39 +4401,12 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
-            worker: toml
-                .defaults
-                .worker
-                .map(|w| -> Result<WorkerConfig> {
-                    let hard_timeout_secs = w
-                        .hard_timeout_secs
-                        .unwrap_or(base_defaults.worker.hard_timeout_secs);
-                    let idle_timeout_secs = w
-                        .idle_timeout_secs
-                        .unwrap_or(base_defaults.worker.idle_timeout_secs);
-                    let max_tool_timeout_secs = w
-                        .max_tool_timeout_secs
-                        .unwrap_or(base_defaults.worker.max_tool_timeout_secs);
-                    if idle_timeout_secs == 0 {
-                        return Err(ConfigError::Invalid(
-                            "defaults.worker.idle_timeout_secs must be greater than 0".into(),
-                        )
-                        .into());
-                    }
-                    if max_tool_timeout_secs == 0 {
-                        return Err(ConfigError::Invalid(
-                            "defaults.worker.max_tool_timeout_secs must be greater than 0".into(),
-                        )
-                        .into());
-                    }
-                    Ok(WorkerConfig {
-                        hard_timeout_secs,
-                        idle_timeout_secs,
-                        max_tool_timeout_secs,
-                    })
-                })
-                .transpose()?
-                .unwrap_or(base_defaults.worker),
+            worker: merge_and_validate_worker_config(
+                toml.defaults.worker,
+                base_defaults.worker,
+                || "defaults.worker.idle_timeout_secs must be greater than 0".to_string(),
+                || "defaults.worker.max_tool_timeout_secs must be greater than 0".to_string(),
+            )?,
             browser: toml
                 .defaults
                 .browser
@@ -4503,35 +4512,23 @@ impl Config {
                 let agent_id_for_error = a.id.clone();
                 let worker = a
                     .worker
-                    .map(|w| -> Result<WorkerConfig> {
-                        let hard_timeout_secs = w
-                            .hard_timeout_secs
-                            .unwrap_or(defaults.worker.hard_timeout_secs);
-                        let idle_timeout_secs = w
-                            .idle_timeout_secs
-                            .unwrap_or(defaults.worker.idle_timeout_secs);
-                        let max_tool_timeout_secs = w
-                            .max_tool_timeout_secs
-                            .unwrap_or(defaults.worker.max_tool_timeout_secs);
-                        if idle_timeout_secs == 0 {
-                            return Err(ConfigError::Invalid(format!(
-                                "agent '{}' worker idle_timeout_secs must be greater than 0",
-                                agent_id_for_error
-                            ))
-                            .into());
-                        }
-                        if max_tool_timeout_secs == 0 {
-                            return Err(ConfigError::Invalid(format!(
-                                "agent '{}' worker max_tool_timeout_secs must be greater than 0",
-                                agent_id_for_error
-                            ))
-                            .into());
-                        }
-                        Ok(WorkerConfig {
-                            hard_timeout_secs,
-                            idle_timeout_secs,
-                            max_tool_timeout_secs,
-                        })
+                    .map(|worker| {
+                        merge_and_validate_worker_config(
+                            Some(worker),
+                            defaults.worker,
+                            || {
+                                format!(
+                                    "agent '{}' worker idle_timeout_secs must be greater than 0",
+                                    agent_id_for_error
+                                )
+                            },
+                            || {
+                                format!(
+                                    "agent '{}' worker max_tool_timeout_secs must be greater than 0",
+                                    agent_id_for_error
+                                )
+                            },
+                        )
                     })
                     .transpose()?;
 

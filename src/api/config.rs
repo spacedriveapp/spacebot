@@ -837,6 +837,38 @@ id = "main"
     }
 
     #[test]
+    fn test_update_worker_table_allows_zero_hard_timeout() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: Some(0),
+            idle_timeout_secs: None,
+            max_tool_timeout_secs: None,
+        };
+
+        update_worker_table(&mut doc, agent_idx, &update).expect("failed to update worker");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let worker = agent
+            .get("worker")
+            .and_then(|item| item.as_table())
+            .expect("missing worker table");
+
+        assert_eq!(worker["hard_timeout_secs"].as_integer(), Some(0));
+    }
+
+    #[test]
     fn test_update_worker_table_rejects_large_u64_values() {
         let mut doc: toml_edit::DocumentMut = r#"
 [[agents]]
