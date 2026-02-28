@@ -109,6 +109,8 @@ When a branch or worker completes, the channel doesn't poll for results. The com
 
 Retrigger events are debounced. If multiple branches complete within a short window, the channel batches them into a single turn. A retrigger limit (default: 3 per turn) prevents infinite cascades where a branch result triggers a new branch that triggers another retrigger.
 
+Completion relays are also mirrored to a durable SQLite outbox. If the channel self-queue is full or closed during retrigger enqueue, pending relays are retried and replayed from that outbox instead of being dropped.
+
 ### Status Block
 
 Every turn, the channel receives a live snapshot of all active processes:

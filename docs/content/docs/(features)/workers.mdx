@@ -79,6 +79,8 @@ Channel-owned workers are monitored by a watchdog with two limits (configured in
 
 When a worker enters `WaitingForInput`, watchdog timeouts are suspended until it resumes running.
 
+Worker completion relays are durable: branch/worker completion notifications are written to a channel retrigger outbox in SQLite before enqueue. If the channel retrigger queue is unavailable, relays are replayed from the outbox when the channel loop is healthy again.
+
 ## Context and History
 
 Workers start with a **fresh empty history**. They have no access to the channel's conversation. Their only context is:
