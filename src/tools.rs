@@ -466,7 +466,10 @@ pub fn create_cortex_chat_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(MemoryRecallTool::with_runtime(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
         .tool(MemoryDeleteTool::with_runtime(
             memory_search,
             runtime_config.clone(),
