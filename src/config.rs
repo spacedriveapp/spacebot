@@ -6487,6 +6487,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(anthropic_provider.api_type, ApiType::Anthropic);
         assert_eq!(anthropic_provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
         assert_eq!(anthropic_provider.api_key, "legacy-anthropic-key");
+        assert!(
+            anthropic_provider.extra_headers.is_empty(),
+            "anthropic provider should have no extra_headers"
+        );
 
         let openai_provider = config
             .llm
@@ -6496,6 +6500,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openai_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openai_provider.base_url, OPENAI_PROVIDER_BASE_URL);
         assert_eq!(openai_provider.api_key, "legacy-openai-key");
+        assert!(
+            openai_provider.extra_headers.is_empty(),
+            "openai provider should have no extra_headers"
+        );
 
         let openrouter_provider = config
             .llm
@@ -6506,20 +6514,18 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
         assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
         assert_eq!(openrouter_provider.extra_headers.len(), 3);
-        assert_eq!(openrouter_provider.extra_headers[0].0, "HTTP-Referer");
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
         assert_eq!(
-            openrouter_provider.extra_headers[0].1,
-            "https://spacebot.sh/"
-        );
-        assert_eq!(openrouter_provider.extra_headers[1].0, "X-OpenRouter-Title");
-        assert_eq!(openrouter_provider.extra_headers[1].1, "Spacebot");
-        assert_eq!(
-            openrouter_provider.extra_headers[2].0,
-            "X-OpenRouter-Categories"
-        );
-        assert_eq!(
-            openrouter_provider.extra_headers[2].1,
-            "cloud-agent,cli-agent"
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
         );
     }
 
@@ -6549,6 +6555,46 @@ name = "Custom OpenAI"
         assert_eq!(openai_provider.api_key, "explicit-openai-key");
         assert_eq!(openai_provider.name.as_deref(), Some("Custom OpenAI"));
         assert_eq!(config.llm.openai_key.as_deref(), Some("legacy-openai-key"));
+    }
+
+    #[test]
+    fn test_explicit_openrouter_provider_toml_injects_extra_headers() {
+        let toml = r#"
+[llm.provider.openrouter]
+api_type = "openai_completions"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "explicit-openrouter-key"
+name = "My OpenRouter"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        let openrouter_provider = config
+            .llm
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider missing");
+        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(openrouter_provider.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(openrouter_provider.api_key, "explicit-openrouter-key");
+        assert_eq!(openrouter_provider.name.as_deref(), Some("My OpenRouter"));
+
+        // Verify attribution headers are injected even for explicit TOML config
+        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
+        );
     }
 
     #[test]
