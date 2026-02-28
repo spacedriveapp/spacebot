@@ -744,6 +744,7 @@ pub(super) async fn create_agent(
         deps.agent_id.clone(),
         deps.task_store.clone(),
         memory_search.clone(),
+        runtime_config.clone(),
         conversation_logger,
         channel_store,
         run_logger,

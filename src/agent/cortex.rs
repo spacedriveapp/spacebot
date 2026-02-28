@@ -27,6 +27,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
+const WARM_RECALL_MEMORY_LIMIT: usize = 50;
+
 fn update_warmup_status<F>(deps: &AgentDeps, update: F)
 where
     F: FnOnce(&mut crate::config::WarmupStatus),
@@ -491,6 +493,19 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
         errors.push("bulletin generation failed".to_string());
     }
 
+    let warm_recall_count = match refresh_warm_recall_memories(deps).await {
+        Ok(count) => Some(count),
+        Err(error) => {
+            let refresh_error = format!("warm recall refresh failed: {error}");
+            tracing::warn!(
+                error = %refresh_error,
+                "warm recall refresh failed during warmup, keeping previous cache"
+            );
+            errors.push(refresh_error);
+            None
+        }
+    };
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     if errors.is_empty() {
         update_warmup_status(deps, |status| {
@@ -507,6 +522,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             Some(serde_json::json!({
                 "reason": reason,
                 "embedding_ready": embedding_ready,
+                "warm_recall_count": warm_recall_count,
                 "forced": force,
             })),
         );
@@ -525,10 +541,59 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             Some(serde_json::json!({
                 "reason": reason,
                 "errors": errors,
+                "warm_recall_count": warm_recall_count,
                 "forced": force,
             })),
         );
     }
+}
+
+async fn refresh_warm_recall_memories(deps: &AgentDeps) -> Result<usize> {
+    let start_epoch = deps
+        .runtime_config
+        .warm_recall_cache_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let config = SearchConfig {
+        mode: SearchMode::Important,
+        sort_by: SearchSort::Importance,
+        max_results: WARM_RECALL_MEMORY_LIMIT,
+        max_results_per_source: WARM_RECALL_MEMORY_LIMIT,
+        ..Default::default()
+    };
+
+    let results = deps.memory_search.search("", &config).await?;
+    let memories = results
+        .into_iter()
+        .map(|result| result.memory)
+        .collect::<Vec<_>>();
+    let count = memories.len();
+    let _warm_recall_cache_guard = deps.runtime_config.warm_recall_cache_lock.lock().await;
+    let current_epoch = deps
+        .runtime_config
+        .warm_recall_cache_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if current_epoch != start_epoch {
+        let retained_count = deps.runtime_config.warm_recall_memories.load().len();
+        tracing::debug!(
+            start_epoch,
+            current_epoch,
+            retained_count,
+            "skipping warm recall refresh apply due to concurrent cache mutation"
+        );
+        return Ok(retained_count);
+    }
+
+    deps.runtime_config
+        .warm_recall_memories
+        .store(Arc::new(memories));
+    deps.runtime_config
+        .warm_recall_refreshed_at_unix_ms
+        .store(Arc::new(Some(chrono::Utc::now().timestamp_millis())));
+    deps.runtime_config
+        .warm_recall_cache_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    Ok(count)
 }
 
 /// Trigger a forced warmup pass in the background from a dispatch path.
