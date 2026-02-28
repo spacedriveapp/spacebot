@@ -4,7 +4,7 @@ use crate::agent::branch::Branch;
 use crate::agent::compactor::Compactor;
 use crate::agent::status::StatusBlock;
 use crate::agent::worker::Worker;
-use crate::config::ApiType;
+use crate::config::{ApiType, WorkerConfig};
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
 use crate::hooks::SpacebotHook;
@@ -34,6 +34,91 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// Maximum retriggers allowed since the last real user message. Prevents
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
+const MAX_COMPLETED_WORKER_IDS: usize = 1024;
+
+#[derive(Debug, Clone, Copy)]
+struct WorkerWatchdogEntry {
+    started_at: tokio::time::Instant,
+    last_activity_at: tokio::time::Instant,
+    is_waiting_for_input: bool,
+    waiting_since: Option<tokio::time::Instant>,
+    has_activity_signal: bool,
+    in_flight_tools: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerTimeoutKind {
+    Hard,
+    Idle,
+}
+
+type WorkerTaskOutcome = (String, bool, bool);
+type WorkerTaskHandle = tokio::task::JoinHandle<WorkerTaskOutcome>;
+
+fn worker_timeout_kind(
+    entry: &WorkerWatchdogEntry,
+    config: WorkerConfig,
+    now: tokio::time::Instant,
+) -> Option<WorkerTimeoutKind> {
+    if config.hard_timeout_secs > 0
+        && !entry.is_waiting_for_input
+        && now.duration_since(entry.started_at).as_secs() >= config.hard_timeout_secs
+    {
+        return Some(WorkerTimeoutKind::Hard);
+    }
+
+    if config.idle_timeout_secs > 0
+        && !entry.is_waiting_for_input
+        && entry.has_activity_signal
+        && entry.in_flight_tools == 0
+        && now.duration_since(entry.last_activity_at).as_secs() >= config.idle_timeout_secs
+    {
+        return Some(WorkerTimeoutKind::Idle);
+    }
+
+    None
+}
+
+fn worker_watchdog_deadline(
+    entry: &WorkerWatchdogEntry,
+    config: WorkerConfig,
+) -> Option<tokio::time::Instant> {
+    let hard_deadline = (config.hard_timeout_secs > 0 && !entry.is_waiting_for_input)
+        .then_some(entry.started_at + std::time::Duration::from_secs(config.hard_timeout_secs));
+    let idle_deadline = (config.idle_timeout_secs > 0
+        && !entry.is_waiting_for_input
+        && entry.has_activity_signal
+        && entry.in_flight_tools == 0)
+        .then_some(
+            entry.last_activity_at + std::time::Duration::from_secs(config.idle_timeout_secs),
+        );
+
+    match (hard_deadline, idle_deadline) {
+        (Some(hard), Some(idle)) => Some(hard.min(idle)),
+        (Some(hard), None) => Some(hard),
+        (None, Some(idle)) => Some(idle),
+        (None, None) => None,
+    }
+}
+
+fn status_indicates_waiting_for_input(status: &str) -> bool {
+    let normalized = status.trim().to_ascii_lowercase();
+    normalized == "waiting" || normalized.starts_with("waiting for ")
+}
+
+fn enter_waiting_for_input(entry: &mut WorkerWatchdogEntry, now: tokio::time::Instant) {
+    if entry.waiting_since.is_none() {
+        entry.waiting_since = Some(now);
+    }
+    entry.is_waiting_for_input = true;
+}
+
+fn resume_from_waiting_for_input(entry: &mut WorkerWatchdogEntry, now: tokio::time::Instant) {
+    if let Some(waiting_since) = entry.waiting_since.take() {
+        entry.started_at += now.saturating_duration_since(waiting_since);
+    }
+    entry.is_waiting_for_input = false;
+}
 
 #[derive(Debug, Clone)]
 enum TemporalTimezone {
@@ -182,7 +267,7 @@ pub struct ChannelState {
     pub active_branches: Arc<RwLock<HashMap<BranchId, tokio::task::JoinHandle<()>>>>,
     pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
     /// Tokio task handles for running workers, used for cancellation via abort().
-    pub worker_handles: Arc<RwLock<HashMap<WorkerId, tokio::task::JoinHandle<()>>>>,
+    pub worker_handles: Arc<RwLock<HashMap<WorkerId, WorkerTaskHandle>>>,
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
@@ -201,6 +286,7 @@ impl ChannelState {
     /// Cancel a running worker by aborting its tokio task and cleaning up state.
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
+        const CANCELLED_RESULT: &str = "Worker cancelled";
         let handle = self.worker_handles.write().await.remove(&worker_id);
         let removed = self
             .active_workers
@@ -209,16 +295,80 @@ impl ChannelState {
             .remove(&worker_id)
             .is_some();
         self.worker_inputs.write().await.remove(&worker_id);
+        {
+            let mut status = self.status_block.write().await;
+            status.remove_worker(worker_id);
+        }
 
         if let Some(handle) = handle {
-            handle.abort();
-            // Mark the DB row as cancelled since the abort prevents WorkerComplete from firing
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
+            let was_finished = handle.is_finished();
+            if !was_finished {
+                handle.abort();
+            }
+
+            let event_tx = self.deps.event_tx.clone();
+            let agent_id = self.deps.agent_id.clone();
+            let channel_id = self.channel_id.clone();
+            let process_run_logger = self.process_run_logger.clone();
+
+            tokio::spawn(async move {
+                match handle.await {
+                    Ok((result, notify, success)) => {
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result,
+                            notify,
+                            success,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit worker completion during cancellation reconciliation"
+                            );
+                        }
+                    }
+                    Err(join_error) if join_error.is_cancelled() => {
+                        process_run_logger.log_worker_completed(worker_id, CANCELLED_RESULT, false);
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result: CANCELLED_RESULT.to_string(),
+                            notify: false,
+                            success: false,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit cancelled worker completion"
+                            );
+                        }
+                    }
+                    Err(join_error) => {
+                        let failure_text = format!("Worker failed while cancelling: {join_error}");
+                        process_run_logger.log_worker_completed(worker_id, &failure_text, false);
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result: failure_text,
+                            notify: false,
+                            success: false,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit failed worker cancellation completion"
+                            );
+                        }
+                    }
+                }
+            });
             Ok(())
         } else if removed {
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
+            tracing::debug!(worker_id = %worker_id, "worker state removed without active handle");
             Ok(())
         } else {
             Err(format!("Worker {worker_id} not found"))
@@ -292,6 +442,10 @@ pub struct Channel {
     /// Background process results waiting to be embedded in the next retrigger.
     /// Accumulated during the debounce window and drained when the retrigger fires.
     pending_results: Vec<PendingResult>,
+    /// Per-worker watchdog timestamps for hard/idle timeout enforcement.
+    worker_watchdog: HashMap<WorkerId, WorkerWatchdogEntry>,
+    /// Dedupes duplicate completion events that can arrive from recovery paths.
+    completed_workers: HashSet<WorkerId>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
 }
@@ -392,6 +546,8 @@ impl Channel {
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
             pending_results: Vec::new(),
+            worker_watchdog: HashMap::new(),
+            completed_workers: HashSet::new(),
             send_agent_message_tool,
         };
 
@@ -427,13 +583,16 @@ impl Channel {
         tracing::info!(channel_id = %self.id, "channel started");
 
         loop {
-            // Compute next deadline from coalesce and retrigger timers
-            let next_deadline = match (self.coalesce_deadline, self.retrigger_deadline) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (Some(a), None) => Some(a),
-                (None, Some(b)) => Some(b),
-                (None, None) => None,
-            };
+            // Compute next deadline from coalesce, retrigger, and worker watchdog timers.
+            let worker_watchdog_deadline = self.next_worker_watchdog_deadline();
+            let next_deadline = [
+                self.coalesce_deadline,
+                self.retrigger_deadline,
+                worker_watchdog_deadline,
+            ]
+            .into_iter()
+            .flatten()
+            .min();
             let sleep_duration = next_deadline
                 .map(|deadline| {
                     let now = tokio::time::Instant::now();
@@ -461,13 +620,34 @@ impl Channel {
                         }
                     }
                 }
-                Ok(event) = self.event_rx.recv() => {
+                event = self.event_rx.recv() => {
                     // Events bypass coalescing - flush buffer first if needed
                     if let Err(error) = self.flush_coalesce_buffer().await {
                         tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
                     }
-                    if let Err(error) = self.handle_event(event).await {
-                        tracing::error!(%error, channel_id = %self.id, "error handling event");
+                    match event {
+                        Ok(event) => {
+                            if let Err(error) = self.handle_event(event).await {
+                                tracing::error!(%error, channel_id = %self.id, "error handling event");
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                            let pruned_workers = prune_finished_worker_state(&self.state).await;
+                            self.resync_worker_watchdog_after_event_lag().await;
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                skipped,
+                                pruned_finished_workers = pruned_workers.len(),
+                                "channel event receiver lagged, continuing with latest events"
+                            );
+                        }
+                        Err(broadcast::error::RecvError::Closed) => {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                "channel event receiver closed, stopping channel loop"
+                            );
+                            break;
+                        }
                     }
                 }
                 _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() => {
@@ -482,6 +662,10 @@ impl Channel {
                     if self.retrigger_deadline.is_some_and(|d| d <= now) {
                         self.flush_pending_retrigger().await;
                     }
+                    // Check watchdog deadline
+                    if worker_watchdog_deadline.is_some_and(|d| d <= now) {
+                        self.reap_timed_out_workers().await;
+                    }
                 }
                 else => break,
             }
@@ -494,6 +678,296 @@ impl Channel {
 
         tracing::info!(channel_id = %self.id, "channel stopped");
         Ok(())
+    }
+
+    fn next_worker_watchdog_deadline(&self) -> Option<tokio::time::Instant> {
+        let config = **self.deps.runtime_config.worker.load();
+        self.worker_watchdog
+            .values()
+            .filter_map(|entry| worker_watchdog_deadline(entry, config))
+            .min()
+    }
+
+    fn register_worker_watchdog(&mut self, worker_id: WorkerId) {
+        let now = tokio::time::Instant::now();
+        self.worker_watchdog.insert(
+            worker_id,
+            WorkerWatchdogEntry {
+                started_at: now,
+                last_activity_at: now,
+                is_waiting_for_input: false,
+                waiting_since: None,
+                has_activity_signal: false,
+                in_flight_tools: 0,
+            },
+        );
+    }
+
+    fn note_worker_status(&mut self, worker_id: WorkerId, status: &str) {
+        if let Some(entry) = self.worker_watchdog.get_mut(&worker_id) {
+            let now = tokio::time::Instant::now();
+            let was_waiting = entry.is_waiting_for_input;
+            let is_waiting_for_input = status_indicates_waiting_for_input(status);
+            entry.last_activity_at = now;
+            entry.has_activity_signal = true;
+            if is_waiting_for_input {
+                if !was_waiting {
+                    enter_waiting_for_input(entry, now);
+                }
+            } else if was_waiting {
+                // Waiting windows should not consume hard-timeout budget.
+                resume_from_waiting_for_input(entry, now);
+            } else {
+                entry.is_waiting_for_input = false;
+                entry.waiting_since = None;
+            }
+        }
+    }
+
+    fn note_worker_tool_started(&mut self, worker_id: WorkerId) {
+        if let Some(entry) = self.worker_watchdog.get_mut(&worker_id) {
+            let now = tokio::time::Instant::now();
+            if entry.is_waiting_for_input {
+                resume_from_waiting_for_input(entry, now);
+            }
+            entry.last_activity_at = now;
+            entry.is_waiting_for_input = false;
+            entry.waiting_since = None;
+            entry.has_activity_signal = true;
+            entry.in_flight_tools = entry.in_flight_tools.saturating_add(1);
+        }
+    }
+
+    fn note_worker_tool_completed(&mut self, worker_id: WorkerId) {
+        if let Some(entry) = self.worker_watchdog.get_mut(&worker_id) {
+            let now = tokio::time::Instant::now();
+            if entry.is_waiting_for_input {
+                resume_from_waiting_for_input(entry, now);
+            }
+            entry.last_activity_at = now;
+            entry.is_waiting_for_input = false;
+            entry.waiting_since = None;
+            entry.has_activity_signal = true;
+            entry.in_flight_tools = entry.in_flight_tools.saturating_sub(1);
+        }
+    }
+
+    fn remember_worker_completion(&mut self, worker_id: WorkerId) -> bool {
+        if self.completed_workers.len() >= MAX_COMPLETED_WORKER_IDS {
+            self.completed_workers.clear();
+        }
+        self.completed_workers.insert(worker_id)
+    }
+
+    async fn resync_worker_watchdog_after_event_lag(&mut self) {
+        let now = tokio::time::Instant::now();
+        let active_worker_ids: std::collections::HashSet<WorkerId> = {
+            let active_workers = self.state.active_workers.read().await;
+            active_workers.keys().copied().collect()
+        };
+        let waiting_states: std::collections::HashMap<WorkerId, bool> = {
+            let status = self.state.status_block.read().await;
+            status
+                .active_workers
+                .iter()
+                .map(|worker| {
+                    (
+                        worker.id,
+                        status_indicates_waiting_for_input(worker.status.as_str()),
+                    )
+                })
+                .collect()
+        };
+
+        self.worker_watchdog
+            .retain(|worker_id, _| active_worker_ids.contains(worker_id));
+
+        for worker_id in active_worker_ids {
+            let entry = self
+                .worker_watchdog
+                .entry(worker_id)
+                .or_insert(WorkerWatchdogEntry {
+                    started_at: now,
+                    last_activity_at: now,
+                    is_waiting_for_input: false,
+                    waiting_since: None,
+                    has_activity_signal: false,
+                    in_flight_tools: 0,
+                });
+            // Event lag means we may have missed waiting/tool lifecycle events.
+            // Reset timeout anchors and infer waiting state from current status text.
+            entry.started_at = now;
+            entry.last_activity_at = now;
+            entry.is_waiting_for_input = waiting_states.get(&worker_id).copied().unwrap_or(false);
+            entry.waiting_since = entry.is_waiting_for_input.then_some(now);
+            entry.has_activity_signal = false;
+            entry.in_flight_tools = 0;
+        }
+    }
+
+    async fn reap_timed_out_workers(&mut self) {
+        let config = **self.deps.runtime_config.worker.load();
+        let now = tokio::time::Instant::now();
+        let timed_out_workers: Vec<(WorkerId, WorkerTimeoutKind)> = self
+            .worker_watchdog
+            .iter()
+            .filter_map(|(worker_id, entry)| {
+                worker_timeout_kind(entry, config, now).map(|kind| (*worker_id, kind))
+            })
+            .collect();
+
+        for (worker_id, timeout_kind) in timed_out_workers {
+            self.worker_watchdog.remove(&worker_id);
+
+            let handle = self.state.worker_handles.write().await.remove(&worker_id);
+            let Some(handle) = handle else {
+                continue;
+            };
+
+            self.state.active_workers.write().await.remove(&worker_id);
+            self.state.worker_inputs.write().await.remove(&worker_id);
+            {
+                let mut status = self.state.status_block.write().await;
+                status.remove_worker(worker_id);
+            }
+
+            if handle.is_finished() {
+                match handle.await {
+                    Ok((result, notify, success)) => {
+                        if let Err(error) = self.deps.event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id: self.deps.agent_id.clone(),
+                            worker_id,
+                            channel_id: Some(self.id.clone()),
+                            result,
+                            notify,
+                            success,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit completion from finished watchdog handle"
+                            );
+                        }
+                    }
+                    Err(join_error) if join_error.is_cancelled() => {}
+                    Err(join_error) => {
+                        let failure_text =
+                            format!("Worker panicked before watchdog reconciliation: {join_error}");
+                        self.state.process_run_logger.log_worker_completed(
+                            worker_id,
+                            &failure_text,
+                            false,
+                        );
+                        if let Err(error) = self.deps.event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id: self.deps.agent_id.clone(),
+                            worker_id,
+                            channel_id: Some(self.id.clone()),
+                            result: failure_text,
+                            notify: true,
+                            success: false,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit watchdog panic completion"
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+
+            let result_text = match timeout_kind {
+                WorkerTimeoutKind::Hard => {
+                    format!(
+                        "Worker timed out after {}s (hard timeout).",
+                        config.hard_timeout_secs
+                    )
+                }
+                WorkerTimeoutKind::Idle => {
+                    format!(
+                        "Worker timed out after {}s without status/tool activity (idle timeout).",
+                        config.idle_timeout_secs
+                    )
+                }
+            };
+
+            let timeout_kind_label = match timeout_kind {
+                WorkerTimeoutKind::Hard => "hard",
+                WorkerTimeoutKind::Idle => "idle",
+            };
+
+            tracing::warn!(
+                worker_id = %worker_id,
+                timeout_kind = timeout_kind_label,
+                hard_timeout_secs = config.hard_timeout_secs,
+                idle_timeout_secs = config.idle_timeout_secs,
+                "worker watchdog timed out, aborting worker task"
+            );
+
+            let event_tx = self.deps.event_tx.clone();
+            let agent_id = self.deps.agent_id.clone();
+            let channel_id = self.id.clone();
+            let process_run_logger = self.state.process_run_logger.clone();
+
+            tokio::spawn(async move {
+                handle.abort();
+                match handle.await {
+                    Ok((result, notify, success)) => {
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result,
+                            notify,
+                            success,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit completion after watchdog abort race"
+                            );
+                        }
+                    }
+                    Err(join_error) if join_error.is_cancelled() => {
+                        process_run_logger.log_worker_completed(worker_id, &result_text, false);
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result: result_text,
+                            notify: true,
+                            success: false,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit watchdog timeout completion"
+                            );
+                        }
+                    }
+                    Err(join_error) => {
+                        let failure_text =
+                            format!("Worker failed after timeout abort: {join_error}");
+                        process_run_logger.log_worker_completed(worker_id, &failure_text, false);
+                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id,
+                            worker_id,
+                            channel_id: Some(channel_id),
+                            result: failure_text,
+                            notify: true,
+                            success: false,
+                        }) {
+                            tracing::debug!(
+                                worker_id = %worker_id,
+                                %error,
+                                "failed to emit watchdog abort failure completion"
+                            );
+                        }
+                    }
+                }
+            });
+        }
     }
 
     /// Determine if a message should be coalesced (batched with other messages).
@@ -1502,7 +1976,6 @@ impl Channel {
 
         let mut should_retrigger = false;
         let mut retrigger_metadata = std::collections::HashMap::new();
-        let run_logger = &self.state.process_run_logger;
 
         match &event {
             ProcessEvent::BranchStarted {
@@ -1512,7 +1985,11 @@ impl Channel {
                 reply_to_message_id,
                 ..
             } => {
-                run_logger.log_branch_started(channel_id, *branch_id, description);
+                self.state.process_run_logger.log_branch_started(
+                    channel_id,
+                    *branch_id,
+                    description,
+                );
                 if let Some(message_id) = reply_to_message_id {
                     self.branch_reply_targets.insert(*branch_id, *message_id);
                 }
@@ -1522,7 +1999,9 @@ impl Channel {
                 conclusion,
                 ..
             } => {
-                run_logger.log_branch_completed(*branch_id, conclusion);
+                self.state
+                    .process_run_logger
+                    .log_branch_completed(*branch_id, conclusion);
 
                 // Remove from active branches
                 let mut branches = self.state.active_branches.write().await;
@@ -1569,18 +2048,35 @@ impl Channel {
                 worker_type,
                 ..
             } => {
-                run_logger.log_worker_started(
+                self.state.process_run_logger.log_worker_started(
                     channel_id.as_ref(),
                     *worker_id,
                     task,
                     worker_type,
                     &self.deps.agent_id,
                 );
+                self.completed_workers.remove(worker_id);
+                self.register_worker_watchdog(*worker_id);
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
             } => {
-                run_logger.log_worker_status(*worker_id, status);
+                self.state
+                    .process_run_logger
+                    .log_worker_status(*worker_id, status);
+                self.note_worker_status(*worker_id, status);
+            }
+            ProcessEvent::ToolStarted {
+                process_id: ProcessId::Worker(worker_id),
+                ..
+            } => {
+                self.note_worker_tool_started(*worker_id);
+            }
+            ProcessEvent::ToolCompleted {
+                process_id: ProcessId::Worker(worker_id),
+                ..
+            } => {
+                self.note_worker_tool_completed(*worker_id);
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -1589,7 +2085,17 @@ impl Channel {
                 success,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result, *success);
+                if !self.remember_worker_completion(*worker_id) {
+                    tracing::debug!(
+                        worker_id = %worker_id,
+                        "ignoring duplicate worker completion event"
+                    );
+                    return Ok(());
+                }
+                self.state
+                    .process_run_logger
+                    .log_worker_completed(*worker_id, result, *success);
+                self.worker_watchdog.remove(worker_id);
 
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
@@ -2058,14 +2564,104 @@ async fn spawn_branch(
 /// Check whether the channel has capacity for another worker.
 async fn check_worker_limit(state: &ChannelState) -> std::result::Result<(), AgentError> {
     let max_workers = **state.deps.runtime_config.max_concurrent_workers.load();
-    let workers = state.active_workers.read().await;
-    if workers.len() >= max_workers {
+    let worker_handles = state.worker_handles.read().await;
+    let active_worker_count = worker_handles
+        .values()
+        .filter(|handle| !handle.is_finished())
+        .count();
+    if active_worker_count >= max_workers {
         return Err(AgentError::WorkerLimitReached {
             channel_id: state.channel_id.to_string(),
             max: max_workers,
         });
     }
     Ok(())
+}
+
+async fn prune_finished_worker_state(state: &ChannelState) -> Vec<WorkerId> {
+    let finished_worker_ids: Vec<WorkerId> = {
+        let worker_handles = state.worker_handles.read().await;
+        worker_handles
+            .iter()
+            .filter_map(|(worker_id, handle)| handle.is_finished().then_some(*worker_id))
+            .collect()
+    };
+
+    if finished_worker_ids.is_empty() {
+        return finished_worker_ids;
+    }
+
+    let mut finished_handles = Vec::with_capacity(finished_worker_ids.len());
+    {
+        let mut worker_handles = state.worker_handles.write().await;
+        for worker_id in &finished_worker_ids {
+            if let Some(handle) = worker_handles.remove(worker_id) {
+                finished_handles.push((*worker_id, handle));
+            }
+        }
+    }
+    {
+        let mut active_workers = state.active_workers.write().await;
+        for worker_id in &finished_worker_ids {
+            active_workers.remove(worker_id);
+        }
+    }
+    {
+        let mut worker_inputs = state.worker_inputs.write().await;
+        for worker_id in &finished_worker_ids {
+            worker_inputs.remove(worker_id);
+        }
+    }
+    {
+        let mut status = state.status_block.write().await;
+        for worker_id in &finished_worker_ids {
+            status.remove_worker(*worker_id);
+        }
+    }
+
+    for (worker_id, handle) in finished_handles {
+        match handle.await {
+            Ok((result_text, notify, success)) => {
+                if let Err(error) = state.deps.event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: state.deps.agent_id.clone(),
+                    worker_id,
+                    channel_id: Some(state.channel_id.clone()),
+                    result: result_text,
+                    notify,
+                    success,
+                }) {
+                    tracing::debug!(
+                        worker_id = %worker_id,
+                        %error,
+                        "failed to emit reconciled worker completion"
+                    );
+                }
+            }
+            Err(join_error) if join_error.is_cancelled() => {}
+            Err(join_error) => {
+                let failure_text = format!("Worker panicked before completion event: {join_error}");
+                state
+                    .process_run_logger
+                    .log_worker_completed(worker_id, &failure_text, false);
+                if let Err(error) = state.deps.event_tx.send(ProcessEvent::WorkerComplete {
+                    agent_id: state.deps.agent_id.clone(),
+                    worker_id,
+                    channel_id: Some(state.channel_id.clone()),
+                    result: failure_text,
+                    notify: true,
+                    success: false,
+                }) {
+                    tracing::debug!(
+                        worker_id = %worker_id,
+                        %error,
+                        "failed to emit reconciled worker panic completion"
+                    );
+                }
+            }
+        }
+    }
+
+    finished_worker_ids
 }
 
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
@@ -2153,6 +2749,7 @@ pub async fn spawn_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        state.process_run_logger.clone(),
         worker.run().instrument(worker_span),
     );
 
@@ -2163,6 +2760,13 @@ pub async fn spawn_worker_from_state(
         status.add_worker(worker_id, &task, false);
     }
 
+    state.process_run_logger.log_worker_started(
+        Some(&state.channel_id),
+        worker_id,
+        &task,
+        "builtin",
+        &state.deps.agent_id,
+    );
     state
         .deps
         .event_tx
@@ -2253,6 +2857,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        state.process_run_logger.clone(),
         async move {
             let result = worker.run().await?;
             Ok::<String, anyhow::Error>(result.result_text)
@@ -2263,6 +2868,13 @@ pub async fn spawn_opencode_worker_from_state(
     state.worker_handles.write().await.insert(worker_id, handle);
 
     let opencode_task = format!("[opencode] {task}");
+    state.process_run_logger.log_worker_started(
+        Some(&state.channel_id),
+        worker_id,
+        &opencode_task,
+        "opencode",
+        &state.deps.agent_id,
+    );
     {
         let mut status = state.status_block.write().await;
         status.add_worker(worker_id, &opencode_task, false);
@@ -2295,8 +2907,9 @@ fn spawn_worker_task<F, E>(
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
+    process_run_logger: ProcessRunLogger,
     future: F,
-) -> tokio::task::JoinHandle<()>
+) -> WorkerTaskHandle
 where
     F: std::future::Future<Output = std::result::Result<String, E>> + Send + 'static,
     E: std::fmt::Display + Send + 'static,
@@ -2318,6 +2931,7 @@ where
                 (format!("Worker failed: {error}"), true, false)
             }
         };
+        process_run_logger.log_worker_completed(worker_id, &result_text, success);
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -2331,14 +2945,22 @@ where
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 
-        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
             agent_id,
             worker_id,
             channel_id,
-            result: result_text,
+            result: result_text.clone(),
             notify,
             success,
-        });
+        }) {
+            tracing::debug!(
+                worker_id = %worker_id,
+                %error,
+                "failed to emit worker completion from worker task"
+            );
+        }
+
+        (result_text, notify, success)
     })
 }
 
@@ -2499,10 +3121,18 @@ fn extract_discord_message_id(message: &InboundMessage) -> Option<u64> {
 /// channel's workers would leak into sibling channels (e.g. threads).
 fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
     match event {
+        ProcessEvent::BranchStarted {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
         ProcessEvent::BranchResult {
             channel_id: event_channel,
             ..
         } => event_channel == channel_id,
+        ProcessEvent::WorkerStarted {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
         ProcessEvent::WorkerComplete {
             channel_id: event_channel,
             ..
@@ -2511,8 +3141,34 @@ fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
             channel_id: event_channel,
             ..
         } => event_channel.as_ref() == Some(channel_id),
-        // Status block updates, tool events, etc. — match on agent_id which
-        // is already filtered by the event bus subscription. Let them through.
+        ProcessEvent::ToolStarted {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::ToolCompleted {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::CompactionTriggered {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
+        ProcessEvent::WorkerPermission {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::WorkerQuestion {
+            channel_id: event_channel,
+            ..
+        } => event_channel.as_ref() == Some(channel_id),
+        ProcessEvent::AgentMessageSent {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
+        ProcessEvent::AgentMessageReceived {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
         _ => true,
     }
 }
@@ -3035,7 +3691,12 @@ fn is_user_text_message(message: &rig::message::Message) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_history_after_turn;
+    use super::{
+        WorkerTimeoutKind, WorkerWatchdogEntry, apply_history_after_turn, event_is_for_channel,
+        resume_from_waiting_for_input, status_indicates_waiting_for_input, worker_timeout_kind,
+        worker_watchdog_deadline,
+    };
+    use crate::config::WorkerConfig;
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
     use rig::tool::ToolSetError;
@@ -3064,6 +3725,257 @@ mod tests {
                 }
             })
             .collect()
+    }
+
+    #[test]
+    fn worker_watchdog_deadline_uses_earliest_timeout() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start + std::time::Duration::from_secs(30),
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 300,
+            idle_timeout_secs: 60,
+        };
+
+        let deadline =
+            worker_watchdog_deadline(&entry, config).expect("watchdog deadline should exist");
+
+        assert_eq!(
+            deadline,
+            start + std::time::Duration::from_secs(90),
+            "idle timeout should fire before hard timeout"
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_prefers_hard_timeout() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 10,
+            idle_timeout_secs: 10,
+        };
+        let now = start + std::time::Duration::from_secs(11);
+
+        assert_eq!(
+            worker_timeout_kind(&entry, config, now),
+            Some(WorkerTimeoutKind::Hard)
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_respects_recent_activity() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start + std::time::Duration::from_secs(8),
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 60,
+            idle_timeout_secs: 10,
+        };
+        let now = start + std::time::Duration::from_secs(15);
+
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn worker_timeout_kind_ignores_idle_while_waiting_for_input() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: true,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 600,
+            idle_timeout_secs: 10,
+        };
+        let now = start + std::time::Duration::from_secs(60);
+
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn worker_timeout_kind_ignores_hard_while_waiting_for_input() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: true,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 10,
+            idle_timeout_secs: 0,
+        };
+        let now = start + std::time::Duration::from_secs(60);
+
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn resume_from_waiting_preserves_hard_timeout_budget() {
+        let start = tokio::time::Instant::now();
+        let mut entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start + std::time::Duration::from_secs(8),
+            is_waiting_for_input: true,
+            waiting_since: Some(start + std::time::Duration::from_secs(8)),
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let resume_at = start + std::time::Duration::from_secs(18);
+        let config = WorkerConfig {
+            hard_timeout_secs: 10,
+            idle_timeout_secs: 0,
+        };
+
+        resume_from_waiting_for_input(&mut entry, resume_at);
+        let now = start + std::time::Duration::from_secs(19);
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+
+        let now = start + std::time::Duration::from_secs(20);
+        assert_eq!(
+            worker_timeout_kind(&entry, config, now),
+            Some(WorkerTimeoutKind::Hard)
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_ignores_idle_without_activity_signal() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: false,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 600,
+            idle_timeout_secs: 10,
+        };
+        let now = start + std::time::Duration::from_secs(60);
+
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn worker_watchdog_deadline_ignores_all_timeouts_while_waiting_for_input() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: true,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 300,
+            idle_timeout_secs: 10,
+        };
+
+        assert_eq!(
+            worker_watchdog_deadline(&entry, config),
+            None,
+            "watchdog should not schedule timeouts while worker is waiting for input"
+        );
+    }
+
+    #[test]
+    fn worker_watchdog_deadline_ignores_idle_with_in_flight_tool() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 1,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 10_000_000,
+            idle_timeout_secs: 10,
+        };
+
+        let deadline =
+            worker_watchdog_deadline(&entry, config).expect("hard deadline should still exist");
+
+        assert_eq!(
+            deadline,
+            start + std::time::Duration::from_secs(10_000_000),
+            "watchdog should not schedule idle wakeups while worker has in-flight tools"
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_ignores_idle_with_in_flight_tool() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 1,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 600,
+            idle_timeout_secs: 10,
+        };
+        let now = start + std::time::Duration::from_secs(60);
+
+        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn waiting_status_detection_supports_follow_up_variant() {
+        assert!(status_indicates_waiting_for_input("waiting for input"));
+        assert!(status_indicates_waiting_for_input("waiting for follow-up"));
+        assert!(status_indicates_waiting_for_input("Waiting for follow-up"));
+        assert!(!status_indicates_waiting_for_input("processing follow-up"));
+    }
+
+    #[test]
+    fn event_filter_rejects_other_channel_worker_started() {
+        let channel_id = std::sync::Arc::<str>::from("channel-a");
+        let event = crate::ProcessEvent::WorkerStarted {
+            agent_id: std::sync::Arc::<str>::from("agent"),
+            worker_id: uuid::Uuid::new_v4(),
+            channel_id: Some(std::sync::Arc::<str>::from("channel-b")),
+            task: "task".to_string(),
+            worker_type: "builtin".to_string(),
+        };
+
+        assert!(
+            !event_is_for_channel(&event, &channel_id),
+            "worker events from other channels should be ignored"
+        );
     }
 
     /// On success, the full post-turn history is written back.

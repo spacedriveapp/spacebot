@@ -3,6 +3,10 @@
 use crate::{BranchId, ProcessEvent, ProcessId, WorkerId};
 use chrono::{DateTime, Utc};
 
+const MAX_COMPLETED_ITEMS: usize = 10;
+const MAX_RENDERED_COMPLETED_ITEMS: usize = 5;
+const WORKER_COMPLETED_TTL_SECS: i64 = 300;
+
 /// Live status block injected into channel context.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct StatusBlock {
@@ -68,6 +72,8 @@ impl StatusBlock {
 
     /// Update from a process event.
     pub fn update(&mut self, event: &ProcessEvent) {
+        self.prune_completed_items();
+
         match event {
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
@@ -122,17 +128,14 @@ impl StatusBlock {
                         result_summary: conclusion.clone(),
                     });
                 }
-
-                // Keep only last 10 completed items
-                if self.completed_items.len() > 10 {
-                    self.completed_items.remove(0);
-                }
             }
             ProcessEvent::AgentMessageSent { to_agent_id, .. } => {
                 self.track_link_conversation(to_agent_id.as_ref());
             }
             _ => {}
         }
+
+        self.prune_completed_items();
     }
 
     /// Add a new active branch.
@@ -154,6 +157,18 @@ impl StatusBlock {
             notify_on_complete,
             tool_calls: 0,
         });
+    }
+
+    /// Remove an active worker from the status block without recording completion.
+    /// Used for reconciliation paths when lifecycle events were missed.
+    pub fn remove_worker(&mut self, id: WorkerId) {
+        if let Some(pos) = self
+            .active_workers
+            .iter()
+            .position(|worker| worker.id == id)
+        {
+            self.active_workers.remove(pos);
+        }
     }
 
     /// Render the status block as a string for context injection.
@@ -219,9 +234,21 @@ impl StatusBlock {
         }
 
         // Recently completed
-        if !self.completed_items.is_empty() {
+        let now = Utc::now();
+        let worker_ttl = chrono::Duration::seconds(WORKER_COMPLETED_TTL_SECS);
+        let recent_completed: Vec<&CompletedItem> = self
+            .completed_items
+            .iter()
+            .rev()
+            .filter(|item| {
+                item.item_type != CompletedItemType::Worker
+                    || now.signed_duration_since(item.completed_at) <= worker_ttl
+            })
+            .take(MAX_RENDERED_COMPLETED_ITEMS)
+            .collect();
+        if !recent_completed.is_empty() {
             output.push_str("## Recently Completed\n");
-            for item in self.completed_items.iter().rev().take(5) {
+            for item in recent_completed {
                 let type_str = match item.item_type {
                     CompletedItemType::Branch => "branch",
                     CompletedItemType::Worker => "worker",
@@ -242,6 +269,20 @@ impl StatusBlock {
         }
 
         output
+    }
+
+    fn prune_completed_items(&mut self) {
+        let now = Utc::now();
+        let worker_ttl = chrono::Duration::seconds(WORKER_COMPLETED_TTL_SECS);
+        self.completed_items.retain(|item| {
+            item.item_type != CompletedItemType::Worker
+                || now.signed_duration_since(item.completed_at) <= worker_ttl
+        });
+
+        if self.completed_items.len() > MAX_COMPLETED_ITEMS {
+            let prune_count = self.completed_items.len() - MAX_COMPLETED_ITEMS;
+            self.completed_items.drain(..prune_count);
+        }
     }
 
     /// Check if a worker is active.
@@ -281,12 +322,59 @@ impl StatusBlock {
 
 #[cfg(test)]
 mod tests {
-    use super::StatusBlock;
+    use super::{CompletedItem, CompletedItemType, StatusBlock};
 
     #[test]
     fn render_with_time_context_renders_current_time_when_empty() {
         let status = StatusBlock::new();
         let rendered = status.render_with_time_context(Some("2026-02-26 12:00:00 UTC"));
         assert!(rendered.contains("Current date/time: 2026-02-26 12:00:00 UTC"));
+    }
+
+    #[test]
+    fn render_excludes_stale_worker_completions() {
+        let mut status = StatusBlock::new();
+        status.completed_items.push(CompletedItem {
+            id: "worker-1".to_string(),
+            item_type: CompletedItemType::Worker,
+            description: "stale worker".to_string(),
+            completed_at: chrono::Utc::now() - chrono::Duration::seconds(600),
+            result_summary: "stale output".to_string(),
+        });
+        status.completed_items.push(CompletedItem {
+            id: "branch-1".to_string(),
+            item_type: CompletedItemType::Branch,
+            description: "recent branch".to_string(),
+            completed_at: chrono::Utc::now(),
+            result_summary: "fresh branch output".to_string(),
+        });
+
+        let rendered = status.render();
+
+        assert!(!rendered.contains("stale worker"));
+        assert!(rendered.contains("recent branch"));
+    }
+
+    #[test]
+    fn update_prunes_completed_items_to_cap() {
+        let mut status = StatusBlock::new();
+        for index in 0..20 {
+            status.completed_items.push(CompletedItem {
+                id: format!("branch-{index}"),
+                item_type: CompletedItemType::Branch,
+                description: format!("branch {index}"),
+                completed_at: chrono::Utc::now(),
+                result_summary: "ok".to_string(),
+            });
+        }
+
+        status.update(&crate::ProcessEvent::StatusUpdate {
+            agent_id: std::sync::Arc::<str>::from("agent"),
+            process_id: crate::ProcessId::Channel(std::sync::Arc::<str>::from("channel")),
+            status: "noop".to_string(),
+        });
+
+        assert_eq!(status.completed_items.len(), 10);
+        assert_eq!(status.completed_items[0].id, "branch-10");
     }
 }

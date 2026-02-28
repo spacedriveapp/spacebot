@@ -46,6 +46,12 @@ pub(super) struct CortexSection {
 }
 
 #[derive(Serialize, Debug)]
+pub(super) struct WorkerSection {
+    hard_timeout_secs: u64,
+    idle_timeout_secs: u64,
+}
+
+#[derive(Serialize, Debug)]
 pub(super) struct WarmupSection {
     enabled: bool,
     eager_embedding_load: bool,
@@ -92,6 +98,7 @@ pub(super) struct AgentConfigResponse {
     routing: RoutingSection,
     tuning: TuningSection,
     compaction: CompactionSection,
+    worker: WorkerSection,
     cortex: CortexSection,
     warmup: WarmupSection,
     coalesce: CoalesceSection,
@@ -115,6 +122,8 @@ pub(super) struct AgentConfigUpdateRequest {
     tuning: Option<TuningUpdate>,
     #[serde(default)]
     compaction: Option<CompactionUpdate>,
+    #[serde(default)]
+    worker: Option<WorkerUpdate>,
     #[serde(default)]
     cortex: Option<CortexUpdate>,
     #[serde(default)]
@@ -157,6 +166,12 @@ pub(super) struct CompactionUpdate {
     background_threshold: Option<f32>,
     aggressive_threshold: Option<f32>,
     emergency_threshold: Option<f32>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(super) struct WorkerUpdate {
+    hard_timeout_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -224,6 +239,7 @@ pub(super) async fn get_agent_config(
 
     let routing = rc.routing.load();
     let compaction = rc.compaction.load();
+    let worker = rc.worker.load();
     let cortex = rc.cortex.load();
     let warmup = rc.warmup.load();
     let coalesce = rc.coalesce.load();
@@ -253,6 +269,10 @@ pub(super) async fn get_agent_config(
             background_threshold: compaction.background_threshold,
             aggressive_threshold: compaction.aggressive_threshold,
             emergency_threshold: compaction.emergency_threshold,
+        },
+        worker: WorkerSection {
+            hard_timeout_secs: worker.hard_timeout_secs,
+            idle_timeout_secs: worker.idle_timeout_secs,
         },
         cortex: CortexSection {
             tick_interval_secs: cortex.tick_interval_secs,
@@ -353,6 +373,9 @@ pub(super) async fn update_agent_config(
     }
     if let Some(compaction) = &request.compaction {
         update_compaction_table(&mut doc, agent_idx, compaction)?;
+    }
+    if let Some(worker) = &request.worker {
+        update_worker_table(&mut doc, agent_idx, worker)?;
     }
     if let Some(cortex) = &request.cortex {
         update_cortex_table(&mut doc, agent_idx, cortex)?;
@@ -553,6 +576,24 @@ fn update_compaction_table(
     Ok(())
 }
 
+fn update_worker_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    worker: &WorkerUpdate,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    let table = get_or_create_subtable(agent, "worker")?;
+    if let Some(v) = worker.hard_timeout_secs {
+        table["hard_timeout_secs"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
+    if let Some(v) = worker.idle_timeout_secs {
+        table["idle_timeout_secs"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
+    Ok(())
+}
+
 fn update_cortex_table(
     doc: &mut toml_edit::DocumentMut,
     agent_idx: usize,
@@ -713,6 +754,90 @@ fn update_discord_table(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_update_worker_table_writes_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: Some(240),
+            idle_timeout_secs: Some(90),
+        };
+
+        update_worker_table(&mut doc, agent_idx, &update).expect("failed to update worker");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let worker = agent
+            .get("worker")
+            .and_then(|item| item.as_table())
+            .expect("missing worker table");
+
+        assert_eq!(worker["hard_timeout_secs"].as_integer(), Some(240));
+        assert_eq!(worker["idle_timeout_secs"].as_integer(), Some(90));
+    }
+
+    #[test]
+    fn test_update_worker_table_partial_update_only_sets_requested_keys() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: Some(300),
+            idle_timeout_secs: None,
+        };
+
+        update_worker_table(&mut doc, agent_idx, &update).expect("failed to update worker");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let worker = agent
+            .get("worker")
+            .and_then(|item| item.as_table())
+            .expect("missing worker table");
+
+        assert_eq!(worker["hard_timeout_secs"].as_integer(), Some(300));
+        assert!(worker.get("idle_timeout_secs").is_none());
+    }
+
+    #[test]
+    fn test_update_worker_table_rejects_large_u64_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: Some(u64::MAX),
+            idle_timeout_secs: None,
+        };
+
+        let result = update_worker_table(&mut doc, agent_idx, &update);
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
 
     #[test]
     fn test_update_warmup_table_writes_values() {

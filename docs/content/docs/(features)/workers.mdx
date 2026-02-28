@@ -36,7 +36,7 @@ Channel: "route: looks good, run the tests"
   → Worker runs tests, returns result
 ```
 
-Interactive workers stay alive until the input channel is dropped, a follow-up fails, or the channel cancels them.
+Interactive workers stay alive while waiting for follow-up input. They stop when the input channel is dropped, a follow-up fails, or the channel cancels them.
 
 ## Tools
 
@@ -69,6 +69,15 @@ WaitingForInput ──→ Failed    (follow-up processing failed)
 ```
 
 `Done` and `Failed` are terminal. Illegal transitions are runtime errors.
+
+## Watchdog Timeouts
+
+Channel-owned workers are monitored by a watchdog with two limits (configured in `[defaults.worker]` / `[agents.worker]`):
+
+- `hard_timeout_secs` applies while the worker is actively running.
+- `idle_timeout_secs` applies only after the worker has emitted activity (`set_status` or tool events), and only while it is actively running.
+
+When a worker enters `WaitingForInput`, watchdog timeouts are suspended until it resumes running.
 
 ## Context and History
 

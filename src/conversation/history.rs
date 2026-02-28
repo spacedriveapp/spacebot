@@ -325,18 +325,38 @@ impl ProcessRunLogger {
         let id = worker_id.to_string();
         let result = result.to_string();
         let status = if success { "done" } else { "failed" };
+        const MAX_RETRIES: usize = 3;
 
         tokio::spawn(async move {
-            if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
-            )
-            .bind(&result)
-            .bind(status)
-            .bind(&id)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
+            for attempt in 1..=MAX_RETRIES {
+                let query_result = sqlx::query(
+                    "UPDATE worker_runs \
+                     SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP \
+                     WHERE id = ? AND completed_at IS NULL",
+                )
+                .bind(&result)
+                .bind(status)
+                .bind(&id)
+                .execute(&pool)
+                .await;
+
+                match query_result {
+                    Ok(done) if done.rows_affected() > 0 => return,
+                    Ok(_) if attempt < MAX_RETRIES => {
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                    Ok(_) => {
+                        tracing::debug!(
+                            worker_id = %id,
+                            attempts = attempt,
+                            "worker completion update skipped (already completed or missing start row)"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, worker_id = %id, "failed to persist worker completion");
+                        return;
+                    }
+                }
             }
         });
     }

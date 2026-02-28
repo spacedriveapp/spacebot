@@ -532,6 +532,7 @@ pub(super) async fn create_agent(
         ingestion: None,
         cortex: None,
         warmup: None,
+        worker: None,
         browser: None,
         mcp: None,
         brave_search_key: None,

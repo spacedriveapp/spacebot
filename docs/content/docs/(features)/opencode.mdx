@@ -127,6 +127,8 @@ route: worker_id=abc, message="now add the database layer"
 
 The OpenCode session accumulates context across follow-ups, so subsequent messages benefit from everything the agent learned during earlier work.
 
+Like builtin interactive workers, OpenCode workers suspend watchdog timeouts while they are in `WaitingForInput`. Hard/idle watchdog limits apply only when the worker is actively running.
+
 ## Model Override
 
 You can override the model used by OpenCode workers:

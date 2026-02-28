@@ -101,6 +101,11 @@ eager_embedding_load = true
 refresh_secs = 900
 startup_delay_secs = 5
 
+# Worker watchdog settings (channel-spawned workers).
+[defaults.worker]
+hard_timeout_secs = 300
+idle_timeout_secs = 120
+
 # Browser automation for workers.
 [defaults.browser]
 enabled = true
@@ -122,6 +127,11 @@ user_timezone = "America/Los_Angeles"  # optional per-agent timezone override fo
 # Per-agent routing overrides (merges with defaults).
 [agents.routing]
 channel = "anthropic/claude-opus-4-20250514"
+
+# Per-agent worker watchdog overrides.
+[agents.worker]
+hard_timeout_secs = 240
+idle_timeout_secs = 90
 
 # Per-agent sandbox configuration.
 [agents.sandbox]
@@ -230,6 +240,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_turns` | Yes | Next channel message uses new limit |
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
+| Worker watchdog (`[agents.worker]`) | Yes | Next watchdog pass uses new hard/idle timeouts |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |

@@ -537,6 +537,7 @@ pub struct DefaultsConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub worker: WorkerConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
@@ -567,6 +568,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("ingestion", &self.ingestion)
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
+            .field("worker", &self.worker)
             .field("browser", &self.browser)
             .field("mcp", &self.mcp)
             .field(
@@ -834,6 +836,24 @@ impl Default for WarmupConfig {
     }
 }
 
+/// Worker watchdog configuration.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkerConfig {
+    /// Hard wall-clock timeout for an individual worker run.
+    pub hard_timeout_secs: u64,
+    /// Idle timeout with no worker status/tool activity.
+    pub idle_timeout_secs: u64,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            hard_timeout_secs: 300,
+            idle_timeout_secs: 120,
+        }
+    }
+}
+
 /// Current warmup lifecycle state.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -960,6 +980,7 @@ pub struct AgentConfig {
     pub ingestion: Option<IngestionConfig>,
     pub cortex: Option<CortexConfig>,
     pub warmup: Option<WarmupConfig>,
+    pub worker: Option<WorkerConfig>,
     pub browser: Option<BrowserConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
@@ -1015,6 +1036,7 @@ pub struct ResolvedAgentConfig {
     pub ingestion: IngestionConfig,
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
+    pub worker: WorkerConfig,
     pub browser: BrowserConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
@@ -1042,6 +1064,7 @@ impl Default for DefaultsConfig {
             ingestion: IngestionConfig::default(),
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
+            worker: WorkerConfig::default(),
             browser: BrowserConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
@@ -1102,6 +1125,7 @@ impl AgentConfig {
             ingestion: self.ingestion.unwrap_or(defaults.ingestion),
             cortex: self.cortex.unwrap_or(defaults.cortex),
             warmup: self.warmup.unwrap_or(defaults.warmup),
+            worker: self.worker.unwrap_or(defaults.worker),
             browser: self
                 .browser
                 .clone()
@@ -2539,6 +2563,7 @@ struct TomlDefaultsConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     warmup: Option<TomlWarmupConfig>,
+    worker: Option<TomlWorkerConfig>,
     browser: Option<TomlBrowserConfig>,
     #[serde(default)]
     mcp: Vec<TomlMcpServerConfig>,
@@ -2621,6 +2646,12 @@ struct TomlWarmupConfig {
 }
 
 #[derive(Deserialize)]
+struct TomlWorkerConfig {
+    hard_timeout_secs: Option<u64>,
+    idle_timeout_secs: Option<u64>,
+}
+
+#[derive(Deserialize)]
 struct TomlBrowserConfig {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -2686,6 +2717,7 @@ struct TomlAgentConfig {
     ingestion: Option<TomlIngestionConfig>,
     cortex: Option<TomlCortexConfig>,
     warmup: Option<TomlWarmupConfig>,
+    worker: Option<TomlWorkerConfig>,
     browser: Option<TomlBrowserConfig>,
     mcp: Option<Vec<TomlMcpServerConfig>>,
     brave_search_key: Option<String>,
@@ -3717,6 +3749,7 @@ impl Config {
             ingestion: None,
             cortex: None,
             warmup: None,
+            worker: None,
             browser: None,
             mcp: None,
             brave_search_key: None,
@@ -4327,6 +4360,18 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
+            worker: toml
+                .defaults
+                .worker
+                .map(|w| WorkerConfig {
+                    hard_timeout_secs: w
+                        .hard_timeout_secs
+                        .unwrap_or(base_defaults.worker.hard_timeout_secs),
+                    idle_timeout_secs: w
+                        .idle_timeout_secs
+                        .unwrap_or(base_defaults.worker.idle_timeout_secs),
+                })
+                .unwrap_or(base_defaults.worker),
             browser: toml
                 .defaults
                 .browser
@@ -4520,6 +4565,14 @@ impl Config {
                             .startup_delay_secs
                             .unwrap_or(defaults.warmup.startup_delay_secs),
                     }),
+                    worker: a.worker.map(|w| WorkerConfig {
+                        hard_timeout_secs: w
+                            .hard_timeout_secs
+                            .unwrap_or(defaults.worker.hard_timeout_secs),
+                        idle_timeout_secs: w
+                            .idle_timeout_secs
+                            .unwrap_or(defaults.worker.idle_timeout_secs),
+                    }),
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -4571,6 +4624,7 @@ impl Config {
                 ingestion: None,
                 cortex: None,
                 warmup: None,
+                worker: None,
                 browser: None,
                 mcp: None,
                 brave_search_key: None,
@@ -5125,6 +5179,7 @@ pub struct RuntimeConfig {
     pub user_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
     pub warmup: ArcSwap<WarmupConfig>,
+    pub worker: ArcSwap<WorkerConfig>,
     /// Current warmup lifecycle status for API and observability.
     pub warmup_status: ArcSwap<WarmupStatus>,
     /// Synchronizes warmup passes so periodic and API-triggered runs don't overlap.
@@ -5186,6 +5241,7 @@ impl RuntimeConfig {
             user_timezone: ArcSwap::from_pointee(agent_config.user_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
             warmup: ArcSwap::from_pointee(agent_config.warmup),
+            worker: ArcSwap::from_pointee(agent_config.worker),
             warmup_status: ArcSwap::from_pointee(WarmupStatus::default()),
             warmup_lock: Arc::new(tokio::sync::Mutex::new(())),
             memory_bulletin: ArcSwap::from_pointee(String::new()),
@@ -5274,6 +5330,7 @@ impl RuntimeConfig {
         self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
+        self.worker.store(Arc::new(resolved.worker));
         // sandbox config is not hot-reloaded here because the Sandbox instance
         // is constructed once at startup and shared via Arc. Changing sandbox
         // settings requires an agent restart.
@@ -7052,6 +7109,51 @@ startup_delay_secs = 2
         assert!(!resolved.warmup.eager_embedding_load);
         assert_eq!(resolved.warmup.refresh_secs, 120);
         assert_eq!(resolved.warmup.startup_delay_secs, 2);
+    }
+
+    #[test]
+    fn test_worker_watchdog_defaults_applied_when_not_configured() {
+        let toml = r#"
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert_eq!(config.defaults.worker.hard_timeout_secs, 300);
+        assert_eq!(config.defaults.worker.idle_timeout_secs, 120);
+        assert_eq!(
+            resolved.worker.hard_timeout_secs,
+            config.defaults.worker.hard_timeout_secs
+        );
+        assert_eq!(
+            resolved.worker.idle_timeout_secs,
+            config.defaults.worker.idle_timeout_secs
+        );
+    }
+
+    #[test]
+    fn test_worker_watchdog_default_and_agent_override_resolution() {
+        let toml = r#"
+[defaults.worker]
+hard_timeout_secs = 180
+idle_timeout_secs = 45
+
+[[agents]]
+id = "main"
+
+[agents.worker]
+idle_timeout_secs = 20
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert_eq!(config.defaults.worker.hard_timeout_secs, 180);
+        assert_eq!(config.defaults.worker.idle_timeout_secs, 45);
+        assert_eq!(resolved.worker.hard_timeout_secs, 180);
+        assert_eq!(resolved.worker.idle_timeout_secs, 20);
     }
 
     #[test]
