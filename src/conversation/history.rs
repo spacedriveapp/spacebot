@@ -222,6 +222,14 @@ pub struct ProcessRunLogger {
     pool: SqlitePool,
 }
 
+/// A pending retrigger outbox row for durable relay replay.
+#[derive(Debug, Clone)]
+pub(crate) struct RetriggerOutboxRow {
+    pub id: String,
+    pub payload_json: String,
+    pub attempt_count: i64,
+}
+
 impl ProcessRunLogger {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
@@ -359,6 +367,202 @@ impl ProcessRunLogger {
                 }
             }
         });
+    }
+
+    /// Persist a retrigger payload for durable replay.
+    pub async fn enqueue_retrigger_outbox(
+        &self,
+        agent_id: &crate::AgentId,
+        channel_id: &ChannelId,
+        payload_json: &str,
+    ) -> crate::error::Result<String> {
+        let id = uuid::Uuid::new_v4().to_string();
+        sqlx::query(
+            "INSERT INTO channel_retrigger_outbox \
+             (id, agent_id, channel_id, result_payload) \
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(agent_id.as_ref())
+        .bind(channel_id.as_ref())
+        .bind(payload_json)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(id)
+    }
+
+    /// Overwrite the payload for a pending outbox row.
+    pub async fn update_retrigger_outbox_payload(
+        &self,
+        outbox_id: &str,
+        payload_json: &str,
+    ) -> crate::error::Result<()> {
+        sqlx::query(
+            "UPDATE channel_retrigger_outbox \
+             SET result_payload = ? \
+             WHERE id = ? AND delivered_at IS NULL",
+        )
+        .bind(payload_json)
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
+    /// List due retrigger outbox rows for replay.
+    pub(crate) async fn list_due_retrigger_outbox(
+        &self,
+        agent_id: &crate::AgentId,
+        channel_id: &ChannelId,
+        limit: i64,
+    ) -> crate::error::Result<Vec<RetriggerOutboxRow>> {
+        let rows = sqlx::query(
+            "SELECT id, result_payload, attempt_count \
+             FROM channel_retrigger_outbox \
+             WHERE agent_id = ? \
+               AND channel_id = ? \
+               AND delivered_at IS NULL \
+               AND datetime(next_attempt_at) <= datetime(CURRENT_TIMESTAMP) \
+             ORDER BY created_at ASC, id ASC \
+             LIMIT ?",
+        )
+        .bind(agent_id.as_ref())
+        .bind(channel_id.as_ref())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+
+        rows.into_iter()
+            .map(|row| {
+                let id: String = row.try_get("id").map_err(|error| {
+                    anyhow::anyhow!("failed to decode retrigger outbox id: {error}")
+                })?;
+                let payload_json: String = row.try_get("result_payload").map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to decode retrigger outbox payload for row {id}: {error}"
+                    )
+                })?;
+                let attempt_count: i64 = row.try_get("attempt_count").map_err(|error| {
+                    anyhow::anyhow!(
+                        "failed to decode retrigger outbox attempt_count for row {id}: {error}"
+                    )
+                })?;
+
+                Ok(RetriggerOutboxRow {
+                    id,
+                    payload_json,
+                    attempt_count,
+                })
+            })
+            .collect()
+    }
+
+    /// Mark a retrigger outbox row as delivered.
+    pub async fn mark_retrigger_outbox_delivered(
+        &self,
+        outbox_id: &str,
+    ) -> crate::error::Result<()> {
+        sqlx::query(
+            "UPDATE channel_retrigger_outbox \
+             SET delivered_at = CURRENT_TIMESTAMP, \
+                 last_error = NULL \
+             WHERE id = ? AND delivered_at IS NULL",
+        )
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
+    /// Lease a retrigger outbox row while a synthetic retrigger is in-flight.
+    pub async fn lease_retrigger_outbox_delivery(
+        &self,
+        outbox_id: &str,
+        lease_secs: u64,
+    ) -> crate::error::Result<bool> {
+        let lease_modifier = format!("+{} seconds", lease_secs.max(1));
+        let result = sqlx::query(
+            "UPDATE channel_retrigger_outbox \
+             SET next_attempt_at = datetime(CURRENT_TIMESTAMP, ?), \
+                 last_error = NULL \
+             WHERE id = ? \
+               AND delivered_at IS NULL \
+               AND datetime(next_attempt_at) <= datetime(CURRENT_TIMESTAMP)",
+        )
+        .bind(lease_modifier)
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Record a failed delivery attempt and schedule retry with backoff.
+    pub async fn mark_retrigger_outbox_retry(
+        &self,
+        outbox_id: &str,
+        error: &str,
+    ) -> crate::error::Result<()> {
+        let current_attempt_count: i64 = match sqlx::query(
+            "SELECT attempt_count \
+             FROM channel_retrigger_outbox \
+             WHERE id = ? AND delivered_at IS NULL",
+        )
+        .bind(outbox_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?
+        {
+            Some(row) => row.try_get("attempt_count").map_err(|error| {
+                anyhow::anyhow!(
+                    "failed to decode retrigger outbox attempt_count for row {outbox_id}: {error}"
+                )
+            })?,
+            None => return Ok(()),
+        };
+
+        let next_attempt_count = current_attempt_count.saturating_add(1);
+        let retry_delay_secs = retrigger_outbox_retry_delay_secs(next_attempt_count);
+        let retry_modifier = format!("+{retry_delay_secs} seconds");
+
+        sqlx::query(
+            "UPDATE channel_retrigger_outbox \
+             SET attempt_count = ?, \
+                 last_error = ?, \
+                 next_attempt_at = datetime(CURRENT_TIMESTAMP, ?) \
+             WHERE id = ? AND delivered_at IS NULL",
+        )
+        .bind(next_attempt_count)
+        .bind(error)
+        .bind(retry_modifier)
+        .bind(outbox_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
+    }
+
+    /// Best-effort cleanup for delivered outbox rows.
+    pub async fn prune_delivered_retrigger_outbox(&self, limit: i64) -> crate::error::Result<()> {
+        sqlx::query(
+            "DELETE FROM channel_retrigger_outbox \
+             WHERE id IN ( \
+                 SELECT id \
+                 FROM channel_retrigger_outbox \
+                 WHERE delivered_at IS NOT NULL \
+                 ORDER BY delivered_at ASC \
+                 LIMIT ? \
+             )",
+        )
+        .bind(limit)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| anyhow::anyhow!(e))?;
+        Ok(())
     }
 
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
@@ -617,4 +821,278 @@ pub struct WorkerDetailRow {
     pub completed_at: Option<String>,
     pub transcript_blob: Option<Vec<u8>>,
     pub tool_calls: i64,
+}
+
+fn retrigger_outbox_retry_delay_secs(attempt_count: i64) -> u64 {
+    match attempt_count {
+        i if i <= 1 => 1,
+        2 => 5,
+        3 => 30,
+        4 => 120,
+        _ => 600,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProcessRunLogger, retrigger_outbox_retry_delay_secs};
+    use sqlx::{Row, SqlitePool};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    async fn create_outbox_schema(pool: &SqlitePool) {
+        sqlx::query(
+            "CREATE TABLE channel_retrigger_outbox (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                channel_id TEXT NOT NULL,
+                result_payload TEXT NOT NULL,
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                last_error TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                delivered_at TIMESTAMP
+            )",
+        )
+        .execute(pool)
+        .await
+        .expect("outbox schema should create");
+    }
+
+    async fn read_outbox_attempt_and_next_attempt_at(
+        pool: &SqlitePool,
+        outbox_id: &str,
+    ) -> (i64, String) {
+        let row = sqlx::query(
+            "SELECT attempt_count, datetime(next_attempt_at) AS next_attempt_at
+             FROM channel_retrigger_outbox
+             WHERE id = ?",
+        )
+        .bind(outbox_id)
+        .fetch_one(pool)
+        .await
+        .expect("outbox row should exist");
+
+        let attempt_count: i64 = row
+            .try_get("attempt_count")
+            .expect("attempt_count should decode");
+        let next_attempt_at: String = row
+            .try_get("next_attempt_at")
+            .expect("next_attempt_at should decode");
+        (attempt_count, next_attempt_at)
+    }
+
+    #[test]
+    fn retrigger_outbox_retry_delay_caps_at_ten_minutes() {
+        assert_eq!(retrigger_outbox_retry_delay_secs(0), 1);
+        assert_eq!(retrigger_outbox_retry_delay_secs(1), 1);
+        assert_eq!(retrigger_outbox_retry_delay_secs(2), 5);
+        assert_eq!(retrigger_outbox_retry_delay_secs(3), 30);
+        assert_eq!(retrigger_outbox_retry_delay_secs(4), 120);
+        assert_eq!(retrigger_outbox_retry_delay_secs(5), 600);
+        assert_eq!(retrigger_outbox_retry_delay_secs(50), 600);
+    }
+
+    #[tokio::test]
+    async fn list_due_retrigger_outbox_fails_on_attempt_count_decode_error() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        create_outbox_schema(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO channel_retrigger_outbox
+                (id, agent_id, channel_id, result_payload, attempt_count, next_attempt_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind("row-1")
+        .bind("agent-1")
+        .bind("channel-1")
+        .bind("{}")
+        .bind("not-an-integer")
+        .execute(&pool)
+        .await
+        .expect("malformed row should insert in sqlite dynamic typing mode");
+
+        let logger = ProcessRunLogger::new(pool);
+        let agent_id: crate::AgentId = Arc::<str>::from("agent-1");
+        let channel_id: crate::ChannelId = Arc::<str>::from("channel-1");
+
+        let error = logger
+            .list_due_retrigger_outbox(&agent_id, &channel_id, 10)
+            .await
+            .expect_err("decode error should not be silently defaulted");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to decode retrigger outbox attempt_count"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_retrigger_outbox_delivery_temporarily_hides_due_row() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        create_outbox_schema(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO channel_retrigger_outbox
+                (id, agent_id, channel_id, result_payload, attempt_count, next_attempt_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind("row-lease")
+        .bind("agent-1")
+        .bind("channel-1")
+        .bind("{\"results\":[]}")
+        .bind(0)
+        .execute(&pool)
+        .await
+        .expect("outbox row should insert");
+
+        let logger = ProcessRunLogger::new(pool);
+        let agent_id: crate::AgentId = Arc::<str>::from("agent-1");
+        let channel_id: crate::ChannelId = Arc::<str>::from("channel-1");
+
+        let due_before = logger
+            .list_due_retrigger_outbox(&agent_id, &channel_id, 10)
+            .await
+            .expect("list_due_retrigger_outbox should succeed before lease");
+        assert_eq!(due_before.len(), 1);
+
+        let first_lease = logger
+            .lease_retrigger_outbox_delivery("row-lease", 60)
+            .await
+            .expect("leasing outbox row should succeed");
+        assert!(first_lease, "first lease attempt should claim the row");
+
+        let second_lease = logger
+            .lease_retrigger_outbox_delivery("row-lease", 60)
+            .await
+            .expect("second lease attempt should return false, not error");
+        assert!(
+            !second_lease,
+            "already-leased row should not be claimed by another consumer"
+        );
+
+        let due_after = logger
+            .list_due_retrigger_outbox(&agent_id, &channel_id, 10)
+            .await
+            .expect("list_due_retrigger_outbox should succeed after lease");
+        assert!(
+            due_after.is_empty(),
+            "leased row should not be replay-eligible immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn lease_miss_does_not_increment_attempt_count_until_retry_marked() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        create_outbox_schema(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO channel_retrigger_outbox
+                (id, agent_id, channel_id, result_payload, attempt_count, next_attempt_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind("row-e2e")
+        .bind("agent-1")
+        .bind("channel-1")
+        .bind("{\"results\":[]}")
+        .bind(0)
+        .execute(&pool)
+        .await
+        .expect("outbox row should insert");
+
+        let logger = ProcessRunLogger::new(pool.clone());
+
+        let first_lease = logger
+            .lease_retrigger_outbox_delivery("row-e2e", 1)
+            .await
+            .expect("first lease should succeed");
+        assert!(first_lease, "first lease should claim due row");
+
+        let (attempt_count_after_first_lease, leased_next_attempt_at) =
+            read_outbox_attempt_and_next_attempt_at(&pool, "row-e2e").await;
+        assert_eq!(attempt_count_after_first_lease, 0);
+
+        // Simulate repeated channel flush ticks while the row is still leased/not due.
+        for _ in 0..3 {
+            let leased = logger
+                .lease_retrigger_outbox_delivery("row-e2e", 1)
+                .await
+                .expect("lease miss should be a non-error false");
+            assert!(
+                !leased,
+                "lease should not be reacquired until next_attempt_at is due"
+            );
+        }
+
+        let (attempt_count_after_lease_misses, next_attempt_after_lease_misses) =
+            read_outbox_attempt_and_next_attempt_at(&pool, "row-e2e").await;
+        assert_eq!(
+            attempt_count_after_lease_misses, 0,
+            "lease misses must not inflate attempt_count/backoff"
+        );
+        assert_eq!(
+            next_attempt_after_lease_misses, leased_next_attempt_at,
+            "lease misses must not push next_attempt_at farther into the future"
+        );
+
+        // Wait until the 1-second lease expires, then verify row can be claimed again.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+        let lease_after_expiry = logger
+            .lease_retrigger_outbox_delivery("row-e2e", 1)
+            .await
+            .expect("lease should succeed after previous lease expires");
+        assert!(lease_after_expiry);
+
+        // A real retry-worthy failure should increment attempt_count.
+        logger
+            .mark_retrigger_outbox_retry("row-e2e", "synthetic send failure")
+            .await
+            .expect("retry marker should succeed");
+        let (attempt_count_after_retry, _) =
+            read_outbox_attempt_and_next_attempt_at(&pool, "row-e2e").await;
+        assert_eq!(attempt_count_after_retry, 1);
+    }
+
+    #[tokio::test]
+    async fn mark_retrigger_outbox_retry_fails_on_attempt_count_decode_error() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        create_outbox_schema(&pool).await;
+
+        sqlx::query(
+            "INSERT INTO channel_retrigger_outbox
+                (id, agent_id, channel_id, result_payload, attempt_count, next_attempt_at)
+             VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)",
+        )
+        .bind("row-bad-retry")
+        .bind("agent-1")
+        .bind("channel-1")
+        .bind("{}")
+        .bind("bad-int")
+        .execute(&pool)
+        .await
+        .expect("malformed row should insert in sqlite dynamic typing mode");
+
+        let logger = ProcessRunLogger::new(pool);
+        let error = logger
+            .mark_retrigger_outbox_retry("row-bad-retry", "test failure")
+            .await
+            .expect_err("decode error should not be silently defaulted");
+
+        assert!(
+            error
+                .to_string()
+                .contains("failed to decode retrigger outbox attempt_count"),
+            "unexpected error: {error}"
+        );
+    }
 }

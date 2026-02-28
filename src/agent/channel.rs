@@ -30,6 +30,12 @@ use tracing::Instrument as _;
 /// Debounce window for retriggers: coalesce rapid branch/worker completions
 /// into a single retrigger instead of firing one per event.
 const RETRIGGER_DEBOUNCE_MS: u64 = 500;
+const RETRIGGER_OUTBOX_REPLAY_MS: u64 = 5_000;
+const RETRIGGER_OUTBOX_REPLAY_BATCH: i64 = 10;
+const RETRIGGER_OUTBOX_PRUNE_LIMIT: i64 = 100;
+const RETRIGGER_OUTBOX_IN_FLIGHT_LEASE_SECS: u64 = 60;
+const RETRIGGER_OUTBOX_LEASE_MISS_RETRY_MS: u64 = 1_000;
+const RETRIGGER_OUTBOX_ID_METADATA_KEY: &str = "retrigger_outbox_id";
 
 /// Maximum retriggers allowed since the last real user message. Prevents
 /// infinite retrigger cascades where each retrigger spawns more work.
@@ -118,6 +124,51 @@ fn resume_from_waiting_for_input(entry: &mut WorkerWatchdogEntry, now: tokio::ti
         entry.started_at += now.saturating_duration_since(waiting_since);
     }
     entry.is_waiting_for_input = false;
+}
+
+fn reconcile_worker_watchdog_after_event_lag(
+    worker_watchdog: &mut HashMap<WorkerId, WorkerWatchdogEntry>,
+    active_worker_ids: &HashSet<WorkerId>,
+    waiting_states: &HashMap<WorkerId, bool>,
+    worker_start_times: &HashMap<WorkerId, tokio::time::Instant>,
+    now: tokio::time::Instant,
+) {
+    worker_watchdog.retain(|worker_id, _| active_worker_ids.contains(worker_id));
+
+    for worker_id in active_worker_ids {
+        let is_waiting_for_input = waiting_states.get(worker_id).copied().unwrap_or(false);
+        if let Some(entry) = worker_watchdog.get_mut(worker_id) {
+            // Preserve started_at so hard-timeout budget remains monotonic.
+            // Event lag can mask idle/tool events, so reset activity anchors only.
+            let was_waiting_for_input = entry.is_waiting_for_input;
+            entry.last_activity_at = now;
+            entry.is_waiting_for_input = is_waiting_for_input;
+            entry.waiting_since = if is_waiting_for_input {
+                if was_waiting_for_input {
+                    entry.waiting_since.or(Some(now))
+                } else {
+                    Some(now)
+                }
+            } else {
+                None
+            };
+            entry.has_activity_signal = false;
+            entry.in_flight_tools = 0;
+        } else {
+            let started_at = worker_start_times.get(worker_id).copied().unwrap_or(now);
+            worker_watchdog.insert(
+                *worker_id,
+                WorkerWatchdogEntry {
+                    started_at,
+                    last_activity_at: now,
+                    is_waiting_for_input,
+                    waiting_since: is_waiting_for_input.then_some(now),
+                    has_activity_signal: false,
+                    in_flight_tools: 0,
+                },
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -256,6 +307,81 @@ struct PendingResult {
     success: bool,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RetriggerOutboxResult {
+    process_type: String,
+    process_id: String,
+    result: String,
+    success: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct RetriggerOutboxPayload {
+    conversation_id: String,
+    results: Vec<RetriggerOutboxResult>,
+    metadata: HashMap<String, serde_json::Value>,
+}
+
+fn retrigger_results_from_pending(results: &[PendingResult]) -> Vec<RetriggerOutboxResult> {
+    results
+        .iter()
+        .map(|result| RetriggerOutboxResult {
+            process_type: result.process_type.to_string(),
+            process_id: result.process_id.clone(),
+            result: result.result.clone(),
+            success: result.success,
+        })
+        .collect()
+}
+
+fn retrigger_prompt_results(
+    results: &[RetriggerOutboxResult],
+) -> Vec<crate::prompts::engine::RetriggerResult> {
+    results
+        .iter()
+        .map(|result| crate::prompts::engine::RetriggerResult {
+            process_type: result.process_type.clone(),
+            process_id: result.process_id.clone(),
+            success: result.success,
+            result: result.result.clone(),
+        })
+        .collect()
+}
+
+fn retrigger_result_summary(results: &[RetriggerOutboxResult]) -> String {
+    results
+        .iter()
+        .map(|result| {
+            let status = if result.success {
+                "completed"
+            } else {
+                "failed"
+            };
+            let truncated = if result.result.len() > 500 {
+                let boundary = result.result.floor_char_boundary(500);
+                format!("{}... [truncated]", &result.result[..boundary])
+            } else {
+                result.result.clone()
+            };
+            format!(
+                "[{} {} {}]: {}",
+                result.process_type, result.process_id, status, truncated
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn retrigger_outbox_id_from_metadata(
+    metadata: &HashMap<String, serde_json::Value>,
+) -> Option<String> {
+    metadata
+        .get(RETRIGGER_OUTBOX_ID_METADATA_KEY)
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 /// Shared state that channel tools need to act on the channel.
 ///
 /// Wrapped in Arc and passed to tools (branch, spawn_worker, route, cancel)
@@ -268,6 +394,8 @@ pub struct ChannelState {
     pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
     /// Tokio task handles for running workers, used for cancellation via abort().
     pub worker_handles: Arc<RwLock<HashMap<WorkerId, WorkerTaskHandle>>>,
+    /// Worker start instants keyed by worker ID. Used for watchdog recovery after event lag.
+    pub worker_start_times: Arc<RwLock<HashMap<WorkerId, tokio::time::Instant>>>,
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
@@ -288,6 +416,7 @@ impl ChannelState {
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
         const CANCELLED_RESULT: &str = "Worker cancelled";
         let handle = self.worker_handles.write().await.remove(&worker_id);
+        self.worker_start_times.write().await.remove(&worker_id);
         let removed = self
             .active_workers
             .write()
@@ -311,61 +440,59 @@ impl ChannelState {
             let channel_id = self.channel_id.clone();
             let process_run_logger = self.process_run_logger.clone();
 
-            tokio::spawn(async move {
-                match handle.await {
-                    Ok((result, notify, success)) => {
-                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id,
-                            worker_id,
-                            channel_id: Some(channel_id),
-                            result,
-                            notify,
-                            success,
-                        }) {
-                            tracing::debug!(
-                                worker_id = %worker_id,
-                                %error,
-                                "failed to emit worker completion during cancellation reconciliation"
-                            );
-                        }
-                    }
-                    Err(join_error) if join_error.is_cancelled() => {
-                        process_run_logger.log_worker_completed(worker_id, CANCELLED_RESULT, false);
-                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id,
-                            worker_id,
-                            channel_id: Some(channel_id),
-                            result: CANCELLED_RESULT.to_string(),
-                            notify: false,
-                            success: false,
-                        }) {
-                            tracing::debug!(
-                                worker_id = %worker_id,
-                                %error,
-                                "failed to emit cancelled worker completion"
-                            );
-                        }
-                    }
-                    Err(join_error) => {
-                        let failure_text = format!("Worker failed while cancelling: {join_error}");
-                        process_run_logger.log_worker_completed(worker_id, &failure_text, false);
-                        if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
-                            agent_id,
-                            worker_id,
-                            channel_id: Some(channel_id),
-                            result: failure_text,
-                            notify: false,
-                            success: false,
-                        }) {
-                            tracing::debug!(
-                                worker_id = %worker_id,
-                                %error,
-                                "failed to emit failed worker cancellation completion"
-                            );
-                        }
+            match handle.await {
+                Ok((result, notify, success)) => {
+                    if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                        agent_id,
+                        worker_id,
+                        channel_id: Some(channel_id),
+                        result,
+                        notify,
+                        success,
+                    }) {
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            %error,
+                            "failed to emit worker completion during cancellation reconciliation"
+                        );
                     }
                 }
-            });
+                Err(join_error) if join_error.is_cancelled() => {
+                    process_run_logger.log_worker_completed(worker_id, CANCELLED_RESULT, false);
+                    if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                        agent_id,
+                        worker_id,
+                        channel_id: Some(channel_id),
+                        result: CANCELLED_RESULT.to_string(),
+                        notify: false,
+                        success: false,
+                    }) {
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            %error,
+                            "failed to emit cancelled worker completion"
+                        );
+                    }
+                }
+                Err(join_error) => {
+                    let failure_text = format!("Worker failed while cancelling: {join_error}");
+                    process_run_logger.log_worker_completed(worker_id, &failure_text, false);
+                    if let Err(error) = event_tx.send(ProcessEvent::WorkerComplete {
+                        agent_id,
+                        worker_id,
+                        channel_id: Some(channel_id),
+                        result: failure_text,
+                        notify: false,
+                        success: false,
+                    }) {
+                        tracing::debug!(
+                            worker_id = %worker_id,
+                            %error,
+                            "failed to emit failed worker cancellation completion"
+                        );
+                    }
+                }
+            }
             Ok(())
         } else if removed {
             tracing::debug!(worker_id = %worker_id, "worker state removed without active handle");
@@ -442,10 +569,14 @@ pub struct Channel {
     /// Background process results waiting to be embedded in the next retrigger.
     /// Accumulated during the debounce window and drained when the retrigger fires.
     pending_results: Vec<PendingResult>,
+    /// Outbox row backing the current in-memory pending retrigger state.
+    pending_retrigger_outbox_id: Option<String>,
     /// Per-worker watchdog timestamps for hard/idle timeout enforcement.
     worker_watchdog: HashMap<WorkerId, WorkerWatchdogEntry>,
     /// Dedupes duplicate completion events that can arrive from recovery paths.
     completed_workers: HashSet<WorkerId>,
+    /// Periodic deadline for replaying durable retrigger outbox rows.
+    retrigger_outbox_replay_deadline: tokio::time::Instant,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
 }
@@ -476,6 +607,7 @@ impl Channel {
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
         let active_workers = Arc::new(RwLock::new(HashMap::new()));
+        let worker_start_times = Arc::new(RwLock::new(HashMap::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
@@ -490,6 +622,7 @@ impl Channel {
             active_branches: active_branches.clone(),
             active_workers: active_workers.clone(),
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
+            worker_start_times: worker_start_times.clone(),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
@@ -546,8 +679,11 @@ impl Channel {
             pending_retrigger_metadata: HashMap::new(),
             retrigger_deadline: None,
             pending_results: Vec::new(),
+            pending_retrigger_outbox_id: None,
             worker_watchdog: HashMap::new(),
             completed_workers: HashSet::new(),
+            retrigger_outbox_replay_deadline: tokio::time::Instant::now()
+                + std::time::Duration::from_millis(RETRIGGER_OUTBOX_REPLAY_MS),
             send_agent_message_tool,
         };
 
@@ -582,6 +718,14 @@ impl Channel {
     pub async fn run(mut self) -> Result<()> {
         tracing::info!(channel_id = %self.id, "channel started");
 
+        if let Err(error) = self.replay_due_retrigger_outbox().await {
+            tracing::warn!(
+                channel_id = %self.id,
+                %error,
+                "failed to replay durable retrigger outbox on startup"
+            );
+        }
+
         loop {
             // Compute next deadline from coalesce, retrigger, and worker watchdog timers.
             let worker_watchdog_deadline = self.next_worker_watchdog_deadline();
@@ -589,6 +733,7 @@ impl Channel {
                 self.coalesce_deadline,
                 self.retrigger_deadline,
                 worker_watchdog_deadline,
+                Some(self.retrigger_outbox_replay_deadline),
             ]
             .into_iter()
             .flatten()
@@ -665,6 +810,18 @@ impl Channel {
                     // Check watchdog deadline
                     if worker_watchdog_deadline.is_some_and(|d| d <= now) {
                         self.reap_timed_out_workers().await;
+                    }
+                    // Check periodic durable retrigger outbox replay deadline.
+                    if self.retrigger_outbox_replay_deadline <= now {
+                        if let Err(error) = self.replay_due_retrigger_outbox().await {
+                            tracing::warn!(
+                                channel_id = %self.id,
+                                %error,
+                                "failed replaying durable retrigger outbox"
+                            );
+                        }
+                        self.retrigger_outbox_replay_deadline = tokio::time::Instant::now()
+                            + std::time::Duration::from_millis(RETRIGGER_OUTBOX_REPLAY_MS);
                     }
                 }
                 else => break,
@@ -761,11 +918,14 @@ impl Channel {
 
     async fn resync_worker_watchdog_after_event_lag(&mut self) {
         let now = tokio::time::Instant::now();
-        let active_worker_ids: std::collections::HashSet<WorkerId> = {
-            let active_workers = self.state.active_workers.read().await;
-            active_workers.keys().copied().collect()
+        let active_worker_ids: HashSet<WorkerId> = {
+            let worker_handles = self.state.worker_handles.read().await;
+            worker_handles
+                .iter()
+                .filter_map(|(worker_id, handle)| (!handle.is_finished()).then_some(*worker_id))
+                .collect()
         };
-        let waiting_states: std::collections::HashMap<WorkerId, bool> = {
+        let waiting_states: HashMap<WorkerId, bool> = {
             let status = self.state.status_block.read().await;
             status
                 .active_workers
@@ -778,31 +938,15 @@ impl Channel {
                 })
                 .collect()
         };
+        let worker_start_times = self.state.worker_start_times.read().await.clone();
 
-        self.worker_watchdog
-            .retain(|worker_id, _| active_worker_ids.contains(worker_id));
-
-        for worker_id in active_worker_ids {
-            let entry = self
-                .worker_watchdog
-                .entry(worker_id)
-                .or_insert(WorkerWatchdogEntry {
-                    started_at: now,
-                    last_activity_at: now,
-                    is_waiting_for_input: false,
-                    waiting_since: None,
-                    has_activity_signal: false,
-                    in_flight_tools: 0,
-                });
-            // Event lag means we may have missed waiting/tool lifecycle events.
-            // Reset timeout anchors and infer waiting state from current status text.
-            entry.started_at = now;
-            entry.last_activity_at = now;
-            entry.is_waiting_for_input = waiting_states.get(&worker_id).copied().unwrap_or(false);
-            entry.waiting_since = entry.is_waiting_for_input.then_some(now);
-            entry.has_activity_signal = false;
-            entry.in_flight_tools = 0;
-        }
+        reconcile_worker_watchdog_after_event_lag(
+            &mut self.worker_watchdog,
+            &active_worker_ids,
+            &waiting_states,
+            &worker_start_times,
+            now,
+        );
     }
 
     async fn reap_timed_out_workers(&mut self) {
@@ -820,6 +964,11 @@ impl Channel {
             self.worker_watchdog.remove(&worker_id);
 
             let handle = self.state.worker_handles.write().await.remove(&worker_id);
+            self.state
+                .worker_start_times
+                .write()
+                .await
+                .remove(&worker_id);
             let Some(handle) = handle else {
                 continue;
             };
@@ -1427,8 +1576,11 @@ impl Channel {
         }
 
         let is_retrigger = message.source == "system";
+        let retrigger_outbox_id = is_retrigger
+            .then(|| retrigger_outbox_id_from_metadata(&message.metadata))
+            .flatten();
 
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag) = match self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
@@ -1436,10 +1588,47 @@ impl Channel {
                 attachment_content,
                 is_retrigger,
             )
-            .await?;
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                if let Some(outbox_id) = retrigger_outbox_id.as_deref() {
+                    self.mark_pending_retrigger_outbox_retry(
+                        outbox_id,
+                        &format!("retrigger turn failed before dispatch: {error}"),
+                    )
+                    .await;
+                }
+                return Err(error);
+            }
+        };
 
-        self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
+        let retrigger_relayed = self
+            .handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
+        if let Some(outbox_id) = retrigger_outbox_id {
+            if retrigger_relayed {
+                if let Err(error) = self
+                    .state
+                    .process_run_logger
+                    .mark_retrigger_outbox_delivered(&outbox_id)
+                    .await
+                {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        outbox_id,
+                        %error,
+                        "failed to mark retrigger outbox row delivered after relay"
+                    );
+                }
+            } else {
+                self.mark_pending_retrigger_outbox_retry(
+                    &outbox_id,
+                    "retrigger turn completed without relaying background results",
+                )
+                .await;
+            }
+        }
 
         // After a successful retrigger relay, inject a compact record into
         // history so the conversation has context about what was relayed.
@@ -1769,11 +1958,15 @@ impl Channel {
         skip_flag: &crate::tools::SkipFlag,
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
-    ) {
+    ) -> bool {
+        let mut retrigger_relayed = false;
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
                 let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
+                if is_retrigger && replied {
+                    retrigger_relayed = true;
+                }
                 let suppress_plaintext_fallback = self.suppress_plaintext_fallback();
                 let adapter = self.current_adapter().unwrap_or("unknown");
 
@@ -1824,6 +2017,8 @@ impl Channel {
                                     .await
                                 {
                                     tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                } else {
+                                    retrigger_relayed = true;
                                 }
                             }
                         }
@@ -1880,6 +2075,8 @@ impl Channel {
                                     .await
                                 {
                                     tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                } else {
+                                    retrigger_relayed = true;
                                 }
                             }
                         }
@@ -1959,6 +2156,11 @@ impl Channel {
             .response_tx
             .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
             .await;
+        if is_retrigger && replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            retrigger_relayed = true;
+        }
+
+        retrigger_relayed
     }
 
     /// Handle a process event (branch results, worker completions, status updates).
@@ -2096,6 +2298,11 @@ impl Channel {
                     .process_run_logger
                     .log_worker_completed(*worker_id, result, *success);
                 self.worker_watchdog.remove(worker_id);
+                self.state
+                    .worker_start_times
+                    .write()
+                    .await
+                    .remove(worker_id);
 
                 let mut workers = self.state.active_workers.write().await;
                 workers.remove(worker_id);
@@ -2154,6 +2361,22 @@ impl Channel {
                         "injected capped results into history as assistant messages"
                     );
                 }
+                if let Some(outbox_id) = self.pending_retrigger_outbox_id.take()
+                    && let Err(error) = self
+                        .state
+                        .process_run_logger
+                        .mark_retrigger_outbox_delivered(&outbox_id)
+                        .await
+                {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        outbox_id,
+                        %error,
+                        "failed to retire retrigger outbox row after cap fallback"
+                    );
+                }
+                self.pending_retrigger = false;
+                self.pending_retrigger_metadata.clear();
             } else {
                 self.pending_retrigger = true;
                 // Merge metadata (later events override earlier ones for the same key)
@@ -2170,16 +2393,235 @@ impl Channel {
         Ok(())
     }
 
+    fn clear_pending_retrigger_state(&mut self) {
+        self.pending_retrigger = false;
+        self.pending_retrigger_metadata.clear();
+        self.pending_results.clear();
+        self.pending_retrigger_outbox_id = None;
+    }
+
+    fn build_pending_retrigger_payload(
+        &self,
+        conversation_id: String,
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> RetriggerOutboxPayload {
+        RetriggerOutboxPayload {
+            conversation_id,
+            results: retrigger_results_from_pending(&self.pending_results),
+            metadata,
+        }
+    }
+
+    async fn ensure_pending_retrigger_outbox(
+        &mut self,
+        payload_json: &str,
+    ) -> crate::error::Result<String> {
+        if let Some(outbox_id) = self.pending_retrigger_outbox_id.clone() {
+            self.state
+                .process_run_logger
+                .update_retrigger_outbox_payload(&outbox_id, payload_json)
+                .await?;
+            return Ok(outbox_id);
+        }
+
+        let outbox_id = self
+            .state
+            .process_run_logger
+            .enqueue_retrigger_outbox(&self.deps.agent_id, &self.id, payload_json)
+            .await?;
+        self.pending_retrigger_outbox_id = Some(outbox_id.clone());
+        Ok(outbox_id)
+    }
+
+    async fn mark_pending_retrigger_outbox_retry(&self, outbox_id: &str, reason: &str) {
+        if let Err(error) = self
+            .state
+            .process_run_logger
+            .mark_retrigger_outbox_retry(outbox_id, reason)
+            .await
+        {
+            tracing::warn!(
+                channel_id = %self.id,
+                outbox_id,
+                %error,
+                "failed to record retrigger outbox retry"
+            );
+        }
+    }
+
+    async fn lease_pending_retrigger_outbox(&self, outbox_id: &str) -> crate::error::Result<bool> {
+        self.state
+            .process_run_logger
+            .lease_retrigger_outbox_delivery(outbox_id, RETRIGGER_OUTBOX_IN_FLIGHT_LEASE_SECS)
+            .await
+    }
+
+    async fn replay_due_retrigger_outbox(&mut self) -> Result<()> {
+        if self.pending_retrigger
+            || !self.pending_results.is_empty()
+            || self.pending_retrigger_outbox_id.is_some()
+        {
+            return Ok(());
+        }
+
+        let due_rows = self
+            .state
+            .process_run_logger
+            .list_due_retrigger_outbox(&self.deps.agent_id, &self.id, RETRIGGER_OUTBOX_REPLAY_BATCH)
+            .await?;
+        for row in due_rows {
+            if self.retrigger_count >= MAX_RETRIGGERS_PER_TURN {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    retrigger_count = self.retrigger_count,
+                    max = MAX_RETRIGGERS_PER_TURN,
+                    "retrigger cap reached, deferring durable outbox replay until next user message"
+                );
+                break;
+            }
+
+            let payload: RetriggerOutboxPayload = match serde_json::from_str(&row.payload_json) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    self.mark_pending_retrigger_outbox_retry(
+                        &row.id,
+                        &format!("failed to decode outbox payload: {error}"),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+
+            if payload.results.is_empty() {
+                if let Err(error) = self
+                    .state
+                    .process_run_logger
+                    .mark_retrigger_outbox_delivered(&row.id)
+                    .await
+                {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        outbox_id = %row.id,
+                        %error,
+                        "failed to mark empty retrigger outbox row as delivered"
+                    );
+                }
+                continue;
+            }
+
+            let prompt_results = retrigger_prompt_results(&payload.results);
+            let retrigger_message = match self
+                .deps
+                .runtime_config
+                .prompts
+                .load()
+                .render_system_retrigger(&prompt_results)
+            {
+                Ok(message) => message,
+                Err(error) => {
+                    self.mark_pending_retrigger_outbox_retry(
+                        &row.id,
+                        &format!("failed to render replay retrigger prompt: {error}"),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+
+            let result_count = payload.results.len();
+            let synthetic = InboundMessage {
+                id: uuid::Uuid::new_v4().to_string(),
+                source: "system".into(),
+                adapter: None,
+                conversation_id: payload.conversation_id,
+                sender_id: "system".into(),
+                agent_id: None,
+                content: crate::MessageContent::Text(retrigger_message),
+                timestamp: chrono::Utc::now(),
+                metadata: {
+                    let mut metadata = payload.metadata;
+                    metadata.insert(
+                        RETRIGGER_OUTBOX_ID_METADATA_KEY.to_string(),
+                        serde_json::Value::String(row.id.clone()),
+                    );
+                    metadata
+                },
+                formatted_author: None,
+            };
+
+            match self.lease_pending_retrigger_outbox(&row.id).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    tracing::debug!(
+                        channel_id = %self.id,
+                        outbox_id = %row.id,
+                        "skipping replay enqueue because retrigger outbox row is already leased"
+                    );
+                    continue;
+                }
+                Err(error) => {
+                    self.mark_pending_retrigger_outbox_retry(
+                        &row.id,
+                        &format!(
+                            "failed to lease retrigger outbox row before replay enqueue: {error}"
+                        ),
+                    )
+                    .await;
+                    continue;
+                }
+            }
+
+            match self.self_tx.try_send(synthetic) {
+                Ok(()) => {
+                    self.retrigger_count += 1;
+                    tracing::info!(
+                        channel_id = %self.id,
+                        outbox_id = %row.id,
+                        attempt_count = row.attempt_count,
+                        result_count,
+                        "replayed durable retrigger outbox row"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    self.mark_pending_retrigger_outbox_retry(
+                        &row.id,
+                        "channel self queue is full while replaying retrigger outbox",
+                    )
+                    .await;
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    self.mark_pending_retrigger_outbox_retry(
+                        &row.id,
+                        "channel self queue is closed while replaying retrigger outbox",
+                    )
+                    .await;
+                    break;
+                }
+            }
+        }
+
+        if let Err(error) = self
+            .state
+            .process_run_logger
+            .prune_delivered_retrigger_outbox(RETRIGGER_OUTBOX_PRUNE_LIMIT)
+            .await
+        {
+            tracing::debug!(
+                channel_id = %self.id,
+                %error,
+                "failed to prune delivered retrigger outbox rows"
+            );
+        }
+
+        Ok(())
+    }
+
     /// Flush the pending retrigger: send a synthetic system message to re-trigger
     /// the channel LLM so it can process background results and respond.
     ///
-    /// Drains `pending_results` and embeds them directly in the retrigger message
-    /// so the LLM sees exactly which process(es) completed and what they returned.
-    /// No result text is left floating in history as an ambiguous user message.
-    ///
-    /// Results are drained only after the synthetic message is queued
-    /// successfully. On transient failures, retrigger state is kept and retried
-    /// so background results are not silently lost.
+    /// Pending results are mirrored to a durable outbox row before enqueue so
+    /// replay can recover from closed/full queue paths.
     async fn flush_pending_retrigger(&mut self) {
         self.retrigger_deadline = None;
 
@@ -2190,11 +2632,9 @@ impl Channel {
         let Some(conversation_id) = &self.conversation_id else {
             tracing::warn!(
                 channel_id = %self.id,
-                "retrigger pending but conversation_id is missing, dropping pending results"
+                "retrigger pending but conversation_id is missing, clearing in-memory state"
             );
-            self.pending_retrigger = false;
-            self.pending_retrigger_metadata.clear();
-            self.pending_results.clear();
+            self.clear_pending_retrigger_state();
             return;
         };
 
@@ -2205,36 +2645,26 @@ impl Channel {
             );
             self.pending_retrigger = false;
             self.pending_retrigger_metadata.clear();
+            self.pending_retrigger_outbox_id = None;
             return;
         }
 
         let result_count = self.pending_results.len();
+        let mut metadata = self.pending_retrigger_metadata.clone();
+        let pending_results = retrigger_results_from_pending(&self.pending_results);
+        metadata.insert(
+            "retrigger_result_summary".to_string(),
+            serde_json::Value::String(retrigger_result_summary(&pending_results)),
+        );
+        let payload = self.build_pending_retrigger_payload(conversation_id.clone(), metadata);
 
-        // Build per-result summaries for the template.
-        let result_items: Vec<_> = self
-            .pending_results
-            .iter()
-            .map(|r| crate::prompts::engine::RetriggerResult {
-                process_type: r.process_type.to_string(),
-                process_id: r.process_id.clone(),
-                success: r.success,
-                result: r.result.clone(),
-            })
-            .collect();
-
-        let retrigger_message = match self
-            .deps
-            .runtime_config
-            .prompts
-            .load()
-            .render_system_retrigger(&result_items)
-        {
-            Ok(message) => message,
+        let payload_json = match serde_json::to_string(&payload) {
+            Ok(payload_json) => payload_json,
             Err(error) => {
                 tracing::error!(
                     channel_id = %self.id,
                     %error,
-                    "failed to render retrigger message, retrying"
+                    "failed to serialize retrigger outbox payload, retrying"
                 );
                 self.retrigger_deadline = Some(
                     tokio::time::Instant::now()
@@ -2244,69 +2674,133 @@ impl Channel {
             }
         };
 
-        // Build a compact summary of the results to inject into history after
-        // a successful relay. This goes into metadata so handle_message can
-        // pull it out without re-parsing the template.
-        let result_summary = self
-            .pending_results
-            .iter()
-            .map(|r| {
-                let status = if r.success { "completed" } else { "failed" };
-                // Truncate very long results for the history record — the user
-                // already saw the full version via the reply tool.
-                let truncated = if r.result.len() > 500 {
-                    let boundary = r.result.floor_char_boundary(500);
-                    format!("{}... [truncated]", &r.result[..boundary])
-                } else {
-                    r.result.clone()
-                };
-                format!(
-                    "[{} {} {}]: {}",
-                    r.process_type, r.process_id, status, truncated
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        let outbox_id = match self.ensure_pending_retrigger_outbox(&payload_json).await {
+            Ok(outbox_id) => outbox_id,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to persist retrigger outbox payload, retrying"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
+                return;
+            }
+        };
 
-        let mut metadata = self.pending_retrigger_metadata.clone();
-        metadata.insert(
-            "retrigger_result_summary".to_string(),
-            serde_json::Value::String(result_summary),
-        );
+        let prompt_results = retrigger_prompt_results(&payload.results);
+        let retrigger_message = match self
+            .deps
+            .runtime_config
+            .prompts
+            .load()
+            .render_system_retrigger(&prompt_results)
+        {
+            Ok(message) => message,
+            Err(error) => {
+                tracing::error!(
+                    channel_id = %self.id,
+                    outbox_id,
+                    %error,
+                    "failed to render retrigger message, retrying"
+                );
+                self.mark_pending_retrigger_outbox_retry(
+                    &outbox_id,
+                    &format!("failed to render retrigger message: {error}"),
+                )
+                .await;
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
+                return;
+            }
+        };
 
         let synthetic = InboundMessage {
             id: uuid::Uuid::new_v4().to_string(),
             source: "system".into(),
             adapter: None,
-            conversation_id: conversation_id.clone(),
+            conversation_id: payload.conversation_id,
             sender_id: "system".into(),
             agent_id: None,
             content: crate::MessageContent::Text(retrigger_message),
             timestamp: chrono::Utc::now(),
-            metadata,
+            metadata: {
+                let mut metadata = payload.metadata;
+                metadata.insert(
+                    RETRIGGER_OUTBOX_ID_METADATA_KEY.to_string(),
+                    serde_json::Value::String(outbox_id.clone()),
+                );
+                metadata
+            },
             formatted_author: None,
         };
+
+        match self.lease_pending_retrigger_outbox(&outbox_id).await {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    outbox_id,
+                    lease_secs = RETRIGGER_OUTBOX_IN_FLIGHT_LEASE_SECS,
+                    retry_ms = RETRIGGER_OUTBOX_LEASE_MISS_RETRY_MS,
+                    "retrigger outbox row lease skipped before enqueue, deferring retry"
+                );
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_OUTBOX_LEASE_MISS_RETRY_MS),
+                );
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    outbox_id,
+                    %error,
+                    lease_secs = RETRIGGER_OUTBOX_IN_FLIGHT_LEASE_SECS,
+                    "failed to lease retrigger outbox row before enqueue, retrying"
+                );
+                self.mark_pending_retrigger_outbox_retry(
+                    &outbox_id,
+                    &format!("failed to lease retrigger outbox row before enqueue: {error}"),
+                )
+                .await;
+                self.retrigger_deadline = Some(
+                    tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
+                );
+                return;
+            }
+        }
+
         match self.self_tx.try_send(synthetic) {
             Ok(()) => {
                 self.retrigger_count += 1;
                 tracing::info!(
                     channel_id = %self.id,
                     retrigger_count = self.retrigger_count,
+                    outbox_id,
                     result_count,
-                    "firing debounced retrigger with {} result(s)",
-                    result_count,
+                    "firing debounced retrigger with durable outbox backing"
                 );
 
-                self.pending_retrigger = false;
-                self.pending_retrigger_metadata.clear();
-                self.pending_results.clear();
+                self.clear_pending_retrigger_state();
             }
             Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
                 tracing::warn!(
                     channel_id = %self.id,
+                    outbox_id,
                     result_count,
                     "channel self queue is full, retrying retrigger"
                 );
+                self.mark_pending_retrigger_outbox_retry(
+                    &outbox_id,
+                    "channel self queue is full while sending retrigger",
+                )
+                .await;
                 self.retrigger_deadline = Some(
                     tokio::time::Instant::now()
                         + std::time::Duration::from_millis(RETRIGGER_DEBOUNCE_MS),
@@ -2315,11 +2809,15 @@ impl Channel {
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
                 tracing::warn!(
                     channel_id = %self.id,
-                    "failed to re-trigger channel: queue is closed, dropping pending results"
+                    outbox_id,
+                    "failed to re-trigger channel: queue is closed, deferring to durable outbox replay"
                 );
-                self.pending_retrigger = false;
-                self.pending_retrigger_metadata.clear();
-                self.pending_results.clear();
+                self.mark_pending_retrigger_outbox_retry(
+                    &outbox_id,
+                    "channel self queue is closed while sending retrigger",
+                )
+                .await;
+                self.clear_pending_retrigger_state();
             }
         }
     }
@@ -2607,6 +3105,12 @@ async fn prune_finished_worker_state(state: &ChannelState) -> Vec<WorkerId> {
         }
     }
     {
+        let mut worker_start_times = state.worker_start_times.write().await;
+        for worker_id in &finished_worker_ids {
+            worker_start_times.remove(worker_id);
+        }
+    }
+    {
         let mut worker_inputs = state.worker_inputs.write().await;
         for worker_id in &finished_worker_ids {
             worker_inputs.remove(worker_id);
@@ -2752,8 +3256,13 @@ pub async fn spawn_worker_from_state(
         state.process_run_logger.clone(),
         worker.run().instrument(worker_span),
     );
-
+    let started_at = tokio::time::Instant::now();
     state.worker_handles.write().await.insert(worker_id, handle);
+    state
+        .worker_start_times
+        .write()
+        .await
+        .insert(worker_id, started_at);
 
     {
         let mut status = state.status_block.write().await;
@@ -2864,8 +3373,13 @@ pub async fn spawn_opencode_worker_from_state(
         }
         .instrument(worker_span),
     );
-
+    let started_at = tokio::time::Instant::now();
     state.worker_handles.write().await.insert(worker_id, handle);
+    state
+        .worker_start_times
+        .write()
+        .await
+        .insert(worker_id, started_at);
 
     let opencode_task = format!("[opencode] {task}");
     state.process_run_logger.log_worker_started(
@@ -3692,14 +4206,17 @@ fn is_user_text_message(message: &rig::message::Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        WorkerTimeoutKind, WorkerWatchdogEntry, apply_history_after_turn, event_is_for_channel,
-        resume_from_waiting_for_input, status_indicates_waiting_for_input, worker_timeout_kind,
+        PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY, WorkerTimeoutKind, WorkerWatchdogEntry,
+        apply_history_after_turn, event_is_for_channel, reconcile_worker_watchdog_after_event_lag,
+        resume_from_waiting_for_input, retrigger_outbox_id_from_metadata, retrigger_result_summary,
+        retrigger_results_from_pending, status_indicates_waiting_for_input, worker_timeout_kind,
         worker_watchdog_deadline,
     };
     use crate::config::WorkerConfig;
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
     use rig::tool::ToolSetError;
+    use std::collections::{HashMap, HashSet};
 
     fn user_msg(text: &str) -> Message {
         Message::User {
@@ -3959,6 +4476,235 @@ mod tests {
         assert!(status_indicates_waiting_for_input("waiting for follow-up"));
         assert!(status_indicates_waiting_for_input("Waiting for follow-up"));
         assert!(!status_indicates_waiting_for_input("processing follow-up"));
+    }
+
+    #[test]
+    fn watchdog_reconcile_keeps_active_workers_after_lag() {
+        let now = tokio::time::Instant::now();
+        let active_worker = uuid::Uuid::new_v4();
+        let waiting_worker = uuid::Uuid::new_v4();
+        let stale_worker = uuid::Uuid::new_v4();
+        let active_started_at = now - std::time::Duration::from_secs(120);
+
+        let mut worker_watchdog = HashMap::new();
+        worker_watchdog.insert(
+            active_worker,
+            WorkerWatchdogEntry {
+                started_at: active_started_at,
+                last_activity_at: now - std::time::Duration::from_secs(10),
+                is_waiting_for_input: false,
+                waiting_since: None,
+                has_activity_signal: true,
+                in_flight_tools: 1,
+            },
+        );
+        worker_watchdog.insert(
+            stale_worker,
+            WorkerWatchdogEntry {
+                started_at: now - std::time::Duration::from_secs(300),
+                last_activity_at: now - std::time::Duration::from_secs(200),
+                is_waiting_for_input: false,
+                waiting_since: None,
+                has_activity_signal: true,
+                in_flight_tools: 0,
+            },
+        );
+
+        let active_worker_ids: HashSet<uuid::Uuid> =
+            [active_worker, waiting_worker].into_iter().collect();
+        let waiting_states: HashMap<uuid::Uuid, bool> =
+            [(active_worker, false), (waiting_worker, true)]
+                .into_iter()
+                .collect();
+        let worker_start_times: HashMap<uuid::Uuid, tokio::time::Instant> =
+            [(waiting_worker, now - std::time::Duration::from_secs(30))]
+                .into_iter()
+                .collect();
+
+        reconcile_worker_watchdog_after_event_lag(
+            &mut worker_watchdog,
+            &active_worker_ids,
+            &waiting_states,
+            &worker_start_times,
+            now,
+        );
+
+        assert!(!worker_watchdog.contains_key(&stale_worker));
+        let active_entry = worker_watchdog
+            .get(&active_worker)
+            .expect("active worker should remain tracked");
+        assert_eq!(active_entry.started_at, active_started_at);
+        assert_eq!(active_entry.last_activity_at, now);
+        assert!(!active_entry.is_waiting_for_input);
+        assert!(active_entry.waiting_since.is_none());
+        assert!(!active_entry.has_activity_signal);
+        assert_eq!(active_entry.in_flight_tools, 0);
+
+        let waiting_entry = worker_watchdog
+            .get(&waiting_worker)
+            .expect("waiting worker should be created");
+        assert_eq!(
+            waiting_entry.started_at,
+            now - std::time::Duration::from_secs(30)
+        );
+        assert_eq!(waiting_entry.last_activity_at, now);
+        assert!(waiting_entry.is_waiting_for_input);
+        assert_eq!(waiting_entry.waiting_since, Some(now));
+        assert!(!waiting_entry.has_activity_signal);
+        assert_eq!(waiting_entry.in_flight_tools, 0);
+    }
+
+    #[test]
+    fn watchdog_reconcile_preserves_hard_timeout_budget() {
+        let now = tokio::time::Instant::now();
+        let active_worker = uuid::Uuid::new_v4();
+        let started_at = now - std::time::Duration::from_secs(90);
+
+        let mut worker_watchdog = HashMap::new();
+        worker_watchdog.insert(
+            active_worker,
+            WorkerWatchdogEntry {
+                started_at,
+                last_activity_at: now - std::time::Duration::from_secs(5),
+                is_waiting_for_input: false,
+                waiting_since: None,
+                has_activity_signal: true,
+                in_flight_tools: 0,
+            },
+        );
+
+        let active_worker_ids: HashSet<uuid::Uuid> = [active_worker].into_iter().collect();
+        let waiting_states: HashMap<uuid::Uuid, bool> =
+            [(active_worker, false)].into_iter().collect();
+        let worker_start_times: HashMap<uuid::Uuid, tokio::time::Instant> = HashMap::new();
+        reconcile_worker_watchdog_after_event_lag(
+            &mut worker_watchdog,
+            &active_worker_ids,
+            &waiting_states,
+            &worker_start_times,
+            now,
+        );
+
+        let entry = worker_watchdog
+            .get(&active_worker)
+            .expect("worker should remain tracked");
+        let config = WorkerConfig {
+            hard_timeout_secs: 60,
+            idle_timeout_secs: 0,
+        };
+
+        assert_eq!(
+            worker_timeout_kind(entry, config, now),
+            Some(WorkerTimeoutKind::Hard),
+            "hard-timeout budget should remain monotonic after lag reconciliation"
+        );
+    }
+
+    #[test]
+    fn watchdog_reconcile_preserves_waiting_since_for_waiting_workers() {
+        let now = tokio::time::Instant::now();
+        let worker_id = uuid::Uuid::new_v4();
+        let started_at = now - std::time::Duration::from_secs(120);
+        let waiting_since = now - std::time::Duration::from_secs(40);
+
+        let mut worker_watchdog = HashMap::new();
+        worker_watchdog.insert(
+            worker_id,
+            WorkerWatchdogEntry {
+                started_at,
+                last_activity_at: now - std::time::Duration::from_secs(5),
+                is_waiting_for_input: true,
+                waiting_since: Some(waiting_since),
+                has_activity_signal: true,
+                in_flight_tools: 0,
+            },
+        );
+
+        let active_worker_ids: HashSet<uuid::Uuid> = [worker_id].into_iter().collect();
+        let waiting_states: HashMap<uuid::Uuid, bool> = [(worker_id, true)].into_iter().collect();
+        let worker_start_times: HashMap<uuid::Uuid, tokio::time::Instant> = HashMap::new();
+        reconcile_worker_watchdog_after_event_lag(
+            &mut worker_watchdog,
+            &active_worker_ids,
+            &waiting_states,
+            &worker_start_times,
+            now,
+        );
+
+        let entry = worker_watchdog
+            .get(&worker_id)
+            .expect("worker should remain tracked");
+        assert!(entry.is_waiting_for_input);
+        assert_eq!(
+            entry.waiting_since,
+            Some(waiting_since),
+            "existing waiting start should be preserved across lag reconciliation"
+        );
+
+        let mut resumed = *entry;
+        resume_from_waiting_for_input(&mut resumed, now);
+        assert_eq!(
+            resumed.started_at,
+            started_at + std::time::Duration::from_secs(40),
+            "resuming should credit the full waiting window to hard-timeout budget"
+        );
+    }
+
+    #[test]
+    fn retrigger_result_helpers_preserve_fields() {
+        let pending = vec![PendingResult {
+            process_type: "worker",
+            process_id: "abc123".to_string(),
+            result: "done".to_string(),
+            success: true,
+        }];
+
+        let outbox_results = retrigger_results_from_pending(&pending);
+        assert_eq!(outbox_results.len(), 1);
+        assert_eq!(outbox_results[0].process_type, "worker");
+        assert_eq!(outbox_results[0].process_id, "abc123");
+        assert_eq!(outbox_results[0].result, "done");
+        assert!(outbox_results[0].success);
+    }
+
+    #[test]
+    fn retrigger_result_summary_truncates_long_values() {
+        let long_text = "x".repeat(900);
+        let summary = retrigger_result_summary(&[super::RetriggerOutboxResult {
+            process_type: "worker".to_string(),
+            process_id: "abc123".to_string(),
+            result: long_text,
+            success: false,
+        }]);
+
+        assert!(summary.contains("[worker abc123 failed]:"));
+        assert!(summary.contains("[truncated]"));
+        assert!(summary.len() < 700);
+    }
+
+    #[test]
+    fn retrigger_outbox_id_metadata_extracts_non_empty_string_only() {
+        let mut metadata = std::collections::HashMap::new();
+        metadata.insert(
+            RETRIGGER_OUTBOX_ID_METADATA_KEY.to_string(),
+            serde_json::Value::String("outbox-123".to_string()),
+        );
+        assert_eq!(
+            retrigger_outbox_id_from_metadata(&metadata).as_deref(),
+            Some("outbox-123")
+        );
+
+        metadata.insert(
+            RETRIGGER_OUTBOX_ID_METADATA_KEY.to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        assert_eq!(retrigger_outbox_id_from_metadata(&metadata), None);
+
+        metadata.insert(
+            RETRIGGER_OUTBOX_ID_METADATA_KEY.to_string(),
+            serde_json::Value::Bool(true),
+        );
+        assert_eq!(retrigger_outbox_id_from_metadata(&metadata), None);
     }
 
     #[test]
