@@ -14,6 +14,8 @@ pub(super) struct GlobalSettingsResponse {
     api_bind: String,
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
+    ssh_enabled: bool,
+    ssh_port: u16,
 }
 
 #[derive(Serialize)]
@@ -41,6 +43,8 @@ pub(super) struct GlobalSettingsUpdate {
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
+    ssh_enabled: Option<bool>,
+    ssh_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -88,129 +92,154 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) =
-        if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let doc: toml_edit::DocumentMut = content
-                .parse()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (
+        brave_search_key,
+        api_enabled,
+        api_port,
+        api_bind,
+        worker_log_mode,
+        opencode,
+        ssh_enabled,
+        ssh_port,
+    ) = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            let brave_search = doc
-                .get("defaults")
-                .and_then(|d| d.get("brave_search_key"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    if let Some(var) = s.strip_prefix("env:") {
-                        std::env::var(var).ok()
-                    } else {
-                        Some(s.to_string())
-                    }
-                });
+        let brave_search = doc
+            .get("defaults")
+            .and_then(|d| d.get("brave_search_key"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                if let Some(var) = s.strip_prefix("env:") {
+                    std::env::var(var).ok()
+                } else {
+                    Some(s.to_string())
+                }
+            });
 
-            let api_enabled = doc
-                .get("api")
-                .and_then(|a| a.get("enabled"))
+        let api_enabled = doc
+            .get("api")
+            .and_then(|a| a.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let api_port = doc
+            .get("api")
+            .and_then(|a| a.get("port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(19898);
+
+        let api_bind = doc
+            .get("api")
+            .and_then(|a| a.get("bind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+
+        let worker_log_mode = doc
+            .get("defaults")
+            .and_then(|d| d.get("worker_log_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("errors_only")
+            .to_string();
+
+        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+        let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
+        let opencode = OpenCodeSettingsResponse {
+            enabled: opencode_table
+                .and_then(|o| o.get("enabled"))
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            let api_port = doc
-                .get("api")
-                .and_then(|a| a.get("port"))
+                .unwrap_or(false),
+            path: opencode_table
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode")
+                .to_string(),
+            max_servers: opencode_table
+                .and_then(|o| o.get("max_servers"))
                 .and_then(|v| v.as_integer())
-                .and_then(|i| u16::try_from(i).ok())
-                .unwrap_or(19898);
-
-            let api_bind = doc
-                .get("api")
-                .and_then(|a| a.get("bind"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("127.0.0.1")
-                .to_string();
-
-            let worker_log_mode = doc
-                .get("defaults")
-                .and_then(|d| d.get("worker_log_mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("errors_only")
-                .to_string();
-
-            let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
-            let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
-            let opencode = OpenCodeSettingsResponse {
-                enabled: opencode_table
-                    .and_then(|o| o.get("enabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                path: opencode_table
-                    .and_then(|o| o.get("path"))
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(5),
+            server_startup_timeout_secs: opencode_table
+                .and_then(|o| o.get("server_startup_timeout_secs"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u64::try_from(i).ok())
+                .unwrap_or(30),
+            max_restart_retries: opencode_table
+                .and_then(|o| o.get("max_restart_retries"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(5),
+            permissions: OpenCodePermissionsResponse {
+                edit: opencode_perms
+                    .and_then(|p| p.get("edit"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("opencode")
+                    .unwrap_or("allow")
                     .to_string(),
-                max_servers: opencode_table
-                    .and_then(|o| o.get("max_servers"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(5),
-                server_startup_timeout_secs: opencode_table
-                    .and_then(|o| o.get("server_startup_timeout_secs"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u64::try_from(i).ok())
-                    .unwrap_or(30),
-                max_restart_retries: opencode_table
-                    .and_then(|o| o.get("max_restart_retries"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u32::try_from(i).ok())
-                    .unwrap_or(5),
-                permissions: OpenCodePermissionsResponse {
-                    edit: opencode_perms
-                        .and_then(|p| p.get("edit"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    bash: opencode_perms
-                        .and_then(|p| p.get("bash"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    webfetch: opencode_perms
-                        .and_then(|p| p.get("webfetch"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                },
-            };
-
-            (
-                brave_search,
-                api_enabled,
-                api_port,
-                api_bind,
-                worker_log_mode,
-                opencode,
-            )
-        } else {
-            (
-                None,
-                true,
-                19898,
-                "127.0.0.1".to_string(),
-                "errors_only".to_string(),
-                OpenCodeSettingsResponse {
-                    enabled: false,
-                    path: "opencode".to_string(),
-                    max_servers: 5,
-                    server_startup_timeout_secs: 30,
-                    max_restart_retries: 5,
-                    permissions: OpenCodePermissionsResponse {
-                        edit: "allow".to_string(),
-                        bash: "allow".to_string(),
-                        webfetch: "allow".to_string(),
-                    },
-                },
-            )
+                bash: opencode_perms
+                    .and_then(|p| p.get("bash"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+                webfetch: opencode_perms
+                    .and_then(|p| p.get("webfetch"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+            },
         };
+
+        let ssh_enabled = doc
+            .get("ssh")
+            .and_then(|s| s.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        let ssh_port = doc
+            .get("ssh")
+            .and_then(|s| s.get("port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(22);
+
+        (
+            brave_search,
+            api_enabled,
+            api_port,
+            api_bind,
+            worker_log_mode,
+            opencode,
+            ssh_enabled,
+            ssh_port,
+        )
+    } else {
+        (
+            None,
+            true,
+            19898,
+            "127.0.0.1".to_string(),
+            "errors_only".to_string(),
+            OpenCodeSettingsResponse {
+                enabled: false,
+                path: "opencode".to_string(),
+                max_servers: 5,
+                server_startup_timeout_secs: 30,
+                max_restart_retries: 5,
+                permissions: OpenCodePermissionsResponse {
+                    edit: "allow".to_string(),
+                    bash: "allow".to_string(),
+                    webfetch: "allow".to_string(),
+                },
+            },
+            false,
+            22,
+        )
+    };
 
     Ok(Json(GlobalSettingsResponse {
         brave_search_key,
@@ -219,6 +248,8 @@ pub(super) async fn get_global_settings(
         api_bind,
         worker_log_mode,
         opencode,
+        ssh_enabled,
+        ssh_port,
     }))
 }
 
@@ -329,9 +360,46 @@ pub(super) async fn update_global_settings(
         }
     }
 
+    if request.ssh_enabled.is_some() || request.ssh_port.is_some() {
+        if doc.get("ssh").is_none() {
+            doc["ssh"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+
+        if let Some(enabled) = request.ssh_enabled {
+            doc["ssh"]["enabled"] = toml_edit::value(enabled);
+        }
+        if let Some(port) = request.ssh_port {
+            doc["ssh"]["port"] = toml_edit::value(i64::from(port));
+        }
+    }
+
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Start or stop sshd based on the new config
+    if request.ssh_enabled.is_some() {
+        let ssh_enabled = doc
+            .get("ssh")
+            .and_then(|s| s.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let ssh_port = doc
+            .get("ssh")
+            .and_then(|s| s.get("port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(22);
+
+        let mut ssh_manager = state.ssh_manager.lock().await;
+        if ssh_enabled {
+            if let Err(error) = ssh_manager.start(ssh_port).await {
+                tracing::error!(%error, "failed to start sshd after settings update");
+            }
+        } else if let Err(error) = ssh_manager.stop().await {
+            tracing::error!(%error, "failed to stop sshd after settings update");
+        }
+    }
 
     let message = if requires_restart {
         "Settings updated. API server changes require a restart to take effect.".to_string()

@@ -55,6 +55,8 @@ pub struct Config {
     pub bindings: Vec<Binding>,
     /// HTTP API server configuration.
     pub api: ApiConfig,
+    /// SSH server configuration.
+    pub ssh: SshConfig,
     /// Prometheus metrics endpoint configuration.
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
@@ -110,6 +112,24 @@ impl Default for ApiConfig {
             port: 19898,
             bind: "127.0.0.1".into(),
             auth_token: None,
+        }
+    }
+}
+
+/// SSH server configuration.
+#[derive(Debug, Clone)]
+pub struct SshConfig {
+    /// Whether the SSH server is enabled.
+    pub enabled: bool,
+    /// Port for sshd to listen on.
+    pub port: u16,
+}
+
+impl Default for SshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: 22,
         }
     }
 }
@@ -2287,6 +2307,8 @@ struct TomlConfig {
     #[serde(default)]
     api: TomlApiConfig,
     #[serde(default)]
+    ssh: TomlSshConfig,
+    #[serde(default)]
     metrics: TomlMetricsConfig,
     #[serde(default)]
     telemetry: TomlTelemetryConfig,
@@ -2368,6 +2390,27 @@ fn default_api_port() -> u16 {
 }
 fn default_api_bind() -> String {
     "127.0.0.1".into()
+}
+
+#[derive(Deserialize)]
+struct TomlSshConfig {
+    #[serde(default)]
+    enabled: bool,
+    #[serde(default = "default_ssh_port")]
+    port: u16,
+}
+
+impl Default for TomlSshConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            port: default_ssh_port(),
+        }
+    }
+}
+
+fn default_ssh_port() -> u16 {
+    22
 }
 
 fn hosted_api_bind(bind: String) -> String {
@@ -3745,6 +3788,7 @@ impl Config {
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
             api,
+            ssh: SshConfig::default(),
             metrics: MetricsConfig::default(),
             telemetry: TelemetryConfig {
                 otlp_endpoint: std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(),
@@ -5058,6 +5102,11 @@ impl Config {
             });
         }
 
+        let ssh = SshConfig {
+            enabled: toml.ssh.enabled,
+            port: toml.ssh.port,
+        };
+
         Ok(Config {
             instance_dir,
             llm,
@@ -5069,6 +5118,7 @@ impl Config {
             messaging,
             bindings,
             api,
+            ssh,
             metrics,
             telemetry,
         })

@@ -23,6 +23,7 @@ pub mod sandbox;
 pub mod secrets;
 pub mod settings;
 pub mod skills;
+pub mod ssh;
 pub mod tasks;
 #[cfg(feature = "metrics")]
 pub mod telemetry;

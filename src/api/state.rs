@@ -108,6 +108,8 @@ pub struct ApiState {
     pub agent_groups: ArcSwap<Vec<crate::config::GroupDef>>,
     /// Org-level humans for the topology UI.
     pub agent_humans: ArcSwap<Vec<crate::config::HumanDef>>,
+    /// SSH server manager.
+    pub ssh_manager: tokio::sync::Mutex<crate::ssh::SshManager>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -257,6 +259,9 @@ impl ApiState {
             agent_links: ArcSwap::from_pointee(Vec::new()),
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
+            ssh_manager: tokio::sync::Mutex::new(crate::ssh::SshManager::new(
+                std::path::Path::new(""),
+            )),
         }
     }
 
@@ -601,6 +606,11 @@ impl ApiState {
     /// Set the org-level humans for the topology UI.
     pub fn set_agent_humans(&self, humans: Vec<crate::config::HumanDef>) {
         self.agent_humans.store(Arc::new(humans));
+    }
+
+    /// Replace the SSH manager with one configured for the correct instance directory.
+    pub async fn set_ssh_manager(&self, manager: crate::ssh::SshManager) {
+        *self.ssh_manager.lock().await = manager;
     }
 
     /// Send an event to all SSE subscribers.
