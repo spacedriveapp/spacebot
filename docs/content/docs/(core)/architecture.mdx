@@ -336,9 +336,11 @@ CLI (clap) → parse args
     → For each agent:
         → Run SQLite migrations
         → Initialize MemoryStore, LanceDB tables
-        → Initialize MessagingManager (start all platform adapters)
-        → Initialize CronScheduler
-        → Start Cortex (warmup → first bulletin)
+        → Load RuntimeConfig + identity + skills
+    → Best-effort startup warmup pass (bounded wait)
+    → Initialize MessagingManager (start all platform adapters)
+    → Initialize CronScheduler
+    → Start Cortex loops (warmup, bulletin fallback, association, ready-task)
         → Register agent in active agents map
     → Enter main event loop (tokio::select!)
         → Inbound messages → route to Channel instances

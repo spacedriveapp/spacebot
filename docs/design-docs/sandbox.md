@@ -124,8 +124,6 @@ mode = "enabled"
 writable_paths = ["/home/user/projects/myapp"]
 ```
 
-When `SPACEBOT_DEPLOYMENT=hosted`, the platform boot script forces `mode = "enabled"` regardless of user config.
-
 ### Types
 
 ```rust

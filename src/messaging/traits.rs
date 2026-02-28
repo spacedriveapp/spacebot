@@ -168,3 +168,24 @@ impl<T: Messaging> MessagingDyn for T {
         Box::pin(Messaging::shutdown(self))
     }
 }
+
+/// Rewrite a conversation ID's platform prefix to use a named adapter's runtime key.
+///
+/// Given a `runtime_key` like `"discord:ops"` and a `base_conversation_id` like
+/// `"discord:12345"`, returns `"discord:ops:12345"`. If the runtime key matches
+/// the existing platform prefix (i.e. the default adapter), the ID is returned
+/// unchanged.
+pub fn apply_runtime_adapter_to_conversation_id(
+    runtime_key: &str,
+    base_conversation_id: String,
+) -> String {
+    let Some((platform, remainder)) = base_conversation_id.split_once(':') else {
+        return base_conversation_id;
+    };
+
+    if runtime_key == platform {
+        base_conversation_id
+    } else {
+        format!("{runtime_key}:{remainder}")
+    }
+}

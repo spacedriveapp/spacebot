@@ -90,14 +90,15 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 	return (
 		<div className="h-full overflow-y-auto">
 			<div className="mx-auto max-w-6xl p-6 pb-24">
-				{/* Hero Section */}
-				<HeroSection
-					agentId={agentId}
-					channelCount={agentChannels.length}
-					workers={activity.workers}
-					branches={activity.branches}
-					hasLiveActivity={hasLiveActivity}
-					onDelete={() => setDeleteOpen(true)}
+			{/* Hero Section */}
+			<HeroSection
+				agentId={agentId}
+				displayName={agent.display_name}
+				channelCount={agentChannels.length}
+				workers={activity.workers}
+				branches={activity.branches}
+				hasLiveActivity={hasLiveActivity}
+				onDelete={() => setDeleteOpen(true)}
 				/>
 				<DeleteAgentDialog open={deleteOpen} onOpenChange={setDeleteOpen} agentId={agentId} />
 
@@ -224,6 +225,7 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 
 function HeroSection({
 	agentId,
+	displayName,
 	channelCount,
 	workers,
 	branches,
@@ -231,6 +233,7 @@ function HeroSection({
 	onDelete,
 }: {
 	agentId: string;
+	displayName?: string;
 	channelCount: number;
 	workers: number;
 	branches: number;
@@ -241,7 +244,12 @@ function HeroSection({
 		<div className="flex flex-col gap-4 border-b border-app-line pb-6">
 			<div className="flex items-start justify-between">
 				<div>
-					<h1 className="font-plex text-3xl font-semibold text-ink">{agentId}</h1>
+					<h1 className="font-plex text-3xl font-semibold text-ink">
+						{displayName?.trim() ? displayName : agentId}
+					</h1>
+					{displayName?.trim() && (
+						<span className="mt-0.5 text-sm text-ink-faint">{agentId}</span>
+					)}
 					<div className="mt-2 flex items-center gap-4 text-sm">
 						<div className="flex items-center gap-2">
 							<div className={`h-2 w-2 rounded-full ${hasLiveActivity ? "animate-pulse bg-amber-400" : "bg-green-500"}`} />

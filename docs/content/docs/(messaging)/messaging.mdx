@@ -44,6 +44,7 @@ Go to **Settings** → **Bindings** tab to create and manage bindings.
 Each binding specifies:
 - Which **agent** handles the messages
 - Which **platform** (Discord, Slack, Telegram, Twitch, Email)
+- Optionally which **adapter instance** on that platform
 - Optionally which **server/workspace/chat** to scope it to
 - Optionally which **channels** within that server
 
@@ -56,6 +57,13 @@ Each binding specifies:
 agent_id = "main"
 channel = "discord"
 guild_id = "123456789"
+
+# Route only the named Discord adapter instance `ops`
+[[bindings]]
+agent_id = "main"
+channel = "discord"
+adapter = "ops"
+guild_id = "987654321"
 
 # Route a Slack workspace to the main agent
 [[bindings]]
@@ -74,6 +82,8 @@ chat_id = "-100123456789"
 </Tabs>
 
 Without any filtering (no guild ID, workspace ID, or chat ID), a binding accepts messages from anywhere on that platform.
+
+Named adapters use `adapter = "<name>"` in bindings. Omit `adapter` to target the platform default adapter (`discord`, `slack`, `telegram`, `twitch`, `email`, `webhook`).
 
 If no binding matches an incoming message, it's routed to the default agent automatically. This means the bot responds everywhere out of the box — add bindings to restrict it to specific channels or servers.
 

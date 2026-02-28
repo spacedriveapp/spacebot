@@ -17,7 +17,9 @@ This is what makes Spacebot feel like it actually *knows* you. Without the bulle
 
 Bulletin generation is a two-phase process: programmatic retrieval, then LLM synthesis.
 
-On a configurable interval (default: 60 minutes), the cortex:
+When warmup is enabled (default), warmup is the primary bulletin refresher on `warmup.refresh_secs` (default: 15 minutes). The bulletin loop still runs on `bulletin_interval_secs` (default: 60 minutes) as a fallback when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+
+Each bulletin generation pass does:
 
 1. **Retrieves** memory data across eight predefined sections by querying the memory store directly (no LLM needed for retrieval):
    - Identity & Core Facts — typed search for Identity memories, sorted by importance
@@ -34,7 +36,7 @@ On a configurable interval (default: 60 minutes), the cortex:
 
 This design avoids the problem of an LLM formulating search queries without conversation context. The retrieval phase uses `SearchMode::Typed`, `SearchMode::Recent`, and `SearchMode::Important` — metadata-based modes that query SQLite directly without needing vector embeddings or search terms. The LLM only gets involved for the part it's good at: turning structured data into readable prose.
 
-The first bulletin is generated immediately on startup. Subsequent runs happen every `bulletin_interval_secs`. If a generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
+On startup, Spacebot runs a best-effort warmup pass before adapters accept traffic (bounded wait), so the first bulletin is usually already present when the first user message arrives. If generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
 
 ### What Channels See
 
