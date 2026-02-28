@@ -88,9 +88,15 @@ pub async fn start_http_server(
         )
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
+        .route(
+            "/agents/memories",
+            get(memories::list_memories)
+                .post(memories::create_memory)
+                .put(memories::update_memory)
+                .delete(memories::delete_memory),
+        )
         .route("/agents/workers", get(workers::list_workers))
         .route("/agents/workers/detail", get(workers::worker_detail))
-        .route("/agents/memories", get(memories::list_memories))
         .route("/agents/memories/search", get(memories::search_memories))
         .route("/agents/memories/graph", get(memories::memory_graph))
         .route(

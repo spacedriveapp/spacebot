@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { AnimatePresence, motion } from "framer-motion";
 import {
@@ -13,10 +13,23 @@ import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { MemoryGraph } from "@/components/MemoryGraph";
 import {
 	Button,
+	Dialog,
+	DialogContent,
+	DialogHeader,
+	DialogTitle,
 	DropdownMenu,
 	DropdownMenuContent,
 	DropdownMenuItem,
 	DropdownMenuTrigger,
+	Input,
+	Label,
+	Select,
+	SelectContent,
+	SelectItem,
+	SelectTrigger,
+	SelectValue,
+	Slider,
+	TextArea,
 	ToggleGroup,
 	SearchInput,
 	FilterButton,
@@ -24,8 +37,37 @@ import {
 import { formatTimeAgo } from "@/lib/format";
 import { Search01Icon, ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faPenToSquare, faTrash } from "@fortawesome/free-solid-svg-icons";
 
 type ViewMode = "list" | "graph";
+
+interface MemoryFormData {
+	content: string;
+	memory_type: MemoryType;
+	importance: number;
+}
+
+interface UpdateMemoryMutationInput {
+	memoryId: string;
+	data: MemoryFormData;
+}
+
+function emptyFormData(): MemoryFormData {
+	return {
+		content: "",
+		memory_type: "fact",
+		importance: 0.6,
+	};
+}
+
+function memoryToFormData(memory: MemoryItem): MemoryFormData {
+	return {
+		content: memory.content,
+		memory_type: memory.memory_type,
+		importance: memory.importance,
+	};
+}
 
 const SORT_OPTIONS: { value: MemorySort; label: string }[] = [
 	{ value: "recent", label: "Recent" },
@@ -71,6 +113,7 @@ interface AgentMemoriesProps {
 }
 
 export function AgentMemories({ agentId }: AgentMemoriesProps) {
+	const queryClient = useQueryClient();
 	const [viewMode, setViewMode] = useState<ViewMode>("list");
 	const [searchQuery, setSearchQuery] = useState("");
 	const [debouncedQuery, setDebouncedQuery] = useState("");
@@ -78,6 +121,12 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [typeFilter, setTypeFilter] = useState<MemoryType | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
 	const [chatOpen, setChatOpen] = useState(true);
+	const [editorOpen, setEditorOpen] = useState(false);
+	const [editingMemory, setEditingMemory] = useState<MemoryItem | null>(null);
+	const [formData, setFormData] = useState<MemoryFormData>(emptyFormData());
+	const [formError, setFormError] = useState<string | null>(null);
+	const [deleteConfirmMemoryId, setDeleteConfirmMemoryId] = useState<string | null>(null);
+	const [graphRefreshToken, setGraphRefreshToken] = useState(0);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -128,14 +177,118 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const isLoading = isSearching ? searchQueryResult.isLoading : listQuery.isLoading;
 	const isError = isSearching ? searchQueryResult.isError : listQuery.isError;
 
+	const refreshMemories = () => {
+		queryClient.invalidateQueries({ queryKey: ["memories", agentId] });
+		queryClient.invalidateQueries({ queryKey: ["memories-search", agentId] });
+	};
+
+	const createMutation = useMutation({
+		mutationFn: (data: MemoryFormData) => {
+			return api.createMemory({
+				agent_id: agentId,
+				content: data.content,
+				memory_type: data.memory_type,
+				importance: data.importance,
+			});
+		},
+		onSuccess: () => {
+			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
+			setEditorOpen(false);
+			setEditingMemory(null);
+			setFormData(emptyFormData());
+			setFormError(null);
+		},
+		onError: () => setFormError("Failed to create memory"),
+	});
+
+	const updateMutation = useMutation({
+		mutationFn: ({ memoryId, data }: UpdateMemoryMutationInput) => {
+			return api.updateMemory({
+				agent_id: agentId,
+				memory_id: memoryId,
+				content: data.content,
+				memory_type: data.memory_type,
+				importance: data.importance,
+			});
+		},
+		onSuccess: () => {
+			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
+			setEditorOpen(false);
+			setEditingMemory(null);
+			setFormData(emptyFormData());
+			setFormError(null);
+		},
+		onError: () => setFormError("Failed to update memory"),
+	});
+
+	const deleteMutation = useMutation({
+		mutationFn: (memoryId: string) => api.deleteMemory(agentId, memoryId),
+		onSuccess: (_response, memoryId) => {
+			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
+			if (expandedId === memoryId) {
+				setExpandedId(null);
+			}
+			setDeleteConfirmMemoryId(null);
+		},
+	});
+
+	const openCreateDialog = () => {
+		setEditingMemory(null);
+		setFormData(emptyFormData());
+		setFormError(null);
+		setEditorOpen(true);
+	};
+
+	const openEditDialog = (memory: MemoryItem) => {
+		setEditingMemory(memory);
+		setFormData(memoryToFormData(memory));
+		setFormError(null);
+		setEditorOpen(true);
+	};
+
+	const saveMemory = () => {
+		const trimmedContent = formData.content.trim();
+		if (!trimmedContent) {
+			setFormError("Content is required");
+			return;
+		}
+
+		if (formData.importance < 0 || formData.importance > 1) {
+			setFormError("Importance must be between 0 and 1");
+			return;
+		}
+
+		const payload: MemoryFormData = {
+			content: trimmedContent,
+			memory_type: formData.memory_type,
+			importance: formData.importance,
+		};
+
+		setFormError(null);
+		if (editingMemory) {
+			updateMutation.mutate({ memoryId: editingMemory.id, data: payload });
+		} else {
+			createMutation.mutate(payload);
+		}
+	};
+
 	const virtualizer = useVirtualizer({
 		count: memories.length,
 		getScrollElement: () => parentRef.current,
+		getItemKey: (index) => memories[index]?.id ?? index,
 		estimateSize: useCallback((index: number) => {
 			return expandedId === memories[index]?.id ? 200 : 48;
 		}, [expandedId, memories]),
 		overscan: 10,
 	});
+
+	// eslint-disable-next-line react-hooks/exhaustive-deps
+	useEffect(() => {
+		virtualizer.measure();
+	}, [memories.length, expandedId]);
 
 	// Reset expanded when data changes
 	useEffect(() => {
@@ -173,6 +326,10 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 						))}
 					</DropdownMenuContent>
 				</DropdownMenu>
+
+				<Button size="sm" variant="secondary" onClick={openCreateDialog}>
+					+ Add memory
+				</Button>
 
 			{/* View mode toggle */}
 			<ToggleGroup
@@ -224,16 +381,25 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			</div>
 
 			{viewMode === "graph" ? (
-				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
+				<MemoryGraph
+					agentId={agentId}
+					sort={sort}
+					typeFilter={typeFilter}
+					refreshToken={graphRefreshToken}
+					onEditMemory={openEditDialog}
+					onDeleteMemory={(memory) => setDeleteConfirmMemoryId(memory.id)}
+				/>
 			) : (
 				<>
 					{/* Table header */}
-					<div className="grid grid-cols-[80px_1fr_100px_120px_100px] gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
-						<span>Type</span>
-						<span>{isSearching ? "Content / Score" : "Content"}</span>
-						<span>Importance</span>
-						<span>Source</span>
-						<span>Created</span>
+					<div className="flex items-center gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
+						<div className="grid flex-1 grid-cols-[80px_1fr_100px_120px] gap-3">
+							<span>Type</span>
+							<span>{isSearching ? "Content / Score" : "Content"}</span>
+							<span>Importance</span>
+							<span>Created</span>
+						</div>
+						<span className="w-[72px] text-right">Actions</span>
 					</div>
 
 					{/* Virtualized rows */}
@@ -274,11 +440,12 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											className="absolute left-0 top-0 w-full"
 											style={{ transform: `translateY(${virtualRow.start}px)` }}
 										>
-										<Button
-											onClick={() => setExpandedId(isExpanded ? null : memory.id)}
-											variant="ghost"
-											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
-										>
+										<div className="group flex items-center gap-3 border-b border-app-line/20 px-6 py-3 hover:bg-app-darkBox/30">
+											<button
+												type="button"
+												onClick={() => setExpandedId(isExpanded ? null : memory.id)}
+												className="grid min-w-0 flex-1 grid-cols-[80px_1fr_100px_120px] items-center gap-3 text-left"
+											>
 												<TypeBadge type={memory.memory_type} />
 												<div className="min-w-0">
 													<p className="truncate text-sm text-ink-dull">
@@ -291,13 +458,33 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 													)}
 												</div>
 												<ImportanceBar value={memory.importance} />
-												<span className="truncate text-tiny text-ink-faint">
-													{memory.source ?? "-"}
-												</span>
 												<span className="text-tiny text-ink-faint">
 													{formatTimeAgo(memory.created_at)}
 												</span>
-											</Button>
+											</button>
+											<div className="flex w-[72px] justify-end gap-1">
+												<Button
+													size="icon"
+													variant="outline"
+													className="h-6 w-6 flex-shrink-0"
+													title="Edit memory"
+													aria-label="Edit memory"
+													onClick={() => openEditDialog(memory)}
+												>
+													<FontAwesomeIcon icon={faPenToSquare} className="text-[11px]" />
+												</Button>
+												<Button
+													size="icon"
+													variant="outline"
+													className="h-6 w-6 flex-shrink-0"
+													title="Remove memory"
+													aria-label="Remove memory"
+													onClick={() => setDeleteConfirmMemoryId(memory.id)}
+												>
+													<FontAwesomeIcon icon={faTrash} className="text-[11px]" />
+												</Button>
+											</div>
+										</div>
 
 											{/* Expanded detail */}
 											<AnimatePresence>
@@ -318,9 +505,6 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 																<span>Accessed: {memory.access_count}x</span>
 																<span>Last accessed: {formatTimeAgo(memory.last_accessed_at)}</span>
 																<span>Updated: {formatTimeAgo(memory.updated_at)}</span>
-																{memory.channel_id && (
-																	<span>Channel: {memory.channel_id}</span>
-																)}
 															</div>
 														</div>
 													</motion.div>
@@ -355,6 +539,119 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					</motion.div>
 				)}
 			</AnimatePresence>
+
+			<Dialog open={editorOpen} onOpenChange={(open) => !open && setEditorOpen(false)}>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>{editingMemory ? "Edit memory" : "Add memory"}</DialogTitle>
+					</DialogHeader>
+					<div className="space-y-3">
+						<div className="space-y-1.5">
+							<Label>Content</Label>
+							<TextArea
+								value={formData.content}
+								onChange={(event) =>
+									setFormData((prev) => ({ ...prev, content: event.target.value }))
+								}
+								rows={4}
+							/>
+						</div>
+						<div className="grid grid-cols-2 gap-3">
+							<div className="space-y-1.5">
+								<Label>Type</Label>
+								<Select
+									value={formData.memory_type}
+									onValueChange={(value) =>
+										setFormData((prev) => ({ ...prev, memory_type: value as MemoryType }))
+									}
+								>
+									<SelectTrigger>
+										<SelectValue />
+									</SelectTrigger>
+									<SelectContent>
+										{MEMORY_TYPES.map((type_) => (
+											<SelectItem key={type_} value={type_}>
+												{type_}
+											</SelectItem>
+										))}
+									</SelectContent>
+								</Select>
+							</div>
+							<div className="space-y-1.5">
+								<Label>Importance (0-1)</Label>
+								<div className="flex items-center gap-3">
+									<Slider
+										value={[formData.importance]}
+										onValueChange={(value) =>
+											setFormData((prev) => ({ ...prev, importance: value[0] ?? prev.importance }))
+										}
+										min={0}
+										max={1}
+										step={0.01}
+										className="flex-1"
+									/>
+									<Input
+										type="number"
+										min={0}
+										max={1}
+										step={0.01}
+										value={formData.importance.toFixed(2)}
+										onChange={(event) => {
+											const parsed = Number.parseFloat(event.target.value);
+											if (Number.isNaN(parsed)) return;
+											setFormData((prev) => ({
+												...prev,
+												importance: Math.min(1, Math.max(0, parsed)),
+											}));
+										}}
+										className="w-24"
+									/>
+								</div>
+							</div>
+						</div>
+						{formError && <p className="text-sm text-red-400">{formError}</p>}
+						<div className="flex justify-end gap-2">
+							<Button variant="ghost" size="sm" onClick={() => setEditorOpen(false)}>
+								Cancel
+							</Button>
+							<Button
+								size="sm"
+								onClick={saveMemory}
+								loading={createMutation.isPending || updateMutation.isPending}
+							>
+								{editingMemory ? "Save changes" : "Create memory"}
+							</Button>
+						</div>
+					</div>
+				</DialogContent>
+			</Dialog>
+
+			<Dialog
+				open={deleteConfirmMemoryId !== null}
+				onOpenChange={(open) => !open && setDeleteConfirmMemoryId(null)}
+			>
+				<DialogContent>
+					<DialogHeader>
+						<DialogTitle>Remove memory?</DialogTitle>
+					</DialogHeader>
+					<p className="text-sm text-ink-dull">
+						This forgets the memory and removes it from active recall.
+					</p>
+					<div className="flex justify-end gap-2">
+						<Button variant="ghost" size="sm" onClick={() => setDeleteConfirmMemoryId(null)}>
+							Cancel
+						</Button>
+						<Button
+							variant="destructive"
+							size="sm"
+							onClick={() => deleteConfirmMemoryId && deleteMutation.mutate(deleteConfirmMemoryId)}
+							loading={deleteMutation.isPending}
+						>
+							Remove
+						</Button>
+					</div>
+				</DialogContent>
+			</Dialog>
 		</div>
 	);
 }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Graph from "graphology";
 import Sigma from "sigma";
 import { EdgeArrowProgram } from "sigma/rendering";
@@ -14,8 +14,10 @@ import {
 } from "@/api/client";
 import { formatTimeAgo } from "@/lib/format";
 import { Button } from "@/ui";
-import { Target02Icon, PlusSignIcon, MinusSignIcon, RefreshIcon, Cancel01Icon } from "@hugeicons/core-free-icons";
+import { Target02Icon, PlusSignIcon, MinusSignIcon, RefreshIcon, Cancel01Icon, Route01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faPenToSquare, faTrash } from "@fortawesome/free-solid-svg-icons";
 
 // -- Constants --
 
@@ -45,6 +47,9 @@ interface MemoryGraphProps {
 	agentId: string;
 	sort: MemorySort;
 	typeFilter: MemoryType | null;
+	refreshToken?: number;
+	onEditMemory?: (memory: MemoryItem) => void;
+	onDeleteMemory?: (memory: MemoryItem) => void;
 }
 
 interface NodeDetail {
@@ -53,7 +58,14 @@ interface NodeDetail {
 	y: number;
 }
 
-export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
+export function MemoryGraph({
+	agentId,
+	sort,
+	typeFilter,
+	refreshToken,
+	onEditMemory,
+	onDeleteMemory,
+}: MemoryGraphProps) {
 	const containerRef = useRef<HTMLDivElement>(null);
 	const sigmaRef = useRef<Sigma | null>(null);
 	const graphRef = useRef<Graph | null>(null);
@@ -67,12 +79,6 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 	const [expandingNode, setExpandingNode] = useState<string | null>(null);
 	// Track loaded node IDs so we can exclude them when fetching neighbors
 	const loadedNodeIds = useRef<Set<string>>(new Set());
-
-	// Memoize the graph data key to refetch when filters change
-	const queryKey = useMemo(
-		() => [agentId, sort, typeFilter],
-		[agentId, sort, typeFilter],
-	);
 
 	const cleanup = useCallback(() => {
 		if (layoutRef.current) {
@@ -208,7 +214,7 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 			cancelled = true;
 			cleanup();
 		};
-	}, [queryKey, cleanup, agentId, sort, typeFilter]);
+	}, [cleanup, agentId, sort, typeFilter, refreshToken]);
 
 	// Register Sigma event handlers (separate from graph loading to avoid recreating)
 	useEffect(() => {
@@ -480,14 +486,52 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 								<span>Source: {selectedNode.memory.source}</span>
 							)}
 						</div>
-						<Button
-							onClick={() => expandNeighbors(selectedNode.memory.id)}
-							size="sm"
-							loading={expandingNode === selectedNode.memory.id}
-							className="mt-3 w-full bg-accent/15 text-tiny text-accent hover:bg-accent/25"
-						>
-							Expand Neighbors
-						</Button>
+						<div className="mt-3 flex items-center gap-2">
+							{onEditMemory && (
+								<Button
+									size="sm"
+									variant="outline"
+									className="h-8 flex-1"
+									title="Edit memory"
+									aria-label="Edit memory"
+									onClick={() => {
+										onEditMemory(selectedNode.memory);
+										setSelectedNode(null);
+									}}
+								>
+									<FontAwesomeIcon icon={faPenToSquare} className="text-[12px]" />
+								</Button>
+							)}
+							{onDeleteMemory && (
+								<Button
+									size="sm"
+									variant="outline"
+									className="h-8 flex-1"
+									title="Remove memory"
+									aria-label="Remove memory"
+									onClick={() => {
+										onDeleteMemory(selectedNode.memory);
+										setSelectedNode(null);
+									}}
+								>
+									<FontAwesomeIcon icon={faTrash} className="text-[12px]" />
+								</Button>
+							)}
+							<Button
+								size="sm"
+								variant="outline"
+								className="h-8 flex-1"
+								title="Expand neighbors"
+								aria-label="Expand neighbors"
+								disabled={expandingNode === selectedNode.memory.id}
+								onClick={() => expandNeighbors(selectedNode.memory.id)}
+							>
+								<HugeiconsIcon
+									icon={Route01Icon}
+									className={`h-3.5 w-3.5 ${expandingNode === selectedNode.memory.id ? "animate-spin" : ""}`}
+								/>
+							</Button>
+						</div>
 					</motion.div>
 				)}
 			</AnimatePresence>
