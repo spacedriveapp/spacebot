@@ -1251,7 +1251,7 @@ function SecretsSection() {
 								<div className="flex items-center gap-2">
 									<code className="text-sm font-medium text-ink">{secret.name}</code>
 									<Badge
-										variant={secret.category === "system" ? "violet" : "accent"}
+										variant="outline"
 										size="sm"
 										className="pointer-events-none transition-none"
 									>
