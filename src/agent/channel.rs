@@ -2178,6 +2178,14 @@ impl Channel {
             return Ok(());
         }
 
+        if should_ignore_event_due_to_terminal_worker_state(&event, &self.completed_workers) {
+            tracing::debug!(
+                channel_id = %self.id,
+                "ignoring stale worker lifecycle event after terminal completion"
+            );
+            return Ok(());
+        }
+
         // Update status block
         {
             let mut status = self.state.status_block.write().await;
@@ -2265,7 +2273,6 @@ impl Channel {
                     worker_type,
                     &self.deps.agent_id,
                 );
-                self.completed_workers.remove(worker_id);
                 let started_at = {
                     let now = tokio::time::Instant::now();
                     let worker_start_times = self.state.worker_start_times.read().await;
@@ -3698,6 +3705,28 @@ fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
     }
 }
 
+fn should_ignore_event_due_to_terminal_worker_state(
+    event: &ProcessEvent,
+    completed_workers: &HashSet<WorkerId>,
+) -> bool {
+    let worker_id = match event {
+        ProcessEvent::WorkerStarted { worker_id, .. }
+        | ProcessEvent::WorkerStatus { worker_id, .. }
+        | ProcessEvent::WorkerComplete { worker_id, .. } => Some(worker_id),
+        ProcessEvent::ToolStarted {
+            process_id: ProcessId::Worker(worker_id),
+            ..
+        }
+        | ProcessEvent::ToolCompleted {
+            process_id: ProcessId::Worker(worker_id),
+            ..
+        } => Some(worker_id),
+        _ => None,
+    };
+
+    worker_id.is_some_and(|worker_id| completed_workers.contains(worker_id))
+}
+
 /// Image MIME types we support for vision.
 const IMAGE_MIME_PREFIXES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
@@ -4221,8 +4250,8 @@ mod tests {
         apply_history_after_turn, event_is_for_channel, reconcile_worker_watchdog_after_event_lag,
         resolve_worker_watchdog_started_at, resume_from_waiting_for_input,
         retrigger_outbox_id_from_metadata, retrigger_result_summary,
-        retrigger_results_from_pending, status_indicates_waiting_for_input, worker_timeout_kind,
-        worker_watchdog_deadline,
+        retrigger_results_from_pending, should_ignore_event_due_to_terminal_worker_state,
+        status_indicates_waiting_for_input, worker_timeout_kind, worker_watchdog_deadline,
     };
     use crate::config::WorkerConfig;
     use rig::completion::{CompletionError, PromptError};
@@ -4767,6 +4796,61 @@ mod tests {
         assert!(
             !event_is_for_channel(&event, &channel_id),
             "worker events from other channels should be ignored"
+        );
+    }
+
+    #[test]
+    fn out_of_order_worker_started_after_complete_is_ignored() {
+        let worker_id = uuid::Uuid::new_v4();
+        let channel_id: crate::ChannelId = std::sync::Arc::<str>::from("channel-a");
+        let agent_id: crate::AgentId = std::sync::Arc::<str>::from("agent-a");
+        let mut completed_workers = HashSet::new();
+
+        let complete_event = crate::ProcessEvent::WorkerComplete {
+            agent_id: agent_id.clone(),
+            worker_id,
+            channel_id: Some(channel_id.clone()),
+            result: "done".to_string(),
+            notify: true,
+            success: true,
+        };
+        assert!(
+            !should_ignore_event_due_to_terminal_worker_state(&complete_event, &completed_workers),
+            "first completion event should be processed"
+        );
+        completed_workers.insert(worker_id);
+
+        let started_event = crate::ProcessEvent::WorkerStarted {
+            agent_id,
+            worker_id,
+            channel_id: Some(channel_id),
+            task: "task".to_string(),
+            worker_type: "builtin".to_string(),
+        };
+        assert!(
+            should_ignore_event_due_to_terminal_worker_state(&started_event, &completed_workers),
+            "late WorkerStarted should be ignored after worker reached terminal state"
+        );
+
+        let mut worker_watchdog = HashMap::new();
+        if !should_ignore_event_due_to_terminal_worker_state(&started_event, &completed_workers) {
+            let now = tokio::time::Instant::now();
+            worker_watchdog.insert(
+                worker_id,
+                WorkerWatchdogEntry {
+                    started_at: now,
+                    last_activity_at: now,
+                    is_waiting_for_input: false,
+                    waiting_since: None,
+                    has_activity_signal: false,
+                    in_flight_tools: 0,
+                },
+            );
+        }
+
+        assert!(
+            worker_watchdog.is_empty(),
+            "ignored late WorkerStarted must not re-register watchdog state"
         );
     }
 
