@@ -190,6 +190,34 @@ impl StreamScrubber {
     }
 }
 
+/// Scrub all tool secret values from a text string in one pass.
+///
+/// Convenience wrapper over `StreamScrubber` for non-streaming content (worker
+/// results, branch conclusions, status text). Replaces each tool secret value
+/// with `[REDACTED:<name>]`.
+pub fn scrub_secrets(text: &str, tool_secrets: &[(String, String)]) -> String {
+    if tool_secrets.is_empty() {
+        return text.to_string();
+    }
+    let mut result = text.to_string();
+    for (name, value) in tool_secrets {
+        if !value.is_empty() {
+            result = result.replace(value.as_str(), &format!("[REDACTED:{name}]"));
+        }
+    }
+    result
+}
+
+/// Scrub tool secret values from text using a `SecretsStore`.
+///
+/// Reads the current tool secrets from the store and performs exact-match
+/// redaction. For use in result paths where a `SecretsStore` reference is
+/// available.
+pub fn scrub_with_store(text: &str, store: &crate::secrets::store::SecretsStore) -> String {
+    let pairs = store.tool_secret_pairs();
+    scrub_secrets(text, &pairs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

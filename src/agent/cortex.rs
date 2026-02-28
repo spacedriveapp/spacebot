@@ -1168,6 +1168,14 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let sandbox_containment_active = deps.sandbox.containment_active();
     let sandbox_read_allowlist = deps.sandbox.prompt_read_allowlist();
     let sandbox_write_allowlist = deps.sandbox.prompt_write_allowlist();
+
+    // Collect tool secret names so the worker template can list available credentials.
+    let secrets_guard = deps.runtime_config.secrets.load();
+    let tool_secret_names = match (*secrets_guard).as_ref() {
+        Some(store) => store.tool_secret_names(),
+        None => Vec::new(),
+    };
+
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &deps.runtime_config.instance_dir.display().to_string(),
@@ -1176,6 +1184,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             sandbox_containment_active,
             sandbox_read_allowlist,
             sandbox_write_allowlist,
+            &tool_secret_names,
         )
         .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
 

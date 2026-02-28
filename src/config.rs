@@ -2,6 +2,7 @@
 
 use crate::error::{ConfigError, Result};
 use crate::llm::routing::RoutingConfig;
+use crate::secrets::store::{InstancePattern, SecretField, SystemSecrets};
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use chrono_tz::Tz;
@@ -325,6 +326,137 @@ impl LlmConfig {
     }
 }
 
+impl SystemSecrets for LlmConfig {
+    fn section() -> &'static str {
+        "llm"
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "anthropic_key",
+                secret_name: "ANTHROPIC_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "anthropic_key",
+                secret_name: "ANTHROPIC_AUTH_TOKEN",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "openai_key",
+                secret_name: "OPENAI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "openrouter_key",
+                secret_name: "OPENROUTER_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "kilo_key",
+                secret_name: "KILO_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "zhipu_key",
+                secret_name: "ZHIPU_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "groq_key",
+                secret_name: "GROQ_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "together_key",
+                secret_name: "TOGETHER_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "fireworks_key",
+                secret_name: "FIREWORKS_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "deepseek_key",
+                secret_name: "DEEPSEEK_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "xai_key",
+                secret_name: "XAI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "mistral_key",
+                secret_name: "MISTRAL_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "gemini_key",
+                secret_name: "GEMINI_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "gemini_key",
+                secret_name: "GOOGLE_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "ollama_key",
+                secret_name: "OLLAMA_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "opencode_zen_key",
+                secret_name: "OPENCODE_ZEN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "opencode_go_key",
+                secret_name: "OPENCODE_GO_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "nvidia_key",
+                secret_name: "NVIDIA_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "minimax_key",
+                secret_name: "MINIMAX_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "minimax_cn_key",
+                secret_name: "MINIMAX_CN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "moonshot_key",
+                secret_name: "MOONSHOT_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "zai_coding_plan_key",
+                secret_name: "ZAI_CODING_PLAN_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "cerebras_key",
+                secret_name: "CEREBRAS_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "sambanova_key",
+                secret_name: "SAMBANOVA_API_KEY",
+                instance_pattern: None,
+            },
+        ]
+    }
+}
+
 const ANTHROPIC_PROVIDER_BASE_URL: &str = "https://api.anthropic.com";
 const OPENAI_PROVIDER_BASE_URL: &str = "https://api.openai.com";
 const OPENROUTER_PROVIDER_BASE_URL: &str = "https://openrouter.ai/api";
@@ -580,6 +712,20 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("opencode", &self.opencode)
             .field("worker_log_mode", &self.worker_log_mode)
             .finish()
+    }
+}
+
+impl SystemSecrets for DefaultsConfig {
+    fn section() -> &'static str {
+        "defaults"
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "brave_search_key",
+            secret_name: "BRAVE_SEARCH_API_KEY",
+            instance_pattern: None,
+        }]
     }
 }
 
@@ -1654,6 +1800,27 @@ impl std::fmt::Debug for DiscordConfig {
     }
 }
 
+impl SystemSecrets for DiscordConfig {
+    fn section() -> &'static str {
+        "discord"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "token",
+            secret_name: "DISCORD_BOT_TOKEN",
+            instance_pattern: Some(InstancePattern {
+                platform_prefix: "DISCORD",
+                field_suffix: "BOT_TOKEN",
+            }),
+        }]
+    }
+}
+
 /// A single slash command definition for the Slack adapter.
 ///
 /// Maps a Slack slash command (e.g. `/ask`) to a target agent.
@@ -1716,6 +1883,37 @@ impl std::fmt::Debug for SlackConfig {
             .field("dm_allowed_users", &self.dm_allowed_users)
             .field("commands", &self.commands)
             .finish()
+    }
+}
+
+impl SystemSecrets for SlackConfig {
+    fn section() -> &'static str {
+        "slack"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "bot_token",
+                secret_name: "SLACK_BOT_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SLACK",
+                    field_suffix: "BOT_TOKEN",
+                }),
+            },
+            SecretField {
+                toml_key: "app_token",
+                secret_name: "SLACK_APP_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SLACK",
+                    field_suffix: "APP_TOKEN",
+                }),
+            },
+        ]
     }
 }
 
@@ -1950,6 +2148,27 @@ impl std::fmt::Debug for TelegramConfig {
     }
 }
 
+impl SystemSecrets for TelegramConfig {
+    fn section() -> &'static str {
+        "telegram"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[SecretField {
+            toml_key: "token",
+            secret_name: "TELEGRAM_BOT_TOKEN",
+            instance_pattern: Some(InstancePattern {
+                platform_prefix: "TELEGRAM",
+                field_suffix: "BOT_TOKEN",
+            }),
+        }]
+    }
+}
+
 #[derive(Clone)]
 pub struct EmailConfig {
     pub enabled: bool,
@@ -2045,6 +2264,53 @@ impl std::fmt::Debug for EmailConfig {
             .field("max_body_bytes", &self.max_body_bytes)
             .field("max_attachment_bytes", &self.max_attachment_bytes)
             .finish()
+    }
+}
+
+impl SystemSecrets for EmailConfig {
+    fn section() -> &'static str {
+        "email"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "imap_username",
+                secret_name: "EMAIL_IMAP_USERNAME",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "IMAP_USERNAME",
+                }),
+            },
+            SecretField {
+                toml_key: "imap_password",
+                secret_name: "EMAIL_IMAP_PASSWORD",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "IMAP_PASSWORD",
+                }),
+            },
+            SecretField {
+                toml_key: "smtp_username",
+                secret_name: "EMAIL_SMTP_USERNAME",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "SMTP_USERNAME",
+                }),
+            },
+            SecretField {
+                toml_key: "smtp_password",
+                secret_name: "EMAIL_SMTP_PASSWORD",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "EMAIL",
+                    field_suffix: "SMTP_PASSWORD",
+                }),
+            },
+        ]
     }
 }
 
@@ -2184,6 +2450,53 @@ impl std::fmt::Debug for TwitchConfig {
             .field("channels", &self.channels)
             .field("trigger_prefix", &self.trigger_prefix)
             .finish()
+    }
+}
+
+impl SystemSecrets for TwitchConfig {
+    fn section() -> &'static str {
+        "twitch"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "oauth_token",
+                secret_name: "TWITCH_OAUTH_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "OAUTH_TOKEN",
+                }),
+            },
+            SecretField {
+                toml_key: "client_id",
+                secret_name: "TWITCH_CLIENT_ID",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "CLIENT_ID",
+                }),
+            },
+            SecretField {
+                toml_key: "client_secret",
+                secret_name: "TWITCH_CLIENT_SECRET",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "CLIENT_SECRET",
+                }),
+            },
+            SecretField {
+                toml_key: "refresh_token",
+                secret_name: "TWITCH_REFRESH_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "TWITCH",
+                    field_suffix: "REFRESH_TOKEN",
+                }),
+            },
+        ]
     }
 }
 
@@ -2971,13 +3284,50 @@ struct TomlBinding {
     dm_allowed_users: Vec<String>,
 }
 
-/// Resolve a value that might be an "env:VAR_NAME" reference.
+/// Resolve a value that might be an "env:VAR_NAME" or "secret:NAME" reference.
+///
+/// Three resolution modes:
+/// - `secret:NAME` — look up from the secrets store (if available).
+/// - `env:VAR_NAME` — read from system environment variable.
+/// - Anything else — literal value.
 fn resolve_env_value(value: &str) -> Option<String> {
-    if let Some(var_name) = value.strip_prefix("env:") {
+    if let Some(alias) = value.strip_prefix("secret:") {
+        // Try the thread-local secrets store if set.
+        RESOLVE_SECRETS_STORE.with(|cell| {
+            cell.borrow().as_ref().and_then(|store| {
+                store
+                    .get(alias)
+                    .ok()
+                    .map(|secret| secret.expose().to_string())
+            })
+        })
+    } else if let Some(var_name) = value.strip_prefix("env:") {
         std::env::var(var_name).ok()
     } else {
         Some(value.to_string())
     }
+}
+
+// Thread-local reference to the secrets store for use during config resolution.
+//
+// Set before calling config resolution functions and cleared after. This avoids
+// threading the secrets store through 60+ `resolve_env_value` call sites.
+std::thread_local! {
+    static RESOLVE_SECRETS_STORE: std::cell::RefCell<Option<std::sync::Arc<crate::secrets::store::SecretsStore>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Set the secrets store for config resolution on the current thread.
+pub fn set_resolve_secrets_store(store: std::sync::Arc<crate::secrets::store::SecretsStore>) {
+    RESOLVE_SECRETS_STORE.with(|cell| {
+        *cell.borrow_mut() = Some(store);
+    });
+}
+
+/// Clear the secrets store from the current thread.
+pub fn clear_resolve_secrets_store() {
+    RESOLVE_SECRETS_STORE.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
 }
 
 fn normalize_timezone(value: &str) -> Option<String> {
@@ -5203,6 +5553,8 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Secrets store for encrypted credential storage.
+    pub secrets: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Sandbox configuration for process containment.
     ///
     /// Wrapped in `Arc` so it can be shared with the `Sandbox` struct, which
@@ -5259,6 +5611,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            secrets: ArcSwap::from_pointee(None),
             sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),
         }
     }
@@ -5276,6 +5629,11 @@ impl RuntimeConfig {
     /// Set the settings store after initialization.
     pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
         self.settings.store(Arc::new(Some(settings)));
+    }
+
+    /// Set the secrets store after initialization.
+    pub fn set_secrets(&self, secrets: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets.store(Arc::new(Some(secrets)));
     }
 
     /// Compute the current dispatch-readiness signal.

@@ -61,6 +61,7 @@ notify = "7"
 # Cryptography (for secrets)
 aes-gcm = "0.10"
 sha2 = "0.10"
+argon2 = "0.5"
 rand = "0.9"
 
 # UUID generation
@@ -90,6 +91,10 @@ dialoguer = { version = "0.11", features = ["password"] }
 daemonize = "0.5"
 libc = "0.2"
 ignore = "0.4"
+
+# OS keystore (macOS Keychain for master key storage)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 # Discord
 serenity = { version = "0.12", default-features = false, features = ["client", "gateway", "model", "cache", "chrono", "rustls_backend"] }

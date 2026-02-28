@@ -7,6 +7,7 @@
 
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
@@ -118,6 +119,11 @@ pub struct Sandbox {
     data_dir: PathBuf,
     tools_bin: PathBuf,
     backend: SandboxBackend,
+    /// Reference to the secrets store for injecting tool secrets into worker
+    /// subprocesses. When set, `wrap()` reads tool secrets from the store and
+    /// injects them as env vars via `--setenv` (bubblewrap) or `Command::env()`
+    /// (passthrough/sandbox-exec).
+    secrets_store: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
 }
 
 impl std::fmt::Debug for Sandbox {
@@ -190,6 +196,24 @@ impl Sandbox {
             data_dir,
             tools_bin,
             backend,
+            secrets_store: ArcSwap::from_pointee(None),
+        }
+    }
+
+    /// Set the secrets store for tool secret injection into worker subprocesses.
+    ///
+    /// Called after the secrets store is initialized (may happen after sandbox
+    /// construction during agent startup).
+    pub fn set_secrets_store(&self, store: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets_store.store(Arc::new(Some(store)));
+    }
+
+    /// Read tool secrets from the store for injection into subprocess environment.
+    fn tool_secrets(&self) -> HashMap<String, String> {
+        let guard = self.secrets_store.load();
+        match guard.as_ref() {
+            Some(store) => store.tool_env_vars(),
+            None => HashMap::new(),
         }
     }
 
@@ -317,8 +341,11 @@ impl Sandbox {
             None => self.tools_bin.to_string_lossy().into_owned(),
         };
 
+        // Read tool secrets once for injection into the subprocess.
+        let tool_secrets = self.tool_secrets();
+
         if config.mode == SandboxMode::Disabled {
-            return self.wrap_passthrough(program, args, working_dir, &path_env, &config);
+            return self.wrap_passthrough(program, args, working_dir, &path_env, &config, &tool_secrets);
         }
 
         match self.backend {
@@ -329,17 +356,24 @@ impl Sandbox {
                 proc_supported,
                 &path_env,
                 &config,
+                &tool_secrets,
             ),
-            SandboxBackend::SandboxExec => {
-                self.wrap_sandbox_exec(program, args, working_dir, &path_env, &config)
-            }
+            SandboxBackend::SandboxExec => self.wrap_sandbox_exec(
+                program,
+                args,
+                working_dir,
+                &path_env,
+                &config,
+                &tool_secrets,
+            ),
             SandboxBackend::None => {
-                self.wrap_passthrough(program, args, working_dir, &path_env, &config)
+                self.wrap_passthrough(program, args, working_dir, &path_env, &config, &tool_secrets)
             }
         }
     }
 
     /// Linux: wrap with bubblewrap mount namespace.
+    #[allow(clippy::too_many_arguments)]
     fn wrap_bubblewrap(
         &self,
         program: &str,
@@ -348,6 +382,7 @@ impl Sandbox {
         proc_supported: bool,
         path_env: &str,
         config: &SandboxConfig,
+        tool_secrets: &HashMap<String, String>,
     ) -> Command {
         let mut cmd = Command::new("bwrap");
 
@@ -429,6 +464,13 @@ impl Sandbox {
             }
         }
 
+        // 13. Re-inject tool secrets from the secret store.
+        // Only tool-category secrets are injected; system secrets (LLM API keys,
+        // messaging tokens) never enter subprocess environments.
+        for (name, value) in tool_secrets {
+            cmd.arg("--setenv").arg(name).arg(value);
+        }
+
         // 14. Re-inject passthrough env vars (user-configured forwarding),
         // skipping any that would override hardened defaults.
         for var_name in &config.passthrough_env {
@@ -441,7 +483,20 @@ impl Sandbox {
             }
         }
 
-        // 15. The actual command
+        // 15. Worker keyring isolation (Linux) — give the child a fresh empty
+        // session keyring so it cannot access the parent's keyring (which holds
+        // the master key for secret store encryption).
+        #[cfg(target_os = "linux")]
+        {
+            // pre_exec runs between fork and exec. If it fails, spawn() fails
+            // and the worker is not started (correct — a worker that inherits
+            // the parent's session keyring could access the master key).
+            unsafe {
+                cmd.pre_exec(|| crate::secrets::keystore::pre_exec_new_session_keyring());
+            }
+        }
+
+        // 16. The actual command
         cmd.arg("--").arg(program);
         for arg in args {
             cmd.arg(arg);
@@ -458,6 +513,7 @@ impl Sandbox {
         working_dir: &Path,
         path_env: &str,
         config: &SandboxConfig,
+        tool_secrets: &HashMap<String, String>,
     ) -> Command {
         let profile = self.generate_sbpl_profile(config);
 
@@ -479,6 +535,10 @@ impl Sandbox {
             if let Ok(value) = std::env::var(var_name) {
                 cmd.env(var_name, value);
             }
+        }
+        // Inject tool secrets from the secret store.
+        for (name, value) in tool_secrets {
+            cmd.env(name, value);
         }
         for var_name in &config.passthrough_env {
             if is_reserved_env_var(var_name) {
@@ -504,6 +564,7 @@ impl Sandbox {
         working_dir: &Path,
         path_env: &str,
         config: &SandboxConfig,
+        tool_secrets: &HashMap<String, String>,
     ) -> Command {
         let mut cmd = Command::new(program);
         for arg in args {
@@ -522,6 +583,10 @@ impl Sandbox {
                 cmd.env(var_name, value);
             }
         }
+        // Inject tool secrets from the secret store.
+        for (name, value) in tool_secrets {
+            cmd.env(name, value);
+        }
         for var_name in &config.passthrough_env {
             if is_reserved_env_var(var_name) {
                 tracing::debug!(%var_name, "skipping reserved passthrough_env variable");
@@ -529,6 +594,15 @@ impl Sandbox {
             }
             if let Ok(value) = std::env::var(var_name) {
                 cmd.env(var_name, value);
+            }
+        }
+
+        // Worker keyring isolation (Linux) — give the child a fresh empty
+        // session keyring even in passthrough (no sandbox) mode.
+        #[cfg(target_os = "linux")]
+        {
+            unsafe {
+                cmd.pre_exec(|| crate::secrets::keystore::pre_exec_new_session_keyring());
             }
         }
 

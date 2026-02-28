@@ -10,6 +10,17 @@ Single binary. No server dependencies. Runs on tokio. All data lives in embedded
 
 **Stack:** Rust (edition 2024), tokio, Rig (v0.30.0, agentic loop framework), SQLite (sqlx), LanceDB (embedded vector + FTS), redb (embedded key-value).
 
+## JavaScript Tooling (Critical)
+
+- For UI work in `spacebot/interface/`, use `bun` for all JS/TS package management and scripts.
+- **NEVER** use `npm`, `pnpm`, or `yarn` in this repo unless the user explicitly asks for one.
+- Standard commands:
+  - `bun install`
+  - `bun run dev`
+  - `bun run build`
+  - `bun run test`
+  - `bunx <tool>` (instead of `npx <tool>`)
+
 ## Migration Safety
 
 - **NEVER edit an existing migration file in place** once it has been committed or applied in any environment.
