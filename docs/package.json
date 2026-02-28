@@ -2,6 +2,7 @@
   "name": "spacebot",
   "version": "0.0.0",
   "private": true,
+  "packageManager": "bun@1.1.34",
   "scripts": {
     "build": "next build",
     "dev": "next dev -p 19830",
