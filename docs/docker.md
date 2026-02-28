@@ -149,6 +149,139 @@ volumes:
 
 The `shm_size` and `seccomp` settings are needed for Chromium to run properly in a container.
 
+### External Browser
+
+Run `chromedp/headless-shell` as a separate container and point Spacebot at it via
+`connect_url`. This decouples the browser lifecycle from the main process and avoids
+bundling Chromium into the Spacebot image.
+
+Workers spawned by the same agent share one Chrome process (each gets its own tab). A
+Chrome crash kills all tabs for that agent.
+
+#### Spacebot on host, browser in Docker
+
+When Spacebot runs as a binary directly on the host, expose port 9222 so the host process
+can reach the container:
+
+```yaml
+# docker-compose.yml
+services:
+  browser:
+    image: chromedp/headless-shell:latest
+    container_name: browser
+    ports:
+      - "127.0.0.1:9222:9222"
+    shm_size: 1gb
+    restart: unless-stopped
+```
+
+Test whether the browser is reachable from the host:
+
+```bash
+curl http://localhost:9222/json/version
+```
+
+Then configure Spacebot via config:
+
+```toml
+[defaults.browser]
+connect_url = "http://localhost:9222"
+```
+
+#### Both in Docker
+
+When both Spacebot and the browser run in containers, use a Docker network instead of
+exposing ports:
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    ports:
+      - "19898:19898"
+    volumes:
+      - spacebot-data:/data
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+    volumes:
+      - spacebot-data:/data
+      - ./config.toml:/data/config.toml:ro
+    networks:
+      - spacebot-net
+    restart: unless-stopped
+    
+  browser:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 1gb
+    restart: unless-stopped
+
+networks:
+  spacebot-net:
+
+volumes:
+  spacebot-data:
+```
+
+#### Per-agent dedicated sandboxes
+
+Use a `config.toml` to route each agent to its own container:
+
+```toml
+[defaults.browser]
+connect_url = "http://browser-main:9222"
+
+[[agents]]
+id = "research"
+[agents.browser]
+connect_url = "http://browser-research:9222"
+
+[[agents]]
+id = "internal"
+[agents.browser]
+enabled = false
+```
+
+```yaml
+services:
+  spacebot:
+    image: ghcr.io/spacedriveapp/spacebot:slim
+    volumes:
+      - spacebot-data:/data
+      - ./config.toml:/data/config.toml:ro
+    networks:
+      - spacebot-net
+
+  browser-main:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 512mb
+    restart: unless-stopped
+
+  browser-research:
+    image: chromedp/headless-shell:latest
+    networks:
+      - spacebot-net
+    shm_size: 1gb
+    restart: unless-stopped
+
+networks:
+  spacebot-net:
+
+volumes:
+  spacebot-data:
+```
+
+#### `connect_url`
+
+Accepted formats:
+- `http://host:9222` — auto-discovers the WebSocket URL via `/json/version` (preferred)
+- `ws://host:9222/devtools/browser/<id>` — direct WebSocket URL
+
+An empty string is treated as unset and falls back to the embedded launch path.
+
 ## Building the Image
 
 From the spacebot repo root:
