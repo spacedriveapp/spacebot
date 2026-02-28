@@ -586,6 +586,11 @@ impl SpacebotModel {
             request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
         }
 
+        // Apply provider-specific extra headers (e.g. OpenRouter app attribution).
+        for (key, value) in &provider_config.extra_headers {
+            request_builder = request_builder.header(key.as_str(), value.as_str());
+        }
+
         let response = request_builder
             .json(&body)
             .send()
