@@ -37,6 +37,8 @@ import {
 import { formatTimeAgo } from "@/lib/format";
 import { Search01Icon, ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
+import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
+import { faPenToSquare, faTrash } from "@fortawesome/free-solid-svg-icons";
 
 type ViewMode = "list" | "graph";
 
@@ -124,6 +126,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [formData, setFormData] = useState<MemoryFormData>(emptyFormData());
 	const [formError, setFormError] = useState<string | null>(null);
 	const [deleteConfirmMemoryId, setDeleteConfirmMemoryId] = useState<string | null>(null);
+	const [graphRefreshToken, setGraphRefreshToken] = useState(0);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -190,6 +193,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		},
 		onSuccess: () => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			setEditorOpen(false);
 			setEditingMemory(null);
 			setFormData(emptyFormData());
@@ -210,6 +214,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		},
 		onSuccess: () => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			setEditorOpen(false);
 			setEditingMemory(null);
 			setFormData(emptyFormData());
@@ -222,6 +227,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 		mutationFn: (memoryId: string) => api.deleteMemory(agentId, memoryId),
 		onSuccess: (_response, memoryId) => {
 			refreshMemories();
+			setGraphRefreshToken((token) => token + 1);
 			if (expandedId === memoryId) {
 				setExpandedId(null);
 			}
@@ -375,15 +381,25 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			</div>
 
 			{viewMode === "graph" ? (
-				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
+				<MemoryGraph
+					agentId={agentId}
+					sort={sort}
+					typeFilter={typeFilter}
+					refreshToken={graphRefreshToken}
+					onEditMemory={openEditDialog}
+					onDeleteMemory={(memory) => setDeleteConfirmMemoryId(memory.id)}
+				/>
 			) : (
 				<>
 					{/* Table header */}
-					<div className="grid grid-cols-[80px_1fr_100px_120px] gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
-						<span>Type</span>
-						<span>{isSearching ? "Content / Score" : "Content"}</span>
-						<span>Importance</span>
-						<span>Created</span>
+					<div className="flex items-center gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
+						<div className="grid flex-1 grid-cols-[80px_1fr_100px_120px] gap-3">
+							<span>Type</span>
+							<span>{isSearching ? "Content / Score" : "Content"}</span>
+							<span>Importance</span>
+							<span>Created</span>
+						</div>
+						<span className="w-[72px] text-right">Actions</span>
 					</div>
 
 					{/* Virtualized rows */}
@@ -424,11 +440,12 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											className="absolute left-0 top-0 w-full"
 											style={{ transform: `translateY(${virtualRow.start}px)` }}
 										>
-										<Button
-											onClick={() => setExpandedId(isExpanded ? null : memory.id)}
-											variant="ghost"
-											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
-										>
+										<div className="group flex items-center gap-3 border-b border-app-line/20 px-6 py-3 hover:bg-app-darkBox/30">
+											<button
+												type="button"
+												onClick={() => setExpandedId(isExpanded ? null : memory.id)}
+												className="grid min-w-0 flex-1 grid-cols-[80px_1fr_100px_120px] items-center gap-3 text-left"
+											>
 												<TypeBadge type={memory.memory_type} />
 												<div className="min-w-0">
 													<p className="truncate text-sm text-ink-dull">
@@ -444,7 +461,30 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 												<span className="text-tiny text-ink-faint">
 													{formatTimeAgo(memory.created_at)}
 												</span>
-											</Button>
+											</button>
+											<div className="flex w-[72px] justify-end gap-1">
+												<Button
+													size="icon"
+													variant="outline"
+													className="h-6 w-6 flex-shrink-0"
+													title="Edit memory"
+													aria-label="Edit memory"
+													onClick={() => openEditDialog(memory)}
+												>
+													<FontAwesomeIcon icon={faPenToSquare} className="text-[11px]" />
+												</Button>
+												<Button
+													size="icon"
+													variant="outline"
+													className="h-6 w-6 flex-shrink-0"
+													title="Remove memory"
+													aria-label="Remove memory"
+													onClick={() => setDeleteConfirmMemoryId(memory.id)}
+												>
+													<FontAwesomeIcon icon={faTrash} className="text-[11px]" />
+												</Button>
+											</div>
+										</div>
 
 											{/* Expanded detail */}
 											<AnimatePresence>
@@ -456,23 +496,11 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 														transition={{ type: "spring", stiffness: 500, damping: 35 }}
 														className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
 													>
-													<div className="py-4">
-														<p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
-															{memory.content}
-														</p>
-														<div className="mt-3 flex items-center gap-2">
-															<Button size="sm" variant="secondary" onClick={() => openEditDialog(memory)}>
-																Edit
-															</Button>
-															<Button
-																size="sm"
-																variant="destructive"
-																onClick={() => setDeleteConfirmMemoryId(memory.id)}
-															>
-																Remove
-															</Button>
-														</div>
-														<div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-tiny text-ink-faint">
+														<div className="py-4">
+															<p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
+																{memory.content}
+															</p>
+															<div className="mt-3 flex flex-wrap gap-x-6 gap-y-1 text-tiny text-ink-faint">
 																<span>ID: {memory.id}</span>
 																<span>Accessed: {memory.access_count}x</span>
 																<span>Last accessed: {formatTimeAgo(memory.last_accessed_at)}</span>
