@@ -581,8 +581,10 @@ pub struct Channel {
     pending_retrigger_outbox_id: Option<String>,
     /// Per-worker watchdog timestamps for hard/idle timeout enforcement.
     worker_watchdog: HashMap<WorkerId, WorkerWatchdogEntry>,
-    /// Dedupes duplicate completion events that can arrive from recovery paths.
+    /// Active generation of terminal worker IDs used to ignore stale lifecycle events.
     completed_workers: HashSet<WorkerId>,
+    /// Previous generation of terminal worker IDs kept to avoid immediate dedupe gaps on rotation.
+    prev_completed_workers: HashSet<WorkerId>,
     /// Periodic deadline for replaying durable retrigger outbox rows.
     retrigger_outbox_replay_deadline: tokio::time::Instant,
     /// Optional send_agent_message tool (only when agent has active links).
@@ -690,6 +692,7 @@ impl Channel {
             pending_retrigger_outbox_id: None,
             worker_watchdog: HashMap::new(),
             completed_workers: HashSet::new(),
+            prev_completed_workers: HashSet::new(),
             retrigger_outbox_replay_deadline: tokio::time::Instant::now()
                 + std::time::Duration::from_millis(RETRIGGER_OUTBOX_REPLAY_MS),
             send_agent_message_tool,
@@ -918,10 +921,11 @@ impl Channel {
     }
 
     fn remember_worker_completion(&mut self, worker_id: WorkerId) -> bool {
-        if self.completed_workers.len() >= MAX_COMPLETED_WORKER_IDS {
-            self.completed_workers.clear();
-        }
-        self.completed_workers.insert(worker_id)
+        remember_worker_completion_with_generations(
+            &mut self.completed_workers,
+            &mut self.prev_completed_workers,
+            worker_id,
+        )
     }
 
     async fn resync_worker_watchdog_after_event_lag(&mut self) {
@@ -2178,7 +2182,11 @@ impl Channel {
             return Ok(());
         }
 
-        if should_ignore_event_due_to_terminal_worker_state(&event, &self.completed_workers) {
+        if should_ignore_event_due_to_terminal_worker_state(
+            &event,
+            &self.completed_workers,
+            &self.prev_completed_workers,
+        ) {
             tracing::debug!(
                 channel_id = %self.id,
                 "ignoring stale worker lifecycle event after terminal completion"
@@ -3708,6 +3716,7 @@ fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
 fn should_ignore_event_due_to_terminal_worker_state(
     event: &ProcessEvent,
     completed_workers: &HashSet<WorkerId>,
+    prev_completed_workers: &HashSet<WorkerId>,
 ) -> bool {
     let worker_id = match event {
         ProcessEvent::WorkerStarted { worker_id, .. }
@@ -3724,7 +3733,26 @@ fn should_ignore_event_due_to_terminal_worker_state(
         _ => None,
     };
 
-    worker_id.is_some_and(|worker_id| completed_workers.contains(worker_id))
+    worker_id.is_some_and(|worker_id| {
+        completed_workers.contains(worker_id) || prev_completed_workers.contains(worker_id)
+    })
+}
+
+fn remember_worker_completion_with_generations(
+    completed_workers: &mut HashSet<WorkerId>,
+    prev_completed_workers: &mut HashSet<WorkerId>,
+    worker_id: WorkerId,
+) -> bool {
+    if completed_workers.contains(&worker_id) || prev_completed_workers.contains(&worker_id) {
+        return false;
+    }
+
+    if completed_workers.len() >= MAX_COMPLETED_WORKER_IDS {
+        std::mem::swap(completed_workers, prev_completed_workers);
+        completed_workers.clear();
+    }
+
+    completed_workers.insert(worker_id)
 }
 
 /// Image MIME types we support for vision.
@@ -4246,8 +4274,9 @@ fn is_user_text_message(message: &rig::message::Message) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY, WorkerTimeoutKind, WorkerWatchdogEntry,
-        apply_history_after_turn, event_is_for_channel, reconcile_worker_watchdog_after_event_lag,
+        MAX_COMPLETED_WORKER_IDS, PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY,
+        WorkerTimeoutKind, WorkerWatchdogEntry, apply_history_after_turn, event_is_for_channel,
+        reconcile_worker_watchdog_after_event_lag, remember_worker_completion_with_generations,
         resolve_worker_watchdog_started_at, resume_from_waiting_for_input,
         retrigger_outbox_id_from_metadata, retrigger_result_summary,
         retrigger_results_from_pending, should_ignore_event_due_to_terminal_worker_state,
@@ -4805,6 +4834,7 @@ mod tests {
         let channel_id: crate::ChannelId = std::sync::Arc::<str>::from("channel-a");
         let agent_id: crate::AgentId = std::sync::Arc::<str>::from("agent-a");
         let mut completed_workers = HashSet::new();
+        let prev_completed_workers = HashSet::new();
 
         let complete_event = crate::ProcessEvent::WorkerComplete {
             agent_id: agent_id.clone(),
@@ -4815,7 +4845,11 @@ mod tests {
             success: true,
         };
         assert!(
-            !should_ignore_event_due_to_terminal_worker_state(&complete_event, &completed_workers),
+            !should_ignore_event_due_to_terminal_worker_state(
+                &complete_event,
+                &completed_workers,
+                &prev_completed_workers,
+            ),
             "first completion event should be processed"
         );
         completed_workers.insert(worker_id);
@@ -4828,12 +4862,20 @@ mod tests {
             worker_type: "builtin".to_string(),
         };
         assert!(
-            should_ignore_event_due_to_terminal_worker_state(&started_event, &completed_workers),
+            should_ignore_event_due_to_terminal_worker_state(
+                &started_event,
+                &completed_workers,
+                &prev_completed_workers,
+            ),
             "late WorkerStarted should be ignored after worker reached terminal state"
         );
 
         let mut worker_watchdog = HashMap::new();
-        if !should_ignore_event_due_to_terminal_worker_state(&started_event, &completed_workers) {
+        if !should_ignore_event_due_to_terminal_worker_state(
+            &started_event,
+            &completed_workers,
+            &prev_completed_workers,
+        ) {
             let now = tokio::time::Instant::now();
             worker_watchdog.insert(
                 worker_id,
@@ -4851,6 +4893,158 @@ mod tests {
         assert!(
             worker_watchdog.is_empty(),
             "ignored late WorkerStarted must not re-register watchdog state"
+        );
+    }
+
+    #[test]
+    fn remember_worker_completion_rotates_two_generations() {
+        let mut completed_workers = HashSet::new();
+        let mut prev_completed_workers = HashSet::new();
+        let first_generation_worker_id = uuid::Uuid::new_v4();
+
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            first_generation_worker_id
+        ));
+
+        for _ in 1..MAX_COMPLETED_WORKER_IDS {
+            assert!(remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                uuid::Uuid::new_v4()
+            ));
+        }
+
+        let first_rotation_id = uuid::Uuid::new_v4();
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            first_rotation_id
+        ));
+
+        assert!(
+            prev_completed_workers.contains(&first_generation_worker_id),
+            "first generation should remain deduped through one rotation"
+        );
+        assert!(
+            !remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                first_generation_worker_id
+            ),
+            "worker IDs in previous generation must still dedupe"
+        );
+
+        for _ in 1..MAX_COMPLETED_WORKER_IDS {
+            assert!(remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                uuid::Uuid::new_v4()
+            ));
+        }
+
+        let second_rotation_id = uuid::Uuid::new_v4();
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            second_rotation_id
+        ));
+
+        assert!(
+            !completed_workers.contains(&first_generation_worker_id)
+                && !prev_completed_workers.contains(&first_generation_worker_id),
+            "first generation should drop after the next rotation"
+        );
+        assert!(
+            remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                first_generation_worker_id
+            ),
+            "dropped IDs should be accepted again once both generations rotate"
+        );
+    }
+
+    #[test]
+    fn worker_complete_duplicate_is_ignored_while_in_previous_generation() {
+        let channel_id: crate::ChannelId = std::sync::Arc::<str>::from("channel-a");
+        let agent_id: crate::AgentId = std::sync::Arc::<str>::from("agent-a");
+        let worker_id = uuid::Uuid::new_v4();
+        let mut completed_workers = HashSet::new();
+        let mut prev_completed_workers = HashSet::new();
+
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            worker_id
+        ));
+
+        let duplicate_complete_event = crate::ProcessEvent::WorkerComplete {
+            agent_id,
+            worker_id,
+            channel_id: Some(channel_id),
+            result: "done".to_string(),
+            notify: true,
+            success: true,
+        };
+        assert!(
+            should_ignore_event_due_to_terminal_worker_state(
+                &duplicate_complete_event,
+                &completed_workers,
+                &prev_completed_workers,
+            ),
+            "duplicate completion should be ignored in current generation"
+        );
+
+        for _ in 1..MAX_COMPLETED_WORKER_IDS {
+            assert!(remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                uuid::Uuid::new_v4()
+            ));
+        }
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            uuid::Uuid::new_v4()
+        ));
+        assert!(
+            prev_completed_workers.contains(&worker_id),
+            "worker id should move to previous generation after rotation"
+        );
+        assert!(
+            should_ignore_event_due_to_terminal_worker_state(
+                &duplicate_complete_event,
+                &completed_workers,
+                &prev_completed_workers,
+            ),
+            "duplicate completion should remain ignored while in previous generation"
+        );
+
+        for _ in 1..MAX_COMPLETED_WORKER_IDS {
+            assert!(remember_worker_completion_with_generations(
+                &mut completed_workers,
+                &mut prev_completed_workers,
+                uuid::Uuid::new_v4()
+            ));
+        }
+        assert!(remember_worker_completion_with_generations(
+            &mut completed_workers,
+            &mut prev_completed_workers,
+            uuid::Uuid::new_v4()
+        ));
+        assert!(
+            !completed_workers.contains(&worker_id) && !prev_completed_workers.contains(&worker_id),
+            "worker id should be evicted after a second rotation"
+        );
+        assert!(
+            !should_ignore_event_due_to_terminal_worker_state(
+                &duplicate_complete_event,
+                &completed_workers,
+                &prev_completed_workers,
+            ),
+            "duplicate completion should stop being ignored once evicted from both generations"
         );
     }
 
