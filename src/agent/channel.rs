@@ -627,7 +627,8 @@ pub struct Channel {
     coalesce_buffer: Vec<InboundMessage>,
     /// Deadline for flushing the coalesce buffer.
     coalesce_deadline: Option<tokio::time::Instant>,
-    /// Number of retriggers fired since the last real user message.
+    /// Number of in-flight/successful retriggers since the last real user message.
+    /// Failed retrigger turns release one budget slot so retries are not blocked.
     retrigger_count: usize,
     /// Whether a retrigger is pending (debounce window active).
     pending_retrigger: bool,
@@ -1707,6 +1708,7 @@ impl Channel {
         let retrigger_outbox_id = is_retrigger
             .then(|| retrigger_outbox_id_from_metadata(&message.metadata))
             .flatten();
+        let has_retrigger_budget_token = retrigger_outbox_id.is_some();
 
         let (result, skip_flag, replied_flag) = match self
             .run_agent_turn(
@@ -1720,6 +1722,10 @@ impl Channel {
         {
             Ok(result) => result,
             Err(error) => {
+                if has_retrigger_budget_token {
+                    self.retrigger_count =
+                        reconcile_retrigger_count_after_turn(self.retrigger_count, false);
+                }
                 if let Some(outbox_id) = retrigger_outbox_id.as_deref() {
                     self.mark_pending_retrigger_outbox_retry(
                         outbox_id,
@@ -1734,6 +1740,10 @@ impl Channel {
         let retrigger_relayed = self
             .handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
+        if has_retrigger_budget_token {
+            self.retrigger_count =
+                reconcile_retrigger_count_after_turn(self.retrigger_count, retrigger_relayed);
+        }
         if let Some(outbox_id) = retrigger_outbox_id {
             if retrigger_relayed {
                 if let Err(error) = self
@@ -3911,6 +3921,14 @@ fn remember_worker_completion_with_generations(
     completed_workers.insert(worker_id)
 }
 
+fn reconcile_retrigger_count_after_turn(retrigger_count: usize, retrigger_relayed: bool) -> usize {
+    if retrigger_relayed {
+        retrigger_count
+    } else {
+        retrigger_count.saturating_sub(1)
+    }
+}
+
 /// Image MIME types we support for vision.
 const IMAGE_MIME_PREFIXES: &[&str] = &["image/jpeg", "image/png", "image/gif", "image/webp"];
 
@@ -4432,9 +4450,10 @@ mod tests {
     use super::{
         MAX_COMPLETED_WORKER_IDS, PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY,
         WorkerTimeoutKind, WorkerWatchdogEntry, apply_history_after_turn, event_is_for_channel,
-        reconcile_worker_watchdog_after_event_lag, remember_worker_completion_with_generations,
-        resolve_worker_watchdog_started_at, resolve_worker_watchdog_tool_timeout_cap,
-        resume_from_waiting_for_input, retrigger_outbox_id_from_metadata, retrigger_result_summary,
+        reconcile_retrigger_count_after_turn, reconcile_worker_watchdog_after_event_lag,
+        remember_worker_completion_with_generations, resolve_worker_watchdog_started_at,
+        resolve_worker_watchdog_tool_timeout_cap, resume_from_waiting_for_input,
+        retrigger_outbox_id_from_metadata, retrigger_result_summary,
         retrigger_results_from_pending, should_ignore_event_due_to_terminal_worker_state,
         status_indicates_waiting_for_input, worker_timeout_kind, worker_timeout_kind_with_cap,
         worker_watchdog_deadline,
@@ -5185,6 +5204,30 @@ mod tests {
             serde_json::Value::Bool(true),
         );
         assert_eq!(retrigger_outbox_id_from_metadata(&metadata), None);
+    }
+
+    #[test]
+    fn retrigger_budget_releases_slot_when_relay_fails() {
+        assert_eq!(
+            reconcile_retrigger_count_after_turn(1, false),
+            0,
+            "failed retrigger relay should release budget slot"
+        );
+        assert_eq!(
+            reconcile_retrigger_count_after_turn(3, false),
+            2,
+            "failed retrigger relay should decrement outstanding budget"
+        );
+        assert_eq!(
+            reconcile_retrigger_count_after_turn(0, false),
+            0,
+            "failed retrigger relay should not underflow"
+        );
+        assert_eq!(
+            reconcile_retrigger_count_after_turn(2, true),
+            2,
+            "successful retrigger relay should retain consumed budget"
+        );
     }
 
     #[test]
