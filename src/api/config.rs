@@ -79,6 +79,7 @@ pub(super) struct BrowserSection {
 pub(super) struct SandboxSection {
     mode: String,
     writable_paths: Vec<String>,
+    passthrough_env: Vec<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -204,6 +205,7 @@ pub(super) struct BrowserUpdate {
 pub(super) struct SandboxUpdate {
     mode: Option<String>,
     writable_paths: Option<Vec<String>>,
+    passthrough_env: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -295,6 +297,7 @@ pub(super) async fn get_agent_config(
                 .iter()
                 .map(|p| p.display().to_string())
                 .collect(),
+            passthrough_env: sandbox.passthrough_env.clone(),
         },
         discord: {
             let perms = state.discord_permissions.read().await;
@@ -684,6 +687,13 @@ fn update_sandbox_table(
             array.push(path.as_str());
         }
         table["writable_paths"] = toml_edit::value(array);
+    }
+    if let Some(ref env_vars) = sandbox.passthrough_env {
+        let mut array = toml_edit::Array::new();
+        for var_name in env_vars {
+            array.push(var_name.as_str());
+        }
+        table["passthrough_env"] = toml_edit::value(array);
     }
     Ok(())
 }

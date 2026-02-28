@@ -29,6 +29,10 @@ impl SendFileTool {
     }
 
     /// Validate that a path falls within the workspace boundary.
+    ///
+    /// Checks both the canonicalized path and individual path components for
+    /// symlinks to prevent TOCTOU races where a symlink is swapped between
+    /// validation and the actual file read.
     fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
         let workspace = &self.workspace;
 
@@ -45,6 +49,25 @@ impl SendFileTool {
                  File operations are restricted to {}.",
                 workspace.display()
             )));
+        }
+
+        // Reject paths containing symlinks within the workspace to prevent
+        // TOCTOU races where a path component is replaced with a symlink
+        // between this check and the file read.
+        let relative = canonical
+            .strip_prefix(&workspace_canonical)
+            .unwrap_or(&canonical);
+        let mut walk = workspace_canonical.clone();
+        for component in relative.components() {
+            walk.push(component);
+            match walk.symlink_metadata() {
+                Ok(meta) if meta.is_symlink() => {
+                    return Err(SendFileError(
+                        "ACCESS DENIED: Symlinks are not allowed within the workspace.".into(),
+                    ));
+                }
+                _ => {}
+            }
         }
 
         Ok(canonical)

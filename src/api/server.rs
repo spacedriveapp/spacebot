@@ -3,7 +3,7 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, settings, skills, system, tasks, webchat, workers,
+    models, providers, settings, skills, system, tasks, tools, webchat, workers,
 };
 
 use axum::Json;
@@ -139,6 +139,7 @@ pub async fn start_http_server(
         .route("/agents/skills", get(skills::list_skills))
         .route("/agents/skills/install", post(skills::install_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
+        .route("/agents/tools", get(tools::list_tools))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
         .route(

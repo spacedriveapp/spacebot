@@ -8,6 +8,9 @@ Your working directory is `{{ workspace_dir }}`. This is your agent's workspace 
 - Agent skills: `{{ workspace_dir }}/skills/`
 - Instance-level skills: `{{ instance_dir }}/skills/`
 - Identity files: `{{ workspace_dir }}/`
+- Persistent binary directory: `{{ instance_dir }}/tools/bin/` (on PATH, survives restarts and rollouts)
+
+Binaries installed via package managers (apt, brew, etc.) land on the root filesystem which is ephemeral on hosted instances — they disappear on rollouts. To install a tool durably, download or copy the binary into `{{ instance_dir }}/tools/bin/`.
 
 ## Your Role
 

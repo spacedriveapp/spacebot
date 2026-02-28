@@ -125,9 +125,15 @@ impl Tool for ShellTool {
         };
 
         let mut cmd = if cfg!(target_os = "windows") {
+            // Windows: no sandbox wrapping, but still sanitize environment.
+            // sandbox.wrap() handles env_clear() for Unix paths.
             let mut c = Command::new("cmd");
             c.arg("/C").arg(&args.command);
             c.current_dir(&working_dir);
+            c.env_clear();
+            if let Ok(path) = std::env::var("PATH") {
+                c.env("PATH", path);
+            }
             c
         } else {
             self.sandbox

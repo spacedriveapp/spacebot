@@ -5,8 +5,10 @@
 //! On macOS, uses sandbox-exec with a generated SBPL profile.
 //! Falls back to no sandboxing when neither backend is available.
 
+use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::process::Command;
 
 /// Sandbox configuration from the agent config file.
@@ -16,6 +18,13 @@ pub struct SandboxConfig {
     pub mode: SandboxMode,
     #[serde(default)]
     pub writable_paths: Vec<PathBuf>,
+    /// Environment variable names to forward from the parent process into worker
+    /// subprocesses. This is the escape hatch for self-hosted users who set env
+    /// vars in Docker/systemd but don't configure a secret store. When the secret
+    /// store is available, `passthrough_env` is redundant — everything should be
+    /// in the store. The field is additive either way.
+    #[serde(default)]
+    pub passthrough_env: Vec<String>,
 }
 
 impl Default for SandboxConfig {
@@ -23,6 +32,7 @@ impl Default for SandboxConfig {
         Self {
             mode: SandboxMode::Enabled,
             writable_paths: Vec::new(),
+            passthrough_env: Vec::new(),
         }
     }
 }
@@ -52,79 +62,95 @@ enum SandboxBackend {
     None,
 }
 
+/// Environment variables always passed through to worker subprocesses.
+/// These are required for basic process operation.
+const SAFE_ENV_VARS: &[&str] = &["HOME", "USER", "LANG", "TERM", "TMPDIR"];
+
 /// Filesystem sandbox for subprocess execution.
 ///
 /// Created once per agent at startup, shared via `Arc` across all workers.
 /// Wraps `tokio::process::Command` to apply OS-level containment before spawning.
-#[derive(Debug, Clone)]
+///
+/// Reads `SandboxMode` dynamically from the shared `ArcSwap<SandboxConfig>` on
+/// every `wrap()` call, so toggling sandbox mode via the API takes effect
+/// immediately without restarting the agent.
 pub struct Sandbox {
-    #[allow(dead_code)]
-    mode: SandboxMode,
+    config: Arc<ArcSwap<SandboxConfig>>,
     workspace: PathBuf,
     data_dir: PathBuf,
     tools_bin: PathBuf,
-    writable_paths: Vec<PathBuf>,
     backend: SandboxBackend,
+}
+
+impl std::fmt::Debug for Sandbox {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let config = self.config.load();
+        f.debug_struct("Sandbox")
+            .field("mode", &config.mode)
+            .field("workspace", &self.workspace)
+            .field("data_dir", &self.data_dir)
+            .field("tools_bin", &self.tools_bin)
+            .field("backend", &self.backend)
+            .finish()
+    }
 }
 
 impl Sandbox {
     /// Create a sandbox with the given configuration. Probes for backend support.
+    ///
+    /// Always detects the best available backend regardless of the initial mode,
+    /// so switching from Disabled to Enabled via the API works without restart.
     pub async fn new(
-        config: &SandboxConfig,
+        config: Arc<ArcSwap<SandboxConfig>>,
         workspace: PathBuf,
         instance_dir: &Path,
         data_dir: PathBuf,
     ) -> Self {
         let tools_bin = instance_dir.join("tools/bin");
-        let backend = if config.mode == SandboxMode::Disabled {
-            SandboxBackend::None
-        } else {
-            detect_backend().await
-        };
+
+        // Always detect the backend so we know what's available if the user
+        // later enables sandboxing via the API.
+        let backend = detect_backend().await;
+        let current_mode = config.load().mode;
 
         match backend {
             SandboxBackend::Bubblewrap { proc_supported } => {
-                tracing::info!(proc_supported, "sandbox enabled: bubblewrap backend");
+                if current_mode == SandboxMode::Enabled {
+                    tracing::info!(proc_supported, "sandbox enabled: bubblewrap backend");
+                } else {
+                    tracing::info!(
+                        proc_supported,
+                        "sandbox disabled by config (bubblewrap available)"
+                    );
+                }
             }
             SandboxBackend::SandboxExec => {
-                tracing::info!("sandbox enabled: macOS sandbox-exec backend");
+                if current_mode == SandboxMode::Enabled {
+                    tracing::info!("sandbox enabled: macOS sandbox-exec backend");
+                } else {
+                    tracing::info!("sandbox disabled by config (sandbox-exec available)");
+                }
             }
-            SandboxBackend::None if config.mode == SandboxMode::Enabled => {
+            SandboxBackend::None if current_mode == SandboxMode::Enabled => {
                 tracing::warn!(
                     "sandbox mode is enabled but no backend available — \
                      processes will run unsandboxed"
                 );
             }
             SandboxBackend::None => {
-                tracing::info!("sandbox disabled by config");
+                tracing::info!("sandbox disabled by config (no backend available)");
             }
         }
 
         // Canonicalize paths at construction to resolve symlinks and validate existence.
         let workspace = canonicalize_or_self(&workspace);
         let data_dir = canonicalize_or_self(&data_dir);
-        let writable_paths: Vec<PathBuf> = config
-            .writable_paths
-            .iter()
-            .filter_map(|path| match path.canonicalize() {
-                Ok(canonical) => Some(canonical),
-                Err(error) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        %error,
-                        "dropping writable_path entry (does not exist or is unresolvable)"
-                    );
-                    None
-                }
-            })
-            .collect();
 
         Self {
-            mode: config.mode,
+            config,
             workspace,
             data_dir,
             tools_bin,
-            writable_paths,
             backend,
         }
     }
@@ -134,7 +160,12 @@ impl Sandbox {
     /// Returns a `Command` ready to spawn, potentially prefixed with bwrap or
     /// sandbox-exec depending on the detected backend. The caller still needs
     /// to set stdout/stderr/timeout after this call.
+    ///
+    /// Reads the current `SandboxMode` from the shared `ArcSwap<SandboxConfig>`
+    /// on every call, so changes via the API take effect immediately.
     pub fn wrap(&self, program: &str, args: &[&str], working_dir: &Path) -> Command {
+        let config = self.config.load();
+
         // Prepend tools/bin to PATH for all commands
         let path_env = match std::env::var_os("PATH") {
             Some(current) => {
@@ -148,12 +179,21 @@ impl Sandbox {
             None => self.tools_bin.to_string_lossy().into_owned(),
         };
 
+        if config.mode == SandboxMode::Disabled {
+            return self.wrap_passthrough(program, args, working_dir, &path_env);
+        }
+
         match self.backend {
-            SandboxBackend::Bubblewrap { proc_supported } => {
-                self.wrap_bubblewrap(program, args, working_dir, proc_supported, &path_env)
-            }
+            SandboxBackend::Bubblewrap { proc_supported } => self.wrap_bubblewrap(
+                program,
+                args,
+                working_dir,
+                proc_supported,
+                &path_env,
+                &config,
+            ),
             SandboxBackend::SandboxExec => {
-                self.wrap_sandbox_exec(program, args, working_dir, &path_env)
+                self.wrap_sandbox_exec(program, args, working_dir, &path_env, &config)
             }
             SandboxBackend::None => self.wrap_passthrough(program, args, working_dir, &path_env),
         }
@@ -167,6 +207,7 @@ impl Sandbox {
         working_dir: &Path,
         proc_supported: bool,
         path_env: &str,
+        config: &SandboxConfig,
     ) -> Command {
         let mut cmd = Command::new("bwrap");
 
@@ -188,9 +229,20 @@ impl Sandbox {
         // 5. Workspace writable
         cmd.arg("--bind").arg(&self.workspace).arg(&self.workspace);
 
-        // 6. Each configured writable path
-        for writable in &self.writable_paths {
-            cmd.arg("--bind").arg(writable).arg(writable);
+        // 6. Each configured writable path (canonicalized dynamically)
+        for path in &config.writable_paths {
+            match path.canonicalize() {
+                Ok(canonical) => {
+                    cmd.arg("--bind").arg(&canonical).arg(&canonical);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        path = %path.display(),
+                        %error,
+                        "skipping writable_path (does not exist or is unresolvable)"
+                    );
+                }
+            }
         }
 
         // 7. Re-protect agent data dir (may overlap with workspace parent)
@@ -201,13 +253,31 @@ impl Sandbox {
         cmd.arg("--new-session");
         cmd.arg("--die-with-parent");
 
-        // 9. Working directory
+        // 9. Clear all inherited environment variables. Workers must not see
+        // system secrets (LLM API keys, messaging tokens) or SPACEBOT_* internals.
+        cmd.arg("--clearenv");
+
+        // 10. Working directory
         cmd.arg("--chdir").arg(working_dir);
 
-        // 10. Set PATH inside the sandbox
+        // 11. Set PATH inside the sandbox
         cmd.arg("--setenv").arg("PATH").arg(path_env);
 
-        // 11. The actual command
+        // 12. Re-inject safe environment variables for basic process operation
+        for var_name in SAFE_ENV_VARS {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.arg("--setenv").arg(var_name).arg(value);
+            }
+        }
+
+        // 13. Re-inject passthrough env vars (user-configured forwarding)
+        for var_name in &config.passthrough_env {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.arg("--setenv").arg(var_name).arg(value);
+            }
+        }
+
+        // 14. The actual command
         cmd.arg("--").arg(program);
         for arg in args {
             cmd.arg(arg);
@@ -223,8 +293,9 @@ impl Sandbox {
         args: &[&str],
         working_dir: &Path,
         path_env: &str,
+        config: &SandboxConfig,
     ) -> Command {
-        let profile = self.generate_sbpl_profile();
+        let profile = self.generate_sbpl_profile(config);
 
         let mut cmd = Command::new("/usr/bin/sandbox-exec");
         cmd.arg("-p").arg(profile);
@@ -233,12 +304,29 @@ impl Sandbox {
             cmd.arg(arg);
         }
         cmd.current_dir(working_dir);
+
+        // Clear all inherited environment variables, then re-inject only
+        // approved vars. Prevents system secrets from leaking to workers.
+        cmd.env_clear();
         cmd.env("PATH", path_env);
+        for var_name in SAFE_ENV_VARS {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.env(var_name, value);
+            }
+        }
+        for var_name in &config.passthrough_env {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.env(var_name, value);
+            }
+        }
 
         cmd
     }
 
-    /// No backend: pass through unchanged.
+    /// No backend: pass through without OS-level containment.
+    ///
+    /// Still applies environment sanitization — workers never inherit the full
+    /// parent environment regardless of sandbox state.
     fn wrap_passthrough(
         &self,
         program: &str,
@@ -246,12 +334,28 @@ impl Sandbox {
         working_dir: &Path,
         path_env: &str,
     ) -> Command {
+        let config = self.config.load();
+
         let mut cmd = Command::new(program);
         for arg in args {
             cmd.arg(arg);
         }
         cmd.current_dir(working_dir);
+
+        // Clear all inherited environment variables, then re-inject only
+        // approved vars. Prevents system secrets from leaking to workers.
+        cmd.env_clear();
         cmd.env("PATH", path_env);
+        for var_name in SAFE_ENV_VARS {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.env(var_name, value);
+            }
+        }
+        for var_name in &config.passthrough_env {
+            if let Ok(value) = std::env::var(var_name) {
+                cmd.env(var_name, value);
+            }
+        }
 
         cmd
     }
@@ -259,7 +363,7 @@ impl Sandbox {
     /// Generate a macOS SBPL (Sandbox Profile Language) policy.
     ///
     /// Paths are canonicalized because /var on macOS is actually /private/var.
-    fn generate_sbpl_profile(&self) -> String {
+    fn generate_sbpl_profile(&self, config: &SandboxConfig) -> String {
         let workspace = canonicalize_or_self(&self.workspace);
 
         let mut profile = String::from(
@@ -284,9 +388,9 @@ impl Sandbox {
             workspace.display()
         ));
 
-        // Additional writable paths
-        for (index, writable) in self.writable_paths.iter().enumerate() {
-            let canonical = canonicalize_or_self(writable);
+        // Additional writable paths (canonicalized dynamically)
+        for (index, path) in config.writable_paths.iter().enumerate() {
+            let canonical = canonicalize_or_self(path);
             profile.push_str(&format!(
                 "; writable path {index}\n(allow file-write* (subpath \"{}\"))\n",
                 canonical.display()

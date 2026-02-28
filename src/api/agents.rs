@@ -664,7 +664,7 @@ pub(super) async fn create_agent(
 
     let sandbox = std::sync::Arc::new(
         crate::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            runtime_config.sandbox.clone(),
             agent_config.workspace.clone(),
             &instance_dir,
             agent_config.data_dir.clone(),

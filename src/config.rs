@@ -5145,7 +5145,10 @@ pub struct RuntimeConfig {
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
     /// Sandbox configuration for process containment.
-    pub sandbox: ArcSwap<crate::sandbox::SandboxConfig>,
+    ///
+    /// Wrapped in `Arc` so it can be shared with the `Sandbox` struct, which
+    /// reads the current mode dynamically on every `wrap()` call.
+    pub sandbox: Arc<ArcSwap<crate::sandbox::SandboxConfig>>,
 }
 
 impl RuntimeConfig {
@@ -5197,7 +5200,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
-            sandbox: ArcSwap::from_pointee(agent_config.sandbox.clone()),
+            sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),
         }
     }
 
@@ -5274,9 +5277,7 @@ impl RuntimeConfig {
         self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
-        // sandbox config is not hot-reloaded here because the Sandbox instance
-        // is constructed once at startup and shared via Arc. Changing sandbox
-        // settings requires an agent restart.
+        self.sandbox.store(Arc::new(resolved.sandbox.clone()));
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
