@@ -499,8 +499,14 @@ pub fn create_branch_tool_server(
             agent_id.clone(),
             memory_event_tx.clone(),
         ))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
-        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(MemoryRecallTool::with_runtime(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
+        .tool(MemoryDeleteTool::with_runtime(
+            memory_search,
+            runtime_config.clone(),
+        ))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
         .tool(EmailSearchTool::new(runtime_config))
@@ -640,8 +646,14 @@ pub fn create_cortex_chat_tool_server(
             agent_id.clone(),
             memory_event_tx,
         ))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
-        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(MemoryRecallTool::with_runtime(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
+        .tool(MemoryDeleteTool::with_runtime(
+            memory_search,
+            runtime_config.clone(),
+        ))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
         .tool(ConfigInspectTool::new(
