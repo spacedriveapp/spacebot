@@ -61,9 +61,40 @@ enum WorkerTimeoutKind {
 type WorkerTaskOutcome = (String, bool, bool);
 type WorkerTaskHandle = tokio::task::JoinHandle<WorkerTaskOutcome>;
 
+fn worker_idle_timeout_secs_with_cap(
+    entry: &WorkerWatchdogEntry,
+    config: WorkerConfig,
+    in_flight_tool_timeout_cap_secs: u64,
+) -> Option<u64> {
+    if config.idle_timeout_secs == 0 || entry.is_waiting_for_input || !entry.has_activity_signal {
+        return None;
+    }
+
+    // Keep idle detection off while tools are actively in flight, but bound the
+    // suppression window by the configured per-tool cap so dropped ToolCompleted
+    // events cannot strand workers forever when hard timeout is disabled.
+    let in_flight_min_idle_secs = if entry.in_flight_tools > 0 {
+        in_flight_tool_timeout_cap_secs.max(1)
+    } else {
+        0
+    };
+
+    Some(config.idle_timeout_secs.max(in_flight_min_idle_secs))
+}
+
+#[cfg(test)]
 fn worker_timeout_kind(
     entry: &WorkerWatchdogEntry,
     config: WorkerConfig,
+    now: tokio::time::Instant,
+) -> Option<WorkerTimeoutKind> {
+    worker_timeout_kind_with_cap(entry, config, config.max_tool_timeout_secs, now)
+}
+
+fn worker_timeout_kind_with_cap(
+    entry: &WorkerWatchdogEntry,
+    config: WorkerConfig,
+    in_flight_tool_timeout_cap_secs: u64,
     now: tokio::time::Instant,
 ) -> Option<WorkerTimeoutKind> {
     if config.hard_timeout_secs > 0
@@ -73,11 +104,9 @@ fn worker_timeout_kind(
         return Some(WorkerTimeoutKind::Hard);
     }
 
-    if config.idle_timeout_secs > 0
-        && !entry.is_waiting_for_input
-        && entry.has_activity_signal
-        && entry.in_flight_tools == 0
-        && now.duration_since(entry.last_activity_at).as_secs() >= config.idle_timeout_secs
+    if let Some(idle_timeout_secs) =
+        worker_idle_timeout_secs_with_cap(entry, config, in_flight_tool_timeout_cap_secs)
+        && now.duration_since(entry.last_activity_at).as_secs() >= idle_timeout_secs
     {
         return Some(WorkerTimeoutKind::Idle);
     }
@@ -85,18 +114,26 @@ fn worker_timeout_kind(
     None
 }
 
+#[cfg(test)]
 fn worker_watchdog_deadline(
     entry: &WorkerWatchdogEntry,
     config: WorkerConfig,
 ) -> Option<tokio::time::Instant> {
+    worker_watchdog_deadline_with_cap(entry, config, config.max_tool_timeout_secs)
+}
+
+fn worker_watchdog_deadline_with_cap(
+    entry: &WorkerWatchdogEntry,
+    config: WorkerConfig,
+    in_flight_tool_timeout_cap_secs: u64,
+) -> Option<tokio::time::Instant> {
     let hard_deadline = (config.hard_timeout_secs > 0 && !entry.is_waiting_for_input)
         .then_some(entry.started_at + std::time::Duration::from_secs(config.hard_timeout_secs));
-    let idle_deadline = (config.idle_timeout_secs > 0
-        && !entry.is_waiting_for_input
-        && entry.has_activity_signal
-        && entry.in_flight_tools == 0)
-        .then_some(
-            entry.last_activity_at + std::time::Duration::from_secs(config.idle_timeout_secs),
+    let idle_deadline =
+        worker_idle_timeout_secs_with_cap(entry, config, in_flight_tool_timeout_cap_secs).map(
+            |idle_timeout_secs| {
+                entry.last_activity_at + std::time::Duration::from_secs(idle_timeout_secs)
+            },
         );
 
     match (hard_deadline, idle_deadline) {
@@ -139,7 +176,7 @@ fn reconcile_worker_watchdog_after_event_lag(
         let is_waiting_for_input = waiting_states.get(worker_id).copied().unwrap_or(false);
         if let Some(entry) = worker_watchdog.get_mut(worker_id) {
             // Preserve started_at so hard-timeout budget remains monotonic.
-            // Event lag can mask idle/tool events, so reset activity anchors only.
+            // Event lag can mask idle/tool events, so reset activity anchors.
             let was_waiting_for_input = entry.is_waiting_for_input;
             entry.last_activity_at = now;
             entry.is_waiting_for_input = is_waiting_for_input;
@@ -152,8 +189,12 @@ fn reconcile_worker_watchdog_after_event_lag(
             } else {
                 None
             };
-            entry.has_activity_signal = false;
-            entry.in_flight_tools = 0;
+            // Treat lag reconciliation as an activity anchor so idle timeout
+            // still bounds workers even when prior status/tool events were dropped.
+            entry.has_activity_signal = true;
+            // Preserve in-flight count. If ToolStarted was processed but the
+            // paired ToolCompleted was dropped by lag, forcing this to zero can
+            // misclassify a running tool call as idle.
         } else {
             let started_at = worker_start_times.get(worker_id).copied().unwrap_or(now);
             worker_watchdog.insert(
@@ -163,7 +204,9 @@ fn reconcile_worker_watchdog_after_event_lag(
                     last_activity_at: now,
                     is_waiting_for_input,
                     waiting_since: is_waiting_for_input.then_some(now),
-                    has_activity_signal: false,
+                    // New entries created during lag reconciliation should
+                    // still be subject to idle timeout.
+                    has_activity_signal: true,
                     in_flight_tools: 0,
                 },
             );
@@ -177,6 +220,18 @@ fn resolve_worker_watchdog_started_at(
     now: tokio::time::Instant,
 ) -> tokio::time::Instant {
     worker_start_times.get(&worker_id).copied().unwrap_or(now)
+}
+
+fn resolve_worker_watchdog_tool_timeout_cap(
+    worker_id: WorkerId,
+    worker_tool_timeout_caps: &HashMap<WorkerId, u64>,
+    default_tool_timeout_cap_secs: u64,
+) -> u64 {
+    worker_tool_timeout_caps
+        .get(&worker_id)
+        .copied()
+        .unwrap_or(default_tool_timeout_cap_secs)
+        .max(1)
 }
 
 #[derive(Debug, Clone)]
@@ -404,6 +459,8 @@ pub struct ChannelState {
     pub worker_handles: Arc<RwLock<HashMap<WorkerId, WorkerTaskHandle>>>,
     /// Worker start instants keyed by worker ID. Used for watchdog recovery after event lag.
     pub worker_start_times: Arc<RwLock<HashMap<WorkerId, tokio::time::Instant>>>,
+    /// Worker tool-timeout caps captured at spawn time, keyed by worker ID.
+    pub worker_tool_timeout_caps: Arc<RwLock<HashMap<WorkerId, u64>>>,
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
@@ -425,6 +482,10 @@ impl ChannelState {
         const CANCELLED_RESULT: &str = "Worker cancelled";
         let handle = self.worker_handles.write().await.remove(&worker_id);
         self.worker_start_times.write().await.remove(&worker_id);
+        self.worker_tool_timeout_caps
+            .write()
+            .await
+            .remove(&worker_id);
         let removed = self
             .active_workers
             .write()
@@ -581,6 +642,9 @@ pub struct Channel {
     pending_retrigger_outbox_id: Option<String>,
     /// Per-worker watchdog timestamps for hard/idle timeout enforcement.
     worker_watchdog: HashMap<WorkerId, WorkerWatchdogEntry>,
+    /// Per-worker tool-timeout cap captured when watchdog tracking begins.
+    /// Preserved for running workers across config hot-reloads.
+    worker_watchdog_tool_timeout_caps: HashMap<WorkerId, u64>,
     /// Active generation of terminal worker IDs used to ignore stale lifecycle events.
     completed_workers: HashSet<WorkerId>,
     /// Previous generation of terminal worker IDs kept to avoid immediate dedupe gaps on rotation.
@@ -618,6 +682,7 @@ impl Channel {
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
         let active_workers = Arc::new(RwLock::new(HashMap::new()));
         let worker_start_times = Arc::new(RwLock::new(HashMap::new()));
+        let worker_tool_timeout_caps = Arc::new(RwLock::new(HashMap::new()));
         let (message_tx, message_rx) = mpsc::channel(64);
 
         let conversation_logger = ConversationLogger::new(deps.sqlite_pool.clone());
@@ -633,6 +698,7 @@ impl Channel {
             active_workers: active_workers.clone(),
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
             worker_start_times: worker_start_times.clone(),
+            worker_tool_timeout_caps: worker_tool_timeout_caps.clone(),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
@@ -691,6 +757,7 @@ impl Channel {
             pending_results: Vec::new(),
             pending_retrigger_outbox_id: None,
             worker_watchdog: HashMap::new(),
+            worker_watchdog_tool_timeout_caps: HashMap::new(),
             completed_workers: HashSet::new(),
             prev_completed_workers: HashSet::new(),
             retrigger_outbox_replay_deadline: tokio::time::Instant::now()
@@ -851,12 +918,24 @@ impl Channel {
     fn next_worker_watchdog_deadline(&self) -> Option<tokio::time::Instant> {
         let config = **self.deps.runtime_config.worker.load();
         self.worker_watchdog
-            .values()
-            .filter_map(|entry| worker_watchdog_deadline(entry, config))
+            .iter()
+            .filter_map(|(worker_id, entry)| {
+                let in_flight_tool_timeout_cap_secs = self
+                    .worker_watchdog_tool_timeout_caps
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or(config.max_tool_timeout_secs.max(1));
+                worker_watchdog_deadline_with_cap(entry, config, in_flight_tool_timeout_cap_secs)
+            })
             .min()
     }
 
-    fn register_worker_watchdog(&mut self, worker_id: WorkerId, started_at: tokio::time::Instant) {
+    fn register_worker_watchdog(
+        &mut self,
+        worker_id: WorkerId,
+        started_at: tokio::time::Instant,
+        tool_timeout_cap_secs: u64,
+    ) {
         let now = tokio::time::Instant::now();
         self.worker_watchdog.insert(
             worker_id,
@@ -865,10 +944,14 @@ impl Channel {
                 last_activity_at: now,
                 is_waiting_for_input: false,
                 waiting_since: None,
-                has_activity_signal: false,
+                // Count idle from worker registration time so workers that
+                // never emit status/tool events are still bounded by idle timeout.
+                has_activity_signal: true,
                 in_flight_tools: 0,
             },
         );
+        self.worker_watchdog_tool_timeout_caps
+            .insert(worker_id, tool_timeout_cap_secs.max(1));
     }
 
     fn note_worker_status(&mut self, worker_id: WorkerId, status: &str) {
@@ -959,6 +1042,27 @@ impl Channel {
             &worker_start_times,
             now,
         );
+        self.worker_watchdog_tool_timeout_caps
+            .retain(|worker_id, _| active_worker_ids.contains(worker_id));
+        let spawn_time_caps = self.state.worker_tool_timeout_caps.read().await.clone();
+        let tool_timeout_cap_secs = self
+            .deps
+            .runtime_config
+            .worker
+            .load()
+            .max_tool_timeout_secs
+            .max(1);
+        for worker_id in active_worker_ids {
+            self.worker_watchdog_tool_timeout_caps
+                .entry(worker_id)
+                .or_insert_with(|| {
+                    resolve_worker_watchdog_tool_timeout_cap(
+                        worker_id,
+                        &spawn_time_caps,
+                        tool_timeout_cap_secs,
+                    )
+                });
+        }
     }
 
     async fn reap_timed_out_workers(&mut self) {
@@ -968,16 +1072,28 @@ impl Channel {
             .worker_watchdog
             .iter()
             .filter_map(|(worker_id, entry)| {
-                worker_timeout_kind(entry, config, now).map(|kind| (*worker_id, kind))
+                let in_flight_tool_timeout_cap_secs = self
+                    .worker_watchdog_tool_timeout_caps
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or(config.max_tool_timeout_secs.max(1));
+                worker_timeout_kind_with_cap(entry, config, in_flight_tool_timeout_cap_secs, now)
+                    .map(|kind| (*worker_id, kind))
             })
             .collect();
 
         for (worker_id, timeout_kind) in timed_out_workers {
             self.worker_watchdog.remove(&worker_id);
+            self.worker_watchdog_tool_timeout_caps.remove(&worker_id);
 
             let handle = self.state.worker_handles.write().await.remove(&worker_id);
             self.state
                 .worker_start_times
+                .write()
+                .await
+                .remove(&worker_id);
+            self.state
+                .worker_tool_timeout_caps
                 .write()
                 .await
                 .remove(&worker_id);
@@ -2286,7 +2402,17 @@ impl Channel {
                     let worker_start_times = self.state.worker_start_times.read().await;
                     resolve_worker_watchdog_started_at(*worker_id, &worker_start_times, now)
                 };
-                self.register_worker_watchdog(*worker_id, started_at);
+                let tool_timeout_cap_secs = {
+                    let caps = self.state.worker_tool_timeout_caps.read().await;
+                    let default_tool_timeout_cap_secs =
+                        self.deps.runtime_config.worker.load().max_tool_timeout_secs;
+                    resolve_worker_watchdog_tool_timeout_cap(
+                        *worker_id,
+                        &caps,
+                        default_tool_timeout_cap_secs,
+                    )
+                };
+                self.register_worker_watchdog(*worker_id, started_at, tool_timeout_cap_secs);
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
@@ -2326,8 +2452,14 @@ impl Channel {
                     .process_run_logger
                     .log_worker_completed(*worker_id, result, *success);
                 self.worker_watchdog.remove(worker_id);
+                self.worker_watchdog_tool_timeout_caps.remove(worker_id);
                 self.state
                     .worker_start_times
+                    .write()
+                    .await
+                    .remove(worker_id);
+                self.state
+                    .worker_tool_timeout_caps
                     .write()
                     .await
                     .remove(worker_id);
@@ -3137,6 +3269,12 @@ async fn prune_finished_worker_state(state: &ChannelState) -> Vec<WorkerId> {
         }
     }
     {
+        let mut worker_tool_timeout_caps = state.worker_tool_timeout_caps.write().await;
+        for worker_id in &finished_worker_ids {
+            worker_tool_timeout_caps.remove(worker_id);
+        }
+    }
+    {
         let mut worker_inputs = state.worker_inputs.write().await;
         for worker_id in &finished_worker_ids {
             worker_inputs.remove(worker_id);
@@ -3267,6 +3405,7 @@ pub async fn spawn_worker_from_state(
     };
 
     let worker_id = worker.id;
+    let tool_timeout_cap_secs = worker.tool_timeout_cap_secs();
 
     let worker_span = tracing::info_span!(
         "worker.run",
@@ -3289,6 +3428,11 @@ pub async fn spawn_worker_from_state(
         .write()
         .await
         .insert(worker_id, started_at);
+    state
+        .worker_tool_timeout_caps
+        .write()
+        .await
+        .insert(worker_id, tool_timeout_cap_secs);
 
     {
         let mut status = state.status_block.write().await;
@@ -3406,6 +3550,18 @@ pub async fn spawn_opencode_worker_from_state(
         .write()
         .await
         .insert(worker_id, started_at);
+    let tool_timeout_cap_secs = state
+        .deps
+        .runtime_config
+        .worker
+        .load()
+        .max_tool_timeout_secs
+        .max(1);
+    state
+        .worker_tool_timeout_caps
+        .write()
+        .await
+        .insert(worker_id, tool_timeout_cap_secs);
 
     let opencode_task = format!("[opencode] {task}");
     state.process_run_logger.log_worker_started(
@@ -4277,10 +4433,11 @@ mod tests {
         MAX_COMPLETED_WORKER_IDS, PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY,
         WorkerTimeoutKind, WorkerWatchdogEntry, apply_history_after_turn, event_is_for_channel,
         reconcile_worker_watchdog_after_event_lag, remember_worker_completion_with_generations,
-        resolve_worker_watchdog_started_at, resume_from_waiting_for_input,
-        retrigger_outbox_id_from_metadata, retrigger_result_summary,
+        resolve_worker_watchdog_started_at, resolve_worker_watchdog_tool_timeout_cap,
+        resume_from_waiting_for_input, retrigger_outbox_id_from_metadata, retrigger_result_summary,
         retrigger_results_from_pending, should_ignore_event_due_to_terminal_worker_state,
-        status_indicates_waiting_for_input, worker_timeout_kind, worker_watchdog_deadline,
+        status_indicates_waiting_for_input, worker_timeout_kind, worker_timeout_kind_with_cap,
+        worker_watchdog_deadline,
     };
     use crate::config::WorkerConfig;
     use rig::completion::{CompletionError, PromptError};
@@ -4328,6 +4485,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 300,
             idle_timeout_secs: 60,
+            max_tool_timeout_secs: 3600,
         };
 
         let deadline =
@@ -4354,6 +4512,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 10,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
         let now = start + std::time::Duration::from_secs(11);
 
@@ -4377,6 +4536,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 60,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
         let now = start + std::time::Duration::from_secs(15);
 
@@ -4397,6 +4557,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 600,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
         let now = start + std::time::Duration::from_secs(60);
 
@@ -4417,6 +4578,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 10,
             idle_timeout_secs: 0,
+            max_tool_timeout_secs: 3600,
         };
         let now = start + std::time::Duration::from_secs(60);
 
@@ -4438,6 +4600,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 10,
             idle_timeout_secs: 0,
+            max_tool_timeout_secs: 3600,
         };
 
         resume_from_waiting_for_input(&mut entry, resume_at);
@@ -4465,10 +4628,31 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 600,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
         let now = start + std::time::Duration::from_secs(60);
 
         assert_eq!(worker_timeout_kind(&entry, config, now), None);
+    }
+
+    #[test]
+    fn worker_timeout_kind_times_out_idle_from_initial_anchor() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig::default();
+        let now = start + std::time::Duration::from_secs(config.idle_timeout_secs + 1);
+
+        assert_eq!(
+            worker_timeout_kind(&entry, config, now),
+            Some(WorkerTimeoutKind::Idle)
+        );
     }
 
     #[test]
@@ -4485,6 +4669,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 300,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
 
         assert_eq!(
@@ -4495,7 +4680,7 @@ mod tests {
     }
 
     #[test]
-    fn worker_watchdog_deadline_ignores_idle_with_in_flight_tool() {
+    fn worker_watchdog_deadline_defers_idle_with_in_flight_tool_until_tool_cap() {
         let start = tokio::time::Instant::now();
         let entry = WorkerWatchdogEntry {
             started_at: start,
@@ -4508,20 +4693,20 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 10_000_000,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
 
-        let deadline =
-            worker_watchdog_deadline(&entry, config).expect("hard deadline should still exist");
+        let deadline = worker_watchdog_deadline(&entry, config).expect("deadline should exist");
 
         assert_eq!(
             deadline,
-            start + std::time::Duration::from_secs(10_000_000),
-            "watchdog should not schedule idle wakeups while worker has in-flight tools"
+            start + std::time::Duration::from_secs(3600),
+            "watchdog should defer idle wakeup until tool-timeout cap when tools are in flight"
         );
     }
 
     #[test]
-    fn worker_timeout_kind_ignores_idle_with_in_flight_tool() {
+    fn worker_timeout_kind_defers_idle_with_in_flight_tool_until_tool_cap() {
         let start = tokio::time::Instant::now();
         let entry = WorkerWatchdogEntry {
             started_at: start,
@@ -4532,12 +4717,87 @@ mod tests {
             in_flight_tools: 1,
         };
         let config = WorkerConfig {
-            hard_timeout_secs: 600,
+            hard_timeout_secs: 0,
             idle_timeout_secs: 10,
+            max_tool_timeout_secs: 3600,
         };
-        let now = start + std::time::Duration::from_secs(60);
+        let before_cap = start + std::time::Duration::from_secs(60);
+        let at_cap = start + std::time::Duration::from_secs(3600);
 
-        assert_eq!(worker_timeout_kind(&entry, config, now), None);
+        assert_eq!(worker_timeout_kind(&entry, config, before_cap), None);
+        assert_eq!(
+            worker_timeout_kind(&entry, config, at_cap),
+            Some(WorkerTimeoutKind::Idle)
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_times_out_stale_in_flight_tool_after_cap() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 1,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 0,
+            idle_timeout_secs: 2,
+            max_tool_timeout_secs: 5,
+        };
+
+        assert_eq!(
+            worker_timeout_kind(&entry, config, start + std::time::Duration::from_secs(4)),
+            None
+        );
+        assert_eq!(
+            worker_timeout_kind(&entry, config, start + std::time::Duration::from_secs(5)),
+            Some(WorkerTimeoutKind::Idle),
+            "stale in-flight state should become reapable after max_tool_timeout_secs"
+        );
+    }
+
+    #[test]
+    fn worker_timeout_kind_preserves_inflight_tool_cap_across_hot_reload() {
+        let start = tokio::time::Instant::now();
+        let entry = WorkerWatchdogEntry {
+            started_at: start,
+            last_activity_at: start,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: true,
+            in_flight_tools: 1,
+        };
+
+        let reloaded_config = WorkerConfig {
+            hard_timeout_secs: 0,
+            idle_timeout_secs: 10,
+            // Simulate operator lowering cap while this worker is already running.
+            max_tool_timeout_secs: 30,
+        };
+        let preserved_worker_cap = 3600;
+
+        assert_eq!(
+            worker_timeout_kind_with_cap(
+                &entry,
+                reloaded_config,
+                preserved_worker_cap,
+                start + std::time::Duration::from_secs(60),
+            ),
+            None
+        );
+        assert_eq!(
+            worker_timeout_kind_with_cap(
+                &entry,
+                reloaded_config,
+                preserved_worker_cap,
+                start + std::time::Duration::from_secs(3600),
+            ),
+            Some(WorkerTimeoutKind::Idle),
+            "existing in-flight worker should continue using its original tool-timeout cap"
+        );
     }
 
     #[test]
@@ -4573,12 +4833,113 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 60,
             idle_timeout_secs: 0,
+            max_tool_timeout_secs: 3600,
         };
 
         assert_eq!(
             worker_timeout_kind(&entry, config, now),
             Some(WorkerTimeoutKind::Hard),
             "hard-timeout budget should account from spawn time, not event delivery time"
+        );
+    }
+
+    #[test]
+    fn delayed_worker_started_event_uses_spawn_time_tool_timeout_cap() {
+        let worker_id = uuid::Uuid::new_v4();
+        let spawn_time_caps: HashMap<uuid::Uuid, u64> = [(worker_id, 3600)].into_iter().collect();
+        let reloaded_default_cap = 30;
+
+        assert_eq!(
+            resolve_worker_watchdog_tool_timeout_cap(
+                worker_id,
+                &spawn_time_caps,
+                reloaded_default_cap
+            ),
+            3600,
+            "watchdog should preserve the cap captured at spawn time for delayed WorkerStarted"
+        );
+        assert_eq!(
+            resolve_worker_watchdog_tool_timeout_cap(
+                uuid::Uuid::new_v4(),
+                &spawn_time_caps,
+                reloaded_default_cap
+            ),
+            reloaded_default_cap,
+            "missing spawn-time cap should fall back to current default"
+        );
+    }
+
+    #[test]
+    fn watchdog_lag_and_hot_reload_preserve_spawn_time_tool_timeout_cap() {
+        let now = tokio::time::Instant::now();
+        let worker_id = uuid::Uuid::new_v4();
+        let spawn_started_at = now - std::time::Duration::from_secs(120);
+        let spawn_time_caps: HashMap<uuid::Uuid, u64> = [(worker_id, 3600)].into_iter().collect();
+
+        let mut worker_watchdog = HashMap::new();
+        worker_watchdog.insert(
+            worker_id,
+            WorkerWatchdogEntry {
+                started_at: spawn_started_at,
+                last_activity_at: now,
+                is_waiting_for_input: false,
+                waiting_since: None,
+                has_activity_signal: true,
+                in_flight_tools: 1,
+            },
+        );
+        let active_worker_ids: HashSet<uuid::Uuid> = [worker_id].into_iter().collect();
+        let waiting_states: HashMap<uuid::Uuid, bool> = [(worker_id, false)].into_iter().collect();
+        let worker_start_times: HashMap<uuid::Uuid, tokio::time::Instant> =
+            [(worker_id, spawn_started_at)].into_iter().collect();
+
+        // Simulate dropped/lost events followed by lag reconciliation.
+        reconcile_worker_watchdog_after_event_lag(
+            &mut worker_watchdog,
+            &active_worker_ids,
+            &waiting_states,
+            &worker_start_times,
+            now,
+        );
+        let entry = worker_watchdog
+            .get(&worker_id)
+            .expect("worker should remain tracked after lag reconciliation");
+        assert_eq!(
+            entry.in_flight_tools, 1,
+            "lag reconciliation must preserve in-flight tool count"
+        );
+
+        // Simulate a hot reload lowering runtime cap while worker is already running.
+        let reloaded_config = WorkerConfig {
+            hard_timeout_secs: 0,
+            idle_timeout_secs: 10,
+            max_tool_timeout_secs: 30,
+        };
+        let cap = resolve_worker_watchdog_tool_timeout_cap(
+            worker_id,
+            &spawn_time_caps,
+            reloaded_config.max_tool_timeout_secs,
+        );
+        assert_eq!(cap, 3600);
+
+        assert_eq!(
+            worker_timeout_kind_with_cap(
+                entry,
+                reloaded_config,
+                cap,
+                now + std::time::Duration::from_secs(60),
+            ),
+            None,
+            "lower reloaded cap must not shorten timeout window for existing in-flight worker"
+        );
+        assert_eq!(
+            worker_timeout_kind_with_cap(
+                entry,
+                reloaded_config,
+                cap,
+                now + std::time::Duration::from_secs(3600),
+            ),
+            Some(WorkerTimeoutKind::Idle)
         );
     }
 
@@ -4641,8 +5002,22 @@ mod tests {
         assert_eq!(active_entry.last_activity_at, now);
         assert!(!active_entry.is_waiting_for_input);
         assert!(active_entry.waiting_since.is_none());
-        assert!(!active_entry.has_activity_signal);
-        assert_eq!(active_entry.in_flight_tools, 0);
+        assert!(active_entry.has_activity_signal);
+        assert_eq!(active_entry.in_flight_tools, 1);
+        let idle_config = WorkerConfig {
+            hard_timeout_secs: 0,
+            idle_timeout_secs: 1,
+            max_tool_timeout_secs: 3600,
+        };
+        assert_eq!(
+            worker_timeout_kind(
+                active_entry,
+                idle_config,
+                now + std::time::Duration::from_secs(2)
+            ),
+            None,
+            "active worker with in-flight tool should not be marked idle after lag reconciliation"
+        );
 
         let waiting_entry = worker_watchdog
             .get(&waiting_worker)
@@ -4654,7 +5029,7 @@ mod tests {
         assert_eq!(waiting_entry.last_activity_at, now);
         assert!(waiting_entry.is_waiting_for_input);
         assert_eq!(waiting_entry.waiting_since, Some(now));
-        assert!(!waiting_entry.has_activity_signal);
+        assert!(waiting_entry.has_activity_signal);
         assert_eq!(waiting_entry.in_flight_tools, 0);
     }
 
@@ -4695,6 +5070,7 @@ mod tests {
         let config = WorkerConfig {
             hard_timeout_secs: 60,
             idle_timeout_secs: 0,
+            max_tool_timeout_secs: 3600,
         };
 
         assert_eq!(

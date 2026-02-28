@@ -15,12 +15,30 @@ use tokio::process::Command;
 pub struct ExecTool {
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    max_timeout_seconds: u64,
 }
 
 impl ExecTool {
     /// Create a new exec tool with sandbox containment.
     pub fn new(workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
-        Self { workspace, sandbox }
+        Self::with_max_timeout(
+            workspace,
+            sandbox,
+            crate::config::WorkerConfig::default().max_tool_timeout_secs,
+        )
+    }
+
+    /// Create a new exec tool with a configurable max per-call timeout cap.
+    pub fn with_max_timeout(
+        workspace: PathBuf,
+        sandbox: Arc<Sandbox>,
+        max_timeout_seconds: u64,
+    ) -> Self {
+        Self {
+            workspace,
+            sandbox,
+            max_timeout_seconds: max_timeout_seconds.max(1),
+        }
     }
 }
 
@@ -105,6 +123,12 @@ impl Tool for ExecTool {
     type Output = ExecOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let timeout_default = default_timeout().min(self.max_timeout_seconds).max(1);
+        let timeout_description = format!(
+            "Maximum time to wait (1-{} seconds)",
+            self.max_timeout_seconds
+        );
+
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: crate::prompts::text::get("tools/exec").to_string(),
@@ -148,9 +172,9 @@ impl Tool for ExecTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 300,
-                        "default": 60,
-                        "description": "Maximum time to wait (1-300 seconds)"
+                        "maximum": self.max_timeout_seconds,
+                        "default": timeout_default,
+                        "description": timeout_description
                     }
                 },
                 "required": ["program"]
@@ -209,12 +233,13 @@ impl Tool for ExecTool {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let timeout = tokio::time::Duration::from_secs(args.timeout_seconds);
+        let effective_timeout_seconds = args.timeout_seconds.min(self.max_timeout_seconds).max(1);
+        let timeout = tokio::time::Duration::from_secs(effective_timeout_seconds);
 
         let output = tokio::time::timeout(timeout, cmd.output())
             .await
             .map_err(|_| ExecError {
-                message: "Execution timed out".to_string(),
+                message: format!("Execution timed out after {effective_timeout_seconds}s"),
                 exit_code: -1,
             })?
             .map_err(|e| ExecError {

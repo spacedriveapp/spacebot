@@ -15,12 +15,30 @@ use tokio::process::Command;
 pub struct ShellTool {
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    max_timeout_seconds: u64,
 }
 
 impl ShellTool {
     /// Create a new shell tool with sandbox containment.
     pub fn new(workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
-        Self { workspace, sandbox }
+        Self::with_max_timeout(
+            workspace,
+            sandbox,
+            crate::config::WorkerConfig::default().max_tool_timeout_secs,
+        )
+    }
+
+    /// Create a new shell tool with a configurable max per-call timeout cap.
+    pub fn with_max_timeout(
+        workspace: PathBuf,
+        sandbox: Arc<Sandbox>,
+        max_timeout_seconds: u64,
+    ) -> Self {
+        Self {
+            workspace,
+            sandbox,
+            max_timeout_seconds: max_timeout_seconds.max(1),
+        }
     }
 }
 
@@ -74,6 +92,12 @@ impl Tool for ShellTool {
     type Output = ShellOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let timeout_default = default_timeout().min(self.max_timeout_seconds).max(1);
+        let timeout_description = format!(
+            "Maximum time to wait for the command to complete (1-{} seconds)",
+            self.max_timeout_seconds
+        );
+
         ToolDefinition {
             name: Self::NAME.to_string(),
             description: crate::prompts::text::get("tools/shell").to_string(),
@@ -91,9 +115,9 @@ impl Tool for ShellTool {
                     "timeout_seconds": {
                         "type": "integer",
                         "minimum": 1,
-                        "maximum": 300,
-                        "default": 60,
-                        "description": "Maximum time to wait for the command to complete (1-300 seconds)"
+                        "maximum": self.max_timeout_seconds,
+                        "default": timeout_default,
+                        "description": timeout_description
                     }
                 },
                 "required": ["command"]
@@ -136,12 +160,13 @@ impl Tool for ShellTool {
 
         cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
-        let timeout = tokio::time::Duration::from_secs(args.timeout_seconds);
+        let effective_timeout_seconds = args.timeout_seconds.min(self.max_timeout_seconds).max(1);
+        let timeout = tokio::time::Duration::from_secs(effective_timeout_seconds);
 
         let output = tokio::time::timeout(timeout, cmd.output())
             .await
             .map_err(|_| ShellError {
-                message: "Command timed out".to_string(),
+                message: format!("Command timed out after {effective_timeout_seconds}s"),
                 exit_code: -1,
             })?
             .map_err(|e| ShellError {

@@ -62,6 +62,8 @@ pub struct Worker {
     /// Status updates.
     pub status_tx: watch::Sender<String>,
     pub status_rx: watch::Receiver<String>,
+    /// Per-worker max tool timeout cap pinned at spawn.
+    tool_timeout_cap_secs: u64,
 }
 
 impl Worker {
@@ -86,6 +88,12 @@ impl Worker {
             channel_id.clone(),
             deps.event_tx.clone(),
         );
+        let tool_timeout_cap_secs = deps
+            .runtime_config
+            .worker
+            .load()
+            .max_tool_timeout_secs
+            .max(1);
         let (status_tx, status_rx) = watch::channel("starting".to_string());
 
         Self {
@@ -103,6 +111,7 @@ impl Worker {
             logs_dir,
             status_tx,
             status_rx,
+            tool_timeout_cap_secs,
         }
     }
 
@@ -127,6 +136,12 @@ impl Worker {
             channel_id.clone(),
             deps.event_tx.clone(),
         );
+        let tool_timeout_cap_secs = deps
+            .runtime_config
+            .worker
+            .load()
+            .max_tool_timeout_secs
+            .max(1);
         let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
 
@@ -145,6 +160,7 @@ impl Worker {
             logs_dir,
             status_tx,
             status_rx,
+            tool_timeout_cap_secs,
         };
 
         (worker, input_tx)
@@ -178,6 +194,10 @@ impl Worker {
         Ok(())
     }
 
+    pub fn tool_timeout_cap_secs(&self) -> u64 {
+        self.tool_timeout_cap_secs
+    }
+
     /// Run the worker's LLM agent loop until completion.
     ///
     /// Runs in segments of 25 turns. After each segment, checks context usage
@@ -205,6 +225,7 @@ impl Worker {
             self.deps.runtime_config.workspace_dir.clone(),
             self.deps.sandbox.clone(),
             mcp_tools,
+            self.tool_timeout_cap_secs,
             self.deps.runtime_config.clone(),
         );
 

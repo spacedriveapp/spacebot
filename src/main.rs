@@ -1961,6 +1961,7 @@ async fn initialize_agents(
                 browser_config,
                 agent.config.screenshot_dir(),
                 brave_search_key,
+                agent.deps.runtime_config.clone(),
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.sandbox.clone(),
             );

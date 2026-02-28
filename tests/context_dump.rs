@@ -199,6 +199,9 @@ async fn dump_channel_context() {
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_start_times: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_tool_timeout_caps: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block,
         deps: deps.clone(),
@@ -332,6 +335,7 @@ async fn dump_worker_context() {
     // Build the actual worker tool server
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
+    let max_tool_timeout_secs = rc.worker.load().max_tool_timeout_secs;
     let worker_id = uuid::Uuid::new_v4();
 
     let worker_tool_server = spacebot::tools::create_worker_tool_server(
@@ -346,6 +350,7 @@ async fn dump_worker_context() {
         std::path::PathBuf::from("/tmp"),
         deps.sandbox.clone(),
         vec![],
+        max_tool_timeout_secs,
         deps.runtime_config.clone(),
     );
 
@@ -419,6 +424,9 @@ async fn dump_all_contexts() {
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_start_times: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_tool_timeout_caps: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
             spacebot::agent::status::StatusBlock::new(),
@@ -494,6 +502,7 @@ async fn dump_all_contexts() {
         .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();
+    let max_tool_timeout_secs = rc.worker.load().max_tool_timeout_secs;
     let worker_tool_server = spacebot::tools::create_worker_tool_server(
         deps.agent_id.clone(),
         uuid::Uuid::new_v4(),
@@ -506,6 +515,7 @@ async fn dump_all_contexts() {
         std::path::PathBuf::from("/tmp"),
         deps.sandbox.clone(),
         vec![],
+        max_tool_timeout_secs,
         deps.runtime_config.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();

@@ -397,12 +397,22 @@ pub fn create_worker_tool_server(
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
     mcp_tools: Vec<McpToolAdapter>,
+    max_tool_timeout_secs: u64,
     runtime_config: Arc<RuntimeConfig>,
 ) -> ToolServerHandle {
+    let max_tool_timeout_secs = max_tool_timeout_secs.max(1);
     let mut server = ToolServer::new()
-        .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+        .tool(ShellTool::with_max_timeout(
+            workspace.clone(),
+            sandbox.clone(),
+            max_tool_timeout_secs,
+        ))
         .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(workspace, sandbox))
+        .tool(ExecTool::with_max_timeout(
+            workspace,
+            sandbox,
+            max_tool_timeout_secs,
+        ))
         .tool(TaskUpdateTool::for_worker(
             task_store,
             agent_id.clone(),
@@ -454,9 +464,11 @@ pub fn create_cortex_chat_tool_server(
     browser_config: BrowserConfig,
     screenshot_dir: PathBuf,
     brave_search_key: Option<String>,
+    runtime_config: Arc<RuntimeConfig>,
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
 ) -> ToolServerHandle {
+    let worker_config = **runtime_config.worker.load();
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
         .tool(MemoryRecallTool::new(memory_search.clone()))
@@ -470,9 +482,17 @@ pub fn create_cortex_chat_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
-        .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+        .tool(ShellTool::with_max_timeout(
+            workspace.clone(),
+            sandbox.clone(),
+            worker_config.max_tool_timeout_secs,
+        ))
         .tool(FileTool::new(workspace.clone()))
-        .tool(ExecTool::new(workspace, sandbox));
+        .tool(ExecTool::with_max_timeout(
+            workspace,
+            sandbox,
+            worker_config.max_tool_timeout_secs,
+        ));
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
@@ -488,6 +508,24 @@ pub fn create_cortex_chat_tool_server(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sandbox::{SandboxConfig, SandboxMode};
+    use std::sync::Arc;
+
+    async fn make_disabled_test_sandbox() -> Arc<Sandbox> {
+        let temp_dir = std::env::temp_dir();
+        Arc::new(
+            Sandbox::new(
+                &SandboxConfig {
+                    mode: SandboxMode::Disabled,
+                    writable_paths: Vec::new(),
+                },
+                temp_dir.clone(),
+                &temp_dir,
+                temp_dir.clone(),
+            )
+            .await,
+        )
+    }
 
     #[test]
     fn shell_args_parses_timeout_as_integer() {
@@ -528,6 +566,84 @@ mod tests {
         let args: exec::ExecArgs =
             serde_json::from_str(r#"{"program": "/bin/ls", "timeout_seconds": 90}"#).unwrap();
         assert_eq!(args.timeout_seconds, 90);
+    }
+
+    #[tokio::test]
+    async fn shell_definition_clamps_default_to_timeout_cap() {
+        let temp_dir = std::env::temp_dir();
+        let tool = ShellTool::with_max_timeout(temp_dir, make_disabled_test_sandbox().await, 30);
+        let definition = tool.definition(String::new()).await;
+        let timeout = &definition.parameters["properties"]["timeout_seconds"];
+        assert_eq!(timeout["maximum"].as_u64(), Some(30));
+        assert_eq!(timeout["default"].as_u64(), Some(30));
+    }
+
+    #[tokio::test]
+    async fn exec_definition_clamps_default_to_timeout_cap() {
+        let temp_dir = std::env::temp_dir();
+        let tool = ExecTool::with_max_timeout(temp_dir, make_disabled_test_sandbox().await, 30);
+        let definition = tool.definition(String::new()).await;
+        let timeout = &definition.parameters["properties"]["timeout_seconds"];
+        assert_eq!(timeout["maximum"].as_u64(), Some(30));
+        assert_eq!(timeout["default"].as_u64(), Some(30));
+    }
+
+    #[tokio::test]
+    async fn shell_call_clamps_timeout_to_cap() {
+        let temp_dir = std::env::temp_dir();
+        let tool = ShellTool::with_max_timeout(temp_dir, make_disabled_test_sandbox().await, 1);
+        let command = if cfg!(target_os = "windows") {
+            "powershell -NoProfile -Command \"Start-Sleep -Seconds 2\"".to_string()
+        } else {
+            "sleep 2".to_string()
+        };
+        let result = tool
+            .call(shell::ShellArgs {
+                command,
+                working_dir: None,
+                timeout_seconds: 999,
+            })
+            .await;
+        let error = result.expect_err("shell call should time out using cap");
+        assert!(
+            error.to_string().contains("timed out after 1s"),
+            "expected timeout to clamp at 1s, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn exec_call_clamps_timeout_to_cap() {
+        let temp_dir = std::env::temp_dir();
+        let tool = ExecTool::with_max_timeout(temp_dir, make_disabled_test_sandbox().await, 1);
+        let (program, args) = if cfg!(target_os = "windows") {
+            (
+                "powershell".to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-Command".to_string(),
+                    "Start-Sleep -Seconds 2".to_string(),
+                ],
+            )
+        } else {
+            (
+                "sh".to_string(),
+                vec!["-c".to_string(), "sleep 2".to_string()],
+            )
+        };
+        let result = tool
+            .call(exec::ExecArgs {
+                program,
+                args,
+                working_dir: None,
+                env: Vec::new(),
+                timeout_seconds: 999,
+            })
+            .await;
+        let error = result.expect_err("exec call should time out using cap");
+        assert!(
+            error.to_string().contains("timed out after 1s"),
+            "expected timeout to clamp at 1s, got: {error}"
+        );
     }
 
     #[test]

@@ -72,10 +72,11 @@ WaitingForInput ──→ Failed    (follow-up processing failed)
 
 ## Watchdog Timeouts
 
-Channel-owned workers are monitored by a watchdog with two limits (configured in `[defaults.worker]` / `[agents.worker]`):
+Channel-owned workers are monitored by a watchdog with three limits (configured in `[defaults.worker]` / `[agents.worker]`):
 
-- `hard_timeout_secs` applies while the worker is actively running.
-- `idle_timeout_secs` applies only after the worker has emitted activity (`set_status` or tool events), and only while it is actively running.
+- `hard_timeout_secs` applies while the worker is actively running (`0` disables hard-timeout enforcement).
+- `idle_timeout_secs` applies while the worker is actively running. The idle timer starts when the worker is registered and is refreshed by `set_status` and tool activity events.
+- `max_tool_timeout_secs` caps per-call `timeout_seconds` for `shell` and `exec` tool invocations.
 
 When a worker enters `WaitingForInput`, watchdog timeouts are suspended until it resumes running.
 

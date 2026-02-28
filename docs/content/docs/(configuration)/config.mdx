@@ -103,8 +103,9 @@ startup_delay_secs = 5
 
 # Worker watchdog settings (channel-spawned workers).
 [defaults.worker]
-hard_timeout_secs = 300
+hard_timeout_secs = 0    # optional hard cap; 0 disables hard timeout
 idle_timeout_secs = 120
+max_tool_timeout_secs = 3600  # cap for shell/exec timeout_seconds
 
 # Browser automation for workers.
 [defaults.browser]
@@ -130,8 +131,9 @@ channel = "anthropic/claude-opus-4-20250514"
 
 # Per-agent worker watchdog overrides.
 [agents.worker]
-hard_timeout_secs = 240
+hard_timeout_secs = 0
 idle_timeout_secs = 90
+max_tool_timeout_secs = 1800
 
 # Per-agent sandbox configuration.
 [agents.sandbox]
@@ -240,7 +242,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_turns` | Yes | Next channel message uses new limit |
 | `context_window` | Yes | Next compaction/worker check uses new size |
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
-| Worker watchdog (`[agents.worker]`) | Yes | Next watchdog pass uses new hard/idle timeouts |
+| Worker watchdog (`[agents.worker]`) | Yes | Next watchdog pass uses new hard/idle values; new worker spawns use new tool timeout cap. Existing worker/cortex chat sessions keep their prior cap until recreated (or agent restart). |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |

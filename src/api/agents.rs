@@ -751,6 +751,7 @@ pub(super) async fn create_agent(
         browser_config,
         agent_config.screenshot_dir(),
         brave_search_key,
+        runtime_config.clone(),
         runtime_config.workspace_dir.clone(),
         sandbox.clone(),
     );

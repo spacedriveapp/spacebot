@@ -49,6 +49,7 @@ pub(super) struct CortexSection {
 pub(super) struct WorkerSection {
     hard_timeout_secs: u64,
     idle_timeout_secs: u64,
+    max_tool_timeout_secs: u64,
 }
 
 #[derive(Serialize, Debug)]
@@ -172,6 +173,7 @@ pub(super) struct CompactionUpdate {
 pub(super) struct WorkerUpdate {
     hard_timeout_secs: Option<u64>,
     idle_timeout_secs: Option<u64>,
+    max_tool_timeout_secs: Option<u64>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -273,6 +275,7 @@ pub(super) async fn get_agent_config(
         worker: WorkerSection {
             hard_timeout_secs: worker.hard_timeout_secs,
             idle_timeout_secs: worker.idle_timeout_secs,
+            max_tool_timeout_secs: worker.max_tool_timeout_secs,
         },
         cortex: CortexSection {
             tick_interval_secs: cortex.tick_interval_secs,
@@ -588,7 +591,17 @@ fn update_worker_table(
             toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
     }
     if let Some(v) = worker.idle_timeout_secs {
+        if v == 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
         table["idle_timeout_secs"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
+    if let Some(v) = worker.max_tool_timeout_secs {
+        if v == 0 {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        table["max_tool_timeout_secs"] =
             toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
     }
     Ok(())
@@ -769,6 +782,7 @@ id = "main"
         let update = WorkerUpdate {
             hard_timeout_secs: Some(240),
             idle_timeout_secs: Some(90),
+            max_tool_timeout_secs: Some(1800),
         };
 
         update_worker_table(&mut doc, agent_idx, &update).expect("failed to update worker");
@@ -785,6 +799,7 @@ id = "main"
 
         assert_eq!(worker["hard_timeout_secs"].as_integer(), Some(240));
         assert_eq!(worker["idle_timeout_secs"].as_integer(), Some(90));
+        assert_eq!(worker["max_tool_timeout_secs"].as_integer(), Some(1800));
     }
 
     #[test]
@@ -801,6 +816,7 @@ id = "main"
         let update = WorkerUpdate {
             hard_timeout_secs: Some(300),
             idle_timeout_secs: None,
+            max_tool_timeout_secs: None,
         };
 
         update_worker_table(&mut doc, agent_idx, &update).expect("failed to update worker");
@@ -817,6 +833,7 @@ id = "main"
 
         assert_eq!(worker["hard_timeout_secs"].as_integer(), Some(300));
         assert!(worker.get("idle_timeout_secs").is_none());
+        assert!(worker.get("max_tool_timeout_secs").is_none());
     }
 
     #[test]
@@ -833,6 +850,49 @@ id = "main"
         let update = WorkerUpdate {
             hard_timeout_secs: Some(u64::MAX),
             idle_timeout_secs: None,
+            max_tool_timeout_secs: None,
+        };
+
+        let result = update_worker_table(&mut doc, agent_idx, &update);
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn test_update_worker_table_rejects_zero_idle_timeout() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: None,
+            idle_timeout_secs: Some(0),
+            max_tool_timeout_secs: None,
+        };
+
+        let result = update_worker_table(&mut doc, agent_idx, &update);
+        assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn test_update_worker_table_rejects_zero_max_tool_timeout() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = WorkerUpdate {
+            hard_timeout_secs: None,
+            idle_timeout_secs: None,
+            max_tool_timeout_secs: Some(0),
         };
 
         let result = update_worker_table(&mut doc, agent_idx, &update);
