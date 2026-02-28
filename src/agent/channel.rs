@@ -171,6 +171,14 @@ fn reconcile_worker_watchdog_after_event_lag(
     }
 }
 
+fn resolve_worker_watchdog_started_at(
+    worker_id: WorkerId,
+    worker_start_times: &HashMap<WorkerId, tokio::time::Instant>,
+    now: tokio::time::Instant,
+) -> tokio::time::Instant {
+    worker_start_times.get(&worker_id).copied().unwrap_or(now)
+}
+
 #[derive(Debug, Clone)]
 enum TemporalTimezone {
     Named { timezone_name: String, timezone: Tz },
@@ -845,12 +853,12 @@ impl Channel {
             .min()
     }
 
-    fn register_worker_watchdog(&mut self, worker_id: WorkerId) {
+    fn register_worker_watchdog(&mut self, worker_id: WorkerId, started_at: tokio::time::Instant) {
         let now = tokio::time::Instant::now();
         self.worker_watchdog.insert(
             worker_id,
             WorkerWatchdogEntry {
-                started_at: now,
+                started_at,
                 last_activity_at: now,
                 is_waiting_for_input: false,
                 waiting_since: None,
@@ -2258,7 +2266,12 @@ impl Channel {
                     &self.deps.agent_id,
                 );
                 self.completed_workers.remove(worker_id);
-                self.register_worker_watchdog(*worker_id);
+                let started_at = {
+                    let now = tokio::time::Instant::now();
+                    let worker_start_times = self.state.worker_start_times.read().await;
+                    resolve_worker_watchdog_started_at(*worker_id, &worker_start_times, now)
+                };
+                self.register_worker_watchdog(*worker_id, started_at);
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
@@ -2375,8 +2388,8 @@ impl Channel {
                         "failed to retire retrigger outbox row after cap fallback"
                     );
                 }
-                self.pending_retrigger = false;
-                self.pending_retrigger_metadata.clear();
+                self.clear_pending_retrigger_state();
+                self.retrigger_deadline = None;
             } else {
                 self.pending_retrigger = true;
                 // Merge metadata (later events override earlier ones for the same key)
@@ -2643,9 +2656,7 @@ impl Channel {
                 channel_id = %self.id,
                 "retrigger fired but no pending results to relay"
             );
-            self.pending_retrigger = false;
-            self.pending_retrigger_metadata.clear();
-            self.pending_retrigger_outbox_id = None;
+            self.clear_pending_retrigger_state();
             return;
         }
 
@@ -4208,7 +4219,8 @@ mod tests {
     use super::{
         PendingResult, RETRIGGER_OUTBOX_ID_METADATA_KEY, WorkerTimeoutKind, WorkerWatchdogEntry,
         apply_history_after_turn, event_is_for_channel, reconcile_worker_watchdog_after_event_lag,
-        resume_from_waiting_for_input, retrigger_outbox_id_from_metadata, retrigger_result_summary,
+        resolve_worker_watchdog_started_at, resume_from_waiting_for_input,
+        retrigger_outbox_id_from_metadata, retrigger_result_summary,
         retrigger_results_from_pending, status_indicates_waiting_for_input, worker_timeout_kind,
         worker_watchdog_deadline,
     };
@@ -4476,6 +4488,40 @@ mod tests {
         assert!(status_indicates_waiting_for_input("waiting for follow-up"));
         assert!(status_indicates_waiting_for_input("Waiting for follow-up"));
         assert!(!status_indicates_waiting_for_input("processing follow-up"));
+    }
+
+    #[test]
+    fn delayed_worker_started_event_uses_recorded_spawn_time() {
+        let now = tokio::time::Instant::now();
+        let worker_id = uuid::Uuid::new_v4();
+        let spawn_started_at = now - std::time::Duration::from_secs(120);
+        let worker_start_times: HashMap<uuid::Uuid, tokio::time::Instant> =
+            [(worker_id, spawn_started_at)].into_iter().collect();
+
+        let started_at = resolve_worker_watchdog_started_at(worker_id, &worker_start_times, now);
+        assert_eq!(
+            started_at, spawn_started_at,
+            "watchdog should use recorded spawn instant when WorkerStarted event is delayed"
+        );
+
+        let entry = WorkerWatchdogEntry {
+            started_at,
+            last_activity_at: now,
+            is_waiting_for_input: false,
+            waiting_since: None,
+            has_activity_signal: false,
+            in_flight_tools: 0,
+        };
+        let config = WorkerConfig {
+            hard_timeout_secs: 60,
+            idle_timeout_secs: 0,
+        };
+
+        assert_eq!(
+            worker_timeout_kind(&entry, config, now),
+            Some(WorkerTimeoutKind::Hard),
+            "hard-timeout budget should account from spawn time, not event delivery time"
+        );
     }
 
     #[test]

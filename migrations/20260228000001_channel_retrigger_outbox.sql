@@ -13,8 +13,8 @@ CREATE TABLE IF NOT EXISTS channel_retrigger_outbox (
     delivered_at TIMESTAMP
 );
 
-CREATE INDEX idx_retrigger_outbox_pending
+CREATE INDEX IF NOT EXISTS idx_retrigger_outbox_pending
     ON channel_retrigger_outbox(agent_id, channel_id, delivered_at, next_attempt_at);
 
-CREATE INDEX idx_retrigger_outbox_created
+CREATE INDEX IF NOT EXISTS idx_retrigger_outbox_created
     ON channel_retrigger_outbox(created_at);

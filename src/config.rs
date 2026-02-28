@@ -4363,14 +4363,25 @@ impl Config {
             worker: toml
                 .defaults
                 .worker
-                .map(|w| WorkerConfig {
-                    hard_timeout_secs: w
+                .map(|w| -> Result<WorkerConfig> {
+                    let hard_timeout_secs = w
                         .hard_timeout_secs
-                        .unwrap_or(base_defaults.worker.hard_timeout_secs),
-                    idle_timeout_secs: w
+                        .unwrap_or(base_defaults.worker.hard_timeout_secs);
+                    let idle_timeout_secs = w
                         .idle_timeout_secs
-                        .unwrap_or(base_defaults.worker.idle_timeout_secs),
+                        .unwrap_or(base_defaults.worker.idle_timeout_secs);
+                    if hard_timeout_secs == 0 || idle_timeout_secs == 0 {
+                        return Err(ConfigError::Invalid(
+                            "defaults.worker timeouts must be greater than 0".into(),
+                        )
+                        .into());
+                    }
+                    Ok(WorkerConfig {
+                        hard_timeout_secs,
+                        idle_timeout_secs,
+                    })
                 })
+                .transpose()?
                 .unwrap_or(base_defaults.worker),
             browser: toml
                 .defaults
@@ -4474,6 +4485,29 @@ impl Config {
                         timeout_secs: h.timeout_secs,
                     })
                     .collect();
+                let agent_id_for_error = a.id.clone();
+                let worker = a
+                    .worker
+                    .map(|w| -> Result<WorkerConfig> {
+                        let hard_timeout_secs = w
+                            .hard_timeout_secs
+                            .unwrap_or(defaults.worker.hard_timeout_secs);
+                        let idle_timeout_secs = w
+                            .idle_timeout_secs
+                            .unwrap_or(defaults.worker.idle_timeout_secs);
+                        if hard_timeout_secs == 0 || idle_timeout_secs == 0 {
+                            return Err(ConfigError::Invalid(format!(
+                                "agent '{}' worker timeouts must be greater than 0",
+                                agent_id_for_error
+                            ))
+                            .into());
+                        }
+                        Ok(WorkerConfig {
+                            hard_timeout_secs,
+                            idle_timeout_secs,
+                        })
+                    })
+                    .transpose()?;
 
                 Ok(AgentConfig {
                     id: a.id,
@@ -4565,14 +4599,7 @@ impl Config {
                             .startup_delay_secs
                             .unwrap_or(defaults.warmup.startup_delay_secs),
                     }),
-                    worker: a.worker.map(|w| WorkerConfig {
-                        hard_timeout_secs: w
-                            .hard_timeout_secs
-                            .unwrap_or(defaults.worker.hard_timeout_secs),
-                        idle_timeout_secs: w
-                            .idle_timeout_secs
-                            .unwrap_or(defaults.worker.idle_timeout_secs),
-                    }),
+                    worker,
                     browser: a.browser.map(|b| BrowserConfig {
                         enabled: b.enabled.unwrap_or(defaults.browser.enabled),
                         headless: b.headless.unwrap_or(defaults.browser.headless),
@@ -7154,6 +7181,47 @@ idle_timeout_secs = 20
         assert_eq!(config.defaults.worker.idle_timeout_secs, 45);
         assert_eq!(resolved.worker.hard_timeout_secs, 180);
         assert_eq!(resolved.worker.idle_timeout_secs, 20);
+    }
+
+    #[test]
+    fn test_worker_watchdog_defaults_reject_zero_values() {
+        let toml = r#"
+[defaults.worker]
+hard_timeout_secs = 0
+idle_timeout_secs = 45
+
+[[agents]]
+id = "main"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let error =
+            Config::from_toml(parsed, PathBuf::from(".")).expect_err("zero defaults must error");
+        assert!(
+            error
+                .to_string()
+                .contains("defaults.worker timeouts must be greater than 0"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn test_worker_watchdog_agent_override_rejects_zero_values() {
+        let toml = r#"
+[[agents]]
+id = "main"
+
+[agents.worker]
+idle_timeout_secs = 0
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let error = Config::from_toml(parsed, PathBuf::from("."))
+            .expect_err("zero per-agent override must error");
+        assert!(
+            error
+                .to_string()
+                .contains("agent 'main' worker timeouts must be greater than 0"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]
