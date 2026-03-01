@@ -61,6 +61,7 @@ notify = "7"
 # Cryptography (for secrets)
 aes-gcm = "0.10"
 sha2 = "0.10"
+argon2 = "0.5"
 rand = "0.9"
 
 # UUID generation
@@ -164,6 +165,10 @@ unimplemented = "deny"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# OS keystore (macOS Keychain for master key storage)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [profile.release]
 lto = "thin"

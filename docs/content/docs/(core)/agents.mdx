@@ -232,7 +232,9 @@ Returns agents, humans, links, and groups for rendering.
 │   │   ├── data/
 │   │   │   ├── spacebot.db              # SQLite (memories, conversations, cron jobs)
 │   │   │   ├── lancedb/                 # LanceDB (embeddings, FTS)
-│   │   │   └── config.redb             # redb (agent-level settings, secrets)
+│   │   │   ├── config.redb             # redb (agent-level settings)
+│   │   │   ├── settings.redb            # redb (runtime settings)
+│   │   │   └── secrets.redb             # redb (secret store)
 │   │   └── archives/                    # compaction transcripts
 │   │
 │   └── engineering/
