@@ -27,7 +27,7 @@ export function ToggleGroup<T extends string>({
 				className
 			)}
 		>
-			{options.map((option, i) => {
+			{options.map((option) => {
 				const isActive = option.value === value;
 
 				return (
