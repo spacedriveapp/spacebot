@@ -156,7 +156,8 @@ Run `chromedp/headless-shell` as a separate container and point Spacebot at it v
 bundling Chromium into the Spacebot image.
 
 Workers spawned by the same agent share one Chrome process (each gets its own tab). A
-Chrome crash kills all tabs for that agent.
+Workers pointing at the same `connect_url` share one Chrome process (each gets its own tab). A
+Chrome crash kills all tabs connected to that browser.
 
 #### Spacebot on host, browser in Docker
 
