@@ -186,6 +186,7 @@ impl LlmManager {
                 api_key: token,
                 name: None,
                 use_bearer_auth: false,
+                extra_headers: vec![],
             }),
             (None, None) => Err(LlmError::UnknownProvider("anthropic".to_string()).into()),
         }
@@ -255,6 +256,7 @@ impl LlmManager {
                 api_key: token,
                 name: None,
                 use_bearer_auth: false,
+                extra_headers: vec![],
             }),
             None => Err(LlmError::UnknownProvider("openai-chatgpt".to_string()).into()),
         }

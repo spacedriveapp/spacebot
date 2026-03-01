@@ -123,12 +123,17 @@ impl SpacebotModel {
                     .name
                     .as_deref()
                     .unwrap_or("OpenAI-compatible provider");
+                let headers: Vec<(&str, &str)> = provider_config
+                    .extra_headers
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), v.as_str()))
+                    .collect();
                 self.call_openai_compatible_with_optional_auth(
                     request,
                     display_name,
                     &endpoint,
                     Some(provider_config.api_key.clone()),
-                    &[],
+                    &headers,
                 )
                 .await
             }
@@ -584,6 +589,11 @@ impl SpacebotModel {
         if chat_completions_url.contains("kimi.com") || chat_completions_url.contains("moonshot.ai")
         {
             request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
+        }
+
+        // Apply provider-specific extra headers (e.g. OpenRouter app attribution).
+        for (key, value) in &provider_config.extra_headers {
+            request_builder = request_builder.header(key.as_str(), value.as_str());
         }
 
         let response = request_builder
