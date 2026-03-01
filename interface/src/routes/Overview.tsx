@@ -3,6 +3,7 @@ import {useQuery} from "@tanstack/react-query";
 import {api} from "@/api/client";
 import {CreateAgentDialog} from "@/components/CreateAgentDialog";
 import {TopologyGraph} from "@/components/TopologyGraph";
+import {UpdatePill} from "@/components/UpdatePill";
 import type {ChannelLiveState} from "@/hooks/useChannelLiveState";
 import {formatUptime} from "@/lib/format";
 
@@ -94,12 +95,15 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 					)}
 				</div>
 
-				<button
-					onClick={() => setCreateOpen(true)}
-					className="text-tiny text-ink-faint hover:text-ink transition-colors"
-				>
-					+ New Agent
-				</button>
+				<div className="flex items-center gap-3">
+					<UpdatePill />
+					<button
+						onClick={() => setCreateOpen(true)}
+						className="text-tiny text-ink-faint hover:text-ink transition-colors"
+					>
+						+ New Agent
+					</button>
+				</div>
 			</div>
 
 			{/* Full-screen topology */}

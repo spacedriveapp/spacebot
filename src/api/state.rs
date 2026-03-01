@@ -74,6 +74,8 @@ pub struct ApiState {
     pub mcp_managers: ArcSwap<HashMap<String, Arc<McpManager>>>,
     /// Per-agent sandbox instances for process containment.
     pub sandboxes: ArcSwap<HashMap<String, Arc<crate::sandbox::Sandbox>>>,
+    /// Instance-level secrets store (shared across all agents).
+    pub secrets_store: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Shared reference to the Discord permissions ArcSwap (same instance used by the adapter and file watcher).
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
@@ -248,6 +250,7 @@ impl ApiState {
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
             sandboxes: ArcSwap::from_pointee(HashMap::new()),
+            secrets_store: ArcSwap::from_pointee(None),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
@@ -544,6 +547,11 @@ impl ApiState {
     /// Set the sandbox instances for all agents.
     pub fn set_sandboxes(&self, sandboxes: HashMap<String, Arc<crate::sandbox::Sandbox>>) {
         self.sandboxes.store(Arc::new(sandboxes));
+    }
+
+    /// Set the instance-level secrets store.
+    pub fn set_secrets_store(&self, store: Arc<crate::secrets::store::SecretsStore>) {
+        self.secrets_store.store(Arc::new(Some(store)));
     }
 
     /// Share the Discord permissions ArcSwap with the API so reads get hot-reloaded values.

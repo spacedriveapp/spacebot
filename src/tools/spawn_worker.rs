@@ -1,9 +1,8 @@
 //! Spawn worker tool for creating new workers.
 
 use crate::WorkerId;
-use crate::agent::channel::{
-    ChannelState, spawn_opencode_worker_from_state, spawn_worker_from_state,
-};
+use crate::agent::channel::ChannelState;
+use crate::agent::channel_dispatch::{spawn_opencode_worker_from_state, spawn_worker_from_state};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;

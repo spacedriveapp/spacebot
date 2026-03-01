@@ -242,20 +242,35 @@ headers = { Authorization = "Bearer ${SENTRY_TOKEN}" }
 
 ### Security
 
-Workers execute arbitrary shell commands and subprocesses on your behalf. Spacebot uses defense-in-depth to contain what those processes can do:
+Spacebot runs autonomous LLM processes that execute arbitrary shell commands and spawn subprocesses. Security isn't an add-on — it's a layered system designed so that no single failure exposes credentials or breaks containment.
 
-- **Process sandbox** — shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the entire filesystem is read-only except the agent's workspace and any explicitly configured writable paths. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. No amount of LLM creativity can write outside the sandbox — it's kernel-enforced, not string-filtered
-- **Workspace isolation** — file tools canonicalize all paths and reject anything outside the agent's workspace. Symlinks that escape the workspace are blocked
+#### Credential Isolation
+
+Secrets are split into two categories: **system** (LLM API keys, messaging tokens — never exposed to subprocesses) and **tool** (CLI credentials like `GH_TOKEN` — injected as env vars into workers). The category is auto-assigned based on the secret name, or set explicitly.
+
+- **Environment sanitization** — every subprocess starts with a clean environment (`--clearenv` on Linux, `env_clear()` everywhere else). Only safe baseline vars (`PATH`, `HOME`, `LANG`), tool-category secrets, and explicit `passthrough_env` entries are present. System secrets never enter any subprocess
+- **Secret store** — credentials live in a dedicated redb database, not in `config.toml`. Config references secrets by alias (`anthropic_key = "secret:ANTHROPIC_API_KEY"`), so the config file is safe to display, screenshot, or `cat`
+- **Encryption at rest** — optional AES-256-GCM encryption with a master key derived via Argon2id. The master key lives in the OS credential store (macOS Keychain, Linux kernel keyring) — never on disk, never in an env var, never accessible to worker subprocesses
+- **Keyring isolation** — on Linux, workers are spawned with a fresh empty session keyring via `pre_exec`. Even without the sandbox, workers cannot access the parent's kernel keyring where the master key lives
+- **Output scrubbing** — all tool secret values are redacted from worker output before it reaches channels or LLM context. A rolling buffer handles secrets split across stream chunks. Channels see `[REDACTED]`, never raw values
+- **Worker secret management** — workers can store credentials they obtain (API keys from account creation, OAuth tokens) via the `secret_set` tool. Stored secrets are immediately available to future workers
+
+#### Process Containment
+
+- **Process sandbox** — shell and exec tools run inside OS-level filesystem containment. On Linux, [bubblewrap](https://github.com/containers/bubblewrap) creates a mount namespace where the entire filesystem is read-only except the agent's workspace and configured writable paths. On macOS, `sandbox-exec` enforces equivalent restrictions via SBPL profiles. Kernel-enforced, not string-filtered
+- **Dynamic sandbox mode** — sandbox settings are hot-reloadable. Toggle via the dashboard or API without restarting the agent
+- **Workspace isolation** — file tools canonicalize all paths and reject anything outside the agent's workspace. Symlinks that escape are blocked
 - **Leak detection** — a hook scans every tool argument before execution and every tool result after execution for secret patterns (API keys, tokens, PEM private keys) across plaintext, URL-encoded, base64, and hex encodings. Leaked secrets in arguments skip the tool call; leaked secrets in output terminate the agent
 - **Library injection blocking** — the exec tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, etc.) that could hijack child process loading
 - **SSRF protection** — the browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
 - **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, and `USER.md` are blocked at the application level
-- **Secret encryption** — credentials stored via the secrets system are encrypted at rest with AES-256-GCM
+- **Durable binary storage** — `tools/bin` directory on PATH survives hosted rollouts. Workers are instructed to install binaries there instead of ephemeral package manager locations
 
 ```toml
 [agents.sandbox]
 mode = "enabled"                              # "enabled" (default) or "disabled"
 writable_paths = ["/home/user/projects/myapp"] # additional writable dirs beyond workspace
+passthrough_env = ["CUSTOM_VAR"]              # forward specific env vars to workers
 ```
 
 ---
@@ -505,6 +520,8 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Memory bulletin and system observation                   |
 | [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                                |
 | [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
+| [Secrets](docs/content/docs/(configuration)/secrets.mdx)         | Credential storage, encryption, and output scrubbing     |
+| [Sandbox](docs/content/docs/(configuration)/sandbox.mdx)         | Process containment and environment sanitization         |
 | [Messaging](docs/content/docs/(messaging)/messaging.mdx)         | Adapter architecture (Discord, Slack, Telegram, Twitch, Webchat, webhook) |
 | [Discord Setup](docs/content/docs/(messaging)/discord-setup.mdx) | Discord bot setup guide                                  |
 | [Browser](docs/content/docs/(features)/browser.mdx)              | Headless Chrome for workers                              |

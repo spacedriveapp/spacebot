@@ -116,7 +116,7 @@ passthrough_env = ["GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN"]
 
 Each listed variable is read from the parent process environment at subprocess spawn time and injected into the worker's environment. Variables not in the list are stripped.
 
-When the secret store is available, `passthrough_env` is redundant -- credentials should be stored in the secret store, which injects tool secrets automatically. The field is additive and continues to work alongside the store.
+When the [secret store](/docs/secrets) is available, `passthrough_env` is redundant -- credentials should be stored in the secret store, which injects tool secrets automatically. The field is additive and continues to work alongside the store.
 
 ## Durable Binaries
 
@@ -216,6 +216,7 @@ The sandbox is one layer in a defense-in-depth model:
 | **Exec env var blocklist** | Blocks `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc. | Exec tool |
 | **Leak detection** | Regex scan of all tool output for secret patterns | All tools via SpacebotHook |
 | **Output scrubbing** | Exact-match redaction of known secret values | Worker output, status updates, OpenCode events |
+| **[Secret store](/docs/secrets)** | Categorized credential storage, config resolution, tool secret injection | All agents |
 | **Permissions system** | Application-level tool access control | All tools |
 
 The sandbox and permissions system are complementary. The [permissions system](/docs/permissions) controls which tools an agent can use and what paths the LLM is allowed to access at the application level. The sandbox enforces filesystem boundaries at the kernel level for subprocesses that are allowed to run.

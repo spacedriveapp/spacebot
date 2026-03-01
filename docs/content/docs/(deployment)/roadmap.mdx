@@ -71,9 +71,9 @@ Implement `SpacebotModel.stream()` with SSE parsing. The messaging adapters alre
 - Wire real values into `observe()` signal extraction
 - Implement CortexHook observation logic (anomaly detection, consolidation triggers)
 
-### Secrets Store
+### ~~Secrets Store~~ ✓ Shipped
 
-Encrypted credentials in redb with `DecryptedSecret` wrapper type. ChaCha20-Poly1305 AEAD with a local key file. All sensitive config values (`token`, `*_key`) encrypted at rest.
+Implemented. Per-agent credential storage in `secrets.redb` with two categories (system/tool), `secret:` config resolution, auto-migration from plaintext config, and optional AES-256-GCM encryption at rest with OS keystore integration. See [Secret Store](/docs/secrets).
 
 ### Cost Tracking
 
