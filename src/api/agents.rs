@@ -508,11 +508,36 @@ pub(super) async fn create_agent(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    let defaults = state.defaults_config.read().await;
-    let defaults = defaults.as_ref().ok_or_else(|| {
-        tracing::error!("defaults config not available");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    // Read defaults directly from the config we just wrote to disk rather than
+    // relying on the cached `defaults_config` which may be stale (e.g. if a
+    // provider was configured but the in-memory cache wasn't refreshed yet).
+    let disk_defaults = match crate::config::Config::load_from_path(&config_path) {
+        Ok(fresh_config) => {
+            // Also update the in-memory cache so subsequent operations
+            // (e.g. creating another agent) don't hit stale defaults.
+            state
+                .set_defaults_config(fresh_config.defaults.clone())
+                .await;
+            Some(fresh_config.defaults)
+        }
+        Err(error) => {
+            tracing::warn!(
+                %error,
+                "failed to reload config.toml for defaults; falling back to cached defaults"
+            );
+            None
+        }
+    };
+    let cached_defaults;
+    let defaults = if let Some(ref d) = disk_defaults {
+        d
+    } else {
+        cached_defaults = state.defaults_config.read().await;
+        cached_defaults.as_ref().ok_or_else(|| {
+            tracing::error!("defaults config not available");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+    };
 
     let raw_config = crate::config::AgentConfig {
         id: agent_id.clone(),
@@ -541,7 +566,6 @@ pub(super) async fn create_agent(
         cron: Vec::new(),
     };
     let agent_config = raw_config.resolve(&instance_dir, defaults);
-    let _ = defaults;
 
     for dir in [
         &agent_config.workspace,
@@ -627,7 +651,9 @@ pub(super) async fn create_agent(
             .clone()
     };
 
-    let defaults_for_runtime = {
+    let defaults_for_runtime = if let Some(d) = disk_defaults {
+        d
+    } else {
         let guard = state.defaults_config.read().await;
         guard
             .as_ref()

@@ -1077,6 +1077,10 @@ async fn run(
                     Ok(new_config)
                         if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
                     {
+                        // Refresh in-memory defaults so newly created agents
+                        // inherit the latest routing from the updated config.
+                        api_state.set_defaults_config(new_config.defaults.clone()).await;
+
                         // Rebuild LlmManager with the new keys
                         match spacebot::llm::LlmManager::with_instance_dir(
                             new_config.llm.clone(),

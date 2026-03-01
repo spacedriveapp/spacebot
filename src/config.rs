@@ -3137,6 +3137,55 @@ fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> 
     })
 }
 
+/// When `[defaults.routing]` is absent from the config file, pick routing
+/// defaults based on which provider the user actually has configured.  This
+/// avoids the common pitfall where a user sets up OpenRouter (or another
+/// non-Anthropic provider) but new agents still default to
+/// `anthropic/claude-sonnet-4` and every LLM call fails.
+///
+/// Provider priority: first-party Anthropic first, then major gateways,
+/// then smaller providers. If the user only has one provider configured
+/// this always picks the right one.
+fn infer_routing_from_providers(
+    providers: &std::collections::HashMap<String, ProviderConfig>,
+) -> Option<crate::llm::routing::RoutingConfig> {
+    const PRIORITY: &[&str] = &[
+        "anthropic",
+        "openrouter",
+        "kilo",
+        "openai",
+        "openai-chatgpt",
+        "deepseek",
+        "gemini",
+        "xai",
+        "groq",
+        "together",
+        "fireworks",
+        "mistral",
+        "zhipu",
+        "ollama",
+        "opencode-zen",
+        "opencode-go",
+        "nvidia",
+        "minimax",
+        "minimax-cn",
+        "moonshot",
+        "zai-coding-plan",
+    ];
+
+    for &name in PRIORITY {
+        if providers.contains_key(name) {
+            return Some(crate::llm::routing::defaults_for_provider(name));
+        }
+    }
+
+    // Fall back to the first provider in the map (covers custom providers).
+    providers
+        .keys()
+        .next()
+        .map(|name| crate::llm::routing::defaults_for_provider(name))
+}
+
 /// Resolve a TomlRoutingConfig against a base RoutingConfig.
 fn resolve_routing(toml: Option<TomlRoutingConfig>, base: &RoutingConfig) -> RoutingConfig {
     let Some(t) = toml else { return base.clone() };
@@ -3665,10 +3714,10 @@ impl Config {
         // Note: We allow boot without provider keys now. System starts in setup mode.
         // Agents are initialized later when keys are added via API.
 
-        // Env-only routing: check for env overrides on channel/worker models.
-        // SPACEBOT_MODEL overrides all process types at once; specific vars take precedence.
-        // ANTHROPIC_MODEL sets all anthropic/* models to the specified value.
-        let mut routing = RoutingConfig::default();
+        // Env-only routing: infer from configured providers, then apply env
+        // overrides.  This way users who only set OPENROUTER_API_KEY get
+        // openrouter/* routing instead of the hardcoded anthropic/* default.
+        let mut routing = infer_routing_from_providers(&llm.providers).unwrap_or_default();
         if let Ok(model) = std::env::var("SPACEBOT_MODEL") {
             routing.channel = model.clone();
             routing.branch = model.clone();
@@ -4202,8 +4251,18 @@ impl Config {
             .collect::<Result<Vec<_>>>()?;
 
         let base_defaults = DefaultsConfig::default();
+        // When `[defaults.routing]` is absent, infer sane routing from the
+        // first configured provider so new agents don't fall back to the
+        // hardcoded `anthropic/claude-sonnet-4` default (which fails if the
+        // user only has e.g. OpenRouter configured).
+        let base_routing = if toml.defaults.routing.is_none() {
+            infer_routing_from_providers(&llm.providers)
+                .unwrap_or_else(|| base_defaults.routing.clone())
+        } else {
+            base_defaults.routing.clone()
+        };
         let defaults = DefaultsConfig {
-            routing: resolve_routing(toml.defaults.routing, &base_defaults.routing),
+            routing: resolve_routing(toml.defaults.routing, &base_routing),
             max_concurrent_branches: toml
                 .defaults
                 .max_concurrent_branches

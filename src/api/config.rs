@@ -390,6 +390,10 @@ pub(super) async fn update_agent_config(
 
     match crate::config::Config::load_from_path(&config_path) {
         Ok(new_config) => {
+            // Keep in-memory defaults fresh so newly created agents inherit
+            // the latest routing values.
+            state.set_defaults_config(new_config.defaults.clone()).await;
+
             let runtime_configs = state.runtime_configs.load();
             let mcp_managers = state.mcp_managers.load();
             if let (Some(rc), Some(mcp_manager)) = (
