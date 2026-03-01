@@ -153,6 +153,9 @@ impl McpConnection {
                                 .with_label_values(&[&self.name, "connected"])
                                 .set(0);
                             m.mcp_connections
+                                .with_label_values(&[&self.name, "disconnected"])
+                                .set(0);
+                            m.mcp_connections
                                 .with_label_values(&[&self.name, "failed"])
                                 .set(1);
                             m.mcp_tools_registered
@@ -223,6 +226,9 @@ impl McpConnection {
                         .inc();
                     m.mcp_connections
                         .with_label_values(&[&self.name, "connected"])
+                        .set(0);
+                    m.mcp_connections
+                        .with_label_values(&[&self.name, "disconnected"])
                         .set(0);
                     m.mcp_connections
                         .with_label_values(&[&self.name, "failed"])
@@ -368,7 +374,7 @@ impl McpConnection {
             .map_err(service_error_to_anyhow);
 
         #[cfg(feature = "metrics")]
-        if result.is_ok() {
+        {
             let m = crate::telemetry::Metrics::global();
             let elapsed = call_start.elapsed().as_secs_f64();
             m.mcp_tool_calls_total

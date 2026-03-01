@@ -114,8 +114,8 @@ The `tier` label corresponds to the process type making the request: `channel`, 
 
 | Metric                                          | Type      | Labels                   | Description                         |
 | ----------------------------------------------- | --------- | ------------------------ | ----------------------------------- |
-| `spacebot_http_requests_total`                  | Counter   | method, handler, status  | Total HTTP API requests             |
-| `spacebot_http_request_duration_seconds`        | Histogram | method, handler          | HTTP request duration               |
+| `spacebot_http_requests_total`                  | Counter   | method, path, status     | Total HTTP API requests             |
+| `spacebot_http_request_duration_seconds`        | Histogram | method, path             | HTTP request duration               |
 
 ### Cron & Ingestion Metrics
 
@@ -168,7 +168,7 @@ histogram_quantile(0.99, rate(spacebot_memory_operation_duration_seconds_bucket[
 
 **API latency by endpoint (p95):**
 ```promql
-histogram_quantile(0.95, sum by (handler, le) (rate(spacebot_http_request_duration_seconds_bucket[5m])))
+histogram_quantile(0.95, sum by (path, le) (rate(spacebot_http_request_duration_seconds_bucket[5m])))
 ```
 
 **Active branches and workers:**

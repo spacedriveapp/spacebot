@@ -373,7 +373,11 @@ impl CompletionModel for SpacebotModel {
             let elapsed = start.elapsed().as_secs_f64();
             let agent_label = self.agent_id.as_deref().unwrap_or("unknown");
             let tier_label = self.process_type.as_deref().unwrap_or("unknown");
-            let worker_label = self.worker_type.as_deref().unwrap_or("unknown");
+            let worker_label = match (tier_label, self.worker_type.as_deref()) {
+                ("worker", Some(wt)) => wt,
+                ("worker", None) => "unknown",
+                _ => "",
+            };
             let metrics = crate::telemetry::Metrics::global();
             metrics
                 .llm_requests_total
