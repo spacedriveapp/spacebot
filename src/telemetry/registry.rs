@@ -377,10 +377,7 @@ impl Metrics {
         .expect("hardcoded metric descriptor");
 
         let mcp_reconnects_total = IntCounterVec::new(
-            Opts::new(
-                "spacebot_mcp_reconnects_total",
-                "MCP reconnection attempts",
-            ),
+            Opts::new("spacebot_mcp_reconnects_total", "MCP reconnection attempts"),
             &["server_name"],
         )
         .expect("hardcoded metric descriptor");
@@ -400,9 +397,7 @@ impl Metrics {
                 "spacebot_mcp_tool_call_duration_seconds",
                 "MCP tool call duration",
             )
-            .buckets(vec![
-                0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0,
-            ]),
+            .buckets(vec![0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0]),
             &["server_name", "tool_name"],
         )
         .expect("hardcoded metric descriptor");
@@ -428,9 +423,7 @@ impl Metrics {
                 "spacebot_message_handling_duration_seconds",
                 "Message handling duration",
             )
-            .buckets(vec![
-                0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0,
-            ]),
+            .buckets(vec![0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0, 120.0]),
             &["agent_id", "channel_type"],
         )
         .expect("hardcoded metric descriptor");
@@ -500,10 +493,7 @@ impl Metrics {
         .expect("hardcoded metric descriptor");
 
         let context_overflow_total = IntCounterVec::new(
-            Opts::new(
-                "spacebot_context_overflow_total",
-                "Context overflow events",
-            ),
+            Opts::new("spacebot_context_overflow_total", "Context overflow events"),
             &["agent_id", "process_type"],
         )
         .expect("hardcoded metric descriptor");

@@ -344,12 +344,26 @@ fn normalize_api_path(path: &str) -> String {
             let parent = parts.get(i - 1).copied().unwrap_or("");
             match parent {
                 "secrets" | "groups" | "humans" | "links" => normalized.push("{name}"),
-                "agents" if !matches!(
-                    *part,
-                    "mcp" | "warmup" | "overview" | "workers" | "memories"
-                        | "profile" | "identity" | "config" | "cron" | "tasks"
-                        | "ingest" | "skills" | "tools"
-                ) => normalized.push("{id}"),
+                "agents"
+                    if !matches!(
+                        *part,
+                        "mcp"
+                            | "warmup"
+                            | "overview"
+                            | "workers"
+                            | "memories"
+                            | "profile"
+                            | "identity"
+                            | "config"
+                            | "cron"
+                            | "tasks"
+                            | "ingest"
+                            | "skills"
+                            | "tools"
+                    ) =>
+                {
+                    normalized.push("{id}")
+                }
                 _ => normalized.push(part),
             }
         } else {

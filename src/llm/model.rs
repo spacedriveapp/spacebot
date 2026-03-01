@@ -377,21 +377,11 @@ impl CompletionModel for SpacebotModel {
             let metrics = crate::telemetry::Metrics::global();
             metrics
                 .llm_requests_total
-                .with_label_values(&[
-                    agent_label,
-                    &self.full_model_name,
-                    tier_label,
-                    worker_label,
-                ])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
                 .inc();
             metrics
                 .llm_request_duration_seconds
-                .with_label_values(&[
-                    agent_label,
-                    &self.full_model_name,
-                    tier_label,
-                    worker_label,
-                ])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
                 .observe(elapsed);
 
             if let Ok(ref response) = result {

@@ -584,9 +584,7 @@ impl McpManager {
         #[cfg(feature = "metrics")]
         if result.is_ok() {
             let m = crate::telemetry::Metrics::global();
-            m.mcp_reconnects_total
-                .with_label_values(&[name])
-                .inc();
+            m.mcp_reconnects_total.with_label_values(&[name]).inc();
         }
 
         result

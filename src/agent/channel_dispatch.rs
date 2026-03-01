@@ -647,8 +647,7 @@ pub(crate) fn spawn_worker_task<F>(
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
     secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
-    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
-    worker_type: &'static str,
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))] worker_type: &'static str,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where

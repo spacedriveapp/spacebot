@@ -1093,8 +1093,7 @@ impl Channel {
         // Increment messages_received_total for each non-system message in the batch
         #[cfg(feature = "metrics")]
         {
-            let received_count =
-                messages.iter().filter(|m| m.source != "system").count() as u64;
+            let received_count = messages.iter().filter(|m| m.source != "system").count() as u64;
             if received_count > 0 {
                 crate::telemetry::Metrics::global()
                     .messages_received_total
@@ -2055,14 +2054,21 @@ impl Channel {
                                         #[cfg(feature = "metrics")]
                                         metrics
                                             .messages_sent_total
-                                            .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                            .with_label_values(&[
+                                                metrics_agent_id,
+                                                metrics_channel_type,
+                                            ])
                                             .inc();
                                     }
                                     Err(error) => {
                                         #[cfg(feature = "metrics")]
                                         metrics
                                             .channel_errors_total
-                                            .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                            .with_label_values(&[
+                                                metrics_agent_id,
+                                                metrics_channel_type,
+                                                "send_failed",
+                                            ])
                                             .inc();
                                         tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
                                     }
@@ -2136,14 +2142,21 @@ impl Channel {
                                         #[cfg(feature = "metrics")]
                                         metrics
                                             .messages_sent_total
-                                            .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                            .with_label_values(&[
+                                                metrics_agent_id,
+                                                metrics_channel_type,
+                                            ])
                                             .inc();
                                     }
                                     Err(error) => {
                                         #[cfg(feature = "metrics")]
                                         metrics
                                             .channel_errors_total
-                                            .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                            .with_label_values(&[
+                                                metrics_agent_id,
+                                                metrics_channel_type,
+                                                "send_failed",
+                                            ])
                                             .inc();
                                         tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
                                     }
@@ -2208,14 +2221,21 @@ impl Channel {
                                     #[cfg(feature = "metrics")]
                                     metrics
                                         .messages_sent_total
-                                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                        .with_label_values(&[
+                                            metrics_agent_id,
+                                            metrics_channel_type,
+                                        ])
                                         .inc();
                                 }
                                 Err(error) => {
                                     #[cfg(feature = "metrics")]
                                     metrics
                                         .channel_errors_total
-                                        .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                        .with_label_values(&[
+                                            metrics_agent_id,
+                                            metrics_channel_type,
+                                            "send_failed",
+                                        ])
                                         .inc();
                                     tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
                                 }

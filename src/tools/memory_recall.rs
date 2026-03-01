@@ -257,7 +257,11 @@ impl Tool for MemoryRecallTool {
         #[cfg(feature = "metrics")]
         {
             let agent_id = self.memory_search.store().agent_id();
-            let agent_label = if agent_id.is_empty() { "unknown" } else { agent_id };
+            let agent_label = if agent_id.is_empty() {
+                "unknown"
+            } else {
+                agent_id
+            };
             crate::telemetry::Metrics::global()
                 .memory_reads_total
                 .with_label_values(&[agent_label])
