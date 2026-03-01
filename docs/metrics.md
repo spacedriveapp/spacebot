@@ -51,7 +51,7 @@ All metrics are prefixed with `spacebot_`. For detailed per-metric documentation
 | `spacebot_llm_tokens_total`             | Counter   | agent_id, model, tier, direction, worker_type | Token counts (input/output/cached) |
 | `spacebot_llm_estimated_cost_dollars`   | Counter   | agent_id, model, tier, worker_type         | Estimated cost in USD              |
 
-The `tier` label corresponds to the process type making the request: `channel`, `branch`, `worker`, `compactor`, or `cortex`. The `worker_type` label identifies the worker variant: `builtin`, `opencode`, or `ingestion`.
+The `tier` label corresponds to the process type making the request: `channel`, `branch`, `worker`, `compactor`, or `cortex`. The `worker_type` label identifies the worker variant: `builtin`, `opencode`, or `ingestion`; non-worker tiers emit an empty string.
 
 ### Tool Metrics
 
