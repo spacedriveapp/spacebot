@@ -1,4 +1,4 @@
 {
   "title": "Configuration",
-  "pages": ["config", "permissions"]
+  "pages": ["config", "sandbox", "permissions"]
 }

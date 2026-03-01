@@ -23,6 +23,7 @@ mod skills;
 mod state;
 mod system;
 mod tasks;
+mod tools;
 mod webchat;
 mod workers;
 

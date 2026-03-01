@@ -71,9 +71,12 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        agent_config.sandbox.clone(),
+    ));
     let sandbox = Arc::new(
         spacebot::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            sandbox_config,
             agent_config.workspace.clone(),
             &config.instance_dir,
             agent_config.data_dir.clone(),

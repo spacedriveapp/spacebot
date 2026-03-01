@@ -71,9 +71,12 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        agent_config.sandbox.clone(),
+    ));
     let sandbox = Arc::new(
         spacebot::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            sandbox_config,
             agent_config.workspace.clone(),
             &config.instance_dir,
             agent_config.data_dir.clone(),
@@ -167,6 +170,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
             None,
             None,
             None,
+            false,
         )
         .expect("failed to render channel prompt")
 }
@@ -323,7 +327,14 @@ async fn dump_worker_context() {
     let instance_dir = rc.instance_dir.to_string_lossy();
     let workspace_dir = rc.workspace_dir.to_string_lossy();
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+        )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
     print_stats("System prompt", &worker_prompt);
@@ -488,7 +499,14 @@ async fn dump_all_contexts() {
 
     // ── Worker ──
     let worker_prompt = prompt_engine
-        .render_worker_prompt(&instance_dir, &workspace_dir)
+        .render_worker_prompt(
+            &instance_dir,
+            &workspace_dir,
+            false,
+            false,
+            Vec::new(),
+            Vec::new(),
+        )
         .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
     let brave_search_key = (**rc.brave_search_key.load()).clone();

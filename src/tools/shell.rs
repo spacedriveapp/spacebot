@@ -125,10 +125,8 @@ impl Tool for ShellTool {
         };
 
         let mut cmd = if cfg!(target_os = "windows") {
-            let mut c = Command::new("cmd");
-            c.arg("/C").arg(&args.command);
-            c.current_dir(&working_dir);
-            c
+            self.sandbox
+                .wrap("cmd", &["/C", &args.command], &working_dir)
         } else {
             self.sandbox
                 .wrap("sh", &["-c", &args.command], &working_dir)
