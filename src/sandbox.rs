@@ -719,7 +719,8 @@ impl Sandbox {
   (require-all (path "/dev/null") (vnode-type CHARACTER-DEVICE)))
 (allow sysctl-read)
 (allow mach-lookup
-  (global-name "com.apple.system.opendirectoryd.libinfo"))
+  (global-name "com.apple.system.opendirectoryd.libinfo")
+  (global-name "com.apple.trustd"))
 (allow ipc-posix-sem)
 (allow pseudo-tty)
 (allow network*)
