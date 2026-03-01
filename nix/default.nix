@@ -37,20 +37,17 @@
     bunNix = generatedFrontendBunNix;
   };
 
+  frontendBaseInstallFlags = [
+    "--frozen-lockfile"
+    "--ignore-scripts"
+    "--no-progress"
+    "--linker=hoisted"
+  ];
+
   frontendInstallFlags =
-    if stdenv.hostPlatform.isDarwin
-    then [
-      "--frozen-lockfile"
-      "--ignore-scripts"
-      "--no-progress"
-      "--linker=hoisted"
+    frontendBaseInstallFlags
+    ++ lib.optionals stdenv.hostPlatform.isDarwin [
       "--backend=copyfile"
-    ]
-    else [
-      "--frozen-lockfile"
-      "--ignore-scripts"
-      "--no-progress"
-      "--linker=hoisted"
     ];
 
   frontend = stdenv.mkDerivation {
