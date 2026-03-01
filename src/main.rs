@@ -49,6 +49,9 @@ enum Command {
     /// Manage authentication
     #[command(subcommand)]
     Auth(AuthCommand),
+    /// Manage secrets stored in the running instance
+    #[command(subcommand)]
+    Secrets(SecretsCommand),
 }
 
 #[derive(Subcommand)]
@@ -115,6 +118,64 @@ enum SkillCommand {
     },
 }
 
+#[derive(Subcommand)]
+enum SecretsCommand {
+    /// Show store state and secret counts
+    Status,
+    /// List all secrets (name + category)
+    List,
+    /// Add or update a secret
+    Set {
+        /// Secret name (e.g. GH_TOKEN)
+        name: String,
+        /// Secret category (system or tool)
+        #[arg(short, long)]
+        category: Option<String>,
+        /// Read value from stdin instead of interactive prompt
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Delete a secret
+    Delete {
+        /// Secret name
+        name: String,
+    },
+    /// Show secret metadata and config references
+    Info {
+        /// Secret name
+        name: String,
+    },
+    /// Auto-migrate plaintext keys from config.toml
+    Migrate,
+    /// Enable encryption (generate master key, encrypt all secrets)
+    Encrypt,
+    /// Unlock encrypted store
+    Unlock {
+        /// Read master key from stdin instead of interactive prompt
+        #[arg(long)]
+        stdin: bool,
+    },
+    /// Lock encrypted store (clear key from memory)
+    Lock,
+    /// Rotate master key (encrypted mode only)
+    Rotate,
+    /// Export all secrets to a backup file
+    Export {
+        /// Output file path
+        #[arg(short, long)]
+        output: std::path::PathBuf,
+    },
+    /// Import secrets from a backup file
+    Import {
+        /// Input file path
+        #[arg(short, long)]
+        input: std::path::PathBuf,
+        /// Overwrite existing secrets with same name
+        #[arg(long)]
+        overwrite: bool,
+    },
+}
+
 /// Tracks an active conversation channel and its message sender.
 struct ActiveChannel {
     message_tx: mpsc::Sender<spacebot::InboundMessage>,
@@ -144,6 +205,7 @@ fn main() -> anyhow::Result<()> {
         Command::Status => cmd_status(),
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
         Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
+        Command::Secrets(secrets_cmd) => cmd_secrets(cli.config, secrets_cmd),
     }
 }
 
@@ -169,6 +231,10 @@ fn cmd_start(
     } else {
         None
     };
+
+    // Open the instance-level secrets store so `secret:` references in config.toml
+    // resolve during Config::load(). The store is shared with all agents.
+    let bootstrapped_store = bootstrap_secrets_store(&resolved_config_path);
 
     // Validate config loads successfully before forking
     let config = load_config(&resolved_config_path)?;
@@ -202,7 +268,7 @@ fn cmd_start(
             spacebot::daemon::init_background_tracing(&paths, debug, &config.telemetry)
         };
 
-        run(config, foreground, otel_provider).await
+        run(config, foreground, otel_provider, bootstrapped_store).await
     })
 }
 
@@ -388,6 +454,475 @@ fn cmd_auth(config_path: Option<std::path::PathBuf>, auth_cmd: AuthCommand) -> a
             }
         }
     })
+}
+
+fn cmd_secrets(
+    config_path: Option<std::path::PathBuf>,
+    secrets_cmd: SecretsCommand,
+) -> anyhow::Result<()> {
+    // Bootstrap the secrets store so `secret:` references in config resolve.
+    bootstrap_secrets_store(&config_path);
+
+    let config = load_config(&config_path)?;
+    let api_base = format!("http://{}:{}/api", config.api.bind, config.api.port);
+    let auth_token = config.api.auth_token.clone();
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("failed to build tokio runtime")?;
+
+    runtime.block_on(async {
+        let client = reqwest::Client::new();
+
+        match secrets_cmd {
+            SecretsCommand::Status => {
+                let response =
+                    secrets_api_get(&client, &api_base, &auth_token, "secrets/status").await?;
+                let body: serde_json::Value = response.json().await?;
+                eprintln!(
+                    "State:          {}",
+                    body["state"].as_str().unwrap_or("unknown")
+                );
+                eprintln!(
+                    "Encrypted:      {}",
+                    body["encrypted"].as_bool().unwrap_or(false)
+                );
+                eprintln!(
+                    "Total secrets:  {}",
+                    body["secret_count"].as_u64().unwrap_or(0)
+                );
+                eprintln!(
+                    "  System:       {}",
+                    body["system_count"].as_u64().unwrap_or(0)
+                );
+                eprintln!(
+                    "  Tool:         {}",
+                    body["tool_count"].as_u64().unwrap_or(0)
+                );
+                if body["platform_managed"].as_bool().unwrap_or(false) {
+                    eprintln!("  Managed by:   platform");
+                }
+                Ok(())
+            }
+            SecretsCommand::List => {
+                let response = secrets_api_get(&client, &api_base, &auth_token, "secrets").await?;
+                let body: serde_json::Value = response.json().await?;
+                let secrets = body["secrets"].as_array();
+                match secrets {
+                    Some(list) if !list.is_empty() => {
+                        eprintln!("{:<30} {:<10} UPDATED", "NAME", "CATEGORY");
+                        for secret in list {
+                            let name = secret["name"].as_str().unwrap_or("");
+                            let category = secret["category"].as_str().unwrap_or("");
+                            let updated = secret["updated_at"].as_str().unwrap_or("");
+                            // Truncate ISO timestamp to date + time.
+                            let short_date = &updated[..updated.len().min(16)];
+                            eprintln!("{:<30} {:<10} {}", name, category, short_date);
+                        }
+                    }
+                    _ => {
+                        eprintln!("No secrets stored.");
+                    }
+                }
+                Ok(())
+            }
+            SecretsCommand::Set {
+                name,
+                category,
+                stdin,
+            } => {
+                let value = if stdin {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf.trim_end().to_string()
+                } else {
+                    dialoguer::Password::new()
+                        .with_prompt("Enter value")
+                        .interact()
+                        .context("failed to read secret value")?
+                };
+
+                if value.is_empty() {
+                    anyhow::bail!("secret value cannot be empty");
+                }
+
+                let mut body = serde_json::json!({ "value": value });
+                if let Some(cat) = &category {
+                    body["category"] = serde_json::json!(cat);
+                }
+
+                let response = secrets_api_put(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    &format!("secrets/{name}"),
+                    &body,
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!(
+                        "Secret {} saved ({}).",
+                        result["name"].as_str().unwrap_or(&name),
+                        result["category"].as_str().unwrap_or("unknown")
+                    );
+                    if result["reload_required"].as_bool().unwrap_or(false) {
+                        eprintln!(
+                            "Note: Reload config or restart for the new value to take effect."
+                        );
+                    }
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("unknown error"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Delete { name } => {
+                let response =
+                    secrets_api_delete(&client, &api_base, &auth_token, &format!("secrets/{name}"))
+                        .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!("Deleted {}.", result["deleted"].as_str().unwrap_or(&name));
+                    if let Some(warning) = result["warning"].as_str() {
+                        eprintln!("Warning: {warning}");
+                    }
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("unknown error"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Info { name } => {
+                let response = secrets_api_get(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    &format!("secrets/{name}/info"),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let info: serde_json::Value = response.json().await?;
+                    eprintln!("Name:     {}", info["name"].as_str().unwrap_or(""));
+                    eprintln!("Category: {}", info["category"].as_str().unwrap_or(""));
+                    eprintln!("Created:  {}", info["created_at"].as_str().unwrap_or(""));
+                    eprintln!("Updated:  {}", info["updated_at"].as_str().unwrap_or(""));
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("secret not found"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Migrate => {
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/migrate",
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!(
+                        "{}",
+                        result["message"].as_str().unwrap_or("Migration complete.")
+                    );
+                    if let Some(migrated) = result["migrated"].as_array() {
+                        for item in migrated {
+                            eprintln!(
+                                "  {} -> {} ({})",
+                                item["config_key"].as_str().unwrap_or(""),
+                                item["secret_name"].as_str().unwrap_or(""),
+                                item["category"].as_str().unwrap_or(""),
+                            );
+                        }
+                    }
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("migration failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Encrypt => {
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/encrypt",
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!();
+                    eprintln!("Encryption enabled.");
+                    eprintln!();
+                    eprintln!(
+                        "Master key: {}",
+                        result["master_key"].as_str().unwrap_or("")
+                    );
+                    eprintln!();
+                    eprintln!("IMPORTANT: Save this master key. You will need it to unlock");
+                    eprintln!("the secret store after a reboot (Linux) or if the Keychain");
+                    eprintln!("is reset (macOS). This is the only time the key will be shown.");
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("encryption failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Unlock { stdin } => {
+                let master_key = if stdin {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf.trim().to_string()
+                } else {
+                    dialoguer::Password::new()
+                        .with_prompt("Enter master key")
+                        .interact()
+                        .context("failed to read master key")?
+                };
+
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/unlock",
+                    &serde_json::json!({ "master_key": master_key }),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!("{}", result["message"].as_str().unwrap_or("Unlocked."));
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("unlock failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Lock => {
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/lock",
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!("{}", result["message"].as_str().unwrap_or("Locked."));
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("lock failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Rotate => {
+                eprintln!("WARNING: This will invalidate your current master key.");
+                eprintln!("You will need to save the new key for future unlocks.");
+                eprint!("Continue? [y/N]: ");
+                let mut confirm = String::new();
+                std::io::BufRead::read_line(&mut std::io::stdin().lock(), &mut confirm)?;
+                if !confirm.trim().eq_ignore_ascii_case("y") {
+                    eprintln!("Cancelled.");
+                    return Ok(());
+                }
+
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/rotate",
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!();
+                    eprintln!(
+                        "New master key: {}",
+                        result["master_key"].as_str().unwrap_or("")
+                    );
+                    eprintln!();
+                    eprintln!("IMPORTANT: Save this new key. Your old key no longer works.");
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("rotation failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Export { output } => {
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/export",
+                    &serde_json::json!({}),
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let body: serde_json::Value = response.json().await?;
+                    let count = body["count"].as_u64().unwrap_or(0);
+                    let content = serde_json::to_string_pretty(&body)
+                        .context("failed to serialize export data")?;
+                    // Write with restrictive permissions — this file contains
+                    // plaintext secrets.
+                    #[cfg(unix)]
+                    {
+                        use std::io::Write as _;
+                        use std::os::unix::fs::OpenOptionsExt as _;
+                        let mut file = std::fs::OpenOptions::new()
+                            .write(true)
+                            .create(true)
+                            .truncate(true)
+                            .mode(0o600)
+                            .open(&output)
+                            .with_context(|| format!("failed to create {}", output.display()))?;
+                        file.write_all(content.as_bytes())
+                            .with_context(|| format!("failed to write {}", output.display()))?;
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        std::fs::write(&output, content)
+                            .with_context(|| format!("failed to write {}", output.display()))?;
+                    }
+                    eprintln!("Exported {count} secrets to {}", output.display());
+
+                    if let Some(warning) = body["warning"].as_str() {
+                        eprintln!();
+                        eprintln!("WARNING: {warning}");
+                    }
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("export failed"));
+                }
+                Ok(())
+            }
+            SecretsCommand::Import { input, overwrite } => {
+                let content = std::fs::read_to_string(&input)
+                    .with_context(|| format!("failed to read {}", input.display()))?;
+                let mut import_data: serde_json::Value = serde_json::from_str(&content)
+                    .context("failed to parse backup file as JSON")?;
+
+                import_data["overwrite"] = serde_json::json!(overwrite);
+
+                let response = secrets_api_post(
+                    &client,
+                    &api_base,
+                    &auth_token,
+                    "secrets/import",
+                    &import_data,
+                )
+                .await?;
+
+                if response.status().is_success() {
+                    let result: serde_json::Value = response.json().await?;
+                    eprintln!(
+                        "{}",
+                        result["message"].as_str().unwrap_or("Import complete.")
+                    );
+                    if let Some(skipped) = result["skipped"].as_array()
+                        && !skipped.is_empty()
+                    {
+                        for name in skipped {
+                            eprintln!(
+                                "  {} -- kept existing (use --overwrite to replace)",
+                                name.as_str().unwrap_or("")
+                            );
+                        }
+                    }
+                } else {
+                    let error: serde_json::Value = response.json().await?;
+                    anyhow::bail!("{}", error["error"].as_str().unwrap_or("import failed"));
+                }
+                Ok(())
+            }
+        }
+    })
+}
+
+/// Build an authenticated HTTP request to the control API.
+fn secrets_api_request(
+    client: &reqwest::Client,
+    method: reqwest::Method,
+    api_base: &str,
+    auth_token: &Option<String>,
+    path: &str,
+) -> reqwest::RequestBuilder {
+    let url = format!("{api_base}/{path}");
+    let mut request = client.request(method, &url);
+    if let Some(token) = auth_token {
+        request = request.bearer_auth(token);
+    }
+    request
+}
+
+async fn secrets_api_get(
+    client: &reqwest::Client,
+    api_base: &str,
+    auth_token: &Option<String>,
+    path: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let response = secrets_api_request(client, reqwest::Method::GET, api_base, auth_token, path)
+        .send()
+        .await
+        .context("failed to connect to spacebot API — is the daemon running?")?;
+    Ok(response)
+}
+
+async fn secrets_api_post(
+    client: &reqwest::Client,
+    api_base: &str,
+    auth_token: &Option<String>,
+    path: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<reqwest::Response> {
+    let response = secrets_api_request(client, reqwest::Method::POST, api_base, auth_token, path)
+        .json(body)
+        .send()
+        .await
+        .context("failed to connect to spacebot API — is the daemon running?")?;
+    Ok(response)
+}
+
+async fn secrets_api_put(
+    client: &reqwest::Client,
+    api_base: &str,
+    auth_token: &Option<String>,
+    path: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<reqwest::Response> {
+    let response = secrets_api_request(client, reqwest::Method::PUT, api_base, auth_token, path)
+        .json(body)
+        .send()
+        .await
+        .context("failed to connect to spacebot API — is the daemon running?")?;
+    Ok(response)
+}
+
+async fn secrets_api_delete(
+    client: &reqwest::Client,
+    api_base: &str,
+    auth_token: &Option<String>,
+    path: &str,
+) -> anyhow::Result<reqwest::Response> {
+    let response = secrets_api_request(client, reqwest::Method::DELETE, api_base, auth_token, path)
+        .send()
+        .await
+        .context("failed to connect to spacebot API — is the daemon running?")?;
+    Ok(response)
 }
 
 fn cmd_skill(
@@ -587,6 +1122,188 @@ fn load_config(
     }
 }
 
+/// Pre-open secrets stores before config loading so `secret:` references in
+/// config.toml can resolve.
+///
+/// Config resolution happens in `Config::load()`, which calls `resolve_env_value()`
+/// for every credential field. That function checks the thread-local
+/// `RESOLVE_SECRETS_STORE` for `secret:` prefixed values. Without this bootstrap,
+/// all `secret:` references resolve to `None` and the config fails validation
+/// (e.g., messaging adapters see empty tokens and error out).
+///
+/// Returns the pre-opened stores keyed by agent ID. These are reused later in
+/// `initialize_agents()` to avoid double-opening the redb files.
+/// Keystore identifier for the instance-level master key.
+const KEYSTORE_INSTANCE_ID: &str = "instance";
+
+/// Open the instance-level secrets store at `<instance_dir>/data/secrets.redb`
+/// before config loading so that `secret:` references in config.toml resolve.
+///
+/// If no instance-level store exists but per-agent stores do (from the previous
+/// per-agent model), secrets are migrated from the first non-empty agent store.
+fn bootstrap_secrets_store(
+    config_path: &Option<std::path::PathBuf>,
+) -> Option<Arc<spacebot::secrets::store::SecretsStore>> {
+    // Probe kernel keyring support before any workers spawn. If keyctl is
+    // blocked (restrictive seccomp, gVisor, etc.), worker keyring isolation
+    // is disabled but workers still start normally.
+    spacebot::secrets::keystore::probe_keyring_support();
+
+    let instance_dir = if let Some(path) = config_path {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    } else {
+        spacebot::config::Config::default_instance_dir()
+    };
+
+    let data_dir = instance_dir.join("data");
+    if let Err(error) = std::fs::create_dir_all(&data_dir) {
+        eprintln!("warning: failed to create instance data directory: {error}");
+        return None;
+    }
+
+    let secrets_path = data_dir.join("secrets.redb");
+    let is_new_store = !secrets_path.exists();
+
+    let store = match spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+        Ok(store) => Arc::new(store),
+        Err(error) => {
+            eprintln!("warning: failed to open secrets store: {error}");
+            return None;
+        }
+    };
+
+    // Migrate from legacy per-agent stores if the instance store is brand new.
+    if is_new_store {
+        migrate_legacy_agent_stores(&instance_dir, &store);
+    }
+
+    // Try to auto-unlock if encrypted.
+    if store.is_encrypted() {
+        let keystore = spacebot::secrets::keystore::platform_keystore();
+
+        // Hosted: check tmpfs-injected key.
+        let tmpfs_key_path = std::path::Path::new("/run/spacebot/master_key");
+        let master_key = if tmpfs_key_path.exists() {
+            std::fs::read(tmpfs_key_path).ok().inspect(|key| {
+                if let Err(error) = std::fs::remove_file(tmpfs_key_path) {
+                    tracing::warn!(%error, "failed to remove tmpfs master key — key may remain accessible");
+                }
+                if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, key) {
+                    tracing::warn!(%error, "failed to persist master key to OS credential store");
+                }
+            })
+        } else {
+            // Try instance-level key first, then fall back to legacy agent keys.
+            keystore
+                .load_key(KEYSTORE_INSTANCE_ID)
+                .ok()
+                .flatten()
+                .or_else(|| load_legacy_keystore_key(&instance_dir))
+        };
+
+        if let Some(key) = master_key
+            && let Err(error) = store.unlock(&key)
+        {
+            tracing::warn!(%error, "failed to unlock secret store — secrets will be inaccessible");
+        }
+    }
+
+    // Set the store into the thread-local for config resolution.
+    spacebot::config::set_resolve_secrets_store(store.clone());
+
+    Some(store)
+}
+
+/// Migrate secrets from legacy per-agent redb stores into the new instance-level
+/// store. Only runs once when the instance-level store is first created.
+fn migrate_legacy_agent_stores(
+    instance_dir: &std::path::Path,
+    target_store: &spacebot::secrets::store::SecretsStore,
+) {
+    let agents_dir = instance_dir.join("agents");
+    let entries = match std::fs::read_dir(&agents_dir) {
+        Ok(entries) => entries,
+        Err(_) => return,
+    };
+
+    let mut total_migrated = 0usize;
+
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let secrets_path = entry.path().join("data").join("secrets.redb");
+        if !secrets_path.exists() {
+            continue;
+        }
+
+        // Open the legacy agent store (read-only access).
+        let legacy_store = match spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+            Ok(store) => store,
+            Err(_) => continue,
+        };
+
+        // If the legacy store is encrypted, try to unlock it with OS keystore.
+        if legacy_store.is_encrypted() {
+            let agent_id = entry.file_name().to_string_lossy().to_string();
+            let keystore = spacebot::secrets::keystore::platform_keystore();
+            if let Some(key) = keystore.load_key(&agent_id).ok().flatten() {
+                let _ = legacy_store.unlock(&key);
+            } else {
+                continue; // Can't read encrypted store without key.
+            }
+        }
+
+        // Export all secrets from the legacy store.
+        let export = match legacy_store.export_all() {
+            Ok(export) => export,
+            Err(_) => continue,
+        };
+
+        // Import into the target store (don't overwrite — first agent wins for
+        // duplicates, which is fine since all agents had the same secrets).
+        match target_store.import_all(&export, false) {
+            Ok(result) => {
+                total_migrated += result.imported;
+            }
+            Err(error) => {
+                eprintln!(
+                    "warning: failed to migrate secrets from {}: {error}",
+                    secrets_path.display()
+                );
+            }
+        }
+    }
+
+    if total_migrated > 0 {
+        eprintln!(
+            "info: migrated {total_migrated} secrets from legacy per-agent stores to instance store"
+        );
+    }
+}
+
+/// Try to load a master key from legacy per-agent keystore entries.
+fn load_legacy_keystore_key(instance_dir: &std::path::Path) -> Option<Vec<u8>> {
+    let agents_dir = instance_dir.join("agents");
+    let entries = std::fs::read_dir(&agents_dir).ok()?;
+    let keystore = spacebot::secrets::keystore::platform_keystore();
+
+    for entry in entries.flatten() {
+        if !entry.file_type().is_ok_and(|ft| ft.is_dir()) {
+            continue;
+        }
+        let agent_id = entry.file_name().to_string_lossy().to_string();
+        if let Ok(Some(key)) = keystore.load_key(&agent_id) {
+            // Migrate the key to the instance-level keystore entry.
+            let _ = keystore.store_key(KEYSTORE_INSTANCE_ID, &key);
+            return Some(key);
+        }
+    }
+    None
+}
+
 fn has_provider_credentials(
     llm_config: &spacebot::config::LlmConfig,
     instance_dir: &std::path::Path,
@@ -600,6 +1317,7 @@ async fn run(
     config: spacebot::config::Config,
     foreground: bool,
     otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    bootstrapped_store: Option<Arc<spacebot::secrets::store::SecretsStore>>,
 ) -> anyhow::Result<()> {
     let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
 
@@ -771,6 +1489,7 @@ async fn run(
             &mut telegram_permissions,
             &mut twitch_permissions,
             agent_links.clone(),
+            &bootstrapped_store,
         )
         .await?;
         agents_initialized = true;
@@ -1077,6 +1796,10 @@ async fn run(
                     Ok(new_config)
                         if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
                     {
+                        // Refresh in-memory defaults so newly created agents
+                        // inherit the latest routing from the updated config.
+                        api_state.set_defaults_config(new_config.defaults.clone()).await;
+
                         // Rebuild LlmManager with the new keys
                         match spacebot::llm::LlmManager::with_instance_dir(
                             new_config.llm.clone(),
@@ -1109,6 +1832,7 @@ async fn run(
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
                                     agent_links.clone(),
+                                    &bootstrapped_store,
                                 ).await {
                                     Ok(()) => {
                                         agents_initialized = true;
@@ -1242,6 +1966,7 @@ async fn initialize_agents(
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
+    bootstrapped_store: &Option<Arc<spacebot::secrets::store::SecretsStore>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
@@ -1372,6 +2097,12 @@ async fn initialize_agents(
             tracing::warn!(%error, agent = %agent_config.id, "failed to set worker_log_mode from config");
         }
 
+        // Share the instance-level secrets store with this agent.
+        if let Some(secrets_store) = bootstrapped_store {
+            runtime_config.set_secrets(secrets_store.clone());
+            spacebot::config::set_resolve_secrets_store(secrets_store.clone());
+        }
+
         watcher_agents.push((
             agent_config.id.clone(),
             agent_config.workspace.clone(),
@@ -1381,13 +2112,18 @@ async fn initialize_agents(
 
         let sandbox = std::sync::Arc::new(
             spacebot::sandbox::Sandbox::new(
-                &agent_config.sandbox,
+                runtime_config.sandbox.clone(),
                 agent_config.workspace.clone(),
                 &config.instance_dir,
                 agent_config.data_dir.clone(),
             )
             .await,
         );
+
+        // Wire the instance-level secrets store into the sandbox for tool secret injection.
+        if let Some(secrets_store) = &bootstrapped_store {
+            sandbox.set_secrets_store(secrets_store.clone());
+        }
 
         let deps = spacebot::AgentDeps {
             agent_id: agent_id.clone(),
@@ -1457,6 +2193,10 @@ async fn initialize_agents(
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
         api_state.set_sandboxes(sandboxes);
+        // Wire the instance-level secrets store into the API state.
+        if let Some(store) = &bootstrapped_store {
+            api_state.set_secrets_store(store.clone());
+        }
         api_state.set_instance_dir(config.instance_dir.clone());
     }
 

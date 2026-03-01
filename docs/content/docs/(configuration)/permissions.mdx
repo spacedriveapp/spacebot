@@ -9,7 +9,7 @@ Per-agent permission system that controls what tools can do, enforces inter-agen
 
 ## Design Principles
 
-**The container is the OS-level sandbox.** On spacebot.sh, each user runs in an isolated container. Self-hosters who need OS-level isolation can run Spacebot in Docker themselves. The permissions system does not attempt to replicate container-level security — it handles inter-agent boundaries and tool-level restrictions within a single Spacebot process.
+**OS-level containment is handled by the [Sandbox](/docs/sandbox) when sandboxing is enabled.** The sandbox enforces filesystem boundaries and environment sanitization at the kernel level, with exact guarantees depending on mode and backend/platform. On spacebot.sh, each user also runs in an isolated container. The permissions system handles a different layer -- inter-agent boundaries and tool-level restrictions within a single Spacebot process.
 
 **Deny is an error, not invisible.** When a tool call is denied, the tool still appears in the LLM's tool list, but returns a structured error explaining the restriction. The LLM can reason about the denial and adapt. This is better than hiding tools (which causes the LLM to attempt workarounds) and better than silent failures (which cause confusion).
 
@@ -50,7 +50,7 @@ But NOT:
 
 ```
 ~/.spacebot/agents/{other_agent}/          # other agents' data
-~/.spacebot/config.toml                    # instance config (contains API keys)
+~/.spacebot/config.toml                    # instance config (secret references, not plaintext keys)
 /etc/, /home/, /Users/                     # system paths
 ```
 
@@ -285,7 +285,7 @@ Default when no `[permissions]` block exists: all tools return permission denied
 
 ## What This Does NOT Do
 
-**OS-level sandboxing.** No Docker containers, no seccomp profiles, no capability dropping. Provisioned instances (spacebot.sh) or the user's own Docker setup handles this. Spacebot's permissions system is application-level.
+**OS-level sandboxing.** The permissions system is application-level -- it controls which tools the LLM can use and what paths it's allowed to access. OS-level containment is handled by the [Sandbox](/docs/sandbox), which operates independently when sandboxing is enabled; exact primitives vary by mode and backend/platform. Provisioned instances (spacebot.sh) also run in isolated containers. The permissions system and sandbox are complementary layers.
 
 **Shell command parsing.** We don't parse shell pipelines or analyze command strings for dangerous patterns. For `shell = "workspace"`, the `working_dir` is confined but the command itself runs unrestricted within that directory. Full command analysis is fragile and has diminishing returns — if you need that level of restriction, use `shell = "deny"`.
 

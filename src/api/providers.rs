@@ -154,6 +154,24 @@ fn model_matches_provider(provider: &str, model: &str) -> bool {
     crate::llm::routing::provider_from_model(model) == provider
 }
 
+/// Reload the in-memory defaults config from disk so that newly created agents
+/// inherit the latest routing values rather than stale startup defaults.
+async fn refresh_defaults_config(state: &Arc<ApiState>) {
+    let config_path = state.config_path.read().await.clone();
+    if config_path.as_os_str().is_empty() || !config_path.exists() {
+        return;
+    }
+    match crate::config::Config::load_from_path(&config_path) {
+        Ok(new_config) => {
+            state.set_defaults_config(new_config.defaults).await;
+            tracing::debug!("defaults_config refreshed from config.toml");
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to refresh defaults_config from config.toml");
+        }
+    }
+}
+
 fn normalize_openai_chatgpt_model(model: &str) -> Option<String> {
     let trimmed = model.trim();
     let (provider, model_name) = trimmed.split_once('/')?;
@@ -310,6 +328,9 @@ async fn finalize_openai_oauth(
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .context("failed to write config.toml")?;
+
+    // Refresh in-memory defaults so newly created agents inherit the updated routing.
+    refresh_defaults_config(state).await;
 
     state
         .provider_setup_tx
@@ -766,6 +787,9 @@ pub(super) async fn update_provider(
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    // Refresh in-memory defaults so newly created agents inherit the updated routing.
+    refresh_defaults_config(&state).await;
 
     state
         .provider_setup_tx

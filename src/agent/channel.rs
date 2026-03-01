@@ -812,6 +812,7 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let sandbox_enabled = self.deps.sandbox.containment_active();
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
@@ -850,6 +851,7 @@ impl Channel {
             empty_to_none(status_text),
             coalesce_hint,
             available_channels,
+            sandbox_enabled,
             org_context,
             adapter_prompt,
         )
@@ -1114,6 +1116,7 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let sandbox_enabled = self.deps.sandbox.containment_active();
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
@@ -1146,6 +1149,7 @@ impl Channel {
             empty_to_none(status_text),
             None, // coalesce_hint - only set for batched messages
             available_channels,
+            sandbox_enabled,
             org_context,
             adapter_prompt,
         )
@@ -2085,10 +2089,26 @@ pub async fn spawn_worker_from_state(
     let worker_task =
         build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
+    let sandbox_enabled = state.deps.sandbox.mode_enabled();
+    let sandbox_containment_active = state.deps.sandbox.containment_active();
+    let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
+    let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
+    // Collect tool secret names so the worker template can list available credentials.
+    let secrets_guard = rc.secrets.load();
+    let tool_secret_names = match (*secrets_guard).as_ref() {
+        Some(store) => store.tool_secret_names(),
+        None => Vec::new(),
+    };
+
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
+            sandbox_enabled,
+            sandbox_containment_active,
+            sandbox_read_allowlist,
+            sandbox_write_allowlist,
+            &tool_secret_names,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
@@ -2148,11 +2168,13 @@ pub async fn spawn_worker_from_state(
         channel_id = %state.channel_id,
         task = %task,
     );
+    let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
     let handle = spawn_worker_task(
         worker_id,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        secrets_store,
         worker.run().instrument(worker_span),
     );
 
@@ -2212,6 +2234,8 @@ pub async fn spawn_opencode_worker_from_state(
 
     let server_pool = rc.opencode_server_pool.clone();
 
+    let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
+
     let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
@@ -2227,16 +2251,23 @@ pub async fn spawn_opencode_worker_from_state(
             .write()
             .await
             .insert(worker_id, input_tx);
-        worker
+        match &oc_secrets_store {
+            Some(store) => worker.with_secrets_store(store.clone()),
+            None => worker,
+        }
     } else {
-        crate::opencode::OpenCodeWorker::new(
+        let worker = crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
             &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
-        )
+        );
+        match &oc_secrets_store {
+            Some(store) => worker.with_secrets_store(store.clone()),
+            None => worker,
+        }
     };
 
     let worker_id = worker.id;
@@ -2253,6 +2284,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        oc_secrets_store,
         async move {
             let result = worker.run().await?;
             Ok::<String, anyhow::Error>(result.result_text)
@@ -2290,11 +2322,16 @@ pub async fn spawn_opencode_worker_from_state(
 /// Handles both success and error cases, logging failures and sending the
 /// appropriate event. Used by both builtin workers and OpenCode workers.
 /// Returns the JoinHandle so the caller can store it for cancellation.
+///
+/// The result text is scrubbed through the secret store's tool secret values
+/// before being sent via the event — tool secret values are replaced with
+/// `[REDACTED:<name>]` so they never propagate to channel context.
 fn spawn_worker_task<F, E>(
     worker_id: WorkerId,
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
+    secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -2312,7 +2349,16 @@ where
             .inc();
 
         let (result_text, notify, success) = match future.await {
-            Ok(text) => (text, true, true),
+            Ok(text) => {
+                // Scrub tool secret values from the result before it reaches
+                // the channel. The channel never sees raw secret values.
+                let scrubbed = if let Some(store) = &secrets_store {
+                    crate::secrets::scrub::scrub_with_store(&text, store)
+                } else {
+                    text
+                };
+                (scrubbed, true, true)
+            }
             Err(error) => {
                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
                 (format!("Worker failed: {error}"), true, false)

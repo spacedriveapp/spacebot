@@ -174,6 +174,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/send_message_to_another_channel") => {
             include_str!("../../prompts/en/tools/send_message_description.md.j2")
         }
+        ("en", "tools/secret_set") => {
+            include_str!("../../prompts/en/tools/secret_set_description.md.j2")
+        }
         ("en", "tools/send_agent_message") => {
             include_str!("../../prompts/en/tools/send_agent_message_description.md.j2")
         }

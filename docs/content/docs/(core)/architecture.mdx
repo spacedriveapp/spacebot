@@ -134,7 +134,9 @@ Three embedded databases, each purpose-built. No server processes, no network co
 ~/.spacebot/agents/{agent_id}/data/
 ├── spacebot.db          # SQLite — relational data
 ├── lancedb/             # LanceDB — vector embeddings, full-text search
-└── config.redb          # redb — key-value settings, encrypted secrets
+├── config.redb          # redb — key-value settings
+├── settings.redb        # redb — runtime settings
+└── secrets.redb         # redb — secret store (categories, encryption)
 ```
 
 ### SQLite (via sqlx)
@@ -171,10 +173,11 @@ The embedding model runs locally via FastEmbed -- no external API calls for embe
 
 ### redb
 
-Embedded key-value store for configuration and secrets.
+Embedded key-value stores for configuration, settings, and secrets.
 
-- **Settings** — runtime key-value pairs (e.g., UI preferences, feature flags)
-- **Encrypted secrets** — API keys and tokens encrypted with AES-256-GCM before storage
+- **config.redb** — key-value pairs (UI preferences, feature flags)
+- **settings.redb** — runtime settings (worker_log_mode, etc.)
+- **secrets.redb** — per-agent credential storage with categories (system/tool), optional AES-256-GCM encryption at rest. See [Secret Store](/docs/secrets).
 
 Separated from SQLite so credentials can be managed and backed up independently.
 
@@ -381,7 +384,7 @@ src/
 ├── cron/                — scheduled tasks
 ├── api/                 — 21 Axum endpoint modules
 ├── identity/            — identity file loading
-├── secrets/             — encrypted credential storage
+├── secrets/             — secret store, OS keystore, output scrubbing
 ├── settings/            — key-value settings
 ├── tasks/               — task board
 ├── links/               — communication graph types

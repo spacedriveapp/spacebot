@@ -167,17 +167,32 @@ agent_id = "main"
 channel = "webhook"
 ```
 
-## Environment Variable References
+## Value References
 
-Any string value in the config can reference an environment variable with the `env:` prefix:
+Any string value in the config supports three resolution modes:
+
+| Prefix | Resolution | Example |
+|--------|-----------|---------|
+| `secret:` | Look up from the [secret store](/docs/secrets) | `"secret:ANTHROPIC_API_KEY"` |
+| `env:` | Read from system environment variable | `"env:ANTHROPIC_API_KEY"` |
+| _(none)_ | Literal value | `"sk-ant-..."` |
 
 ```toml
-anthropic_key = "env:ANTHROPIC_API_KEY"
+# From the secret store (recommended)
+anthropic_key = "secret:ANTHROPIC_API_KEY"
+
+# From an environment variable
+openai_key = "env:OPENAI_API_KEY"
+
+# Literal value (not recommended — use secret: or env: instead)
+groq_key = "gsk_abc123..."
 ```
 
-This reads `ANTHROPIC_API_KEY` from the environment at startup. If the variable is unset, the value is treated as missing.
+The `secret:` prefix resolves from the agent's secret store at config load time. If the secret doesn't exist, the value is treated as missing and implicit env fallbacks are tried.
 
 LLM keys also have implicit env fallbacks — if no key is set in the TOML, Spacebot checks `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `KILO_API_KEY`, and `OPENCODE_GO_API_KEY` automatically.
+
+Use `POST /api/secrets/migrate` to automatically move plaintext credentials from `config.toml` into the secret store and replace them with `secret:` references. See [Secret Store -- Migration](/docs/secrets#migration) for details.
 
 ## Env-Only Mode
 
@@ -241,7 +256,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 
 | Setting | Why |
 |---------|-----|
-| LLM API keys | Provider clients are initialized once |
+| LLM API keys | Provider clients are initialized once (applies to `secret:`, `env:`, and literal values) |
 | Messaging adapters (Discord token, webhook bind/port) | Adapter connections are long-lived |
 | Agent topology (adding/removing `[[agents]]`) | Databases and event buses are per-agent |
 | Database paths | Connections are opened once at startup |
@@ -295,6 +310,7 @@ System prompts (channel, branch, worker, compactor, cortex, etc.) are Jinja2 tem
         │   ├── lancedb/           # vector search
         │   ├── config.redb        # key-value settings
         │   ├── settings.redb      # runtime settings (worker_log_mode, etc.)
+        │   ├── secrets.redb       # secret store (categories, encryption)
         │   └── logs/              # worker execution logs
         └── archives/              # compaction transcripts
 ```
@@ -331,19 +347,19 @@ If you define a custom provider with the same ID as a legacy key, your custom co
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `anthropic_key` | string | None | Anthropic API key (or `env:VAR_NAME`) |
-| `openai_key` | string | None | OpenAI API key (or `env:VAR_NAME`) |
-| `openrouter_key` | string | None | OpenRouter API key (or `env:VAR_NAME`) |
-| `kilo_key` | string | None | Kilo Gateway API key (or `env:VAR_NAME`) |
-| `zhipu_key` | string | None | Zhipu AI (GLM) API key (or `env:VAR_NAME`) |
-| `groq_key` | string | None | Groq API key (or `env:VAR_NAME`) |
-| `together_key` | string | None | Together AI API key (or `env:VAR_NAME`) |
-| `fireworks_key` | string | None | Fireworks AI API key (or `env:VAR_NAME`) |
-| `deepseek_key` | string | None | DeepSeek API key (or `env:VAR_NAME`) |
-| `xai_key` | string | None | XAI API key (or `env:VAR_NAME`) |
-| `mistral_key` | string | None | Mistral API key (or `env:VAR_NAME`) |
-| `opencode_zen_key` | string | None | OpenCode Zen API key (or `env:VAR_NAME`) |
-| `opencode_go_key` | string | None | OpenCode Go API key (or `env:VAR_NAME`) |
+| `anthropic_key` | string | None | Anthropic API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `openai_key` | string | None | OpenAI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `openrouter_key` | string | None | OpenRouter API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `kilo_key` | string | None | Kilo Gateway API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `zhipu_key` | string | None | Zhipu AI (GLM) API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `groq_key` | string | None | Groq API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `together_key` | string | None | Together AI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `fireworks_key` | string | None | Fireworks AI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `deepseek_key` | string | None | DeepSeek API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `xai_key` | string | None | XAI API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `mistral_key` | string | None | Mistral API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `opencode_zen_key` | string | None | OpenCode Zen API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
+| `opencode_go_key` | string | None | OpenCode Go API key (`secret:NAME`, `env:VAR_NAME`, or literal) |
 
 #### Custom Providers
 
@@ -361,7 +377,7 @@ name = "My Provider"            # Optional - friendly name for display
 |-------|------|----------|-------------|
 | `api_type` | string | Yes | API protocol type. One of: `anthropic`, `openai_completions`, `openai_chat_completions`, `openai_responses`, `gemini`, or `kilo_gateway` |
 | `base_url` | string | Yes | Base URL of the API endpoint. Must be a valid URL (including protocol) |
-| `api_key` | string | Yes | API key for authentication. Supports `env:VAR_NAME` syntax to reference environment variables |
+| `api_key` | string | Yes | API key for authentication. Supports `secret:NAME` and `env:VAR_NAME` syntax |
 | `name` | string | No | Optional friendly name for the provider (displayed in logs and UI) |
 
 > Note:
@@ -536,12 +552,15 @@ Agent-specific routing is set via `[agents.routing]` with the same keys as `[def
 
 ### `[agents.sandbox]`
 
-OS-level filesystem containment for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace.
+OS-level filesystem containment and environment sanitization for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace. Environment sanitization runs in all modes -- workers never inherit the parent's environment variables.
+
+See [Sandbox](/docs/sandbox) for a full explanation of how containment, environment sanitization, leak detection, and durable binaries work.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for full host access |
+| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for passthrough (env sanitization still applies) |
 | `writable_paths` | string[] | `[]` | Additional directories the agent can write to beyond its workspace |
+| `passthrough_env` | string[] | `[]` | Environment variable names to forward from the parent process to worker subprocesses |
 
 When `mode = "enabled"`, shell and exec commands run inside a mount namespace where the entire filesystem is read-only except:
 
@@ -552,7 +571,7 @@ When `mode = "enabled"`, shell and exec commands run inside a mount namespace wh
 
 The agent's data directory (databases, config) is explicitly re-mounted read-only even if it would otherwise be writable due to path overlap.
 
-When `SPACEBOT_DEPLOYMENT=hosted`, sandbox mode is always `"enabled"` regardless of config.
+Regardless of mode, all worker subprocesses start with a clean environment. Only `PATH` (with `tools/bin` prepended), safe variables (`HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`), and any `passthrough_env` entries are injected. Use `passthrough_env` with least privilege: only forward variables required by worker tools (for example specific credentials set in Docker Compose or systemd), and avoid forwarding broad or highly sensitive credentials.
 
 If the sandbox backend isn't available (e.g. bubblewrap not installed), processes run unsandboxed with a warning at startup.
 
@@ -560,6 +579,7 @@ If the sandbox backend isn't available (e.g. bubblewrap not installed), processe
 [agents.sandbox]
 mode = "enabled"
 writable_paths = ["/home/user/projects/myapp", "/var/data/shared"]
+passthrough_env = ["GH_TOKEN", "GITHUB_TOKEN"]
 ```
 
 ### `[[agents.cron]]`

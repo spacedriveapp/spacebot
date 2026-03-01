@@ -29,6 +29,10 @@ impl SendFileTool {
     }
 
     /// Validate that a path falls within the workspace boundary.
+    ///
+    /// Checks both the canonicalized path and individual path components for
+    /// symlinks to prevent TOCTOU races where a symlink is swapped between
+    /// validation and the actual file read.
     fn validate_workspace_path(&self, path: &std::path::Path) -> Result<PathBuf, SendFileError> {
         let workspace = &self.workspace;
 
@@ -45,6 +49,32 @@ impl SendFileTool {
                  File operations are restricted to {}.",
                 workspace.display()
             )));
+        }
+
+        // Reject paths containing symlinks within the workspace to prevent
+        // TOCTOU races where a path component is replaced with a symlink
+        // between this check and the file read.
+        let relative_original = path
+            .strip_prefix(workspace)
+            .or_else(|_| path.strip_prefix(&workspace_canonical))
+            .unwrap_or(path);
+        let mut walk = workspace_canonical.clone();
+        for component in relative_original.components() {
+            walk.push(component);
+            match walk.symlink_metadata() {
+                Ok(meta) if meta.is_symlink() => {
+                    return Err(SendFileError(
+                        "ACCESS DENIED: Symlinks are not allowed within the workspace.".into(),
+                    ));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    return Err(SendFileError(format!(
+                        "can't verify path component '{}': {error}",
+                        walk.display()
+                    )));
+                }
+            }
         }
 
         Ok(canonical)
@@ -170,5 +200,63 @@ impl Tool for SendFileTool {
             filename,
             size_bytes,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::fs;
+
+    fn create_tool(workspace: PathBuf) -> SendFileTool {
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        SendFileTool::new(response_tx, workspace)
+    }
+
+    #[test]
+    fn validate_workspace_path_accepts_regular_file() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+        let path = workspace.join("report.txt");
+        fs::write(&path, "ok").expect("failed to write test file");
+
+        let tool = create_tool(workspace.clone());
+        let validated = tool
+            .validate_workspace_path(&path)
+            .expect("path should be accepted");
+
+        assert_eq!(
+            validated,
+            path.canonicalize().expect("failed to canonicalize")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn validate_workspace_path_rejects_symlink_components() {
+        use std::os::unix::fs::symlink;
+
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let real_dir = workspace.join("real");
+        let real_file = real_dir.join("file.txt");
+        let link_dir = workspace.join("link");
+
+        fs::create_dir_all(&real_dir).expect("failed to create real dir");
+        fs::write(&real_file, "secret").expect("failed to write test file");
+        symlink(&real_dir, &link_dir).expect("failed to create symlink");
+
+        let tool = create_tool(workspace.clone());
+        let result = tool.validate_workspace_path(&link_dir.join("file.txt"));
+
+        assert!(result.is_err(), "symlink traversal should be rejected");
+        let error = result.expect_err("missing expected error").to_string();
+        assert!(
+            error.contains("Symlinks are not allowed"),
+            "unexpected error: {error}"
+        );
     }
 }

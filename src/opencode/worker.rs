@@ -6,6 +6,7 @@
 
 use crate::opencode::server::OpenCodeServerPool;
 use crate::opencode::types::*;
+use crate::secrets::store::SecretsStore;
 use crate::{AgentId, ChannelId, ProcessEvent, WorkerId};
 
 use anyhow::{Context as _, bail};
@@ -30,6 +31,8 @@ pub struct OpenCodeWorker {
     pub system_prompt: Option<String>,
     /// Model override (provider/model format like "anthropic/claude-sonnet-4").
     pub model: Option<String>,
+    /// Secrets store for exact-match scrubbing of tool secret values in SSE output.
+    pub secrets_store: Option<Arc<SecretsStore>>,
 }
 
 /// Result of an OpenCode worker run.
@@ -59,6 +62,7 @@ impl OpenCodeWorker {
             input_rx: None,
             system_prompt: None,
             model: None,
+            secrets_store: None,
         }
     }
 
@@ -87,6 +91,21 @@ impl OpenCodeWorker {
     pub fn with_model(mut self, model: impl Into<String>) -> Self {
         self.model = Some(model.into());
         self
+    }
+
+    /// Set the secrets store for exact-match scrubbing of tool secret values.
+    pub fn with_secrets_store(mut self, store: Arc<SecretsStore>) -> Self {
+        self.secrets_store = Some(store);
+        self
+    }
+
+    /// Scrub tool secret values from text, replacing each with `[REDACTED:<name>]`.
+    /// Returns the scrubbed text. If no secrets store is set, returns the input unchanged.
+    fn scrub_text(&self, text: &str) -> String {
+        match &self.secrets_store {
+            Some(store) => crate::secrets::scrub::scrub_with_store(text, store),
+            None => text.to_string(),
+        }
     }
 
     /// Run the worker: spawn/reuse an OpenCode server, create a session,
@@ -317,7 +336,23 @@ impl OpenCodeWorker {
                             return EventAction::Continue;
                         }
                         *has_assistant_message = true;
-                        *last_text = text.clone();
+
+                        // Exact-match scrubbing: replace known tool secret values
+                        // before leak detection so they don't trigger false positives.
+                        let scrubbed = self.scrub_text(text);
+
+                        // Leak detection: scan scrubbed text for known secret patterns.
+                        // OpenCode output is not scanned by SpacebotHook, so this is
+                        // the only leak protection layer for OpenCode workers.
+                        if crate::secrets::scrub::scan_for_leaks(&scrubbed).is_some() {
+                            tracing::error!(
+                                worker_id = %self.id,
+                                "LEAK DETECTED in OpenCode worker output — terminating"
+                            );
+                            return EventAction::Error("leak detected in output".to_string());
+                        }
+
+                        *last_text = scrubbed;
                     }
                     Part::Tool {
                         tool,
@@ -340,7 +375,24 @@ impl OpenCodeWorker {
                                     let label = title.as_deref().unwrap_or(tool_name.as_str());
                                     self.send_status(&format!("running: {label}"));
                                 }
-                                ToolState::Completed { .. } => {
+                                ToolState::Completed { output, .. } => {
+                                    // Scrub + scan tool output for leaks
+                                    if let Some(tool_output) = output {
+                                        let scrubbed = self.scrub_text(tool_output);
+                                        if crate::secrets::scrub::scan_for_leaks(&scrubbed)
+                                            .is_some()
+                                        {
+                                            tracing::error!(
+                                                worker_id = %self.id,
+                                                tool = %tool_name,
+                                                "LEAK DETECTED in OpenCode tool output — terminating"
+                                            );
+                                            return EventAction::Error(
+                                                "leak detected in tool output".to_string(),
+                                            );
+                                        }
+                                    }
+
                                     if current_tool.as_deref() == Some(tool_name.as_str()) {
                                         *current_tool = None;
                                     }

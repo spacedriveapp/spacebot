@@ -1255,6 +1255,66 @@ export interface AgentMessageEvent {
 	channel_id: string;
 }
 
+// ── Secrets ──────────────────────────────────────────────────────────────
+
+export type SecretCategory = "system" | "tool";
+export type StoreState = "unencrypted" | "locked" | "unlocked";
+
+export interface SecretStoreStatus {
+	state: StoreState;
+	encrypted: boolean;
+	secret_count: number;
+	system_count: number;
+	tool_count: number;
+	platform_managed: boolean;
+}
+
+export interface SecretListItem {
+	name: string;
+	category: SecretCategory;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface SecretListResponse {
+	secrets: SecretListItem[];
+}
+
+export interface PutSecretResponse {
+	name: string;
+	category: SecretCategory;
+	reload_required: boolean;
+	message: string;
+}
+
+export interface DeleteSecretResponse {
+	deleted: string;
+	warning?: string;
+}
+
+export interface EncryptResponse {
+	master_key: string;
+	message: string;
+}
+
+export interface UnlockResponse {
+	state: string;
+	secret_count: number;
+	message: string;
+}
+
+export interface MigrationItem {
+	config_key: string;
+	secret_name: string;
+	category: SecretCategory;
+}
+
+export interface MigrateResponse {
+	migrated: MigrationItem[];
+	skipped: string[];
+	message: string;
+}
+
 export const api = {
 	status: () => fetchJson<StatusResponse>("/status"),
 	overview: () => fetchJson<InstanceOverviewResponse>("/overview"),
@@ -1937,6 +1997,76 @@ export const api = {
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
+	},
+
+	// Secrets API
+	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),
+	listSecrets: () => fetchJson<SecretListResponse>("/secrets"),
+	putSecret: async (name: string, value: string, category?: SecretCategory): Promise<PutSecretResponse> => {
+		const response = await fetch(`${API_BASE}/secrets/${encodeURIComponent(name)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ value, category }),
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json() as Promise<PutSecretResponse>;
+	},
+	deleteSecret: async (name: string): Promise<DeleteSecretResponse> => {
+		const response = await fetch(`${API_BASE}/secrets/${encodeURIComponent(name)}`, {
+			method: "DELETE",
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json() as Promise<DeleteSecretResponse>;
+	},
+	enableEncryption: async (): Promise<EncryptResponse> => {
+		const response = await fetch(`${API_BASE}/secrets/encrypt`, { method: "POST" });
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json() as Promise<EncryptResponse>;
+	},
+	unlockSecrets: async (masterKey: string): Promise<UnlockResponse> => {
+		const response = await fetch(`${API_BASE}/secrets/unlock`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ master_key: masterKey }),
+		});
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json() as Promise<UnlockResponse>;
+	},
+	lockSecrets: async (): Promise<{ state: string; message: string }> => {
+		const response = await fetch(`${API_BASE}/secrets/lock`, { method: "POST" });
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	rotateKey: async (): Promise<{ master_key: string; message: string }> => {
+		const response = await fetch(`${API_BASE}/secrets/rotate`, { method: "POST" });
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json();
+	},
+	migrateSecrets: async (): Promise<MigrateResponse> => {
+		const response = await fetch(`${API_BASE}/secrets/migrate`, { method: "POST" });
+		if (!response.ok) {
+			const body = await response.json().catch(() => ({}));
+			throw new Error(body.error || `API error: ${response.status}`);
+		}
+		return response.json() as Promise<MigrateResponse>;
 	},
 
 	eventsUrl: `${API_BASE}/events`,

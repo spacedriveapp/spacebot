@@ -54,21 +54,6 @@ fn is_running_in_container() -> bool {
         .any(|marker| cgroup.contains(marker))
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImageVariant {
-    Slim,
-    Full,
-}
-
-impl ImageVariant {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Slim => "slim",
-            Self::Full => "full",
-        }
-    }
-}
-
 /// Result of an update check.
 #[derive(Debug, Clone, Serialize)]
 pub struct UpdateStatus {
@@ -373,9 +358,8 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
         .to_string();
 
     // Resolve the target image: same base name, new version tag.
-    // e.g. ghcr.io/spacedriveapp/spacebot:v0.1.0-slim -> ghcr.io/spacedriveapp/spacebot:v0.2.0-slim
-    let runtime_variant = detect_runtime_image_variant();
-    let target_image = resolve_target_image(&current_image, latest_version, runtime_variant);
+    // e.g. ghcr.io/spacedriveapp/spacebot:v0.1.0 -> ghcr.io/spacedriveapp/spacebot:v0.2.0
+    let target_image = resolve_target_image(&current_image, latest_version);
 
     tracing::info!(
         current_image = %current_image,
@@ -565,14 +549,12 @@ fn get_own_container_id() -> anyhow::Result<String> {
 /// Given a current image reference and a new version, produce the target image tag.
 ///
 /// Examples:
-///   - `ghcr.io/spacedriveapp/spacebot:v0.1.0-slim` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-slim`
-///   - `ghcr.io/spacedriveapp/spacebot:slim` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-slim`
-///   - `ghcr.io/spacedriveapp/spacebot:latest` + `0.2.0` + full runtime -> `ghcr.io/spacedriveapp/spacebot:v0.2.0-full`
-fn resolve_target_image(
-    current_image: &str,
-    new_version: &str,
-    runtime_variant: Option<ImageVariant>,
-) -> String {
+///   - `ghcr.io/spacedriveapp/spacebot:v0.1.0` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0`
+///   - `ghcr.io/spacedriveapp/spacebot:latest` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0`
+///   - `ghcr.io/spacedriveapp/spacebot:v0.1.0-full` + `0.2.0` -> `ghcr.io/spacedriveapp/spacebot:v0.2.0`
+///
+/// Legacy `-slim`/`-full` suffixes are stripped during migration to the unified image.
+fn resolve_target_image(current_image: &str, new_version: &str) -> String {
     let image_without_digest = current_image
         .split_once('@')
         .map(|(name, _)| name)
@@ -581,46 +563,14 @@ fn resolve_target_image(
     let last_slash = image_without_digest.rfind('/');
     let last_colon = image_without_digest.rfind(':');
 
-    let (base, tag) = match last_colon {
-        Some(colon) if last_slash.is_none_or(|slash| colon > slash) => (
-            &image_without_digest[..colon],
-            &image_without_digest[colon + 1..],
-        ),
-        _ => (image_without_digest, "latest"),
+    let base = match last_colon {
+        Some(colon) if last_slash.is_none_or(|slash| colon > slash) => {
+            &image_without_digest[..colon]
+        }
+        _ => image_without_digest,
     };
 
-    let variant = detect_variant_from_tag(tag)
-        .or(runtime_variant)
-        .unwrap_or(ImageVariant::Slim);
-
-    format!("{}:v{}-{}", base, new_version, variant.as_str())
-}
-
-fn detect_variant_from_tag(tag: &str) -> Option<ImageVariant> {
-    if tag.contains("full") {
-        Some(ImageVariant::Full)
-    } else if tag.contains("slim") {
-        Some(ImageVariant::Slim)
-    } else {
-        None
-    }
-}
-
-fn detect_runtime_image_variant() -> Option<ImageVariant> {
-    if let Ok(chrome_path) = std::env::var("CHROME_PATH")
-        && !chrome_path.is_empty()
-        && std::path::Path::new(&chrome_path).exists()
-    {
-        return Some(ImageVariant::Full);
-    }
-
-    if std::path::Path::new("/usr/bin/chromium").exists()
-        || std::path::Path::new("/usr/bin/chromium-browser").exists()
-    {
-        return Some(ImageVariant::Full);
-    }
-
-    None
+    format!("{base}:v{new_version}")
 }
 
 #[cfg(test)]
@@ -637,69 +587,35 @@ mod tests {
 
     #[test]
     fn test_resolve_target_image() {
+        // Versioned tag
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:v0.1.0-slim",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
+            resolve_target_image("ghcr.io/spacedriveapp/spacebot:v0.1.0", "0.2.0"),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0"
         );
+        // Latest tag
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:v0.1.0-full",
-                "0.2.0",
-                Some(ImageVariant::Slim)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
+            resolve_target_image("ghcr.io/spacedriveapp/spacebot:latest", "0.2.0"),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0"
         );
+        // Legacy slim tag (strips variant)
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:latest",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
+            resolve_target_image("ghcr.io/spacedriveapp/spacebot:v0.1.0-slim", "0.2.0"),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0"
         );
+        // Legacy full tag (strips variant)
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:latest",
-                "0.2.0",
-                Some(ImageVariant::Slim)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
+            resolve_target_image("ghcr.io/spacedriveapp/spacebot:v0.1.0-full", "0.2.0"),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0"
         );
+        // Custom registry with port in host
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:slim",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-slim"
+            resolve_target_image("registry.local:5000/spacebot", "0.2.0"),
+            "registry.local:5000/spacebot:v0.2.0"
         );
+        // Digest reference
         assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot:v0.1.0",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
-        );
-        assert_eq!(
-            resolve_target_image(
-                "registry.local:5000/spacebot",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "registry.local:5000/spacebot:v0.2.0-full"
-        );
-        assert_eq!(
-            resolve_target_image(
-                "ghcr.io/spacedriveapp/spacebot@sha256:abcdef",
-                "0.2.0",
-                Some(ImageVariant::Full)
-            ),
-            "ghcr.io/spacedriveapp/spacebot:v0.2.0-full"
+            resolve_target_image("ghcr.io/spacedriveapp/spacebot@sha256:abcdef", "0.2.0"),
+            "ghcr.io/spacedriveapp/spacebot:v0.2.0"
         );
     }
 }

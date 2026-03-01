@@ -9,9 +9,31 @@
 use anyhow::Context as _;
 use std::sync::Arc;
 
+/// Set up the secrets store thread-local so `secret:` references in config.toml
+/// resolve correctly. Mirrors the bootstrap logic in main.rs.
+fn bootstrap_secrets_for_config() {
+    let instance_dir = spacebot::config::Config::default_instance_dir();
+    let secrets_path = instance_dir.join("data").join("secrets.redb");
+    if !secrets_path.exists() {
+        return;
+    }
+    if let Ok(store) = spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+        let store = Arc::new(store);
+        // Auto-unlock via OS keystore if encrypted.
+        if store.is_encrypted() {
+            let keystore = spacebot::secrets::keystore::platform_keystore();
+            if let Some(key) = keystore.load_key("instance").ok().flatten() {
+                let _ = store.unlock(&key);
+            }
+        }
+        spacebot::config::set_resolve_secrets_store(store);
+    }
+}
+
 /// Bootstrap an AgentDeps from the real ~/.spacebot config, using the first
 /// (default) agent's databases and config.
 async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
+    bootstrap_secrets_for_config();
     let config =
         spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
 
@@ -71,9 +93,12 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
 
+    let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
+        agent_config.sandbox.clone(),
+    ));
     let sandbox = Arc::new(
         spacebot::sandbox::Sandbox::new(
-            &agent_config.sandbox,
+            sandbox_config,
             agent_config.workspace.clone(),
             &config.instance_dir,
             agent_config.data_dir.clone(),

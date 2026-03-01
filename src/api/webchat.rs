@@ -1,16 +1,11 @@
 use super::state::ApiState;
-use crate::conversation::ConversationLogger;
-use crate::messaging::webchat::WebChatEvent;
 use crate::{InboundMessage, MessageContent};
 
 use axum::Json;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
-use axum::response::Sse;
-use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::convert::Infallible;
 use std::sync::Arc;
 
 #[derive(Deserialize)]
@@ -26,19 +21,17 @@ fn default_sender_name() -> String {
     "user".into()
 }
 
+#[derive(Serialize)]
+pub(super) struct WebChatSendResponse {
+    ok: bool,
+}
+
+/// Fire-and-forget message injection. The response arrives via the global SSE
+/// event bus (`/api/events`), same as every other channel.
 pub(super) async fn webchat_send(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<WebChatSendRequest>,
-) -> Result<Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>>, StatusCode> {
-    // ArcSwap<Option<Arc<...>>> → load guard → &Option → &Arc → clone
-    let webchat = state
-        .webchat_adapter
-        .load()
-        .as_ref()
-        .as_ref()
-        .cloned()
-        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
-
+) -> Result<Json<WebChatSendResponse>, StatusCode> {
     let manager = state
         .messaging_manager
         .read()
@@ -47,8 +40,6 @@ pub(super) async fn webchat_send(
         .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
 
     let conversation_id = request.session_id.clone();
-
-    let mut event_rx = webchat.register_session(&conversation_id).await;
 
     let mut metadata = HashMap::new();
     metadata.insert(
@@ -60,7 +51,7 @@ pub(super) async fn webchat_send(
         id: uuid::Uuid::new_v4().to_string(),
         source: "webchat".into(),
         adapter: Some("webchat".into()),
-        conversation_id: conversation_id.clone(),
+        conversation_id,
         sender_id: request.sender_name.clone(),
         agent_id: Some(request.agent_id.into()),
         content: MessageContent::Text(request.message),
@@ -74,40 +65,7 @@ pub(super) async fn webchat_send(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
-    let webchat_for_cleanup = webchat.clone();
-    let cleanup_id = conversation_id.clone();
-
-    let stream = async_stream::stream! {
-        while let Some(event) = event_rx.recv().await {
-            let event_name = match &event {
-                WebChatEvent::Thinking => "thinking",
-                WebChatEvent::Text(_) => "text",
-                WebChatEvent::StreamStart => "stream_start",
-                WebChatEvent::StreamChunk(_) => "stream_chunk",
-                WebChatEvent::StreamEnd => "stream_end",
-                WebChatEvent::ToolStarted { .. } => "tool_started",
-                WebChatEvent::ToolCompleted { .. } => "tool_completed",
-                WebChatEvent::StopTyping => "stop_typing",
-                WebChatEvent::Done => "done",
-            };
-
-            let is_done = matches!(event, WebChatEvent::Done);
-
-            if let Ok(json) = serde_json::to_string(&event) {
-                yield Ok(axum::response::sse::Event::default()
-                    .event(event_name)
-                    .data(json));
-            }
-
-            if is_done {
-                break;
-            }
-        }
-
-        webchat_for_cleanup.unregister_session(&cleanup_id).await;
-    };
-
-    Ok(Sse::new(stream))
+    Ok(Json(WebChatSendResponse { ok: true }))
 }
 
 #[derive(Deserialize)]
@@ -135,7 +93,7 @@ pub(super) async fn webchat_history(
 ) -> Result<Json<Vec<WebChatHistoryMessage>>, StatusCode> {
     let pools = state.agent_pools.load();
     let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
-    let logger = ConversationLogger::new(pool.clone());
+    let logger = crate::conversation::ConversationLogger::new(pool.clone());
 
     let channel_id: crate::ChannelId = Arc::from(query.session_id.as_str());
 

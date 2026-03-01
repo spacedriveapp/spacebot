@@ -212,8 +212,11 @@ pub enum SecretsError {
     #[error("secret not found: {key}")]
     NotFound { key: String },
 
-    #[error("invalid key format")]
+    #[error("invalid master key")]
     InvalidKey,
+
+    #[error("secret store is locked — unlock with master key first")]
+    StoreLocked,
 
     #[error(transparent)]
     Other(#[from] anyhow::Error),

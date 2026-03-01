@@ -241,13 +241,29 @@ impl PromptEngine {
         )
     }
 
-    /// Render the worker system prompt with filesystem context.
-    pub fn render_worker_prompt(&self, instance_dir: &str, workspace_dir: &str) -> Result<String> {
+    /// Render the worker system prompt with filesystem context and optional tool
+    /// secret names.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_worker_prompt(
+        &self,
+        instance_dir: &str,
+        workspace_dir: &str,
+        sandbox_enabled: bool,
+        sandbox_containment_active: bool,
+        sandbox_read_allowlist: Vec<String>,
+        sandbox_write_allowlist: Vec<String>,
+        tool_secret_names: &[String],
+    ) -> Result<String> {
         self.render(
             "worker",
             context! {
                 instance_dir => instance_dir,
                 workspace_dir => workspace_dir,
+                sandbox_enabled => sandbox_enabled,
+                sandbox_containment_active => sandbox_containment_active,
+                sandbox_read_allowlist => sandbox_read_allowlist,
+                sandbox_write_allowlist => sandbox_write_allowlist,
+                tool_secret_names => tool_secret_names,
             },
         )
     }
@@ -438,6 +454,7 @@ impl PromptEngine {
         status_text: Option<String>,
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
+        sandbox_enabled: bool,
     ) -> Result<String> {
         self.render_channel_prompt_with_links(
             identity_context,
@@ -448,6 +465,7 @@ impl PromptEngine {
             status_text,
             coalesce_hint,
             available_channels,
+            sandbox_enabled,
             None,
             None,
         )
@@ -513,6 +531,7 @@ impl PromptEngine {
         status_text: Option<String>,
         coalesce_hint: Option<String>,
         available_channels: Option<String>,
+        sandbox_enabled: bool,
         org_context: Option<String>,
         adapter_prompt: Option<String>,
     ) -> Result<String> {
@@ -527,6 +546,7 @@ impl PromptEngine {
                 status_text => status_text,
                 coalesce_hint => coalesce_hint,
                 available_channels => available_channels,
+                sandbox_enabled => sandbox_enabled,
                 org_context => org_context,
                 adapter_prompt => adapter_prompt,
             },

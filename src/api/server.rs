@@ -3,7 +3,7 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, settings, skills, system, tasks, webchat, workers,
+    models, providers, secrets, settings, skills, system, tasks, tools, webchat, workers,
 };
 
 use axum::Json;
@@ -139,6 +139,22 @@ pub async fn start_http_server(
         .route("/agents/skills", get(skills::list_skills))
         .route("/agents/skills/install", post(skills::install_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))
+        .route("/agents/tools", get(tools::list_tools))
+        // Secret store management
+        .route("/secrets/status", get(secrets::secrets_status))
+        .route("/secrets", get(secrets::list_secrets))
+        .route(
+            "/secrets/{name}",
+            put(secrets::put_secret).delete(secrets::delete_secret),
+        )
+        .route("/secrets/{name}/info", get(secrets::secret_info))
+        .route("/secrets/migrate", post(secrets::migrate_secrets))
+        .route("/secrets/encrypt", post(secrets::enable_encryption))
+        .route("/secrets/unlock", post(secrets::unlock_secrets))
+        .route("/secrets/lock", post(secrets::lock_secrets))
+        .route("/secrets/rotate", post(secrets::rotate_key))
+        .route("/secrets/export", post(secrets::export_secrets))
+        .route("/secrets/import", post(secrets::import_secrets))
         .route("/skills/registry/browse", get(skills::registry_browse))
         .route("/skills/registry/search", get(skills::registry_search))
         .route(

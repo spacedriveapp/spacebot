@@ -1,88 +1,14 @@
-import {useEffect, useMemo, useRef, useState} from "react";
-import {
-	useWebChat,
-	getPortalChatSessionId,
-	type ToolActivity,
-} from "@/hooks/useWebChat";
-import type {ActiveWorker} from "@/hooks/useChannelLiveState";
-import {useLiveContext} from "@/hooks/useLiveContext";
-import {Markdown} from "@/components/Markdown";
+import { useEffect, useRef, useState } from "react";
+import { useWebChat } from "@/hooks/useWebChat";
+import type { ActiveWorker } from "@/hooks/useChannelLiveState";
+import { useLiveContext } from "@/hooks/useLiveContext";
+import { Markdown } from "@/components/Markdown";
 
 interface WebChatPanelProps {
 	agentId: string;
 }
 
-const ASSISTANT_DUPLICATE_WINDOW_MS = 12_000;
-const ASSISTANT_FINGERPRINT_TTL_MS = 30_000;
-
-function normalizeAssistantContent(content: string) {
-	return content.trim().replace(/\s+/g, " ").toLowerCase();
-}
-
-function rememberAssistantContent(
-	fingerprints: Map<string, number>,
-	content: string,
-	now: number,
-) {
-	const fingerprint = normalizeAssistantContent(content);
-	if (!fingerprint) return;
-	fingerprints.set(fingerprint, now);
-}
-
-function isRecentAssistantDuplicate(
-	fingerprints: Map<string, number>,
-	content: string,
-	now: number,
-) {
-	const fingerprint = normalizeAssistantContent(content);
-	if (!fingerprint) return false;
-	const seenAt = fingerprints.get(fingerprint);
-	return seenAt !== undefined && now - seenAt < ASSISTANT_DUPLICATE_WINDOW_MS;
-}
-
-function pruneAssistantFingerprints(fingerprints: Map<string, number>, now: number) {
-	for (const [fingerprint, seenAt] of fingerprints.entries()) {
-		if (now - seenAt > ASSISTANT_FINGERPRINT_TTL_MS) {
-			fingerprints.delete(fingerprint);
-		}
-	}
-}
-
-function ToolActivityIndicator({activity}: {activity: ToolActivity[]}) {
-	if (activity.length === 0) return null;
-
-	return (
-		<div className="flex flex-wrap items-center gap-1.5 mt-2">
-			{activity.map((tool, index) => (
-				<span
-					key={`${tool.tool}-${index}`}
-					className="inline-flex items-center gap-1.5 rounded-full bg-app-box/60 px-2.5 py-0.5"
-				>
-					{tool.status === "running" ? (
-						<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-					) : (
-						<span className="h-1.5 w-1.5 rounded-full bg-green-400" />
-					)}
-					<span className="font-mono text-tiny text-ink-faint">
-						{tool.tool}
-					</span>
-				</span>
-			))}
-		</div>
-	);
-}
-
-function ThinkingIndicator() {
-	return (
-		<div className="flex items-center gap-1.5 py-1">
-			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
-			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
-			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
-		</div>
-	);
-}
-
-function ActiveWorkersPanel({workers}: {workers: ActiveWorker[]}) {
+function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 	if (workers.length === 0) return null;
 
 	return (
@@ -116,17 +42,27 @@ function ActiveWorkersPanel({workers}: {workers: ActiveWorker[]}) {
 	);
 }
 
+function ThinkingIndicator() {
+	return (
+		<div className="flex items-center gap-1.5 py-1">
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.2s]" />
+			<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint [animation-delay:0.4s]" />
+		</div>
+	);
+}
+
 function FloatingChatInput({
 	value,
 	onChange,
 	onSubmit,
-	isStreaming,
+	disabled,
 	agentId,
 }: {
 	value: string;
 	onChange: (value: string) => void;
 	onSubmit: () => void;
-	isStreaming: boolean;
+	disabled: boolean;
 	agentId: string;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -170,19 +106,19 @@ function FloatingChatInput({
 							onChange={(event) => onChange(event.target.value)}
 							onKeyDown={handleKeyDown}
 							placeholder={
-								isStreaming
+								disabled
 									? "Waiting for response..."
 									: `Message ${agentId}...`
 							}
-							disabled={isStreaming}
+							disabled={disabled}
 							rows={1}
 							className="flex-1 resize-none bg-transparent px-1 py-1.5 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
-							style={{maxHeight: "200px"}}
+							style={{ maxHeight: "200px" }}
 						/>
 						<button
 							type="button"
 							onClick={onSubmit}
-							disabled={isStreaming || !value.trim()}
+							disabled={disabled || !value.trim()}
 							className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
 						>
 							<svg
@@ -205,80 +141,26 @@ function FloatingChatInput({
 	);
 }
 
-export function WebChatPanel({agentId}: WebChatPanelProps) {
-	const {messages, isStreaming, error, toolActivity, sendMessage} =
-		useWebChat(agentId);
-	const {liveStates} = useLiveContext();
+export function WebChatPanel({ agentId }: WebChatPanelProps) {
+	const { sessionId, isSending, error, sendMessage } = useWebChat(agentId);
+	const { liveStates } = useLiveContext();
 	const [input, setInput] = useState("");
-	const [sseMessages, setSseMessages] = useState<{id: string; role: "assistant"; content: string}[]>([]);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
-	const sessionId = getPortalChatSessionId(agentId);
-	const activeWorkers = Object.values(liveStates[sessionId]?.workers ?? {});
+
+	const liveState = liveStates[sessionId];
+	const timeline = liveState?.timeline ?? [];
+	const isTyping = liveState?.isTyping ?? false;
+	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
-	const recentAssistantFingerprintsRef = useRef(new Map<string, number>());
-	const fingerprintedMessageIdsRef = useRef(new Set<string>());
 
-	// Pick up assistant messages from the global SSE stream that arrived
-	// after the webchat request SSE closed (e.g. worker completion retriggers).
-	const timeline = liveStates[sessionId]?.timeline;
-	const seenIdsRef = useRef(new Set<string>());
+	// Auto-scroll on new messages or typing state changes
 	useEffect(() => {
-		if (!timeline) return;
-		const now = Date.now();
-		pruneAssistantFingerprints(recentAssistantFingerprintsRef.current, now);
-
-		// Seed seen IDs from webchat messages so we don't duplicate
-		for (const m of messages) {
-			seenIdsRef.current.add(m.id);
-			if (m.role === "assistant" && !fingerprintedMessageIdsRef.current.has(m.id)) {
-				fingerprintedMessageIdsRef.current.add(m.id);
-				rememberAssistantContent(recentAssistantFingerprintsRef.current, m.content, now);
-			}
-		}
-
-		const newMessages: {id: string; role: "assistant"; content: string}[] = [];
-		for (const item of timeline) {
-			if (
-				item.type === "message" &&
-				item.role === "assistant" &&
-				!seenIdsRef.current.has(item.id)
-			) {
-				seenIdsRef.current.add(item.id);
-				if (isRecentAssistantDuplicate(recentAssistantFingerprintsRef.current, item.content, now)) {
-					continue;
-				}
-				fingerprintedMessageIdsRef.current.add(item.id);
-				rememberAssistantContent(recentAssistantFingerprintsRef.current, item.content, now);
-				newMessages.push({
-					id: item.id,
-					role: "assistant",
-					content: item.content,
-				});
-			}
-		}
-		if (newMessages.length > 0) {
-			setSseMessages((prev) => [...prev, ...newMessages]);
-		}
-	}, [timeline, messages]);
-
-	// Clear SSE messages when a new webchat send starts (they'll be in history on next load)
-	useEffect(() => {
-		if (isStreaming) setSseMessages([]);
-	}, [isStreaming]);
-
-	const allMessages = useMemo(() => {
-		const messageIds = new Set(messages.map((message) => message.id));
-		const dedupedSse = sseMessages.filter((message) => !messageIds.has(message.id));
-		return [...messages, ...dedupedSse];
-	}, [messages, sseMessages]);
-
-	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
-	}, [allMessages.length, isStreaming, toolActivity.length, activeWorkers.length]);
+		messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+	}, [timeline.length, isTyping, activeWorkers.length]);
 
 	const handleSubmit = () => {
 		const trimmed = input.trim();
-		if (!trimmed || isStreaming) return;
+		if (!trimmed || isSending) return;
 		setInput("");
 		sendMessage(trimmed);
 	};
@@ -294,7 +176,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 						</div>
 					)}
 
-					{allMessages.length === 0 && !isStreaming && (
+					{timeline.length === 0 && !isTyping && (
 						<div className="flex flex-col items-center justify-center py-24">
 							<p className="text-sm text-ink-faint">
 								Start a conversation with {agentId}
@@ -302,37 +184,27 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 						</div>
 					)}
 
-					{allMessages.map((message) => (
-						<div key={message.id}>
-							{message.role === "user" ? (
-								<div className="flex justify-end">
-									<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5">
-										<p className="text-sm text-ink">{message.content}</p>
+					{timeline.map((item) => {
+						if (item.type !== "message") return null;
+						return (
+							<div key={item.id}>
+								{item.role === "user" ? (
+									<div className="flex justify-end">
+										<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5">
+											<p className="text-sm text-ink">{item.content}</p>
+										</div>
 									</div>
-								</div>
-							) : (
-								<div className="text-sm text-ink-dull">
-									<Markdown>{message.content}</Markdown>
-								</div>
-							)}
-						</div>
-					))}
-
-				{/* Streaming state */}
-				{isStreaming &&
-						allMessages[allMessages.length - 1]?.role !== "assistant" && (
-							<div>
-								<ToolActivityIndicator activity={toolActivity} />
-								{toolActivity.length === 0 && <ThinkingIndicator />}
+								) : (
+									<div className="text-sm text-ink-dull">
+										<Markdown>{item.content}</Markdown>
+									</div>
+								)}
 							</div>
-						)}
+						);
+					})}
 
-				{/* Inline tool activity during streaming assistant message */}
-				{isStreaming &&
-						allMessages[allMessages.length - 1]?.role === "assistant" &&
-						toolActivity.length > 0 && (
-							<ToolActivityIndicator activity={toolActivity} />
-						)}
+					{/* Typing indicator */}
+					{isTyping && <ThinkingIndicator />}
 
 					{error && (
 						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
@@ -348,7 +220,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 				value={input}
 				onChange={setInput}
 				onSubmit={handleSubmit}
-				isStreaming={isStreaming}
+				disabled={isSending || isTyping}
 				agentId={agentId}
 			/>
 		</div>

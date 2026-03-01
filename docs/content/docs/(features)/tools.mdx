@@ -175,19 +175,17 @@ async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
 
 ### Sandbox containment
 
-Shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, sandbox-exec on macOS). The entire filesystem is mounted read-only except the workspace, `/tmp`, and any configured `writable_paths`. The agent's data directory (databases, config files) is explicitly protected. See [Configuration](/docs/config#agentssandbox) for sandbox config options.
+Shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, sandbox-exec on macOS). The entire filesystem is mounted read-only except the workspace, `/tmp`, and any configured `writable_paths`. The agent's data directory (databases, config files) is explicitly protected.
+
+Worker subprocesses also start with a clean environment -- they never inherit the parent's environment variables. System secrets (LLM API keys, messaging tokens) are never visible to workers regardless of sandbox mode. See [Sandbox](/docs/sandbox) for full details.
 
 The `file` tool independently validates paths against the workspace boundary and rejects writes to identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`). The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection regardless of sandbox state.
 
-Leak detection (via `SpacebotHook`) scans all tool output for secret patterns (API keys, tokens, PEM keys) and terminates the process if a leak is found.
+Leak detection (via `SpacebotHook`) scans all tool output for secret patterns (API keys, tokens, PEM keys) and terminates the process if a leak is found. This includes base64-encoded, URL-encoded, and hex-encoded variants.
 
 ### Status reporting
 
-Workers report progress via `set_status`. The channel sees these in its status block. Status updates use `try_send` (non-blocking) so a slow event bus never blocks tool execution.
-
-### Fire-and-forget sends
-
-`set_status` uses `try_send` instead of `.await` on the event channel. If the channel is full, the update is dropped rather than blocking the worker.
+Workers report progress via `set_status`, and the channel sees those updates in its status block. `set_status` uses `try_send` (non-blocking), so if the event channel is full the update is dropped instead of blocking the worker.
 
 ## What Each Tool Does
 
