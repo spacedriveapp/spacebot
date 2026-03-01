@@ -724,6 +724,9 @@ pub struct BrowserConfig {
     pub executable_path: Option<String>,
     /// Directory for storing screenshots and other browser artifacts.
     pub screenshot_dir: Option<PathBuf>,
+    /// Directory for caching a fetcher-downloaded Chromium binary.
+    /// Populated from `{instance_dir}/chrome_cache` during config resolution.
+    pub chrome_cache_dir: PathBuf,
 }
 
 impl Default for BrowserConfig {
@@ -734,6 +737,7 @@ impl Default for BrowserConfig {
             evaluate_enabled: false,
             executable_path: None,
             screenshot_dir: None,
+            chrome_cache_dir: PathBuf::from("chrome_cache"),
         }
     }
 }
@@ -4327,23 +4331,31 @@ impl Config {
                         .unwrap_or(base_defaults.warmup.startup_delay_secs),
                 })
                 .unwrap_or(base_defaults.warmup),
-            browser: toml
-                .defaults
-                .browser
-                .map(|b| {
-                    let base = &base_defaults.browser;
-                    BrowserConfig {
-                        enabled: b.enabled.unwrap_or(base.enabled),
-                        headless: b.headless.unwrap_or(base.headless),
-                        evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
-                        executable_path: b.executable_path.or_else(|| base.executable_path.clone()),
-                        screenshot_dir: b
-                            .screenshot_dir
-                            .map(PathBuf::from)
-                            .or_else(|| base.screenshot_dir.clone()),
-                    }
-                })
-                .unwrap_or_else(|| base_defaults.browser.clone()),
+            browser: {
+                let chrome_cache_dir = instance_dir.join("chrome_cache");
+                toml.defaults
+                    .browser
+                    .map(|b| {
+                        let base = &base_defaults.browser;
+                        BrowserConfig {
+                            enabled: b.enabled.unwrap_or(base.enabled),
+                            headless: b.headless.unwrap_or(base.headless),
+                            evaluate_enabled: b.evaluate_enabled.unwrap_or(base.evaluate_enabled),
+                            executable_path: b
+                                .executable_path
+                                .or_else(|| base.executable_path.clone()),
+                            screenshot_dir: b
+                                .screenshot_dir
+                                .map(PathBuf::from)
+                                .or_else(|| base.screenshot_dir.clone()),
+                            chrome_cache_dir: chrome_cache_dir.clone(),
+                        }
+                    })
+                    .unwrap_or_else(|| BrowserConfig {
+                        chrome_cache_dir,
+                        ..base_defaults.browser.clone()
+                    })
+            },
             mcp: default_mcp,
             brave_search_key: toml
                 .defaults
@@ -4533,6 +4545,7 @@ impl Config {
                             .screenshot_dir
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
+                        chrome_cache_dir: defaults.browser.chrome_cache_dir.clone(),
                     }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(

@@ -131,7 +131,7 @@ arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
 
 # Browser automation
-chromiumoxide = { version = "0.8", features = ["tokio-runtime"], default-features = false }
+chromiumoxide = { version = "0.8", features = ["tokio-runtime", "_fetcher-rustls-tokio"], default-features = false }
 chromiumoxide_cdp = "0.8"
 
 # Templating for prompts

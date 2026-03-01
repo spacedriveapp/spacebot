@@ -6,6 +6,7 @@
 
 use crate::config::BrowserConfig;
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
+use chromiumoxide::fetcher::{BrowserFetcher, BrowserFetcherOptions};
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide_cdp::cdp::browser_protocol::accessibility::{
     EnableParams as AxEnableParams, GetFullAxTreeParams,
@@ -22,7 +23,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -145,6 +146,25 @@ struct BrowserState {
     element_refs: HashMap<String, ElementRef>,
     /// Counter for generating element refs.
     next_ref: usize,
+    /// Per-launch temp directory for Chrome's user data. Cleaned up on drop to
+    /// prevent stale singleton locks from blocking subsequent launches.
+    user_data_dir: Option<PathBuf>,
+}
+
+impl Drop for BrowserState {
+    fn drop(&mut self) {
+        // Browser and handler task are dropped automatically —
+        // chromiumoxide's Child has kill_on_drop(true).
+        if let Some(ref dir) = self.user_data_dir
+            && let Err(error) = std::fs::remove_dir_all(dir)
+        {
+            tracing::debug!(
+                path = %dir.display(),
+                %error,
+                "failed to clean up browser user data dir"
+            );
+        }
+    }
 }
 
 impl std::fmt::Debug for BrowserState {
@@ -180,6 +200,7 @@ impl BrowserTool {
                 active_target: None,
                 element_refs: HashMap::new(),
                 next_ref: 0,
+                user_data_dir: None,
             })),
             config,
             screenshot_dir,
@@ -472,14 +493,25 @@ impl BrowserTool {
             return Ok(BrowserOutput::success("Browser already running"));
         }
 
-        let mut builder = ChromeConfig::builder().no_sandbox();
+        // Resolve the Chrome executable path:
+        //   1. Explicit config override
+        //   2. CHROME / CHROME_PATH env vars
+        //   3. chromiumoxide default detection (system PATH + well-known paths)
+        //   4. Auto-download via BrowserFetcher (cached in chrome_cache_dir)
+        let executable = resolve_chrome_executable(&self.config).await?;
+
+        // Use a unique temp dir per launch to avoid singleton lock collisions
+        // when multiple workers launch browsers or a previous session crashed.
+        let user_data_dir =
+            std::env::temp_dir().join(format!("spacebot-browser-{}", uuid::Uuid::new_v4()));
+
+        let mut builder = ChromeConfig::builder()
+            .no_sandbox()
+            .chrome_executable(&executable)
+            .user_data_dir(&user_data_dir);
 
         if !self.config.headless {
             builder = builder.with_head().window_size(1280, 900);
-        }
-
-        if let Some(path) = &self.config.executable_path {
-            builder = builder.chrome_executable(path);
         }
 
         let chrome_config = builder.build().map_err(|error| {
@@ -488,7 +520,8 @@ impl BrowserTool {
 
         tracing::info!(
             headless = self.config.headless,
-            executable = ?self.config.executable_path,
+            executable = %executable.display(),
+            user_data_dir = %user_data_dir.display(),
             "launching chrome"
         );
 
@@ -500,6 +533,7 @@ impl BrowserTool {
 
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
+        state.user_data_dir = Some(user_data_dir);
 
         tracing::info!("browser launched");
         Ok(BrowserOutput::success("Browser launched successfully"))
@@ -967,6 +1001,17 @@ impl BrowserTool {
         state.next_ref = 0;
         state._handler_task = None;
 
+        // Clean up the per-launch user data dir to free disk space.
+        if let Some(dir) = state.user_data_dir.take()
+            && let Err(error) = tokio::fs::remove_dir_all(&dir).await
+        {
+            tracing::debug!(
+                path = %dir.display(),
+                %error,
+                "failed to clean up browser user data dir"
+            );
+        }
+
         tracing::info!("browser closed");
         Ok(BrowserOutput::success("Browser closed"))
     }
@@ -1107,4 +1152,89 @@ fn truncate_for_display(text: &str, max_len: usize) -> String {
     } else {
         format!("{}...", &text[..max_len])
     }
+}
+
+/// Resolve the Chrome/Chromium executable path using a layered detection chain:
+///
+/// 1. Explicit config override (`executable_path` in TOML)
+/// 2. `CHROME` / `CHROME_PATH` environment variables
+/// 3. chromiumoxide default detection (system PATH + well-known install paths)
+/// 4. Auto-download via `BrowserFetcher` (cached in `chrome_cache_dir`)
+async fn resolve_chrome_executable(config: &BrowserConfig) -> Result<PathBuf, BrowserError> {
+    // 1. Explicit config
+    if let Some(path) = &config.executable_path {
+        let path = PathBuf::from(path);
+        if path.exists() {
+            tracing::debug!(path = %path.display(), "using configured chrome executable");
+            return Ok(path);
+        }
+        tracing::warn!(
+            path = %path.display(),
+            "configured executable_path does not exist, falling through to detection"
+        );
+    }
+
+    // 2. Environment variables
+    if let Some(path) = detect_chrome_from_env() {
+        tracing::debug!(path = %path.display(), "using chrome from environment variable");
+        return Ok(path);
+    }
+
+    // 3. chromiumoxide default detection (PATH lookup + well-known install paths)
+    if let Ok(path) = chromiumoxide::detection::default_executable(Default::default()) {
+        tracing::debug!(path = %path.display(), "using system-detected chrome");
+        return Ok(path);
+    }
+
+    // 4. Auto-download via fetcher
+    tracing::info!(
+        cache_dir = %config.chrome_cache_dir.display(),
+        "no system Chrome found, downloading via fetcher"
+    );
+    fetch_chrome(&config.chrome_cache_dir).await
+}
+
+/// Check `CHROME` and `CHROME_PATH` environment variables for a Chrome binary.
+fn detect_chrome_from_env() -> Option<PathBuf> {
+    for variable in ["CHROME", "CHROME_PATH"] {
+        if let Ok(value) = std::env::var(variable) {
+            let path = PathBuf::from(&value);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+/// Download Chromium using chromiumoxide's built-in fetcher.
+/// The binary is cached in `cache_dir` and reused on subsequent launches.
+async fn fetch_chrome(cache_dir: &Path) -> Result<PathBuf, BrowserError> {
+    tokio::fs::create_dir_all(cache_dir)
+        .await
+        .map_err(|error| {
+            BrowserError::new(format!(
+                "failed to create chrome cache dir {}: {error}",
+                cache_dir.display()
+            ))
+        })?;
+
+    let options = BrowserFetcherOptions::builder()
+        .with_path(cache_dir)
+        .build()
+        .map_err(|error| {
+            BrowserError::new(format!("failed to build browser fetcher options: {error}"))
+        })?;
+
+    let fetcher = BrowserFetcher::new(options);
+    let info = fetcher
+        .fetch()
+        .await
+        .map_err(|error| BrowserError::new(format!("failed to download chrome: {error}")))?;
+
+    tracing::info!(
+        path = %info.executable_path.display(),
+        "chrome downloaded and cached"
+    );
+    Ok(info.executable_path)
 }

@@ -115,27 +115,15 @@ jobs:
         id: platform
         run: echo "pair=$(echo ${{ matrix.platform }} | tr '/' '-')" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push slim
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
-          target: slim
           platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE }}:slim-${{ steps.platform.outputs.pair }}
-          cache-from: type=gha,scope=slim-${{ steps.platform.outputs.pair }}
-          cache-to: type=gha,mode=max,scope=slim-${{ steps.platform.outputs.pair }}
-
-      - name: Build and push full
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          target: full
-          platforms: ${{ matrix.platform }}
-          push: true
-          tags: ${{ env.IMAGE }}:full-${{ steps.platform.outputs.pair }}
-          cache-from: type=gha,scope=full-${{ steps.platform.outputs.pair }}
-          cache-to: type=gha,mode=max,scope=full-${{ steps.platform.outputs.pair }}
+          tags: ${{ env.IMAGE }}:build-${{ steps.platform.outputs.pair }}
+          cache-from: type=gha,scope=build-${{ steps.platform.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=build-${{ steps.platform.outputs.pair }}
 
   merge-docker:
     needs: build-docker
@@ -155,22 +143,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Create slim multi-arch manifest
+      - name: Create multi-arch manifest
         run: |
           docker buildx imagetools create \
-            --tag ${{ env.IMAGE }}:${{ needs.build-docker.outputs.version }}-slim \
-            --tag ${{ env.IMAGE }}:slim \
-            ${{ env.IMAGE }}:slim-linux-amd64 \
-            ${{ env.IMAGE }}:slim-linux-arm64
-
-      - name: Create full multi-arch manifest
-        run: |
-          docker buildx imagetools create \
-            --tag ${{ env.IMAGE }}:${{ needs.build-docker.outputs.version }}-full \
-            --tag ${{ env.IMAGE }}:full \
+            --tag ${{ env.IMAGE }}:${{ needs.build-docker.outputs.version }} \
             --tag ${{ env.IMAGE }}:latest \
-            ${{ env.IMAGE }}:full-linux-amd64 \
-            ${{ env.IMAGE }}:full-linux-arm64
+            ${{ env.IMAGE }}:build-linux-amd64 \
+            ${{ env.IMAGE }}:build-linux-arm64
 
       - name: Log in to Fly registry
         if: github.repository_owner == 'spacedriveapp'
