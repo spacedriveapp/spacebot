@@ -1123,8 +1123,8 @@ function SecretsSection() {
 			{/* Encryption banner (unencrypted stores) */}
 			{state === "unencrypted" && !storeStatus?.platform_managed && (
 				<div className="mb-4 rounded-md border border-amber-500/20 bg-amber-500/5 px-4 py-3">
-					<div className="flex items-center justify-between">
-						<div>
+					<div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+						<div className="sm:pr-4">
 							<p className="text-sm font-medium text-amber-400">Encryption not enabled</p>
 							<p className="mt-0.5 text-sm text-ink-faint">
 								Secrets are stored without encryption. Enable encryption for protection
@@ -1134,9 +1134,9 @@ function SecretsSection() {
 						<Button
 							onClick={() => { setEncryptDialogOpen(true); setMasterKeyDisplay(null); }}
 							variant="outline"
-							size="sm"
+							className="w-full shrink-0 whitespace-nowrap sm:w-auto"
 						>
-							Enable encryption
+							Enable Encryption
 						</Button>
 					</div>
 				</div>
