@@ -1970,6 +1970,33 @@ impl Channel {
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
+    /// Send outbound text and record send metrics.
+    async fn send_outbound_text(&self, text: String, error_context: &str) {
+        match self.response_tx.send(OutboundResponse::Text(text)).await {
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, "{error_context}");
+            }
+        }
+    }
+
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
     ///
     /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed
@@ -2045,34 +2072,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                match self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        #[cfg(feature = "metrics")]
-                                        metrics
-                                            .messages_sent_total
-                                            .with_label_values(&[
-                                                metrics_agent_id,
-                                                metrics_channel_type,
-                                            ])
-                                            .inc();
-                                    }
-                                    Err(error) => {
-                                        #[cfg(feature = "metrics")]
-                                        metrics
-                                            .channel_errors_total
-                                            .with_label_values(&[
-                                                metrics_agent_id,
-                                                metrics_channel_type,
-                                                "send_failed",
-                                            ])
-                                            .inc();
-                                        tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                    }
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2133,34 +2137,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                match self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    Ok(()) => {
-                                        #[cfg(feature = "metrics")]
-                                        metrics
-                                            .messages_sent_total
-                                            .with_label_values(&[
-                                                metrics_agent_id,
-                                                metrics_channel_type,
-                                            ])
-                                            .inc();
-                                    }
-                                    Err(error) => {
-                                        #[cfg(feature = "metrics")]
-                                        metrics
-                                            .channel_errors_total
-                                            .with_label_values(&[
-                                                metrics_agent_id,
-                                                metrics_channel_type,
-                                                "send_failed",
-                                            ])
-                                            .inc();
-                                        tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                    }
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2212,34 +2193,8 @@ impl Channel {
                                 &final_text,
                                 Some(self.agent_display_name()),
                             );
-                            match self
-                                .response_tx
-                                .send(OutboundResponse::Text(final_text))
-                                .await
-                            {
-                                Ok(()) => {
-                                    #[cfg(feature = "metrics")]
-                                    metrics
-                                        .messages_sent_total
-                                        .with_label_values(&[
-                                            metrics_agent_id,
-                                            metrics_channel_type,
-                                        ])
-                                        .inc();
-                                }
-                                Err(error) => {
-                                    #[cfg(feature = "metrics")]
-                                    metrics
-                                        .channel_errors_total
-                                        .with_label_values(&[
-                                            metrics_agent_id,
-                                            metrics_channel_type,
-                                            "send_failed",
-                                        ])
-                                        .inc();
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
-                                }
-                            }
+                            self.send_outbound_text(final_text, "failed to send fallback reply")
+                                .await;
                         }
                     }
 

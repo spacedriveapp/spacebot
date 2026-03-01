@@ -163,7 +163,7 @@ sum by (channel_type) (rate(spacebot_messages_received_total[5m]))
 
 **Memory operation latency p99:**
 ```promql
-histogram_quantile(0.99, rate(spacebot_memory_operation_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, sum by (operation, le) (rate(spacebot_memory_operation_duration_seconds_bucket[5m])))
 ```
 
 **API latency by endpoint (p95):**

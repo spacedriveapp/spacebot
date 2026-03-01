@@ -360,6 +360,7 @@ fn normalize_api_path(path: &str) -> String {
                             | "ingest"
                             | "skills"
                             | "tools"
+                            | "links"
                     ) =>
                 {
                     normalized.push("{id}")
