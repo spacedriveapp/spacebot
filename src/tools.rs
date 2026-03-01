@@ -358,8 +358,14 @@ pub fn create_branch_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
-        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(MemoryRecallTool::with_runtime(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
+        .tool(MemoryDeleteTool::with_runtime(
+            memory_search,
+            runtime_config.clone(),
+        ))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(EmailSearchTool::new(runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
@@ -458,6 +464,7 @@ pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    runtime_config: Arc<RuntimeConfig>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
@@ -469,8 +476,14 @@ pub fn create_cortex_chat_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
-        .tool(MemoryRecallTool::new(memory_search.clone()))
-        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(MemoryRecallTool::with_runtime(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
+        .tool(MemoryDeleteTool::with_runtime(
+            memory_search,
+            runtime_config.clone(),
+        ))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(

@@ -2701,6 +2701,7 @@ async fn initialize_agents(
                 agent.deps.agent_id.clone(),
                 agent.deps.task_store.clone(),
                 agent.deps.memory_search.clone(),
+                agent.deps.runtime_config.clone(),
                 conversation_logger,
                 channel_store,
                 run_logger,
