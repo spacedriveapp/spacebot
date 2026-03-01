@@ -43,9 +43,10 @@ RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
 
-# ---- Slim stage ----
-# Minimal runtime with just the binary. No browser.
-FROM debian:bookworm-slim AS slim
+# ---- Runtime stage ----
+# Minimal runtime with Chrome runtime libraries for fetcher-downloaded Chromium.
+# Chrome itself is downloaded on first browser tool use and cached on the volume.
+FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -53,28 +54,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     gh \
     bubblewrap \
-    && rm -rf /var/lib/apt/lists/*
-
-COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
-COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-RUN chmod +x /usr/local/bin/docker-entrypoint.sh
-
-ENV SPACEBOT_DIR=/data
-ENV SPACEBOT_DEPLOYMENT=docker
-EXPOSE 19898 18789
-
-HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-    CMD curl -f http://localhost:19898/api/health || exit 1
-
-ENTRYPOINT ["docker-entrypoint.sh"]
-CMD ["spacebot", "start", "--foreground"]
-
-# ---- Full stage ----
-# Slim + Chromium for browser workers.
-FROM slim AS full
-
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    chromium \
+    openssh-server \
+    # Chrome runtime dependencies — required whether Chrome is system-installed
+    # or downloaded by the built-in fetcher. The fetcher provides the browser
+    # binary; these are the shared libraries it links against.
     fonts-liberation \
     libnss3 \
     libatk-bridge2.0-0 \
@@ -91,5 +74,16 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*
 
-ENV CHROME_PATH=/usr/bin/chromium
-ENV CHROME_FLAGS="--no-sandbox --disable-dev-shm-usage --disable-gpu"
+COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
+ENV SPACEBOT_DIR=/data
+ENV SPACEBOT_DEPLOYMENT=docker
+EXPOSE 19898 18789
+
+HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
+    CMD curl -f http://localhost:19898/api/health || exit 1
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["spacebot", "start", "--foreground"]

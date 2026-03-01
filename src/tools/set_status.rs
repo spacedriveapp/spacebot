@@ -14,6 +14,8 @@ pub struct SetStatusTool {
     worker_id: WorkerId,
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
+    /// Tool secret pairs for scrubbing status text before it reaches the channel.
+    tool_secret_pairs: Vec<(String, String)>,
 }
 
 impl SetStatusTool {
@@ -29,7 +31,14 @@ impl SetStatusTool {
             worker_id,
             channel_id,
             event_tx,
+            tool_secret_pairs: Vec::new(),
         }
+    }
+
+    /// Set tool secret pairs for output scrubbing.
+    pub fn with_tool_secrets(mut self, pairs: Vec<(String, String)>) -> Self {
+        self.tool_secret_pairs = pairs;
+        self
     }
 }
 
@@ -90,6 +99,9 @@ impl Tool for SetStatusTool {
         } else {
             args.status
         };
+
+        // Scrub tool secret values before the status reaches the channel.
+        let status = crate::secrets::scrub::scrub_secrets(&status, &self.tool_secret_pairs);
 
         let event = ProcessEvent::WorkerStatus {
             agent_id: self.agent_id.clone(),

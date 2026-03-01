@@ -35,6 +35,11 @@ const RETRIGGER_DEBOUNCE_MS: u64 = 500;
 /// infinite retrigger cascades where each retrigger spawns more work.
 const MAX_RETRIGGERS_PER_TURN: usize = 3;
 
+/// Max LLM turns for retrigger relay. Retriggers are simple relay tasks —
+/// the LLM just needs to call the reply tool once. A low cap avoids wasting
+/// tokens on retries when the model struggles with the retrigger format.
+const RETRIGGER_MAX_TURNS: usize = 3;
+
 #[derive(Debug, Clone)]
 enum TemporalTimezone {
     Named { timezone_name: String, timezone: Tz },
@@ -770,7 +775,7 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, _) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
@@ -956,7 +961,7 @@ impl Channel {
 
         let is_retrigger = message.source == "system";
 
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
@@ -969,26 +974,62 @@ impl Channel {
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
 
-        // After a successful retrigger relay, inject a compact record into
-        // history so the conversation has context about what was relayed.
-        // The retrigger turn itself is rolled back by apply_history_after_turn
-        // (PromptCancelled leaves dangling tool calls), so without this the
-        // LLM would have no memory of the background result on subsequent turns.
-        if is_retrigger && replied_flag.load(std::sync::atomic::Ordering::Relaxed) {
-            // Extract the result summaries from the metadata we attached in
-            // flush_pending_retrigger, so we record only the substance (not
-            // the retrigger instructions/template scaffolding).
-            let summary = message
-                .metadata
-                .get("retrigger_result_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("[background work completed and result relayed to user]");
+        // After retrigger turns, persist a fallback summary only when we don't
+        // already have the LLM's actual relay text in history.
+        //
+        // PromptCancelled + reply tool is now handled in apply_history_after_turn:
+        // it extracts the reply content from tool args and records that exact
+        // assistant message (while dropping scaffolding). In that common success
+        // path, we skip summary injection to avoid replacing user-visible wording
+        // with raw worker output.
+        //
+        // If relay failed (replied=false), or if we couldn't extract a clean
+        // reply content payload, this fallback preserves a compact background
+        // result record for the next user turn.
+        if is_retrigger {
+            let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
+            if replied && retrigger_reply_preserved {
+                tracing::debug!(
+                    channel_id = %self.id,
+                    "skipping retrigger summary injection; relay reply already preserved"
+                );
+            } else {
+                // Extract the result summaries from the metadata we attached in
+                // flush_pending_retrigger, so we record only the substance (not
+                // the retrigger instructions/template scaffolding).
+                let summary = message
+                    .metadata
+                    .get("retrigger_result_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[background work completed]");
 
-            let mut history = self.state.history.write().await;
-            history.push(rig::message::Message::Assistant {
-                id: None,
-                content: OneOrMany::one(rig::message::AssistantContent::text(summary)),
-            });
+                let record = if replied {
+                    summary.to_string()
+                } else {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        "retrigger relay failed, preserving result in history for next turn"
+                    );
+                    format!(
+                        "[background work completed but relay to user failed — include this in your next response]\n{summary}"
+                    )
+                };
+
+                let mut history = self.state.history.write().await;
+                // Replace the synthetic bridge message (if present) with the summary
+                // to avoid consecutive assistant messages in history.
+                let replaced = pop_retrigger_bridge_message(&mut history);
+                tracing::debug!(
+                    channel_id = %self.id,
+                    replaced_bridge = replaced,
+                    replied,
+                    "injecting retrigger summary into history"
+                );
+                history.push(rig::message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(rig::message::AssistantContent::text(record)),
+                });
+            }
         }
 
         // Check context size and trigger compaction if needed
@@ -1157,7 +1198,7 @@ impl Channel {
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
     ///
-    /// Returns the prompt result and skip flag for the caller to dispatch.
+    /// Returns the prompt result and per-turn flags for the caller to dispatch.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
     async fn run_agent_turn(
@@ -1171,6 +1212,7 @@ impl Channel {
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
         crate::tools::RepliedFlag,
+        bool,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
@@ -1195,7 +1237,11 @@ impl Channel {
 
         let rc = &self.deps.runtime_config;
         let routing = rc.routing.load();
-        let max_turns = **rc.max_turns.load();
+        let max_turns = if is_retrigger {
+            RETRIGGER_MAX_TURNS
+        } else {
+            **rc.max_turns.load()
+        };
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
@@ -1219,6 +1265,29 @@ impl Channel {
                 OneOrMany::one(UserContent::text("[attachment processing failed]"))
             });
             history.push(rig::message::Message::User { content });
+            drop(history);
+        }
+
+        // For retrigger turns, inject a synthetic assistant acknowledgment so the
+        // LLM sees proper user/assistant role alternation. Without this, the API
+        // receives back-to-back user messages (the original user prompt preserved
+        // from the prior turn + the retrigger system message), which causes some
+        // models to return empty responses or get confused about whose turn it is.
+        if is_retrigger {
+            let mut history = self.state.history.write().await;
+            // Only inject if the last message is a user message (avoid double-stacking
+            // if history already ends with an assistant message).
+            let needs_bridge = history
+                .last()
+                .is_some_and(|m| matches!(m, rig::message::Message::User { .. }));
+            if needs_bridge {
+                history.push(rig::message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(rig::message::AssistantContent::text(
+                        "[acknowledged — working on it in background]",
+                    )),
+                });
+            }
             drop(history);
         }
 
@@ -1265,7 +1334,7 @@ impl Channel {
                 .await;
         }
 
-        {
+        let retrigger_reply_preserved = {
             let mut guard = self.state.history.write().await;
             apply_history_after_turn(
                 &result,
@@ -1274,8 +1343,8 @@ impl Channel {
                 history_len_before,
                 &self.id,
                 is_retrigger,
-            );
-        }
+            )
+        };
 
         if let Err(error) =
             crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
@@ -1283,7 +1352,7 @@ impl Channel {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
-        Ok((result, skip_flag, replied_flag))
+        Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
@@ -2093,6 +2162,13 @@ pub async fn spawn_worker_from_state(
     let sandbox_containment_active = state.deps.sandbox.containment_active();
     let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
     let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
+    // Collect tool secret names so the worker template can list available credentials.
+    let secrets_guard = rc.secrets.load();
+    let tool_secret_names = match (*secrets_guard).as_ref() {
+        Some(store) => store.tool_secret_names(),
+        None => Vec::new(),
+    };
+
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &rc.instance_dir.display().to_string(),
@@ -2101,6 +2177,7 @@ pub async fn spawn_worker_from_state(
             sandbox_containment_active,
             sandbox_read_allowlist,
             sandbox_write_allowlist,
+            &tool_secret_names,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
@@ -2160,11 +2237,13 @@ pub async fn spawn_worker_from_state(
         channel_id = %state.channel_id,
         task = %task,
     );
+    let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
     let handle = spawn_worker_task(
         worker_id,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        secrets_store,
         worker.run().instrument(worker_span),
     );
 
@@ -2224,6 +2303,8 @@ pub async fn spawn_opencode_worker_from_state(
 
     let server_pool = rc.opencode_server_pool.clone();
 
+    let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
+
     let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
@@ -2239,16 +2320,23 @@ pub async fn spawn_opencode_worker_from_state(
             .write()
             .await
             .insert(worker_id, input_tx);
-        worker
+        match &oc_secrets_store {
+            Some(store) => worker.with_secrets_store(store.clone()),
+            None => worker,
+        }
     } else {
-        crate::opencode::OpenCodeWorker::new(
+        let worker = crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
             &worker_task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
-        )
+        );
+        match &oc_secrets_store {
+            Some(store) => worker.with_secrets_store(store.clone()),
+            None => worker,
+        }
     };
 
     let worker_id = worker.id;
@@ -2265,6 +2353,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
+        oc_secrets_store,
         async move {
             let result = worker.run().await?;
             Ok::<String, anyhow::Error>(result.result_text)
@@ -2302,11 +2391,16 @@ pub async fn spawn_opencode_worker_from_state(
 /// Handles both success and error cases, logging failures and sending the
 /// appropriate event. Used by both builtin workers and OpenCode workers.
 /// Returns the JoinHandle so the caller can store it for cancellation.
+///
+/// The result text is scrubbed through the secret store's tool secret values
+/// before being sent via the event — tool secret values are replaced with
+/// `[REDACTED:<name>]` so they never propagate to channel context.
 fn spawn_worker_task<F, E>(
     worker_id: WorkerId,
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
+    secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -2324,7 +2418,16 @@ where
             .inc();
 
         let (result_text, notify, success) = match future.await {
-            Ok(text) => (text, true, true),
+            Ok(text) => {
+                // Scrub tool secret values from the result before it reaches
+                // the channel. The channel never sees raw secret values.
+                let scrubbed = if let Some(store) = &secrets_store {
+                    crate::secrets::scrub::scrub_with_store(&text, store)
+                } else {
+                    text
+                };
+                (scrubbed, true, true)
+            }
             Err(error) => {
                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
                 (format!("Worker failed: {error}"), true, false)
@@ -2976,6 +3079,9 @@ async fn download_text_attachment(
 ///
 /// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
 /// before raising it, so history is consistent.
+///
+/// Returns true when a retrigger PromptCancelled turn had a reply tool call
+/// extracted and persisted as a clean assistant text message.
 fn apply_history_after_turn(
     result: &std::result::Result<String, rig::completion::PromptError>,
     guard: &mut Vec<rig::message::Message>,
@@ -2983,44 +3089,89 @@ fn apply_history_after_turn(
     history_len_before: usize,
     channel_id: &str,
     is_retrigger: bool,
-) {
+) -> bool {
     match result {
         Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
             *guard = history;
+            false
         }
         Err(rig::completion::PromptError::PromptCancelled { .. }) => {
+            let new_messages = &history[history_len_before..];
+
             // Rig appended the user prompt and possibly an assistant tool-call
-            // message to history before cancellation. We keep only the first
-            // user text message (the actual user prompt) and discard everything else
-            // (assistant tool-calls without results, tool-result user messages).
+            // message to history before cancellation.
             //
-            // Exception: retrigger turns. The "user prompt" Rig pushed is actually
-            // the synthetic system retrigger message (internal template scaffolding),
-            // not a real user message. We inject a proper summary record separately
-            // in handle_message, so don't preserve anything from retrigger turns.
+            // Retrigger turns use a synthetic system user prompt, so we never
+            // preserve user text there. Instead, keep only a clean assistant
+            // message extracted from reply tool args when available.
             if is_retrigger {
+                let replaced_bridge = pop_retrigger_bridge_message(guard);
+                if let Some(reply_content) =
+                    extract_reply_content_from_cancelled_history(new_messages)
+                {
+                    guard.push(rig::message::Message::Assistant {
+                        id: None,
+                        content: rig::OneOrMany::one(rig::message::AssistantContent::text(
+                            reply_content,
+                        )),
+                    });
+
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        total_new = new_messages.len(),
+                        replaced_bridge,
+                        "preserved retrigger assistant reply after PromptCancelled"
+                    );
+                    return true;
+                }
+
                 tracing::debug!(
                     channel_id = %channel_id,
-                    rolled_back = history.len().saturating_sub(history_len_before),
-                    "discarding retrigger turn history (summary injected separately)"
+                    total_new = new_messages.len(),
+                    replaced_bridge,
+                    "discarding retrigger PromptCancelled messages (no reply content found)"
                 );
-                return;
+                return false;
             }
-            let new_messages = &history[history_len_before..];
+
+            // For regular turns we preserve:
+            // 1. The first user text message (the actual user prompt)
+            // 2. A clean assistant text message extracted from the reply tool call
+            //
+            // We discard: dangling tool calls (without results), tool-result user
+            // messages, and internal correction prompts.
             let mut preserved = 0usize;
+
+            // Preserve the user text message
             if let Some(message) = new_messages.iter().find(|m| is_user_text_message(m)) {
                 guard.push(message.clone());
-                preserved = 1;
+                preserved += 1;
             }
-            // Skip: Assistant messages (contain tool calls without results),
-            // user ToolResult messages, and internal correction prompts.
+
+            // Extract and preserve the reply content from the assistant's tool call.
+            // The assistant message contains ToolCall(reply, {content: "..."}), but
+            // we can't store the tool call without its result (it would poison future
+            // turns). Instead, extract the content and push a clean text-only message.
+            if let Some(reply_content) = extract_reply_content_from_cancelled_history(new_messages)
+            {
+                guard.push(rig::message::Message::Assistant {
+                    id: None,
+                    content: rig::OneOrMany::one(rig::message::AssistantContent::text(
+                        reply_content,
+                    )),
+                });
+                preserved += 1;
+            }
+
             tracing::debug!(
                 channel_id = %channel_id,
                 total_new = new_messages.len(),
                 preserved,
                 discarded = new_messages.len() - preserved,
-                "selectively preserved first user message after PromptCancelled"
+                "preserved user message and assistant reply after PromptCancelled"
             );
+
+            false
         }
         Err(_) => {
             // Hard errors: history state is unpredictable, truncate to snapshot.
@@ -3030,8 +3181,60 @@ fn apply_history_after_turn(
                 "rolling back history after failed turn"
             );
             guard.truncate(history_len_before);
+            false
         }
     }
+}
+
+fn pop_retrigger_bridge_message(history: &mut Vec<rig::message::Message>) -> bool {
+    if history.last().is_some_and(is_retrigger_bridge_message) {
+        history.pop();
+        true
+    } else {
+        false
+    }
+}
+
+fn is_retrigger_bridge_message(message: &rig::message::Message) -> bool {
+    match message {
+        rig::message::Message::Assistant { content, .. } => content.iter().any(|item| {
+            matches!(
+                item,
+                rig::message::AssistantContent::Text(text)
+                    if text.text.contains("[acknowledged")
+            )
+        }),
+        _ => false,
+    }
+}
+
+/// Extract reply content from a cancelled turn's assistant message.
+///
+/// When the reply tool fires, Rig's history contains an Assistant message with
+/// a ToolCall for `reply` with args like `{"content": "Hey there!"}`. This
+/// extracts that content string so we can inject a clean text-only assistant
+/// message into history (the tool call itself can't be preserved since it has
+/// no matching result).
+fn extract_reply_content_from_cancelled_history(
+    new_messages: &[rig::message::Message],
+) -> Option<String> {
+    for message in new_messages {
+        if let rig::message::Message::Assistant { content, .. } = message {
+            for item in content.iter() {
+                if let rig::message::AssistantContent::ToolCall(tool_call) = item
+                    && tool_call.function.name == "reply"
+                {
+                    // Extract the "content" field from the reply tool args
+                    if let Some(content_value) = tool_call.function.arguments.get("content")
+                        && let Some(text) = content_value.as_str()
+                    {
+                        return Some(text.to_string());
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Returns true if a message is a User message containing only text content
@@ -3115,16 +3318,23 @@ mod tests {
         assert_eq!(guard, history);
     }
 
-    /// PromptCancelled preserves user text messages but discards assistant
-    /// tool-call messages (which have no matching tool results).
+    /// PromptCancelled preserves user text messages and extracts reply content
+    /// from the assistant's tool call, discarding the dangling tool call itself.
     #[test]
-    fn prompt_cancelled_preserves_user_prompt() {
+    fn prompt_cancelled_preserves_user_and_reply() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        // Simulate what Rig does: push user prompt + assistant tool-call
+        // Simulate what Rig does: push user prompt + assistant reply tool-call
         let mut history = initial.clone();
         history.push(user_msg("new user prompt")); // should be preserved
-        history.push(assistant_msg("tool call without result")); // should be discarded
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "Hey there!"}),
+            )),
+        });
         let len_before = initial.len();
 
         let err = Err(PromptError::PromptCancelled {
@@ -3134,18 +3344,19 @@ mod tests {
 
         apply_history_after_turn(&err, &mut guard, history, len_before, "test", false);
 
-        // User prompt should be preserved, assistant tool-call discarded
+        // User prompt and reply content should be preserved, tool-call structure discarded
         let mut expected = initial;
         expected.push(user_msg("new user prompt"));
+        expected.push(assistant_msg("Hey there!"));
         assert_eq!(
             guard, expected,
-            "user text messages should be preserved, assistant messages discarded"
+            "user text message and reply content should be preserved"
         );
     }
 
-    /// PromptCancelled discards tool-result User messages (ToolResult content).
+    /// PromptCancelled extracts reply content and discards tool-result User messages.
     #[test]
-    fn prompt_cancelled_discards_tool_results() {
+    fn prompt_cancelled_extracts_reply_discards_tool_results() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
         let mut history = initial.clone();
@@ -3181,9 +3392,10 @@ mod tests {
 
         let mut expected = initial;
         expected.push(user_msg("new user prompt"));
+        expected.push(assistant_msg("hello"));
         assert_eq!(
             guard, expected,
-            "tool-call and tool-result messages should be discarded"
+            "reply content should be extracted, tool-result messages discarded"
         );
     }
 
@@ -3196,8 +3408,15 @@ mod tests {
         let mut history = initial.clone();
         history.push(user_msg("real user prompt")); // preserved
         history.push(assistant_msg("bad tool syntax"));
-        history.push(user_msg("Please proceed and use the available tools.")); // dropped
-        history.push(assistant_msg("tool call without result"));
+        history.push(user_msg("Please proceed and use the available tools.")); // dropped (correction)
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "Got it!"}),
+            )),
+        });
         let len_before = initial.len();
 
         let err = Err(PromptError::PromptCancelled {
@@ -3209,34 +3428,85 @@ mod tests {
 
         let mut expected = initial;
         expected.push(user_msg("real user prompt"));
+        expected.push(assistant_msg("Got it!"));
         assert_eq!(
             guard, expected,
-            "only the first user prompt should be preserved"
+            "only the first user prompt and final reply should be preserved"
         );
     }
 
-    /// PromptCancelled on retrigger turns discards everything — the synthetic
-    /// system message is internal scaffolding, not a real user message.
-    /// A summary record is injected separately in handle_message.
+    /// PromptCancelled on retrigger turns preserves only the assistant relay
+    /// text extracted from the reply tool args and drops retrigger scaffolding.
     #[test]
-    fn prompt_cancelled_retrigger_discards_all() {
+    fn prompt_cancelled_retrigger_preserves_reply_only() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        let mut history = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
         history.push(user_msg("[System: 1 background process completed...]"));
-        history.push(assistant_msg("relaying result..."));
-        let len_before = initial.len();
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "Relayed branch result to user."}),
+            )),
+        });
+        let len_before = guard.len();
 
         let err = Err(PromptError::PromptCancelled {
             chat_history: Box::new(history.clone()),
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
+        let preserved =
+            apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
 
+        let mut expected = initial;
+        expected.push(assistant_msg("Relayed branch result to user."));
+        assert!(
+            preserved,
+            "retrigger PromptCancelled should report reply preservation"
+        );
+        assert_eq!(
+            guard, expected,
+            "retrigger history should keep only the extracted relay text"
+        );
+    }
+
+    /// PromptCancelled retrigger turns with no reply tool call remove the
+    /// synthetic bridge and preserve no new messages.
+    #[test]
+    fn prompt_cancelled_retrigger_without_reply_discards_scaffolding() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg("relay attempt without tool call"));
+        let len_before = guard.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        let preserved =
+            apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
+
+        assert!(
+            !preserved,
+            "retrigger PromptCancelled should report no reply preservation"
+        );
         assert_eq!(
             guard, initial,
-            "retrigger turns should discard all new messages"
+            "retrigger scaffolding should be removed when no reply payload exists"
         );
     }
 
@@ -3356,15 +3626,19 @@ mod tests {
             false,
         );
 
-        // User prompt preserved, assistant tool-call discarded
+        // User prompt and reply content preserved, tool-call structure discarded
         assert_eq!(
             guard.len(),
-            initial.len() + 1,
-            "user prompt should be preserved"
+            initial.len() + 2,
+            "user prompt and assistant reply should be preserved"
         );
         assert!(
-            matches!(&guard[guard.len() - 1], Message::User { .. }),
-            "last message should be the preserved user prompt"
+            matches!(&guard[guard.len() - 2], Message::User { .. }),
+            "second-to-last message should be the preserved user prompt"
+        );
+        assert!(
+            matches!(&guard[guard.len() - 1], Message::Assistant { .. }),
+            "last message should be the extracted reply content"
         );
 
         // Second turn: new user message appended, successful response

@@ -17,6 +17,7 @@ mod memories;
 mod messaging;
 mod models;
 mod providers;
+mod secrets;
 mod server;
 mod settings;
 mod skills;

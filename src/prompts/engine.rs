@@ -241,7 +241,9 @@ impl PromptEngine {
         )
     }
 
-    /// Render the worker system prompt with filesystem context.
+    /// Render the worker system prompt with filesystem context and optional tool
+    /// secret names.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_worker_prompt(
         &self,
         instance_dir: &str,
@@ -250,6 +252,7 @@ impl PromptEngine {
         sandbox_containment_active: bool,
         sandbox_read_allowlist: Vec<String>,
         sandbox_write_allowlist: Vec<String>,
+        tool_secret_names: &[String],
     ) -> Result<String> {
         self.render(
             "worker",
@@ -260,6 +263,7 @@ impl PromptEngine {
                 sandbox_containment_active => sandbox_containment_active,
                 sandbox_read_allowlist => sandbox_read_allowlist,
                 sandbox_write_allowlist => sandbox_write_allowlist,
+                tool_secret_names => tool_secret_names,
             },
         )
     }
