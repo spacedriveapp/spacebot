@@ -142,7 +142,7 @@ impl KeyStore for LinuxKeyStore {
         let result = unsafe {
             libc::syscall(
                 libc::SYS_add_key,
-                b"user\0".as_ptr(),
+                c"user".as_ptr(),
                 description.as_ptr(),
                 key.as_ptr(),
                 key.len(),
@@ -171,7 +171,7 @@ impl KeyStore for LinuxKeyStore {
                 libc::SYS_keyctl,
                 0x0a_i64, // KEYCTL_SEARCH
                 -3_i64,   // KEY_SPEC_SESSION_KEYRING
-                b"user\0".as_ptr(),
+                c"user".as_ptr(),
                 description.as_ptr(),
                 0_i64, // don't link to a destination keyring
             )
@@ -237,7 +237,7 @@ impl KeyStore for LinuxKeyStore {
                 libc::SYS_keyctl,
                 0x0a_i64, // KEYCTL_SEARCH
                 -3_i64,   // KEY_SPEC_SESSION_KEYRING
-                b"user\0".as_ptr(),
+                c"user".as_ptr(),
                 description.as_ptr(),
                 0_i64,
             )
