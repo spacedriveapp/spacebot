@@ -268,6 +268,10 @@ async fn handle_send(
         "sender_display_name".into(),
         serde_json::Value::String(request.sender_id.clone()),
     );
+    metadata.insert(
+        crate::metadata_keys::CHANNEL_NAME.into(),
+        serde_json::Value::String(request.conversation_id.clone()),
+    );
 
     let conversation_id = format!("webhook:{}", request.conversation_id);
 

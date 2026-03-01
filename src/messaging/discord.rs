@@ -89,7 +89,11 @@ impl DiscordAdapter {
         message
             .metadata
             .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
-            .and_then(|value| value.as_u64())
+            .and_then(|value| match value {
+                serde_json::Value::String(s) => s.parse::<u64>().ok(),
+                serde_json::Value::Number(n) => n.as_u64(),
+                _ => None,
+            })
             .map(MessageId::new)
     }
 }

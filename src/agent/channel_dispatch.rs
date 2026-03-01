@@ -199,7 +199,7 @@ async fn spawn_branch(
             branch_id,
             channel_id: state.channel_id.clone(),
             description: status_label.to_string(),
-            reply_to_message_id: *state.reply_target_message_id.read().await,
+            reply_to_message_id: state.reply_target_message_id.read().await.clone(),
         })
         .ok();
 

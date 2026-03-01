@@ -334,11 +334,15 @@ pub(crate) fn format_batched_user_message(
     format!("[{display_name}] ({absolute_timestamp}; {relative_text}): {text_content}")
 }
 
-pub(crate) fn extract_message_id(message: &InboundMessage) -> Option<u64> {
+pub(crate) fn extract_message_id(message: &InboundMessage) -> Option<String> {
     message
         .metadata
         .get(crate::metadata_keys::MESSAGE_ID)
-        .and_then(|value| value.as_u64())
+        .and_then(|value| match value {
+            serde_json::Value::String(s) => Some(s.clone()),
+            serde_json::Value::Number(n) => Some(n.to_string()),
+            _ => None,
+        })
 }
 
 /// Check if a ProcessEvent is targeted at a specific channel.

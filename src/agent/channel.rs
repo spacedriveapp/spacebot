@@ -70,7 +70,7 @@ pub struct ChannelState {
     pub conversation_logger: ConversationLogger,
     pub process_run_logger: ProcessRunLogger,
     /// Discord message ID to reply to for work spawned in the current turn.
-    pub reply_target_message_id: Arc<RwLock<Option<u64>>>,
+    pub reply_target_message_id: Arc<RwLock<Option<String>>>,
     pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
@@ -155,7 +155,7 @@ pub struct Channel {
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
     /// Optional Discord reply target captured when each branch was started.
-    branch_reply_targets: HashMap<BranchId, u64>,
+    branch_reply_targets: HashMap<BranchId, String>,
     /// Buffer for coalescing rapid-fire messages.
     coalesce_buffer: Vec<InboundMessage>,
     /// Deadline for flushing the coalesce buffer.
@@ -1437,7 +1437,8 @@ impl Channel {
             } => {
                 run_logger.log_branch_started(channel_id, *branch_id, description);
                 if let Some(message_id) = reply_to_message_id {
-                    self.branch_reply_targets.insert(*branch_id, *message_id);
+                    self.branch_reply_targets
+                        .insert(*branch_id, message_id.clone());
                 }
             }
             ProcessEvent::BranchResult {

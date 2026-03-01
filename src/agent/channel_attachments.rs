@@ -417,9 +417,10 @@ async fn download_text_attachment(
 
     // Truncate very large files to avoid blowing up context
     let truncated = if content.len() > 50_000 {
+        let end = content.floor_char_boundary(50_000);
         format!(
             "{}...\n[truncated — {} bytes total]",
-            &content[..50_000],
+            &content[..end],
             content.len()
         )
     } else {

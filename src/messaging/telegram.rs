@@ -818,7 +818,16 @@ fn build_metadata(
         metadata.insert("telegram_chat_title".into(), (*title).into());
         metadata.insert(crate::metadata_keys::SERVER_NAME.into(), (*title).into());
     }
-    metadata.insert(crate::metadata_keys::CHANNEL_NAME.into(), chat_type.into());
+    let channel_name = message
+        .chat
+        .title()
+        .map(|title| title.to_string())
+        .or_else(|| message.from.as_ref().map(build_display_name))
+        .unwrap_or_else(|| chat_type.to_string());
+    metadata.insert(
+        crate::metadata_keys::CHANNEL_NAME.into(),
+        channel_name.into(),
+    );
 
     let formatted_author = if let Some(from) = &message.from {
         metadata.insert(
