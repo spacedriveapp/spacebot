@@ -102,18 +102,24 @@ impl KeyStore for MacOSKeyStore {
 }
 
 #[cfg(target_os = "linux")]
+use std::ffi::CString;
+
+#[cfg(target_os = "linux")]
 pub struct LinuxKeyStore;
 
 #[cfg(target_os = "linux")]
 impl KeyStore for LinuxKeyStore {
     fn store_key(&self, instance_id: &str, key: &[u8]) -> Result<(), SecretsError> {
-        let description = format!("{SERVICE_NAME}:{instance_id}");
+        let description =
+            CString::new(format!("{SERVICE_NAME}:{instance_id}")).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("invalid key description: {error}"))
+            })?;
 
         // Get the session keyring.
         let session_keyring = unsafe {
             libc::syscall(
                 libc::SYS_keyctl,
-                0x0b_i64, // KEYCTL_GET_KEYRING_ID
+                0x00_i64, // KEYCTL_GET_KEYRING_ID
                 -3_i64,   // KEY_SPEC_SESSION_KEYRING
                 0_i64,    // don't create
             )
@@ -148,7 +154,10 @@ impl KeyStore for LinuxKeyStore {
     }
 
     fn load_key(&self, instance_id: &str) -> Result<Option<Vec<u8>>, SecretsError> {
-        let description = format!("{SERVICE_NAME}:{instance_id}");
+        let description =
+            CString::new(format!("{SERVICE_NAME}:{instance_id}")).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("invalid key description: {error}"))
+            })?;
 
         // Search the session keyring for a "user" type key with our description.
         let key_id = unsafe {
@@ -211,7 +220,10 @@ impl KeyStore for LinuxKeyStore {
     }
 
     fn delete_key(&self, instance_id: &str) -> Result<(), SecretsError> {
-        let description = format!("{SERVICE_NAME}:{instance_id}");
+        let description =
+            CString::new(format!("{SERVICE_NAME}:{instance_id}")).map_err(|error| {
+                SecretsError::Other(anyhow::anyhow!("invalid key description: {error}"))
+            })?;
 
         // Find the key first.
         let key_id = unsafe {

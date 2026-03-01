@@ -1,6 +1,6 @@
 use crate::error::Result;
 use anyhow::Context;
-use minijinja::{context, Environment, Value};
+use minijinja::{Environment, Value, context};
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -481,11 +481,7 @@ impl PromptEngine {
         match self.render_static(template_name) {
             Ok(value) => {
                 let value = value.trim().to_string();
-                if value.is_empty() {
-                    None
-                } else {
-                    Some(value)
-                }
+                if value.is_empty() { None } else { Some(value) }
             }
             Err(error) => {
                 tracing::error!(template_name, %error, "failed to render adapter prompt template");

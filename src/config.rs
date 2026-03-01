@@ -3292,15 +3292,14 @@ struct TomlBinding {
 /// - Anything else — literal value.
 fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
-        // Try the thread-local secrets store if set.
-        RESOLVE_SECRETS_STORE.with(|cell| {
-            cell.borrow().as_ref().and_then(|store| {
-                store
-                    .get(alias)
-                    .ok()
-                    .map(|secret| secret.expose().to_string())
-            })
-        })
+        let guard = RESOLVE_SECRETS_STORE.load();
+        match (*guard).as_ref() {
+            Some(store) => store
+                .get(alias)
+                .ok()
+                .map(|secret| secret.expose().to_string()),
+            None => None,
+        }
     } else if let Some(var_name) = value.strip_prefix("env:") {
         std::env::var(var_name).ok()
     } else {
@@ -3308,26 +3307,17 @@ fn resolve_env_value(value: &str) -> Option<String> {
     }
 }
 
-// Thread-local reference to the secrets store for use during config resolution.
-//
-// Set before calling config resolution functions and cleared after. This avoids
-// threading the secrets store through 60+ `resolve_env_value` call sites.
-std::thread_local! {
-    static RESOLVE_SECRETS_STORE: std::cell::RefCell<Option<std::sync::Arc<crate::secrets::store::SecretsStore>>> = const { std::cell::RefCell::new(None) };
-}
+/// Process-wide reference to the secrets store for use during config resolution.
+///
+/// Uses `ArcSwap` so it is accessible from any thread (file watcher, API
+/// handlers, tokio workers) without the thread-affinity issues of a thread-local.
+static RESOLVE_SECRETS_STORE: std::sync::LazyLock<
+    arc_swap::ArcSwap<Option<std::sync::Arc<crate::secrets::store::SecretsStore>>>,
+> = std::sync::LazyLock::new(|| arc_swap::ArcSwap::from_pointee(None));
 
-/// Set the secrets store for config resolution on the current thread.
+/// Set the secrets store for config resolution (process-wide, any thread).
 pub fn set_resolve_secrets_store(store: std::sync::Arc<crate::secrets::store::SecretsStore>) {
-    RESOLVE_SECRETS_STORE.with(|cell| {
-        *cell.borrow_mut() = Some(store);
-    });
-}
-
-/// Clear the secrets store from the current thread.
-pub fn clear_resolve_secrets_store() {
-    RESOLVE_SECRETS_STORE.with(|cell| {
-        *cell.borrow_mut() = None;
-    });
+    RESOLVE_SECRETS_STORE.store(std::sync::Arc::new(Some(store)));
 }
 
 fn normalize_timezone(value: &str) -> Option<String> {

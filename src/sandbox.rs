@@ -345,7 +345,14 @@ impl Sandbox {
         let tool_secrets = self.tool_secrets();
 
         if config.mode == SandboxMode::Disabled {
-            return self.wrap_passthrough(program, args, working_dir, &path_env, &config, &tool_secrets);
+            return self.wrap_passthrough(
+                program,
+                args,
+                working_dir,
+                &path_env,
+                &config,
+                &tool_secrets,
+            );
         }
 
         match self.backend {
@@ -366,9 +373,14 @@ impl Sandbox {
                 &config,
                 &tool_secrets,
             ),
-            SandboxBackend::None => {
-                self.wrap_passthrough(program, args, working_dir, &path_env, &config, &tool_secrets)
-            }
+            SandboxBackend::None => self.wrap_passthrough(
+                program,
+                args,
+                working_dir,
+                &path_env,
+                &config,
+                &tool_secrets,
+            ),
         }
     }
 
