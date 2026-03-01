@@ -812,6 +812,7 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let sandbox_enabled = self.deps.sandbox.containment_active();
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
@@ -850,6 +851,7 @@ impl Channel {
             empty_to_none(status_text),
             coalesce_hint,
             available_channels,
+            sandbox_enabled,
             org_context,
             adapter_prompt,
         )
@@ -1114,6 +1116,7 @@ impl Channel {
         let browser_enabled = rc.browser_config.load().enabled;
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
+        let sandbox_enabled = self.deps.sandbox.containment_active();
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
@@ -1146,6 +1149,7 @@ impl Channel {
             empty_to_none(status_text),
             None, // coalesce_hint - only set for batched messages
             available_channels,
+            sandbox_enabled,
             org_context,
             adapter_prompt,
         )
@@ -2085,10 +2089,18 @@ pub async fn spawn_worker_from_state(
     let worker_task =
         build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
+    let sandbox_enabled = state.deps.sandbox.mode_enabled();
+    let sandbox_containment_active = state.deps.sandbox.containment_active();
+    let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
+    let sandbox_write_allowlist = state.deps.sandbox.prompt_write_allowlist();
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &rc.instance_dir.display().to_string(),
             &rc.workspace_dir.display().to_string(),
+            sandbox_enabled,
+            sandbox_containment_active,
+            sandbox_read_allowlist,
+            sandbox_write_allowlist,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();

@@ -317,6 +317,18 @@ impl OpenCodeWorker {
                             return EventAction::Continue;
                         }
                         *has_assistant_message = true;
+
+                        // Leak detection: scan text content for known secret patterns.
+                        // OpenCode output is not scanned by SpacebotHook, so this is
+                        // the only leak protection layer for OpenCode workers.
+                        if crate::secrets::scrub::scan_for_leaks(text).is_some() {
+                            tracing::error!(
+                                worker_id = %self.id,
+                                "LEAK DETECTED in OpenCode worker output — terminating"
+                            );
+                            return EventAction::Error("leak detected in output".to_string());
+                        }
+
                         *last_text = text.clone();
                     }
                     Part::Tool {
@@ -340,7 +352,22 @@ impl OpenCodeWorker {
                                     let label = title.as_deref().unwrap_or(tool_name.as_str());
                                     self.send_status(&format!("running: {label}"));
                                 }
-                                ToolState::Completed { .. } => {
+                                ToolState::Completed { output, .. } => {
+                                    // Scan tool output for leaks
+                                    if let Some(tool_output) = output
+                                        && crate::secrets::scrub::scan_for_leaks(tool_output)
+                                            .is_some()
+                                    {
+                                        tracing::error!(
+                                            worker_id = %self.id,
+                                            tool = %tool_name,
+                                            "LEAK DETECTED in OpenCode tool output — terminating"
+                                        );
+                                        return EventAction::Error(
+                                            "leak detected in tool output".to_string(),
+                                        );
+                                    }
+
                                     if current_tool.as_deref() == Some(tool_name.as_str()) {
                                         *current_tool = None;
                                     }

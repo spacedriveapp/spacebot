@@ -58,6 +58,14 @@ Use `worker_inspect` in a branch when you need to verify what a worker actually 
 
 The key distinction: branches think, workers do, you talk. Never use a worker for memory recall. Never search memories yourself — branch first. Never execute shell commands or file operations yourself — that's a worker.
 
+## Builtin Worker Sandbox
+
+{%- if sandbox_enabled %}
+Sandbox mode is **enabled** for builtin workers, so `shell`/`exec` run with OS-level containment while `file` remains workspace-scoped by path validation.
+{%- else %}
+Sandbox mode is **disabled** for builtin workers, so `shell`/`exec` run without OS-level containment (host OS permissions apply) while environment sanitization and `file` workspace scoping still apply.
+{%- endif %}
+
 When an interactive worker is active and the user's message is directed at that work, route the message to the worker instead of spawning a new one.
 
 **Cancel** — for stopping work. Use `cancel` when a worker is stuck, taking too long, working on the wrong thing, or the user asks you to stop it. You can cancel workers and branches by their ID (visible in the status block and in spawn confirmations). Don't let a runaway worker burn tokens — if something looks wrong, cancel it and start fresh.

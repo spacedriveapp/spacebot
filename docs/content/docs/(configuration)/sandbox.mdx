@@ -1,0 +1,221 @@
+---
+title: Sandbox
+description: OS-level filesystem containment and environment sanitization for worker subprocesses.
+---
+
+# Sandbox
+
+OS-level containment for builtin worker subprocesses (`shell` and `exec`). Prevents workers from modifying the host filesystem, reading inherited environment secrets, and accessing the agent's internal data directory.
+
+## How It Works
+
+When a worker runs a shell or exec command, the sandbox wraps the subprocess in an OS-level containment layer before execution. The worker's command runs normally -- it can only read a minimal runtime allowlist plus workspace paths, and can only write to explicitly allowed paths.
+
+```
+Worker calls shell("npm test")
+  → Sandbox.wrap() builds a contained command
+  → Subprocess runs with:
+      - Read access to a minimal system allowlist + workspace
+      - Writable access only to the workspace + configured writable paths + /tmp
+      - Clean environment (no inherited secrets)
+      - HOME set to workspace, TMPDIR set to /tmp
+      - tools/bin prepended to PATH
+  → stdout/stderr captured and returned to worker
+```
+
+Two things happen regardless of whether the sandbox is enabled or disabled:
+
+1. **Environment sanitization** -- worker subprocesses never inherit the parent's environment variables. Secrets like `ANTHROPIC_API_KEY` are never visible to workers.
+2. **PATH injection** -- the persistent `tools/bin` directory is prepended to PATH so durably installed binaries are always available.
+
+## Backends
+
+The sandbox auto-detects the best available backend at startup:
+
+| Platform | Backend | Mechanism |
+|----------|---------|-----------|
+| Linux | [bubblewrap](https://github.com/containers/bubblewrap) | Mount namespaces, PID namespaces, environment isolation |
+| macOS | sandbox-exec | SBPL profile with deny-default policy |
+| Other / not available | Passthrough | No filesystem containment (env sanitization still applies) |
+
+If the sandbox is enabled but no backend is available, processes run unsandboxed with a warning at startup. Environment sanitization still applies in all cases.
+
+### Linux (bubblewrap)
+
+The default on all hosted instances and most self-hosted Linux deployments. Bubblewrap creates a mount namespace where:
+
+- A minimal host runtime allowlist is mounted **read-only** (`/bin`, `/sbin`, `/usr`, `/lib`, `/lib64`, `/etc`, `/opt`, `/run`, `/nix` when present)
+- The persistent tools directory is mounted **read-only** (if present)
+- The workspace directory is mounted **read-write**
+- `writable_paths` entries are mounted **read-write**
+- `/tmp` is a private tmpfs per invocation
+- `/dev` has standard device nodes
+- `/proc` is a fresh procfs (when supported by the environment)
+- The agent's data directory is masked with an empty tmpfs (no reads/writes)
+- PID namespace isolation prevents the subprocess from seeing other processes
+- `--die-with-parent` ensures the subprocess is killed if the parent exits
+
+Nested containers (Docker-in-Docker, Fly Machines) may not support `--proc /proc`. The sandbox probes for this at startup and falls back gracefully -- `proc_supported: false` in the startup log means `/proc` inside the sandbox shows the host's process list rather than an isolated view.
+
+### macOS (sandbox-exec)
+
+Uses Apple's sandbox-exec with a generated SBPL (Sandbox Profile Language) profile. The profile starts with `(deny default)` and explicitly allows:
+
+- Process execution and forking
+- Reading only a backend allowlist (system runtime roots + workspace + configured writable paths + tools/bin)
+- Writing only to the workspace, configured writable paths, and `/tmp`
+- Network access (unrestricted)
+- Standard device and IPC operations
+
+The agent's data directory is denied for both reads and writes even if it falls under the workspace subtree.
+
+Note: `sandbox-exec` is deprecated by Apple but remains functional. It's the only user-space sandbox option on macOS without requiring a full VM.
+
+## Filesystem Boundaries
+
+When the sandbox is enabled, the subprocess sees:
+
+| Path | Access | Notes |
+|------|--------|-------|
+| System runtime allowlist | Read-only | Backend-specific system roots required to execute common tools |
+| Agent workspace | Read-write | Where the worker does its job |
+| `writable_paths` entries | Read-write | User-configured additional paths |
+| `{instance_dir}/tools/bin` | Read-only | Persistent binaries on PATH |
+| `/tmp` | Read-write | Private per invocation (bubblewrap) |
+| `/dev` | Read-write | Standard device nodes |
+| Agent data directory | **No access** | Masked/denied to protect databases and config |
+
+The data directory protection is important: even if the data directory overlaps with workspace-related paths, it's explicitly blocked. Workers can't read or modify databases, config files, or identity files at the kernel level.
+
+## Environment Sanitization
+
+Worker subprocesses start with a **clean environment**. The parent process's environment variables are never inherited. This applies in all sandbox modes -- even when the sandbox is disabled, `env_clear()` strips the environment.
+
+A worker running `printenv` sees only:
+
+| Variable | Source | Value |
+|----------|--------|-------|
+| `PATH` | Always | `{instance_dir}/tools/bin:{system_path}` |
+| `HOME` | Always | Worker workspace path |
+| `TMPDIR` | Always | `/tmp` |
+| `USER` | Always | From parent (if set) |
+| `LANG` | Always | From parent (if set) |
+| `TERM` | Always | From parent (if set) |
+| `passthrough_env` entries | Config | User-configured forwarding |
+
+Workers never see `ANTHROPIC_API_KEY`, `DISCORD_BOT_TOKEN`, `SPACEBOT_*` internal vars, or any other environment variables from the parent process.
+
+### passthrough_env
+
+Self-hosted users who set credentials as environment variables in Docker Compose or systemd can forward specific variables to worker subprocesses:
+
+```toml
+[agents.sandbox]
+passthrough_env = ["GH_TOKEN", "GITHUB_TOKEN", "NPM_TOKEN"]
+```
+
+Each listed variable is read from the parent process environment at subprocess spawn time and injected into the worker's environment. Variables not in the list are stripped.
+
+When the secret store is available, `passthrough_env` is redundant -- credentials should be stored in the secret store, which injects tool secrets automatically. The field is additive and continues to work alongside the store.
+
+## Durable Binaries
+
+On hosted instances, the root filesystem is ephemeral -- machine image rollouts replace it. Binaries installed via `apt-get install` or similar disappear on the next deploy.
+
+The `{instance_dir}/tools/bin` directory is on the persistent volume and is prepended to `PATH` for all worker subprocesses. Binaries placed here survive restarts and rollouts.
+
+Workers are instructed about this in their system prompt:
+
+```
+Persistent binary directory: /data/tools/bin (on PATH, survives restarts and rollouts)
+Binaries installed via package managers (apt, brew, etc.) land on the root filesystem
+which is ephemeral on hosted instances -- they disappear on rollouts. To install a tool
+durably, download or copy the binary into /data/tools/bin.
+```
+
+The `GET /agents/tools` API endpoint lists installed binaries for dashboard observability:
+
+```json
+{
+  "tools_bin": "/data/tools/bin",
+  "binaries": [
+    { "name": "gh", "size": 1234567, "modified": "2026-02-20T14:15:00Z" },
+    { "name": "ripgrep", "size": 3456789, "modified": "2026-02-15T10:30:00Z" }
+  ]
+}
+```
+
+## Leak Detection
+
+All tool output (shell, exec, file, browser) is scanned for known secret patterns before being returned to the LLM. This runs in the `SpacebotHook` after every tool execution.
+
+Detected patterns include:
+
+- OpenAI keys (`sk-...`)
+- Anthropic keys (`sk-ant-...`)
+- GitHub tokens (`ghp_...`)
+- Google API keys (`AIza...`)
+- Discord bot tokens
+- Slack tokens (`xoxb-...`, `xapp-...`)
+- Telegram bot tokens
+- PEM private keys
+- Base64-encoded, URL-encoded, and hex-encoded variants of the above
+
+Detection also covers encoded forms -- secrets wrapped in base64, URL encoding, or hex are decoded and checked against the same patterns.
+
+If a leak is detected, the process is terminated immediately with an error. The raw leaked value is never logged or returned to the LLM -- only the detection event, encoding type, and a truncated non-reversible fingerprint are recorded for debugging.
+
+### OpenCode Workers
+
+OpenCode workers (external coding agent processes) are covered by the same protection. SSE output events are scanned through both:
+
+1. **Output scrubbing** (exact-match redaction of known secret values) -- runs first
+2. **Leak detection** (regex pattern matching for unknown secrets) -- runs second
+
+The ordering ensures that stored tool secrets are redacted before leak detection runs, so expected secret values in worker output don't trigger false-positive kills.
+
+## Dynamic Mode Switching
+
+Sandbox mode can be changed at runtime via the API or dashboard without restarting the agent. The `Sandbox` struct reads the current mode from a shared `ArcSwap<SandboxConfig>` on every `wrap()` call.
+
+```
+PUT /agents/config
+{
+  "sandbox": { "mode": "disabled" }
+}
+```
+
+Backend detection runs at startup regardless of the initial mode. If the sandbox starts disabled and is later enabled via the API, bubblewrap/sandbox-exec is already detected and ready to use.
+
+## Configuration
+
+```toml
+[agents.sandbox]
+mode = "enabled"                              # "enabled" | "disabled"
+writable_paths = ["/home/user/shared-data"]   # additional writable directories
+passthrough_env = ["GH_TOKEN"]                # env vars to forward to workers
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `mode` | string | `"enabled"` | `"enabled"` for OS-level containment, `"disabled"` for passthrough |
+| `writable_paths` | string[] | `[]` | Additional directories workers can write to beyond the workspace |
+| `passthrough_env` | string[] | `[]` | Environment variable names to forward from the parent process |
+
+See [Configuration](/docs/config#agentssandbox) for the full config reference.
+
+## Protection Layers
+
+The sandbox is one layer in a defense-in-depth model:
+
+| Layer | What It Does | Scope |
+|-------|-------------|-------|
+| **Sandbox (filesystem)** | Read allowlist + writable workspace/writable_paths/tmp; blocks agent data dir | Shell, exec subprocesses |
+| **Env sanitization** | Clean environment, no inherited secrets | All subprocesses (including passthrough mode) |
+| **File tool workspace guard** | Path validation against workspace boundary | File tool only (in-process) |
+| **Exec env var blocklist** | Blocks `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc. | Exec tool |
+| **Leak detection** | Regex scan of all tool output for secret patterns | All tools via SpacebotHook |
+| **Output scrubbing** | Exact-match redaction of known secret values | Worker output, status updates, OpenCode events |
+| **Permissions system** | Application-level tool access control | All tools |
+
+The sandbox and permissions system are complementary. The [permissions system](/docs/permissions) controls which tools an agent can use and what paths the LLM is allowed to access at the application level. The sandbox enforces filesystem boundaries at the kernel level for subprocesses that are allowed to run.

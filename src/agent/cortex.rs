@@ -1164,10 +1164,18 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     );
 
     let prompt_engine = deps.runtime_config.prompts.load();
+    let sandbox_enabled = deps.sandbox.mode_enabled();
+    let sandbox_containment_active = deps.sandbox.containment_active();
+    let sandbox_read_allowlist = deps.sandbox.prompt_read_allowlist();
+    let sandbox_write_allowlist = deps.sandbox.prompt_write_allowlist();
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &deps.runtime_config.instance_dir.display().to_string(),
             &deps.runtime_config.workspace_dir.display().to_string(),
+            sandbox_enabled,
+            sandbox_containment_active,
+            sandbox_read_allowlist,
+            sandbox_write_allowlist,
         )
         .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
 

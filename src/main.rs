@@ -1385,7 +1385,7 @@ async fn initialize_agents(
 
         let sandbox = std::sync::Arc::new(
             spacebot::sandbox::Sandbox::new(
-                &agent_config.sandbox,
+                runtime_config.sandbox.clone(),
                 agent_config.workspace.clone(),
                 &config.instance_dir,
                 agent_config.data_dir.clone(),

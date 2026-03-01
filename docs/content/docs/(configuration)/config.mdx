@@ -536,12 +536,15 @@ Agent-specific routing is set via `[agents.routing]` with the same keys as `[def
 
 ### `[agents.sandbox]`
 
-OS-level filesystem containment for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace.
+OS-level filesystem containment and environment sanitization for shell and exec tool subprocesses. Uses bubblewrap (Linux) or sandbox-exec (macOS) to enforce read-only access to everything outside the workspace. Environment sanitization runs in all modes -- workers never inherit the parent's environment variables.
+
+See [Sandbox](/docs/sandbox) for a full explanation of how containment, environment sanitization, leak detection, and durable binaries work.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for full host access |
+| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for passthrough (env sanitization still applies) |
 | `writable_paths` | string[] | `[]` | Additional directories the agent can write to beyond its workspace |
+| `passthrough_env` | string[] | `[]` | Environment variable names to forward from the parent process to worker subprocesses |
 
 When `mode = "enabled"`, shell and exec commands run inside a mount namespace where the entire filesystem is read-only except:
 
@@ -552,12 +555,15 @@ When `mode = "enabled"`, shell and exec commands run inside a mount namespace wh
 
 The agent's data directory (databases, config) is explicitly re-mounted read-only even if it would otherwise be writable due to path overlap.
 
+Regardless of mode, all worker subprocesses start with a clean environment. Only `PATH` (with `tools/bin` prepended), safe variables (`HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`), and any `passthrough_env` entries are injected. Use `passthrough_env` with least privilege: only forward variables required by worker tools (for example specific credentials set in Docker Compose or systemd), and avoid forwarding broad or highly sensitive credentials.
+
 If the sandbox backend isn't available (e.g. bubblewrap not installed), processes run unsandboxed with a warning at startup.
 
 ```toml
 [agents.sandbox]
 mode = "enabled"
 writable_paths = ["/home/user/projects/myapp", "/var/data/shared"]
+passthrough_env = ["GH_TOKEN", "GITHUB_TOKEN"]
 ```
 
 ### `[[agents.cron]]`
