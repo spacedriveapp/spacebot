@@ -1269,6 +1269,10 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let agent_id = deps.agent_id.to_string();
     let event_tx = deps.event_tx.clone();
     let logger = logger.clone();
+    let injection_tx = deps.injection_tx.clone();
+    let links = deps.links.clone();
+    let agent_names = deps.agent_names.clone();
+    let sqlite_pool = deps.sqlite_pool.clone();
     tokio::spawn(async move {
         match worker.run().await {
             Ok(result_text) => {
@@ -1307,6 +1311,20 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                         "worker_id": worker_id.to_string(),
                     })),
                 );
+
+                // Handle delegated task completion: log to link channel and
+                // notify the delegating agent's originating channel.
+                notify_delegation_completion(
+                    &task,
+                    &result_text,
+                    true,
+                    &agent_id,
+                    &links,
+                    &agent_names,
+                    &sqlite_pool,
+                    &injection_tx,
+                )
+                .await;
 
                 let _ = event_tx.send(ProcessEvent::WorkerComplete {
                     agent_id: Arc::from(agent_id.as_str()),
@@ -1357,6 +1375,20 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                     })),
                 );
 
+                // Handle delegated task failure: log to link channel and
+                // notify the delegating agent's originating channel.
+                notify_delegation_completion(
+                    &task,
+                    &error_message,
+                    false,
+                    &agent_id,
+                    &links,
+                    &agent_names,
+                    &sqlite_pool,
+                    &injection_tx,
+                )
+                .await;
+
                 let _ = event_tx.send(ProcessEvent::WorkerComplete {
                     agent_id: Arc::from(agent_id.as_str()),
                     worker_id,
@@ -1370,6 +1402,120 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     });
 
     Ok(())
+}
+
+/// When a task with `metadata.delegated_by` completes or fails, log the result
+/// in the link channel between the two agents and inject a retrigger system
+/// message into the delegating agent's originating channel so the user gets
+/// notified.
+async fn notify_delegation_completion(
+    task: &crate::tasks::Task,
+    result_summary: &str,
+    success: bool,
+    executor_agent_id: &str,
+    links: &arc_swap::ArcSwap<Vec<crate::links::AgentLink>>,
+    agent_names: &std::collections::HashMap<String, String>,
+    sqlite_pool: &sqlx::SqlitePool,
+    injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
+) {
+    // Check if this is a delegated task.
+    let delegating_agent_id = task
+        .metadata
+        .get("delegating_agent_id")
+        .and_then(|v| v.as_str());
+
+    let Some(delegating_agent_id) = delegating_agent_id else {
+        return; // Not a delegated task.
+    };
+
+    let originating_channel = task
+        .metadata
+        .get("originating_channel")
+        .and_then(|v| v.as_str());
+
+    let executor_display = agent_names
+        .get(executor_agent_id)
+        .cloned()
+        .unwrap_or_else(|| executor_agent_id.to_string());
+
+    let status_word = if success { "completed" } else { "failed" };
+    let link_message = format!(
+        "{executor_display} {status_word} task #{}: \"{}\"",
+        task.task_number, task.title
+    );
+
+    // Log completion in the link channel on both sides.
+    let all_links = links.load();
+    if let Some(link) =
+        crate::links::find_link_between(&all_links, executor_agent_id, delegating_agent_id)
+    {
+        let conversation_logger =
+            crate::conversation::history::ConversationLogger::new(sqlite_pool.clone());
+        let executor_link_channel = link.channel_id_for(executor_agent_id);
+        let delegator_link_channel = link.channel_id_for(delegating_agent_id);
+        conversation_logger.log_system_message(&executor_link_channel, &link_message);
+        conversation_logger.log_system_message(&delegator_link_channel, &link_message);
+    }
+
+    // Inject a retrigger into the originating channel so the delegating agent
+    // can relay the result to the user.
+    let Some(originating_channel) = originating_channel else {
+        tracing::info!(
+            task_number = task.task_number,
+            delegating_agent_id,
+            "delegated task completed but no originating_channel in metadata, skipping retrigger"
+        );
+        return;
+    };
+
+    // Truncate very long results for the notification message.
+    let truncated_result = if result_summary.len() > 500 {
+        let boundary = result_summary.floor_char_boundary(500);
+        format!("{}... [truncated]", &result_summary[..boundary])
+    } else {
+        result_summary.to_string()
+    };
+
+    let notification_text = format!(
+        "[System] Delegated task #{} {status_word} by {executor_display}: \"{}\"\n\nResult: {truncated_result}",
+        task.task_number, task.title,
+    );
+
+    let injection = crate::ChannelInjection {
+        conversation_id: originating_channel.to_string(),
+        agent_id: delegating_agent_id.to_string(),
+        message: crate::InboundMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            source: "system".into(),
+            adapter: None,
+            conversation_id: originating_channel.to_string(),
+            sender_id: "system".into(),
+            agent_id: Some(delegating_agent_id.to_string().into()),
+            content: crate::MessageContent::Text(notification_text),
+            timestamp: chrono::Utc::now(),
+            metadata: std::collections::HashMap::new(),
+            formatted_author: None,
+        },
+    };
+
+    if let Err(error) = injection_tx.send(injection).await {
+        tracing::warn!(
+            %error,
+            task_number = task.task_number,
+            originating_channel,
+            delegating_agent_id,
+            "failed to inject delegation completion retrigger"
+        );
+    } else {
+        tracing::info!(
+            task_number = task.task_number,
+            originating_channel,
+            delegating_agent_id,
+            executor_agent_id,
+            success,
+            "injected delegation completion retrigger"
+        );
+    }
 }
 
 async fn run_association_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {

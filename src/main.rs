@@ -1336,9 +1336,24 @@ async fn run(
     // Channel for removing agents from the main event loop
     let (agent_remove_tx, mut agent_remove_rx) = mpsc::channel::<String>(8);
 
+    // Channel for cross-agent message injection (e.g. delegated task completion notifications).
+    // The sender is shared with all agents via AgentDeps; the receiver is polled in the main loop.
+    let (injection_tx, mut injection_rx) =
+        tokio::sync::mpsc::channel::<spacebot::ChannelInjection>(64);
+
+    // Shared cross-agent task store registry. Populated after all agents are initialized.
+    let task_store_registry: Arc<
+        ArcSwap<std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>>>,
+    > = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
+
     // Start HTTP API server if enabled
-    let mut api_state =
-        spacebot::api::ApiState::new_with_provider_sender(provider_tx, agent_tx, agent_remove_tx);
+    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
+        provider_tx,
+        agent_tx,
+        agent_remove_tx,
+        injection_tx.clone(),
+        task_store_registry.clone(),
+    );
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
 
@@ -1489,6 +1504,7 @@ async fn run(
             &mut telegram_permissions,
             &mut twitch_permissions,
             agent_links.clone(),
+            injection_tx.clone(),
             &bootstrapped_store,
         )
         .await?;
@@ -1779,6 +1795,32 @@ async fn run(
                     tracing::warn!(agent_id = %agent_id, "agent not found in main loop for removal");
                 }
             }
+            // Cross-agent message injection (e.g. delegated task completion retrigger).
+            // Forwards the injected message to the target channel if it exists.
+            Some(injection) = injection_rx.recv() => {
+                if let Some(active) = active_channels.get(&injection.conversation_id) {
+                    if let Err(error) = active.message_tx.send(injection.message).await {
+                        tracing::warn!(
+                            %error,
+                            conversation_id = %injection.conversation_id,
+                            agent_id = %injection.agent_id,
+                            "failed to forward injected message to channel"
+                        );
+                    } else {
+                        tracing::info!(
+                            conversation_id = %injection.conversation_id,
+                            agent_id = %injection.agent_id,
+                            "forwarded cross-agent injection to active channel"
+                        );
+                    }
+                } else {
+                    tracing::info!(
+                        conversation_id = %injection.conversation_id,
+                        agent_id = %injection.agent_id,
+                        "injection target channel not active, notification will be delivered on next message"
+                    );
+                }
+            }
             Some(_event) = provider_rx.recv(), if !agents_initialized => {
                 tracing::info!("providers configured, initializing agents");
 
@@ -1832,6 +1874,7 @@ async fn run(
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
                                     agent_links.clone(),
+                                    injection_tx.clone(),
                                     &bootstrapped_store,
                                 ).await {
                                     Ok(()) => {
@@ -1966,9 +2009,13 @@ async fn initialize_agents(
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
+    injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
     bootstrapped_store: &Option<Arc<spacebot::secrets::store::SecretsStore>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
+
+    // Shared task store registry — starts empty, populated after all agents are initialized.
+    let task_store_registry = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
 
     // Build agent name map for inter-agent message routing
     let agent_name_map: Arc<std::collections::HashMap<String, String>> = Arc::new(
@@ -2139,6 +2186,8 @@ async fn initialize_agents(
             sandbox,
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
+            task_store_registry: task_store_registry.clone(),
+            injection_tx: injection_tx.clone(),
         };
 
         let agent = spacebot::Agent {
@@ -2150,6 +2199,40 @@ async fn initialize_agents(
 
         tracing::info!(agent_id = %agent_config.id, "agent initialized");
         agents.insert(agent_id, agent);
+    }
+
+    // Populate the cross-agent task store registry now that all agents exist.
+    {
+        let registry: std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>> = agents
+            .iter()
+            .map(|(agent_id, agent)| (agent_id.to_string(), agent.deps.task_store.clone()))
+            .collect();
+        task_store_registry.store(Arc::new(registry));
+    }
+
+    // Pre-register both sides of every link channel so they appear in each
+    // agent's channel list from boot. The actual Channel instances are spawned
+    // on-demand when the first message arrives; this just creates the DB records
+    // so the UI can display them.
+    {
+        let all_links = agent_links.load();
+        let empty_meta = std::collections::HashMap::new();
+        for link in all_links.iter() {
+            let from_channel = link.channel_id_for(&link.from_agent_id);
+            let to_channel = link.channel_id_for(&link.to_agent_id);
+
+            if let Some(agent) = agents.get(&Arc::from(link.from_agent_id.as_str())) {
+                let store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
+                store.upsert(&from_channel, &empty_meta);
+            }
+            if let Some(agent) = agents.get(&Arc::from(link.to_agent_id.as_str())) {
+                let store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
+                store.upsert(&to_channel, &empty_meta);
+            }
+        }
+        if !all_links.is_empty() {
+            tracing::info!(link_count = all_links.len(), "pre-registered link channels");
+        }
     }
 
     tracing::info!(agent_count = agents.len(), "all agents initialized");

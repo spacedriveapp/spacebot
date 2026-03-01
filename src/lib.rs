@@ -196,6 +196,36 @@ pub enum ProcessEvent {
         /// "created", "updated", or "deleted".
         action: String,
     },
+    /// A delegated task (created via send_agent_message) completed or failed.
+    /// Emitted by the executor agent's cortex so the delegating agent can be notified.
+    DelegatedTaskCompleted {
+        /// Agent that executed the task.
+        executor_agent_id: AgentId,
+        /// Agent that delegated the task.
+        delegating_agent_id: AgentId,
+        /// Task number on the executor agent.
+        task_number: i64,
+        /// Task title.
+        title: String,
+        /// Worker result summary.
+        result_summary: String,
+        /// Whether the task completed successfully.
+        success: bool,
+        /// The channel on the delegating agent where the original request came from.
+        originating_channel: String,
+    },
+}
+
+/// A message to be injected into a specific channel from outside the normal
+/// inbound message flow. Used for cross-agent task completion notifications.
+#[derive(Debug, Clone)]
+pub struct ChannelInjection {
+    /// The conversation_id of the target channel.
+    pub conversation_id: String,
+    /// The agent that owns the target channel.
+    pub agent_id: String,
+    /// The message to inject.
+    pub message: InboundMessage,
 }
 
 /// Shared dependency bundle for agent processes.
@@ -215,6 +245,15 @@ pub struct AgentDeps {
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
+    /// reachable via links. Used by `send_agent_message` to create tasks on
+    /// target agents and by the cortex to look up delegation metadata.
+    /// Populated after all agents are initialized.
+    pub task_store_registry:
+        Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
+    /// Sender for injecting messages into channels from outside the normal
+    /// inbound message flow (e.g. cross-agent task completion notifications).
+    pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
 }
 
 impl AgentDeps {

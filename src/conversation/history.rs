@@ -74,6 +74,33 @@ impl ConversationLogger {
         self.log_bot_message_with_name(channel_id, content, None);
     }
 
+    /// Log a system message (e.g. task delegation audit record). Fire-and-forget.
+    ///
+    /// System messages are persisted with role `"system"` and are not fed to any
+    /// LLM context window. They exist purely for UI display in link channel
+    /// timelines and audit logs.
+    pub fn log_system_message(&self, channel_id: &str, content: &str) {
+        let pool = self.pool.clone();
+        let id = uuid::Uuid::new_v4().to_string();
+        let channel_id = channel_id.to_string();
+        let content = content.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "INSERT INTO conversation_messages (id, channel_id, role, sender_name, content) \
+                 VALUES (?, ?, 'system', 'system', ?)",
+            )
+            .bind(&id)
+            .bind(&channel_id)
+            .bind(&content)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, %channel_id, "failed to persist system message");
+            }
+        });
+    }
+
     /// Log a bot (assistant) message with an agent display name. Fire-and-forget.
     pub fn log_bot_message_with_name(
         &self,

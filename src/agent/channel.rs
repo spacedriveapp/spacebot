@@ -239,6 +239,8 @@ impl Channel {
                     deps.agent_id.clone(),
                     deps.links.clone(),
                     deps.agent_names.clone(),
+                    deps.task_store_registry.clone(),
+                    ConversationLogger::new(deps.sqlite_pool.clone()),
                 ))
             } else {
                 None
@@ -1068,6 +1070,13 @@ impl Channel {
         let replied_flag = crate::tools::new_replied_flag();
         let allow_direct_reply = !self.suppress_plaintext_fallback();
 
+        // Set the originating channel on the delegation tool so task completion
+        // notifications route back to this conversation.
+        let send_agent_message_tool = self
+            .send_agent_message_tool
+            .clone()
+            .map(|tool| tool.with_originating_channel(conversation_id.to_string()));
+
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
             self.state.clone(),
@@ -1076,7 +1085,7 @@ impl Channel {
             skip_flag.clone(),
             replied_flag.clone(),
             self.deps.cron_tool.clone(),
-            self.send_agent_message_tool.clone(),
+            send_agent_message_tool,
             allow_direct_reply,
         )
         .await
