@@ -163,7 +163,7 @@ Detected patterns include:
 
 Detection also covers encoded forms -- secrets wrapped in base64, URL encoding, or hex are decoded and checked against the same patterns.
 
-If a leak is detected, the process is terminated immediately with an error. The leaked value is logged for debugging but not returned to the LLM.
+If a leak is detected, the process is terminated immediately with an error. The raw leaked value is never logged or returned to the LLM -- only the detection event, encoding type, and a truncated non-reversible fingerprint are recorded for debugging.
 
 ### OpenCode Workers
 
