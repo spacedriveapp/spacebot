@@ -7,6 +7,10 @@
     crane = {
       url = "github:ipetkov/crane";
     };
+    bun2nix = {
+      url = "github:nix-community/bun2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = {
@@ -14,6 +18,7 @@
     nixpkgs,
     flake-utils,
     crane,
+    bun2nix,
     ...
   }:
     flake-utils.lib.eachDefaultSystem (
@@ -64,9 +69,39 @@
 
         spacebotPackages = import ./nix {
           inherit pkgs craneLib cargoSrc runtimeAssetsSrc frontendSrc;
+          bun2nix = bun2nix.packages.${system}.default;
         };
 
         inherit (spacebotPackages) frontend spacebot spacebot-full spacebot-tests;
+
+        frontendLockIntegrityCheck = pkgs.runCommand "frontend-lock-integrity-check" {
+          nativeBuildInputs = [bun];
+        } ''
+          cp ${frontendSrc}/interface/bun.lock bun.lock
+
+          bun --eval '
+            const lockText = await Bun.file("bun.lock").text()
+            let lock
+            try {
+              lock = JSON.parse(lockText.replace(/,\s*([}\]])/g, "$1"))
+            } catch (error) {
+              console.error("Failed to parse bun.lock for integrity check")
+              console.error(error)
+              process.exit(1)
+            }
+            const packageEntries = Object.values(lock.packages ?? {})
+            const emptyIntegrities = packageEntries.filter(
+              (entry) => Array.isArray(entry) && entry[3] === ""
+            )
+
+            if (emptyIntegrities.length > 0) {
+              console.error("bun.lock has " + emptyIntegrities.length + " packages with empty integrity hashes")
+              process.exit(1)
+            }
+          '
+
+          touch $out
+        '';
       in {
         packages = {
           default = spacebot;
@@ -115,7 +150,7 @@
         };
 
         checks = {
-          inherit spacebot spacebot-full spacebot-tests;
+          inherit frontendLockIntegrityCheck spacebot spacebot-full spacebot-tests;
         };
       }
     )
