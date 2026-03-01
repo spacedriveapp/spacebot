@@ -775,7 +775,7 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, _) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
@@ -961,7 +961,7 @@ impl Channel {
 
         let is_retrigger = message.source == "system";
 
-        let (result, skip_flag, replied_flag) = self
+        let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
@@ -974,64 +974,62 @@ impl Channel {
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
 
-        // After a retrigger turn, replace the synthetic bridge message in history
-        // with a compact summary so the conversation has context about what
-        // happened. The retrigger turn itself is rolled back by
-        // apply_history_after_turn (PromptCancelled leaves dangling tool calls),
-        // so without this the LLM would have no memory of the background result
-        // on subsequent turns.
+        // After retrigger turns, persist a fallback summary only when we don't
+        // already have the LLM's actual relay text in history.
         //
-        // This runs on both success and failure paths: if the LLM successfully
-        // relayed (replied_flag=true), it records what was sent. If the LLM
-        // failed (CompletionError, empty response, etc.), it preserves the result
-        // so it's not silently lost — the next real user turn will see it.
+        // PromptCancelled + reply tool is now handled in apply_history_after_turn:
+        // it extracts the reply content from tool args and records that exact
+        // assistant message (while dropping scaffolding). In that common success
+        // path, we skip summary injection to avoid replacing user-visible wording
+        // with raw worker output.
+        //
+        // If relay failed (replied=false), or if we couldn't extract a clean
+        // reply content payload, this fallback preserves a compact background
+        // result record for the next user turn.
         if is_retrigger {
             let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
-            // Extract the result summaries from the metadata we attached in
-            // flush_pending_retrigger, so we record only the substance (not
-            // the retrigger instructions/template scaffolding).
-            let summary = message
-                .metadata
-                .get("retrigger_result_summary")
-                .and_then(|v| v.as_str())
-                .unwrap_or("[background work completed]");
-
-            let record = if replied {
-                summary.to_string()
-            } else {
-                tracing::warn!(
+            if replied && retrigger_reply_preserved {
+                tracing::debug!(
                     channel_id = %self.id,
-                    "retrigger relay failed, preserving result in history for next turn"
+                    "skipping retrigger summary injection; relay reply already preserved"
                 );
-                format!(
-                    "[background work completed but relay to user failed — include this in your next response]\n{summary}"
-                )
-            };
-
-            let mut history = self.state.history.write().await;
-            // Replace the synthetic bridge message (if present) with the summary
-            // to avoid consecutive assistant messages in history.
-            let replaced = if history.last().is_some_and(|m| match m {
-                rig::message::Message::Assistant { content, .. } => content.iter().any(|c| {
-                    matches!(c, rig::message::AssistantContent::Text(t) if t.text.contains("[acknowledged"))
-                }),
-                _ => false,
-            }) {
-                history.pop();
-                true
             } else {
-                false
-            };
-            tracing::debug!(
-                channel_id = %self.id,
-                replaced_bridge = replaced,
-                replied,
-                "injecting retrigger summary into history"
-            );
-            history.push(rig::message::Message::Assistant {
-                id: None,
-                content: OneOrMany::one(rig::message::AssistantContent::text(record)),
-            });
+                // Extract the result summaries from the metadata we attached in
+                // flush_pending_retrigger, so we record only the substance (not
+                // the retrigger instructions/template scaffolding).
+                let summary = message
+                    .metadata
+                    .get("retrigger_result_summary")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("[background work completed]");
+
+                let record = if replied {
+                    summary.to_string()
+                } else {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        "retrigger relay failed, preserving result in history for next turn"
+                    );
+                    format!(
+                        "[background work completed but relay to user failed — include this in your next response]\n{summary}"
+                    )
+                };
+
+                let mut history = self.state.history.write().await;
+                // Replace the synthetic bridge message (if present) with the summary
+                // to avoid consecutive assistant messages in history.
+                let replaced = pop_retrigger_bridge_message(&mut history);
+                tracing::debug!(
+                    channel_id = %self.id,
+                    replaced_bridge = replaced,
+                    replied,
+                    "injecting retrigger summary into history"
+                );
+                history.push(rig::message::Message::Assistant {
+                    id: None,
+                    content: OneOrMany::one(rig::message::AssistantContent::text(record)),
+                });
+            }
         }
 
         // Check context size and trigger compaction if needed
@@ -1200,7 +1198,7 @@ impl Channel {
 
     /// Register per-turn tools, run the LLM agentic loop, and clean up.
     ///
-    /// Returns the prompt result and skip flag for the caller to dispatch.
+    /// Returns the prompt result and per-turn flags for the caller to dispatch.
     #[allow(clippy::type_complexity)]
     #[tracing::instrument(skip(self, user_text, system_prompt, attachment_content), fields(channel_id = %self.id, agent_id = %self.deps.agent_id))]
     async fn run_agent_turn(
@@ -1214,6 +1212,7 @@ impl Channel {
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
         crate::tools::RepliedFlag,
+        bool,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
@@ -1335,7 +1334,7 @@ impl Channel {
                 .await;
         }
 
-        {
+        let retrigger_reply_preserved = {
             let mut guard = self.state.history.write().await;
             apply_history_after_turn(
                 &result,
@@ -1344,8 +1343,8 @@ impl Channel {
                 history_len_before,
                 &self.id,
                 is_retrigger,
-            );
-        }
+            )
+        };
 
         if let Err(error) =
             crate::tools::remove_channel_tools(&self.tool_server, allow_direct_reply).await
@@ -1353,7 +1352,7 @@ impl Channel {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
-        Ok((result, skip_flag, replied_flag))
+        Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
@@ -3080,6 +3079,9 @@ async fn download_text_attachment(
 ///
 /// `MaxTurnsError` is safe — Rig pushes all tool results into a `User` message
 /// before raising it, so history is consistent.
+///
+/// Returns true when a retrigger PromptCancelled turn had a reply tool call
+/// extracted and persisted as a clean assistant text message.
 fn apply_history_after_turn(
     result: &std::result::Result<String, rig::completion::PromptError>,
     guard: &mut Vec<rig::message::Message>,
@@ -3087,33 +3089,57 @@ fn apply_history_after_turn(
     history_len_before: usize,
     channel_id: &str,
     is_retrigger: bool,
-) {
+) -> bool {
     match result {
         Ok(_) | Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
             *guard = history;
+            false
         }
         Err(rig::completion::PromptError::PromptCancelled { .. }) => {
+            let new_messages = &history[history_len_before..];
+
             // Rig appended the user prompt and possibly an assistant tool-call
-            // message to history before cancellation. We preserve:
+            // message to history before cancellation.
+            //
+            // Retrigger turns use a synthetic system user prompt, so we never
+            // preserve user text there. Instead, keep only a clean assistant
+            // message extracted from reply tool args when available.
+            if is_retrigger {
+                let replaced_bridge = pop_retrigger_bridge_message(guard);
+                if let Some(reply_content) =
+                    extract_reply_content_from_cancelled_history(new_messages)
+                {
+                    guard.push(rig::message::Message::Assistant {
+                        id: None,
+                        content: rig::OneOrMany::one(rig::message::AssistantContent::text(
+                            reply_content,
+                        )),
+                    });
+
+                    tracing::debug!(
+                        channel_id = %channel_id,
+                        total_new = new_messages.len(),
+                        replaced_bridge,
+                        "preserved retrigger assistant reply after PromptCancelled"
+                    );
+                    return true;
+                }
+
+                tracing::debug!(
+                    channel_id = %channel_id,
+                    total_new = new_messages.len(),
+                    replaced_bridge,
+                    "discarding retrigger PromptCancelled messages (no reply content found)"
+                );
+                return false;
+            }
+
+            // For regular turns we preserve:
             // 1. The first user text message (the actual user prompt)
             // 2. A clean assistant text message extracted from the reply tool call
             //
             // We discard: dangling tool calls (without results), tool-result user
             // messages, and internal correction prompts.
-            //
-            // Exception: retrigger turns. The "user prompt" Rig pushed is actually
-            // the synthetic system retrigger message (internal template scaffolding),
-            // not a real user message. We inject a proper summary record separately
-            // in handle_message, so don't preserve anything from retrigger turns.
-            if is_retrigger {
-                tracing::debug!(
-                    channel_id = %channel_id,
-                    rolled_back = history.len().saturating_sub(history_len_before),
-                    "discarding retrigger turn history (summary injected separately)"
-                );
-                return;
-            }
-            let new_messages = &history[history_len_before..];
             let mut preserved = 0usize;
 
             // Preserve the user text message
@@ -3144,6 +3170,8 @@ fn apply_history_after_turn(
                 discarded = new_messages.len() - preserved,
                 "preserved user message and assistant reply after PromptCancelled"
             );
+
+            false
         }
         Err(_) => {
             // Hard errors: history state is unpredictable, truncate to snapshot.
@@ -3153,7 +3181,30 @@ fn apply_history_after_turn(
                 "rolling back history after failed turn"
             );
             guard.truncate(history_len_before);
+            false
         }
+    }
+}
+
+fn pop_retrigger_bridge_message(history: &mut Vec<rig::message::Message>) -> bool {
+    if history.last().is_some_and(is_retrigger_bridge_message) {
+        history.pop();
+        true
+    } else {
+        false
+    }
+}
+
+fn is_retrigger_bridge_message(message: &rig::message::Message) -> bool {
+    match message {
+        rig::message::Message::Assistant { content, .. } => content.iter().any(|item| {
+            matches!(
+                item,
+                rig::message::AssistantContent::Text(text)
+                    if text.text.contains("[acknowledged")
+            )
+        }),
+        _ => false,
     }
 }
 
@@ -3384,28 +3435,78 @@ mod tests {
         );
     }
 
-    /// PromptCancelled on retrigger turns discards everything — the synthetic
-    /// system message is internal scaffolding, not a real user message.
-    /// A summary record is injected separately in handle_message.
+    /// PromptCancelled on retrigger turns preserves only the assistant relay
+    /// text extracted from the reply tool args and drops retrigger scaffolding.
     #[test]
-    fn prompt_cancelled_retrigger_discards_all() {
+    fn prompt_cancelled_retrigger_preserves_reply_only() {
         let initial = make_history(&["hello", "thinking..."]);
         let mut guard = initial.clone();
-        let mut history = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
         history.push(user_msg("[System: 1 background process completed...]"));
-        history.push(assistant_msg("relaying result..."));
-        let len_before = initial.len();
+        history.push(Message::Assistant {
+            id: None,
+            content: rig::OneOrMany::one(rig::message::AssistantContent::tool_call(
+                "call_1",
+                "reply",
+                serde_json::json!({"content": "Relayed branch result to user."}),
+            )),
+        });
+        let len_before = guard.len();
 
         let err = Err(PromptError::PromptCancelled {
             chat_history: Box::new(history.clone()),
             reason: "reply delivered".to_string(),
         });
 
-        apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
+        let preserved =
+            apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
 
+        let mut expected = initial;
+        expected.push(assistant_msg("Relayed branch result to user."));
+        assert!(
+            preserved,
+            "retrigger PromptCancelled should report reply preservation"
+        );
+        assert_eq!(
+            guard, expected,
+            "retrigger history should keep only the extracted relay text"
+        );
+    }
+
+    /// PromptCancelled retrigger turns with no reply tool call remove the
+    /// synthetic bridge and preserve no new messages.
+    #[test]
+    fn prompt_cancelled_retrigger_without_reply_discards_scaffolding() {
+        let initial = make_history(&["hello", "thinking..."]);
+        let mut guard = initial.clone();
+        guard.push(assistant_msg(
+            "[acknowledged — working on it in background]",
+        ));
+
+        let mut history = guard.clone();
+        history.push(user_msg("[System: 1 background process completed...]"));
+        history.push(assistant_msg("relay attempt without tool call"));
+        let len_before = guard.len();
+
+        let err = Err(PromptError::PromptCancelled {
+            chat_history: Box::new(history.clone()),
+            reason: "reply delivered".to_string(),
+        });
+
+        let preserved =
+            apply_history_after_turn(&err, &mut guard, history, len_before, "test", true);
+
+        assert!(
+            !preserved,
+            "retrigger PromptCancelled should report no reply preservation"
+        );
         assert_eq!(
             guard, initial,
-            "retrigger turns should discard all new messages"
+            "retrigger scaffolding should be removed when no reply payload exists"
         );
     }
 
