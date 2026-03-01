@@ -237,8 +237,14 @@ impl KeyStore for LinuxKeyStore {
             )
         };
         if key_id < 0 {
-            // Not found — already deleted.
-            return Ok(());
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ENOKEY) {
+                // Not found — already deleted.
+                return Ok(());
+            }
+            return Err(SecretsError::Other(anyhow::anyhow!(
+                "keyctl search failed: {error}"
+            )));
         }
 
         // Invalidate the key.
