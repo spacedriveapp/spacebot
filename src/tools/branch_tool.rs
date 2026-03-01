@@ -1,7 +1,8 @@
 //! Branch tool for forking context and thinking (channel only).
 
 use crate::BranchId;
-use crate::agent::channel::{ChannelState, spawn_branch_from_state};
+use crate::agent::channel::ChannelState;
+use crate::agent::channel_dispatch::spawn_branch_from_state;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;

@@ -1342,9 +1342,14 @@ async fn build_metadata_and_author(
         "slack_channel_id".into(),
         serde_json::Value::String(channel_id.into()),
     );
+    let ts_string: String = ts.into();
     metadata.insert(
         "slack_message_ts".into(),
-        serde_json::Value::String(ts.into()),
+        serde_json::Value::String(ts_string.clone()),
+    );
+    metadata.insert(
+        crate::metadata_keys::MESSAGE_ID.into(),
+        serde_json::Value::String(ts_string),
     );
 
     if let Some(tts) = thread_ts {
@@ -1370,8 +1375,17 @@ async fn build_metadata_and_author(
     let session = client.open_session(&token);
 
     // Resolve channel name via cache or conversations.info API.
+    let is_dm = channel_id.starts_with('D');
     if let Some(name) = channel_name_cache.read().await.get(channel_id).cloned() {
-        metadata.insert("slack_channel_name".into(), serde_json::Value::String(name));
+        metadata.insert(
+            "slack_channel_name".into(),
+            serde_json::Value::String(name.clone()),
+        );
+        let display_name = if is_dm { name } else { format!("#{name}") };
+        metadata.insert(
+            crate::metadata_keys::CHANNEL_NAME.into(),
+            serde_json::Value::String(display_name),
+        );
     } else {
         match session
             .conversations_info(&SlackApiConversationsInfoRequest::new(SlackChannelId(
@@ -1385,11 +1399,19 @@ async fn build_metadata_and_author(
                         .write()
                         .await
                         .insert(channel_id.to_string(), name.clone());
-                    metadata.insert("slack_channel_name".into(), serde_json::Value::String(name));
+                    metadata.insert(
+                        "slack_channel_name".into(),
+                        serde_json::Value::String(name.clone()),
+                    );
+                    let display_name = if is_dm { name } else { format!("#{name}") };
+                    metadata.insert(
+                        crate::metadata_keys::CHANNEL_NAME.into(),
+                        serde_json::Value::String(display_name),
+                    );
                 }
             }
             // DM channels (D-prefixed) don't support conversations.info in all cases
-            Err(error) if !channel_id.starts_with('D') => {
+            Err(error) if !is_dm => {
                 tracing::warn!(
                     %error,
                     channel_id = %channel_id,
@@ -1445,9 +1467,14 @@ async fn build_metadata_and_author(
         && !metadata.contains_key("slack_channel_name")
         && let Some(display_name) = metadata.get("sender_display_name").and_then(|v| v.as_str())
     {
+        let dm_channel_name = format!("dm-{display_name}");
         metadata.insert(
             "slack_channel_name".into(),
-            serde_json::Value::String(format!("dm-{display_name}")),
+            serde_json::Value::String(dm_channel_name.clone()),
+        );
+        metadata.insert(
+            crate::metadata_keys::CHANNEL_NAME.into(),
+            serde_json::Value::String(dm_channel_name),
         );
     }
 

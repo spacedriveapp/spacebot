@@ -104,7 +104,7 @@ pub enum ProcessEvent {
         branch_id: BranchId,
         channel_id: ChannelId,
         description: String,
-        reply_to_message_id: Option<u64>,
+        reply_to_message_id: Option<String>,
     },
     BranchResult {
         agent_id: AgentId,
@@ -237,6 +237,24 @@ pub struct Agent {
     pub config: config::ResolvedAgentConfig,
     pub db: db::Db,
     pub deps: AgentDeps,
+}
+
+/// Standard metadata keys set by all adapters.
+///
+/// Adapters set these alongside their platform-specific keys so consumers
+/// can read them without knowing which platform originated the message.
+pub mod metadata_keys {
+    /// Server / workspace / chat group name (e.g. Discord guild, Slack workspace).
+    pub const SERVER_NAME: &str = "server_name";
+    /// Channel / conversation name within the server.
+    pub const CHANNEL_NAME: &str = "channel_name";
+    /// Platform message ID (stringified). Used for reply threading.
+    pub const MESSAGE_ID: &str = "message_id";
+    /// Reply target message ID for outbound reply threading.
+    /// Set on retrigger metadata when a branch/worker completes.
+    pub const REPLY_TO_MESSAGE_ID: &str = "reply_to_message_id";
+    /// Quoted reply text preview from the message being replied to.
+    pub const REPLY_TO_TEXT: &str = "reply_to_text";
 }
 
 /// Inbound message from any messaging platform.

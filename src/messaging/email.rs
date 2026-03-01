@@ -837,6 +837,14 @@ fn parse_inbound_email(
         "email_message_id".into(),
         serde_json::Value::String(message_id.clone()),
     );
+    metadata.insert(
+        crate::metadata_keys::MESSAGE_ID.into(),
+        serde_json::Value::String(message_id.clone()),
+    );
+    metadata.insert(
+        crate::metadata_keys::CHANNEL_NAME.into(),
+        serde_json::Value::String(format!("Email: {subject}")),
+    );
     if let Some(in_reply_to) = in_reply_to {
         metadata.insert(
             "email_in_reply_to".into(),
