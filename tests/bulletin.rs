@@ -120,6 +120,10 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        )),
+        injection_tx: tokio::sync::mpsc::channel(1).0,
     })
 }
 

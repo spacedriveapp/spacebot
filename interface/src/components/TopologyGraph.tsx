@@ -96,23 +96,6 @@ function loadHandles(): SavedHandles {
 	return {};
 }
 
-function saveHandles(edges: Edge[]) {
-	const handles: SavedHandles = {};
-	for (const edge of edges) {
-		if (edge.sourceHandle && edge.targetHandle) {
-			handles[edge.id] = {
-				sourceHandle: edge.sourceHandle,
-				targetHandle: edge.targetHandle,
-			};
-		}
-	}
-	try {
-		localStorage.setItem(HANDLES_KEY, JSON.stringify(handles));
-	} catch {
-		// ignore
-	}
-}
-
 /** Deterministic gradient from a seed string. */
 function seedGradient(seed: string): [string, string] {
 	let hash = 0;

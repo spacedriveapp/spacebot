@@ -266,10 +266,18 @@ impl Messaging for TwitchAdapter {
                         let mut metadata = HashMap::new();
                         metadata.insert(
                             "twitch_channel".into(),
+                            serde_json::Value::String(channel_login.clone()),
+                        );
+                        metadata.insert(
+                            crate::metadata_keys::CHANNEL_NAME.into(),
                             serde_json::Value::String(channel_login),
                         );
                         metadata.insert(
                             "twitch_message_id".into(),
+                            serde_json::Value::String(privmsg.message_id.clone()),
+                        );
+                        metadata.insert(
+                            crate::metadata_keys::MESSAGE_ID.into(),
                             serde_json::Value::String(privmsg.message_id.clone()),
                         );
                         metadata.insert(

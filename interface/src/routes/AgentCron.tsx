@@ -2,7 +2,6 @@ import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type CronJobWithStats, type CreateCronRequest } from "@/api/client";
 import { formatDuration, formatTimeAgo } from "@/lib/format";
-import { AnimatePresence, motion } from "framer-motion";
 import { Clock05Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import {

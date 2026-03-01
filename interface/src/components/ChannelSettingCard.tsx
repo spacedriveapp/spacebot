@@ -52,13 +52,13 @@ interface PlatformCatalogProps {
 }
 
 export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
-	const PLATFORMS: {platform: Platform; description: string}[] = [
-		{platform: "discord", description: "Discord bot integration"},
-		{platform: "slack", description: "Slack bot integration"},
-		{platform: "telegram", description: "Telegram bot integration"},
-		{platform: "twitch", description: "Twitch chat integration"},
-		{platform: "email", description: "IMAP/SMTP email integration"},
-		{platform: "webhook", description: "HTTP webhook receiver"},
+	const PLATFORMS: Platform[] = [
+		"discord",
+		"slack",
+		"telegram",
+		"twitch",
+		"email",
+		"webhook",
 	];
 
 	const COMING_SOON = [
@@ -75,7 +75,7 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 			<h3 className="text-xs font-semibold text-ink-faint uppercase tracking-wider mb-2">
 				Available
 			</h3>
-			{PLATFORMS.map(({platform, description}) => (
+			{PLATFORMS.map((platform) => (
 				<button
 					key={platform}
 					type="button"

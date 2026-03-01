@@ -22,7 +22,7 @@ import {
 	FilterButton,
 } from "@/ui";
 import { formatTimeAgo } from "@/lib/format";
-import { Search01Icon, ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
+import { ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 type ViewMode = "list" | "graph";

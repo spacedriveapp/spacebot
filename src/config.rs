@@ -184,6 +184,9 @@ pub struct ProviderConfig {
     /// Anthropic requests. Set automatically when the key originates from
     /// `ANTHROPIC_AUTH_TOKEN` (proxy-compatible auth).
     pub use_bearer_auth: bool,
+    /// Additional HTTP headers included in requests to this provider.
+    /// Currently applied in `call_openai()` (the `OpenAiCompletions` path).
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl std::fmt::Debug for ProviderConfig {
@@ -194,6 +197,14 @@ impl std::fmt::Debug for ProviderConfig {
             .field("api_key", &"[REDACTED]")
             .field("name", &self.name)
             .field("use_bearer_auth", &self.use_bearer_auth)
+            .field(
+                "extra_headers",
+                &self
+                    .extra_headers
+                    .iter()
+                    .map(|(key, _)| key.as_str())
+                    .collect::<Vec<_>>(),
+            )
             .finish()
     }
 }
@@ -480,6 +491,19 @@ const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
 
+/// App attribution headers sent with every OpenRouter API request.
+/// See <https://openrouter.ai/docs/app-attribution>.
+fn openrouter_extra_headers() -> Vec<(String, String)> {
+    vec![
+        ("HTTP-Referer".into(), "https://spacebot.sh/".into()),
+        ("X-OpenRouter-Title".into(), "Spacebot".into()),
+        (
+            "X-OpenRouter-Categories".into(),
+            "cloud-agent,cli-agent".into(),
+        ),
+    ]
+}
+
 /// Returns the default ProviderConfig for a provider ID and API key.
 /// Used by API tests and other code that needs provider configs without duplicating metadata.
 pub(crate) fn default_provider_config(
@@ -494,6 +518,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "openai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -501,6 +526,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "openrouter" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -508,6 +534,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: openrouter_extra_headers(),
         },
         "kilo" => ProviderConfig {
             api_type: ApiType::KiloGateway,
@@ -515,6 +542,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Kilo Gateway".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "zhipu" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -522,6 +550,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Z.AI (GLM)".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "groq" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -529,6 +558,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "together" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -536,6 +566,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "fireworks" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -543,6 +574,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "deepseek" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -550,6 +582,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "xai" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -557,6 +590,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "mistral" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -564,6 +598,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "gemini" => ProviderConfig {
             api_type: ApiType::Gemini,
@@ -571,6 +606,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "ollama" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -578,6 +614,7 @@ pub(crate) fn default_provider_config(
             api_key: String::new(),
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "opencode-zen" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -585,6 +622,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "opencode-go" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -592,6 +630,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "nvidia" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -599,6 +638,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "minimax" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -606,6 +646,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "minimax-cn" => ProviderConfig {
             api_type: ApiType::Anthropic,
@@ -613,6 +654,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "moonshot" => ProviderConfig {
             api_type: ApiType::OpenAiCompletions,
@@ -620,6 +662,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: None,
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         "zai-coding-plan" => ProviderConfig {
             api_type: ApiType::OpenAiChatCompletions,
@@ -627,6 +670,7 @@ pub(crate) fn default_provider_config(
             api_key,
             name: Some("Z.AI Coding Plan".to_string()),
             use_bearer_auth: false,
+            extra_headers: vec![],
         },
         _ => return None,
     })
@@ -650,6 +694,7 @@ fn add_shorthand_provider(
                 api_key,
                 name: name.map(str::to_string),
                 use_bearer_auth,
+                extra_headers: vec![],
             });
     }
 }
@@ -3748,6 +3793,7 @@ impl Config {
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3760,6 +3806,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -3820,6 +3867,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3832,6 +3880,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3844,6 +3893,7 @@ impl Config {
                     api_key: openai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3856,6 +3906,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -3896,6 +3947,7 @@ impl Config {
                     api_key: opencode_zen_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3908,6 +3960,7 @@ impl Config {
                     api_key: opencode_go_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3920,6 +3973,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3932,6 +3986,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3944,6 +3999,7 @@ impl Config {
                     api_key: moonshot_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3956,6 +4012,7 @@ impl Config {
                     api_key: nvidia_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3968,6 +4025,7 @@ impl Config {
                     api_key: fireworks_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3980,6 +4038,7 @@ impl Config {
                     api_key: deepseek_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -3992,6 +4051,7 @@ impl Config {
                     api_key: gemini_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4004,6 +4064,7 @@ impl Config {
                     api_key: groq_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4016,6 +4077,7 @@ impl Config {
                     api_key: together_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4028,6 +4090,7 @@ impl Config {
                     api_key: xai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4040,6 +4103,7 @@ impl Config {
                     api_key: mistral_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4055,6 +4119,7 @@ impl Config {
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4335,14 +4400,21 @@ impl Config {
                     let api_key = resolve_env_value(&config.api_key).ok_or_else(|| {
                         anyhow::anyhow!("failed to resolve API key for provider '{}'", provider_id)
                     })?;
+                    let normalized_id = provider_id.to_lowercase();
+                    let extra_headers = if normalized_id == "openrouter" {
+                        openrouter_extra_headers()
+                    } else {
+                        vec![]
+                    };
                     Ok((
-                        provider_id.to_lowercase(),
+                        normalized_id,
                         ProviderConfig {
                             api_type: config.api_type,
                             base_url: config.base_url,
                             api_key,
                             name: config.name,
                             use_bearer_auth: false,
+                            extra_headers,
                         },
                     ))
                 })
@@ -4368,6 +4440,7 @@ impl Config {
                     api_key: anthropic_key,
                     name: None,
                     use_bearer_auth: anthropic_from_auth_token,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4380,6 +4453,7 @@ impl Config {
                     api_key: openai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4392,6 +4466,7 @@ impl Config {
                     api_key: openrouter_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: openrouter_extra_headers(),
                 });
         }
 
@@ -4452,6 +4527,7 @@ impl Config {
                     api_key: minimax_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4464,6 +4540,7 @@ impl Config {
                     api_key: minimax_cn_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4476,6 +4553,7 @@ impl Config {
                     api_key: moonshot_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4488,6 +4566,7 @@ impl Config {
                     api_key: nvidia_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4500,6 +4579,7 @@ impl Config {
                     api_key: fireworks_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4512,6 +4592,7 @@ impl Config {
                     api_key: deepseek_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4524,6 +4605,7 @@ impl Config {
                     api_key: gemini_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4536,6 +4618,7 @@ impl Config {
                     api_key: groq_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4548,6 +4631,7 @@ impl Config {
                     api_key: together_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4560,6 +4644,7 @@ impl Config {
                     api_key: xai_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4572,6 +4657,7 @@ impl Config {
                     api_key: mistral_key,
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -4587,6 +4673,7 @@ impl Config {
                     api_key: llm.ollama_key.clone().unwrap_or_default(),
                     name: None,
                     use_bearer_auth: false,
+                    extra_headers: vec![],
                 });
         }
 
@@ -6836,6 +6923,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(anthropic_provider.api_type, ApiType::Anthropic);
         assert_eq!(anthropic_provider.base_url, ANTHROPIC_PROVIDER_BASE_URL);
         assert_eq!(anthropic_provider.api_key, "legacy-anthropic-key");
+        assert!(
+            anthropic_provider.extra_headers.is_empty(),
+            "anthropic provider should have no extra_headers"
+        );
 
         let openai_provider = config
             .llm
@@ -6845,6 +6936,10 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openai_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openai_provider.base_url, OPENAI_PROVIDER_BASE_URL);
         assert_eq!(openai_provider.api_key, "legacy-openai-key");
+        assert!(
+            openai_provider.extra_headers.is_empty(),
+            "openai provider should have no extra_headers"
+        );
 
         let openrouter_provider = config
             .llm
@@ -6854,6 +6949,20 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
         assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
+        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
+        );
     }
 
     #[test]
@@ -6882,6 +6991,46 @@ name = "Custom OpenAI"
         assert_eq!(openai_provider.api_key, "explicit-openai-key");
         assert_eq!(openai_provider.name.as_deref(), Some("Custom OpenAI"));
         assert_eq!(config.llm.openai_key.as_deref(), Some("legacy-openai-key"));
+    }
+
+    #[test]
+    fn test_explicit_openrouter_provider_toml_injects_extra_headers() {
+        let toml = r#"
+[llm.provider.openrouter]
+api_type = "openai_completions"
+base_url = "https://openrouter.ai/api/v1"
+api_key = "explicit-openrouter-key"
+name = "My OpenRouter"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        let openrouter_provider = config
+            .llm
+            .providers
+            .get("openrouter")
+            .expect("openrouter provider missing");
+        assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
+        assert_eq!(openrouter_provider.base_url, "https://openrouter.ai/api/v1");
+        assert_eq!(openrouter_provider.api_key, "explicit-openrouter-key");
+        assert_eq!(openrouter_provider.name.as_deref(), Some("My OpenRouter"));
+
+        // Verify attribution headers are injected even for explicit TOML config
+        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        let find_header = |name: &str| -> Option<&str> {
+            openrouter_provider
+                .extra_headers
+                .iter()
+                .find(|(key, _)| key == name)
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
+        assert_eq!(
+            find_header("X-OpenRouter-Categories"),
+            Some("cloud-agent,cli-agent")
+        );
     }
 
     #[test]

@@ -400,6 +400,8 @@ pub(super) async fn trigger_warmup(
         let llm_manager = llm_manager.clone();
         let force = request.force;
         let agent_id = agent_id.clone();
+        let task_store_registry = state.task_store_registry.clone();
+        let injection_tx = state.injection_tx.clone();
         tokio::spawn(async move {
             let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
             let deps = crate::AgentDeps {
@@ -416,6 +418,8 @@ pub(super) async fn trigger_warmup(
                 task_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
+                task_store_registry,
+                injection_tx,
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -716,6 +720,8 @@ pub(super) async fn create_agent(
         links: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_links.load()).clone(),
         )),
+        task_store_registry: state.task_store_registry.clone(),
+        injection_tx: state.injection_tx.clone(),
         agent_names: {
             let configs = state.agent_configs.load();
             let mut names: std::collections::HashMap<String, String> = configs
@@ -825,8 +831,14 @@ pub(super) async fn create_agent(
         state.memory_searches.store(std::sync::Arc::new(searches));
 
         let mut task_stores = (**state.task_stores.load()).clone();
-        task_stores.insert(agent_id.clone(), task_store);
+        task_stores.insert(agent_id.clone(), task_store.clone());
         state.task_stores.store(std::sync::Arc::new(task_stores));
+
+        let mut registry = (**state.task_store_registry.load()).clone();
+        registry.insert(agent_id.clone(), task_store);
+        state
+            .task_store_registry
+            .store(std::sync::Arc::new(registry));
 
         let mut workspaces = (**state.agent_workspaces.load()).clone();
         workspaces.insert(agent_id.clone(), agent_config.workspace.clone());
@@ -1478,10 +1490,16 @@ mod tests {
         let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
         let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
 
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
         Arc::new(ApiState::new_with_provider_sender(
             provider_setup_tx,
             agent_tx,
             agent_remove_tx,
+            injection_tx,
+            task_store_registry,
         ))
     }
 

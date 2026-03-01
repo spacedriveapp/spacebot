@@ -216,37 +216,22 @@ fn extract_platform(channel_id: &str) -> String {
 }
 
 /// Pull the best display name from inbound message metadata.
+///
+/// Adapters set `channel_name` with display-ready values (e.g. `#general`
+/// for Slack, `Email: subject` for email). Portal is the only platform
+/// without adapter-set metadata, so it uses a hardcoded fallback.
 fn extract_display_name(
     platform: &str,
-    channel_id: &str,
+    _channel_id: &str,
     metadata: &HashMap<String, serde_json::Value>,
 ) -> Option<String> {
-    match platform {
-        "discord" => metadata
-            .get("discord_channel_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "slack" => metadata
-            .get("slack_channel_name")
-            .and_then(|v| v.as_str())
-            .map(|name| {
-                if channel_id.contains(":D") || name.starts_with("dm-") {
-                    name.to_string()
-                } else {
-                    format!("#{name}")
-                }
-            }),
-        "telegram" => metadata
-            .get("display_name")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string()),
-        "email" => metadata
-            .get("email_subject")
-            .and_then(|v| v.as_str())
-            .map(|subject| format!("Email: {subject}")),
-        "portal" => Some("portal:chat".to_string()),
-        _ => None,
+    if platform == "portal" {
+        return Some("portal:chat".to_string());
     }
+    metadata
+        .get(crate::metadata_keys::CHANNEL_NAME)
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
 }
 
 /// Build a JSON blob of platform-specific metadata worth persisting.

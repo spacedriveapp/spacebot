@@ -104,7 +104,7 @@ pub enum ProcessEvent {
         branch_id: BranchId,
         channel_id: ChannelId,
         description: String,
-        reply_to_message_id: Option<u64>,
+        reply_to_message_id: Option<String>,
     },
     BranchResult {
         agent_id: AgentId,
@@ -198,6 +198,18 @@ pub enum ProcessEvent {
     },
 }
 
+/// A message to be injected into a specific channel from outside the normal
+/// inbound message flow. Used for cross-agent task completion notifications.
+#[derive(Debug, Clone)]
+pub struct ChannelInjection {
+    /// The conversation_id of the target channel.
+    pub conversation_id: String,
+    /// The agent that owns the target channel.
+    pub agent_id: String,
+    /// The message to inject.
+    pub message: InboundMessage,
+}
+
 /// Shared dependency bundle for agent processes.
 #[derive(Clone)]
 pub struct AgentDeps {
@@ -215,6 +227,15 @@ pub struct AgentDeps {
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
+    /// reachable via links. Used by `send_agent_message` to create tasks on
+    /// target agents and by the cortex to look up delegation metadata.
+    /// Populated after all agents are initialized.
+    pub task_store_registry:
+        Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
+    /// Sender for injecting messages into channels from outside the normal
+    /// inbound message flow (e.g. cross-agent task completion notifications).
+    pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
 }
 
 impl AgentDeps {
@@ -237,6 +258,24 @@ pub struct Agent {
     pub config: config::ResolvedAgentConfig,
     pub db: db::Db,
     pub deps: AgentDeps,
+}
+
+/// Standard metadata keys set by all adapters.
+///
+/// Adapters set these alongside their platform-specific keys so consumers
+/// can read them without knowing which platform originated the message.
+pub mod metadata_keys {
+    /// Server / workspace / chat group name (e.g. Discord guild, Slack workspace).
+    pub const SERVER_NAME: &str = "server_name";
+    /// Channel / conversation name within the server.
+    pub const CHANNEL_NAME: &str = "channel_name";
+    /// Platform message ID (stringified). Used for reply threading.
+    pub const MESSAGE_ID: &str = "message_id";
+    /// Reply target message ID for outbound reply threading.
+    /// Set on retrigger metadata when a branch/worker completes.
+    pub const REPLY_TO_MESSAGE_ID: &str = "reply_to_message_id";
+    /// Quoted reply text preview from the message being replied to.
+    pub const REPLY_TO_TEXT: &str = "reply_to_text";
 }
 
 /// Inbound message from any messaging platform.

@@ -104,6 +104,11 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Cross-agent task store registry for delegation.
+    pub task_store_registry:
+        Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
+    /// Sender for cross-agent message injection.
+    pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
     pub agent_links: ArcSwap<Vec<crate::links::AgentLink>>,
     /// Visual agent groups for the topology UI.
@@ -222,6 +227,10 @@ impl ApiState {
         provider_setup_tx: mpsc::Sender<crate::ProviderSetupEvent>,
         agent_tx: mpsc::Sender<crate::Agent>,
         agent_remove_tx: mpsc::Sender<String>,
+        injection_tx: mpsc::Sender<crate::ChannelInjection>,
+        task_store_registry: Arc<
+            ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
+        >,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -256,6 +265,8 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
+            task_store_registry,
+            injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
             agent_groups: ArcSwap::from_pointee(Vec::new()),
