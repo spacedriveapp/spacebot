@@ -129,8 +129,14 @@ pub fn is_retriable_error(error_message: &str) -> bool {
         || lower.contains("connection")
         // Empty/malformed responses are transient provider issues
         || lower.contains("empty response")
+        || lower.contains("empty output array")
         || lower.contains("failed to read response body")
         || lower.contains("error decoding response body")
+        // SSE stream failures (truncated, incomplete, server closed early)
+        || lower.contains("stream was empty")
+        || lower.contains("stream ended without")
+        || lower.contains("stream may have been truncated")
+        || lower.contains("model run incomplete")
 }
 
 /// Whether a completion error indicates context window overflow.
