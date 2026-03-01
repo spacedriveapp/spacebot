@@ -3294,10 +3294,13 @@ fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
         let guard = RESOLVE_SECRETS_STORE.load();
         match (*guard).as_ref() {
-            Some(store) => store
-                .get(alias)
-                .ok()
-                .map(|secret| secret.expose().to_string()),
+            Some(store) => match store.get(alias) {
+                Ok(secret) => Some(secret.expose().to_string()),
+                Err(error) => {
+                    tracing::warn!(%error, alias, "failed to resolve secret: reference");
+                    None
+                }
+            },
             None => None,
         }
     } else if let Some(var_name) = value.strip_prefix("env:") {

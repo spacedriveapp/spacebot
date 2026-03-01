@@ -480,6 +480,10 @@ impl Sandbox {
         // Only tool-category secrets are injected; system secrets (LLM API keys,
         // messaging tokens) never enter subprocess environments.
         for (name, value) in tool_secrets {
+            if is_reserved_env_var(name) {
+                tracing::debug!(%name, "skipping reserved tool secret name");
+                continue;
+            }
             cmd.arg("--setenv").arg(name).arg(value);
         }
 
@@ -550,6 +554,10 @@ impl Sandbox {
         }
         // Inject tool secrets from the secret store.
         for (name, value) in tool_secrets {
+            if is_reserved_env_var(name) {
+                tracing::debug!(%name, "skipping reserved tool secret name");
+                continue;
+            }
             cmd.env(name, value);
         }
         for var_name in &config.passthrough_env {
@@ -597,6 +605,10 @@ impl Sandbox {
         }
         // Inject tool secrets from the secret store.
         for (name, value) in tool_secrets {
+            if is_reserved_env_var(name) {
+                tracing::debug!(%name, "skipping reserved tool secret name");
+                continue;
+            }
             cmd.env(name, value);
         }
         for var_name in &config.passthrough_env {

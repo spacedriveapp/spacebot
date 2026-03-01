@@ -199,8 +199,12 @@ pub fn scrub_secrets(text: &str, tool_secrets: &[(String, String)]) -> String {
     if tool_secrets.is_empty() {
         return text.to_string();
     }
+    // Sort by descending value length so longer secrets are replaced first.
+    // This prevents partial replacement when one secret value is a prefix of another.
+    let mut sorted: Vec<&(String, String)> = tool_secrets.iter().collect();
+    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
     let mut result = text.to_string();
-    for (name, value) in tool_secrets {
+    for (name, value) in sorted {
         if !value.is_empty() {
             result = result.replace(value.as_str(), &format!("[REDACTED:{name}]"));
         }

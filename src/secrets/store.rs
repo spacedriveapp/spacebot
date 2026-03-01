@@ -464,8 +464,17 @@ impl SecretsStore {
             let (key, value) = entry.map_err(|error| {
                 SecretsError::Other(anyhow::anyhow!("failed to read metadata entry: {error}"))
             })?;
-            if let Ok(meta) = serde_json::from_str::<SecretMetadata>(value.value()) {
-                result.insert(key.value().to_string(), meta);
+            match serde_json::from_str::<SecretMetadata>(value.value()) {
+                Ok(meta) => {
+                    result.insert(key.value().to_string(), meta);
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        key = key.value(),
+                        %error,
+                        "skipping secret with corrupted metadata"
+                    );
+                }
             }
         }
 

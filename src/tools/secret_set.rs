@@ -95,6 +95,19 @@ impl Tool for SecretSetTool {
             return Err(SecretSetError("secret name cannot be empty".to_string()));
         }
 
+        // Secret names are injected as environment variables, so they must be
+        // valid env var identifiers: start with a letter, contain only uppercase
+        // letters, digits, and underscores.
+        if !name.bytes().next().is_some_and(|b| b.is_ascii_uppercase())
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+        {
+            return Err(SecretSetError(
+                "secret name must be a valid env var name (A-Z, 0-9, _ only, starting with a letter)".to_string(),
+            ));
+        }
+
         if args.value.is_empty() {
             return Err(SecretSetError("secret value cannot be empty".to_string()));
         }

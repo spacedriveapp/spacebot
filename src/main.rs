@@ -1163,8 +1163,12 @@ fn bootstrap_secrets_store(
         let tmpfs_key_path = std::path::Path::new("/run/spacebot/master_key");
         let master_key = if tmpfs_key_path.exists() {
             std::fs::read(tmpfs_key_path).ok().inspect(|key| {
-                let _ = std::fs::remove_file(tmpfs_key_path);
-                let _ = keystore.store_key(KEYSTORE_INSTANCE_ID, key);
+                if let Err(error) = std::fs::remove_file(tmpfs_key_path) {
+                    tracing::warn!(%error, "failed to remove tmpfs master key — key may remain accessible");
+                }
+                if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, key) {
+                    tracing::warn!(%error, "failed to persist master key to OS credential store");
+                }
             })
         } else {
             // Try instance-level key first, then fall back to legacy agent keys.
@@ -1175,8 +1179,10 @@ fn bootstrap_secrets_store(
                 .or_else(|| load_legacy_keystore_key(&instance_dir))
         };
 
-        if let Some(key) = master_key {
-            let _ = store.unlock(&key);
+        if let Some(key) = master_key
+            && let Err(error) = store.unlock(&key)
+        {
+            tracing::warn!(%error, "failed to unlock secret store — secrets will be inaccessible");
         }
     }
 
