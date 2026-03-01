@@ -255,7 +255,14 @@ impl Tool for MemoryRecallTool {
         let summary = format_memories(&memories);
 
         #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global().memory_reads_total.inc();
+        {
+            let agent_id = self.memory_search.store().agent_id();
+            let agent_label = if agent_id.is_empty() { "unknown" } else { agent_id };
+            crate::telemetry::Metrics::global()
+                .memory_reads_total
+                .with_label_values(&[agent_label])
+                .inc();
+        }
 
         Ok(MemoryRecallOutput {
             memories,

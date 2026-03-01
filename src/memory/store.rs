@@ -46,8 +46,26 @@ impl MemoryStore {
         &self.pool
     }
 
+    /// Get the agent ID (for metrics labelling).
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
     /// Save a new memory to the store.
     pub async fn save(&self, memory: &Memory) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "save"])
+                .start_timer()
+        };
+
         sqlx::query(
             r#"
             INSERT INTO memories (id, content, memory_type, importance, created_at, updated_at,
@@ -111,10 +129,23 @@ impl MemoryStore {
 
     /// Update an existing memory.
     pub async fn update(&self, memory: &Memory) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "update"])
+                .start_timer()
+        };
+
         sqlx::query(
             r#"
-            UPDATE memories 
-            SET content = ?, memory_type = ?, importance = ?, updated_at = ?, 
+            UPDATE memories
+            SET content = ?, memory_type = ?, importance = ?, updated_at = ?,
                 last_accessed_at = ?, access_count = ?, source = ?, channel_id = ?,
                 forgotten = ?
             WHERE id = ?
@@ -134,11 +165,37 @@ impl MemoryStore {
         .await
         .with_context(|| format!("failed to update memory {}", memory.id))?;
 
+        #[cfg(feature = "metrics")]
+        {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_updates_total
+                .with_label_values(&[agent_label, "update"])
+                .inc();
+        }
+
         Ok(())
     }
 
     /// Delete a memory by ID.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "delete"])
+                .start_timer()
+        };
+
         let _result = sqlx::query("DELETE FROM memories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)

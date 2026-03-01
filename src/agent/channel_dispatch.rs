@@ -295,10 +295,17 @@ async fn spawn_branch(
     }
 
     #[cfg(feature = "metrics")]
-    crate::telemetry::Metrics::global()
-        .active_branches
-        .with_label_values(&[&*state.deps.agent_id])
-        .inc();
+    {
+        let metrics = crate::telemetry::Metrics::global();
+        metrics
+            .active_branches
+            .with_label_values(&[&*state.deps.agent_id])
+            .inc();
+        metrics
+            .branches_spawned_total
+            .with_label_values(&[&*state.deps.agent_id])
+            .inc();
+    }
 
     state
         .deps
@@ -427,6 +434,7 @@ pub async fn spawn_worker_from_state(
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         secrets_store,
+        "builtin",
         worker.run().instrument(worker_span),
     );
 
@@ -559,6 +567,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         oc_secrets_store,
+        "opencode",
         async move {
             let result = worker.run().await.map_err(SpacebotError::from);
 
@@ -638,6 +647,8 @@ pub(crate) fn spawn_worker_task<F>(
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
     secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+    worker_type: &'static str,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -715,7 +726,7 @@ where
                 .dec();
             metrics
                 .worker_duration_seconds
-                .with_label_values(&[&*agent_id, "builtin"])
+                .with_label_values(&[&*agent_id, worker_type])
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 

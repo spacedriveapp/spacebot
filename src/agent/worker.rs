@@ -272,6 +272,7 @@ impl Worker {
         let model_name = routing.resolve(ProcessType::Worker, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")
+            .with_worker_type("builtin")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)

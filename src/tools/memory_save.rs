@@ -336,11 +336,16 @@ impl Tool for MemorySaveTool {
 
         #[cfg(feature = "metrics")]
         {
+            let agent_id = self.memory_search.store().agent_id();
+            let agent_label = if agent_id.is_empty() { "unknown" } else { agent_id };
             let metrics = crate::telemetry::Metrics::global();
-            metrics.memory_writes_total.inc();
+            metrics
+                .memory_writes_total
+                .with_label_values(&[agent_label])
+                .inc();
             metrics
                 .memory_updates_total
-                .with_label_values(&["unknown", "save"])
+                .with_label_values(&[agent_label, "save"])
                 .inc();
         }
 

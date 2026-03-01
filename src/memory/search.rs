@@ -99,12 +99,24 @@ impl MemorySearch {
         query: &str,
         config: &SearchConfig,
     ) -> Result<Vec<MemorySearchResult>> {
-        match config.mode {
+        let results = match config.mode {
             SearchMode::Hybrid => self.hybrid_search(query, config).await,
             SearchMode::Recent => self.metadata_search(SearchSort::Recent, config).await,
             SearchMode::Important => self.metadata_search(SearchSort::Importance, config).await,
             SearchMode::Typed => self.metadata_search(config.sort_by, config).await,
+        }?;
+
+        #[cfg(feature = "metrics")]
+        {
+            let agent_id = self.store.agent_id();
+            let agent_label = if agent_id.is_empty() { "unknown" } else { agent_id };
+            crate::telemetry::Metrics::global()
+                .memory_search_results
+                .with_label_values(&[agent_label])
+                .observe(results.len() as f64);
         }
+
+        Ok(results)
     }
 
     /// Metadata-based search: queries SQLite directly, no vector/FTS/RRF.

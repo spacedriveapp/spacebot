@@ -1080,6 +1080,29 @@ impl Channel {
             "handling batched messages"
         );
 
+        #[cfg(feature = "metrics")]
+        let metrics_turn_start = std::time::Instant::now();
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = messages
+            .iter()
+            .find(|m| m.source != "system")
+            .map(|m| m.source.clone())
+            .or_else(|| self.current_adapter().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        // Increment messages_received_total for each non-system message in the batch
+        #[cfg(feature = "metrics")]
+        {
+            let received_count =
+                messages.iter().filter(|m| m.source != "system").count() as u64;
+            if received_count > 0 {
+                crate::telemetry::Metrics::global()
+                    .messages_received_total
+                    .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
+                    .inc_by(received_count);
+            }
+        }
+
         // Count unique senders for the hint
         let unique_senders: std::collections::HashSet<_> =
             messages.iter().map(|m| &m.sender_id).collect();
@@ -1262,6 +1285,12 @@ impl Channel {
         self.message_count += message_count;
         self.check_memory_persistence().await;
 
+        #[cfg(feature = "metrics")]
+        crate::telemetry::Metrics::global()
+            .message_handling_duration_seconds
+            .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
+            .observe(metrics_turn_start.elapsed().as_secs_f64());
+
         Ok(())
     }
 
@@ -1343,6 +1372,24 @@ impl Channel {
             message_id = %message.id,
             "handling message"
         );
+
+        #[cfg(feature = "metrics")]
+        let metrics_turn_start = std::time::Instant::now();
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = if message.source != "system" {
+            message.source.clone()
+        } else {
+            self.current_adapter().unwrap_or("unknown").to_string()
+        };
+
+        // Increment messages_received_total for non-system messages
+        #[cfg(feature = "metrics")]
+        if message.source != "system" {
+            crate::telemetry::Metrics::global()
+                .messages_received_total
+                .with_label_values(&[&self.deps.agent_id, &message.source])
+                .inc();
+        }
 
         // Track conversation_id for synthetic re-trigger messages
         if self.conversation_id.is_none() {
@@ -1604,6 +1651,12 @@ impl Channel {
             self.message_count += 1;
             self.check_memory_persistence().await;
         }
+
+        #[cfg(feature = "metrics")]
+        crate::telemetry::Metrics::global()
+            .message_handling_duration_seconds
+            .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
+            .observe(metrics_turn_start.elapsed().as_secs_f64());
 
         Ok(())
     }
@@ -1932,6 +1985,13 @@ impl Channel {
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
     ) {
+        #[cfg(feature = "metrics")]
+        let metrics = crate::telemetry::Metrics::global();
+        #[cfg(feature = "metrics")]
+        let metrics_agent_id: &str = &self.deps.agent_id;
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = self.current_adapter().unwrap_or("unknown");
+
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -1986,12 +2046,26 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
+                                match self
                                     .response_tx
                                     .send(OutboundResponse::Text(final_text))
                                     .await
                                 {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                    Ok(()) => {
+                                        #[cfg(feature = "metrics")]
+                                        metrics
+                                            .messages_sent_total
+                                            .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                            .inc();
+                                    }
+                                    Err(error) => {
+                                        #[cfg(feature = "metrics")]
+                                        metrics
+                                            .channel_errors_total
+                                            .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                            .inc();
+                                        tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                    }
                                 }
                             }
                         }
@@ -2004,6 +2078,11 @@ impl Channel {
                 } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
                 } else if is_retrigger {
                     // On retrigger turns the LLM should use the reply tool, but
@@ -2048,12 +2127,26 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
+                                match self
                                     .response_tx
                                     .send(OutboundResponse::Text(final_text))
                                     .await
                                 {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                    Ok(()) => {
+                                        #[cfg(feature = "metrics")]
+                                        metrics
+                                            .messages_sent_total
+                                            .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                            .inc();
+                                    }
+                                    Err(error) => {
+                                        #[cfg(feature = "metrics")]
+                                        metrics
+                                            .channel_errors_total
+                                            .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                            .inc();
+                                        tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
+                                    }
                                 }
                             }
                         }
@@ -2106,12 +2199,26 @@ impl Channel {
                                 &final_text,
                                 Some(self.agent_display_name()),
                             );
-                            if let Err(error) = self
+                            match self
                                 .response_tx
                                 .send(OutboundResponse::Text(final_text))
                                 .await
                             {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
+                                Ok(()) => {
+                                    #[cfg(feature = "metrics")]
+                                    metrics
+                                        .messages_sent_total
+                                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                                        .inc();
+                                }
+                                Err(error) => {
+                                    #[cfg(feature = "metrics")]
+                                    metrics
+                                        .channel_errors_total
+                                        .with_label_values(&[metrics_agent_id, metrics_channel_type, "send_failed"])
+                                        .inc();
+                                    tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
+                                }
                             }
                         }
                     }
@@ -2120,16 +2227,31 @@ impl Channel {
                 }
             }
             Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "max_turns"])
+                    .inc();
                 tracing::warn!(channel_id = %self.id, "channel hit max turns");
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
                 } else {
                     tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
                 }
             }
             Err(error) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "llm_error"])
+                    .inc();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
