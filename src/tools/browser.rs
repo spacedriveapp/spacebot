@@ -155,14 +155,23 @@ impl Drop for BrowserState {
     fn drop(&mut self) {
         // Browser and handler task are dropped automatically —
         // chromiumoxide's Child has kill_on_drop(true).
-        if let Some(ref dir) = self.user_data_dir
-            && let Err(error) = std::fs::remove_dir_all(dir)
-        {
-            tracing::debug!(
-                path = %dir.display(),
-                %error,
-                "failed to clean up browser user data dir"
-            );
+        if let Some(dir) = self.user_data_dir.take() {
+            // Offload sync fs cleanup to a blocking thread so we don't stall
+            // the tokio worker that's dropping this state.
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                handle.spawn_blocking(move || {
+                    if let Err(error) = std::fs::remove_dir_all(&dir) {
+                        tracing::debug!(
+                            path = %dir.display(),
+                            %error,
+                            "failed to clean up browser user data dir"
+                        );
+                    }
+                });
+            } else {
+                // Dropped outside a tokio runtime (unlikely) — clean up inline.
+                let _ = std::fs::remove_dir_all(&dir);
+            }
         }
     }
 }
@@ -487,13 +496,16 @@ impl Tool for BrowserTool {
 
 impl BrowserTool {
     async fn handle_launch(&self) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
-
-        if state.browser.is_some() {
-            return Ok(BrowserOutput::success("Browser already running"));
+        // Quick check under the lock — don't hold it across the potentially
+        // long resolve + launch sequence.
+        {
+            let state = self.state.lock().await;
+            if state.browser.is_some() {
+                return Ok(BrowserOutput::success("Browser already running"));
+            }
         }
 
-        // Resolve the Chrome executable path:
+        // Resolve the Chrome executable path (may download ~150MB on first use):
         //   1. Explicit config override
         //   2. CHROME / CHROME_PATH env vars
         //   3. chromiumoxide default detection (system PATH + well-known paths)
@@ -530,6 +542,18 @@ impl BrowserTool {
             .map_err(|error| BrowserError::new(format!("failed to launch browser: {error}")))?;
 
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
+
+        // Re-acquire the lock only to store state.
+        let mut state = self.state.lock().await;
+
+        // Guard against a concurrent launch that won the race.
+        if state.browser.is_some() {
+            // Another call launched while we were downloading/starting. Clean up
+            // the browser we just created and return success.
+            drop(browser);
+            let _ = std::fs::remove_dir_all(&user_data_dir);
+            return Ok(BrowserOutput::success("Browser already running"));
+        }
 
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
