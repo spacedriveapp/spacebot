@@ -76,11 +76,13 @@ impl Tool for ReactTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         tracing::info!(emoji = %args.emoji, "react tool called");
 
-        self.conversation_logger
-            .log_reaction(&self.channel_id, &args.emoji);
+        let message_id = self
+            .conversation_logger
+            .log_reaction(&self.channel_id, &args.emoji)
+            .await;
 
         self.response_tx
-            .send(OutboundResponse::Reaction(args.emoji.clone()))
+            .send(OutboundResponse::Reaction(args.emoji.clone(), message_id))
             .await
             .map_err(|error| ReactError(format!("failed to send reaction: {error}")))?;
 

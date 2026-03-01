@@ -570,20 +570,24 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 	}, []);
 
 	const handleReaction = useCallback((data: unknown) => {
-		const event = data as ReactionEvent;
+		const event = data as Partial<ReactionEvent>;
+		if (typeof event.channel_id !== "string" || typeof event.emoji !== "string") return;
+		const channelId = event.channel_id;
+		const emoji = event.emoji;
+		const messageId = event.message_id ?? null;
 		setLiveStates((prev) => {
-			const state = prev[event.channel_id];
+			const state = prev[channelId];
 			if (!state) return prev;
-			// Find the most recent user message to attach the reaction to
 			const timeline = [...state.timeline];
+			// Target by message_id when available, fall back to latest user message
 			for (let i = timeline.length - 1; i >= 0; i--) {
 				const item = timeline[i];
-				if (item.type === "message" && item.role === "user") {
-					timeline[i] = { ...item, reaction: event.emoji };
-					break;
-				}
+				if (item.type !== "message" || item.role !== "user") continue;
+				if (messageId && item.id !== messageId) continue;
+				timeline[i] = { ...item, reaction: emoji };
+				break;
 			}
-			return { ...prev, [event.channel_id]: { ...state, timeline } };
+			return { ...prev, [channelId]: { ...state, timeline } };
 		});
 	}, []);
 

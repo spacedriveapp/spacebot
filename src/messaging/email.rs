@@ -423,7 +423,7 @@ impl Messaging for EmailAdapter {
                 )
                 .await?;
             }
-            OutboundResponse::Reaction(_)
+            OutboundResponse::Reaction(..)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_) => {}
             OutboundResponse::Ephemeral { text, .. } => {
@@ -506,7 +506,7 @@ impl Messaging for EmailAdapter {
                 self.send_email(&recipient, "Spacebot message", text, None, Vec::new(), None)
                     .await?;
             }
-            OutboundResponse::Reaction(_)
+            OutboundResponse::Reaction(..)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_)
             | OutboundResponse::StreamStart

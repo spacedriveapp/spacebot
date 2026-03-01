@@ -114,6 +114,7 @@ export interface ReactionEvent {
 	agent_id: string;
 	channel_id: string;
 	emoji: string;
+	message_id: string | null;
 }
 
 export type ApiEvent =

@@ -933,7 +933,7 @@ impl Messaging for SlackAdapter {
                     .context("failed to complete slack file upload")?;
             }
 
-            OutboundResponse::Reaction(emoji) => {
+            OutboundResponse::Reaction(emoji, _) => {
                 let ts =
                     extract_message_ts(message).context("missing slack_message_ts for reaction")?;
                 let req = SlackApiReactionsAddRequest::new(
@@ -1517,7 +1517,7 @@ fn variant_name(response: &OutboundResponse) -> &'static str {
         OutboundResponse::Text(_) => "Text",
         OutboundResponse::ThreadReply { .. } => "ThreadReply",
         OutboundResponse::File { .. } => "File",
-        OutboundResponse::Reaction(_) => "Reaction",
+        OutboundResponse::Reaction(..) => "Reaction",
         OutboundResponse::RemoveReaction(_) => "RemoveReaction",
         OutboundResponse::Ephemeral { .. } => "Ephemeral",
         OutboundResponse::RichMessage { .. } => "RichMessage",

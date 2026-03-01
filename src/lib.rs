@@ -381,7 +381,8 @@ pub enum OutboundResponse {
         caption: Option<String>,
     },
     /// Add a reaction emoji to the triggering message.
-    Reaction(String),
+    /// The optional message_id identifies the specific message being reacted to.
+    Reaction(String, Option<String>),
     /// Remove a reaction emoji from the triggering message.
     /// No-op on platforms that don't support reaction removal.
     RemoveReaction(String),

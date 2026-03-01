@@ -104,29 +104,51 @@ impl ConversationLogger {
         });
     }
 
-    /// Set a reaction emoji on the most recent user message in a channel. Fire-and-forget.
-    pub fn log_reaction(&self, channel_id: &ChannelId, emoji: &str) {
-        let pool = self.pool.clone();
-        let channel_id = channel_id.to_string();
-        let emoji = emoji.to_string();
+    /// Set a reaction emoji on the most recent user message in a channel.
+    ///
+    /// Returns the message ID the reaction was attached to, or `None` if no
+    /// matching user message was found. Retries a few times to handle the race
+    /// where the user message INSERT (fire-and-forget) hasn't landed yet.
+    pub async fn log_reaction(&self, channel_id: &ChannelId, emoji: &str) -> Option<String> {
+        let channel_id_str = channel_id.to_string();
 
-        tokio::spawn(async move {
-            if let Err(error) = sqlx::query(
-                "UPDATE conversation_messages SET reaction = ? \
-                 WHERE id = ( \
-                     SELECT id FROM conversation_messages \
-                     WHERE channel_id = ? AND role = 'user' \
-                     ORDER BY created_at DESC LIMIT 1 \
-                 )",
+        for attempt in 0..5u32 {
+            // Find the target message first so we can return its ID.
+            let target_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM conversation_messages \
+                 WHERE channel_id = ? AND role = 'user' \
+                 ORDER BY created_at DESC LIMIT 1",
             )
-            .bind(&emoji)
-            .bind(&channel_id)
-            .execute(&pool)
+            .bind(&channel_id_str)
+            .fetch_optional(&self.pool)
             .await
+            .ok()
+            .flatten();
+
+            let Some(message_id) = target_id else {
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    continue;
+                }
+                tracing::warn!("no user message found for reaction");
+                return None;
+            };
+
+            match sqlx::query("UPDATE conversation_messages SET reaction = ? WHERE id = ?")
+                .bind(emoji)
+                .bind(&message_id)
+                .execute(&self.pool)
+                .await
             {
-                tracing::warn!(%error, "failed to persist reaction");
+                Ok(_) => return Some(message_id),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to persist reaction");
+                    return None;
+                }
             }
-        });
+        }
+
+        None
     }
 
     /// Load recent messages for a channel (oldest first).
