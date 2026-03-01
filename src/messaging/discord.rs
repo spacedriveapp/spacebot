@@ -290,7 +290,7 @@ impl Messaging for DiscordAdapter {
                     .await
                     .context("failed to send file attachment")?;
             }
-            OutboundResponse::Reaction(emoji) => {
+            OutboundResponse::Reaction(emoji, _) => {
                 let message_id = message
                     .metadata
                     .get("discord_message_id")

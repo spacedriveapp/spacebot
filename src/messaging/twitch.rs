@@ -405,7 +405,7 @@ impl Messaging for TwitchAdapter {
             }
             OutboundResponse::StreamEnd => {}
             // Reactions, status updates, and Slack-specific variants aren't meaningful in Twitch chat
-            OutboundResponse::Reaction(_)
+            OutboundResponse::Reaction(..)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_) => {}
             OutboundResponse::Ephemeral { text, .. } => {

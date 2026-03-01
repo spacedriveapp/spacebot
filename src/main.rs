@@ -1691,6 +1691,14 @@ async fn run(
                                         is_typing: false,
                                     }).ok();
                                 }
+                                spacebot::OutboundResponse::Reaction(emoji, message_id) => {
+                                    api_event_tx.send(spacebot::api::ApiEvent::Reaction {
+                                        agent_id: sse_agent_id.clone(),
+                                        channel_id: sse_channel_id.clone(),
+                                        emoji: emoji.clone(),
+                                        message_id: message_id.clone(),
+                                    }).ok();
+                                }
                                 _ => {}
                             }
 

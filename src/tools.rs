@@ -289,11 +289,17 @@ pub async fn add_channel_tools(
             state.deps.runtime_config.workspace_dir.clone(),
         ))
         .await?;
-    handle.add_tool(CancelTool::new(state)).await?;
     handle
         .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
         .await?;
-    handle.add_tool(ReactTool::new(response_tx.clone())).await?;
+    handle
+        .add_tool(ReactTool::new(
+            response_tx.clone(),
+            state.conversation_logger.clone(),
+            state.channel_id.clone(),
+        ))
+        .await?;
+    handle.add_tool(CancelTool::new(state)).await?;
     if let Some(cron_tool) = cron_tool {
         let cron_tool = cron_tool.with_default_delivery_target(
             default_delivery_target_for_conversation(&conversation_id),

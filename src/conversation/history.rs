@@ -104,6 +104,53 @@ impl ConversationLogger {
         });
     }
 
+    /// Set a reaction emoji on the most recent user message in a channel.
+    ///
+    /// Returns the message ID the reaction was attached to, or `None` if no
+    /// matching user message was found. Retries a few times to handle the race
+    /// where the user message INSERT (fire-and-forget) hasn't landed yet.
+    pub async fn log_reaction(&self, channel_id: &ChannelId, emoji: &str) -> Option<String> {
+        let channel_id_str = channel_id.to_string();
+
+        for attempt in 0..5u32 {
+            // Find the target message first so we can return its ID.
+            let target_id: Option<String> = sqlx::query_scalar(
+                "SELECT id FROM conversation_messages \
+                 WHERE channel_id = ? AND role = 'user' \
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&channel_id_str)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
+
+            let Some(message_id) = target_id else {
+                if attempt < 4 {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    continue;
+                }
+                tracing::warn!("no user message found for reaction");
+                return None;
+            };
+
+            match sqlx::query("UPDATE conversation_messages SET reaction = ? WHERE id = ?")
+                .bind(emoji)
+                .bind(&message_id)
+                .execute(&self.pool)
+                .await
+            {
+                Ok(_) => return Some(message_id),
+                Err(error) => {
+                    tracing::warn!(%error, "failed to persist reaction");
+                    return None;
+                }
+            }
+        }
+
+        None
+    }
+
     /// Load recent messages for a channel (oldest first).
     pub async fn load_recent(
         &self,
@@ -196,6 +243,8 @@ pub enum TimelineItem {
         sender_id: Option<String>,
         content: String,
         created_at: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reaction: Option<String>,
     },
     BranchRun {
         id: String,
@@ -360,17 +409,17 @@ impl ProcessRunLogger {
 
         let query_str = format!(
             "SELECT * FROM ( \
-                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, \
+                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, reaction, \
                        NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, \
                        created_at AS timestamp, NULL AS completed_at \
                 FROM conversation_messages WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL, \
                        description, conclusion, NULL, NULL, NULL, \
                        started_at AS timestamp, completed_at \
                 FROM branch_runs WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL, \
                        NULL, NULL, task, result, status, \
                        started_at AS timestamp, completed_at \
                 FROM worker_runs WHERE channel_id = ?1 \
@@ -403,6 +452,7 @@ impl ProcessRunLogger {
                             .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
                             .map(|t| t.to_rfc3339())
                             .unwrap_or_default(),
+                        reaction: row.try_get("reaction").ok().flatten(),
                     }),
                     "branch_run" => Some(TimelineItem::BranchRun {
                         id: row.try_get("id").unwrap_or_default(),

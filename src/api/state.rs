@@ -215,6 +215,14 @@ pub enum ApiEvent {
         /// "created", "updated", or "deleted".
         action: String,
     },
+    /// An emoji reaction added to a message.
+    Reaction {
+        agent_id: String,
+        channel_id: String,
+        emoji: String,
+        /// The conversation_messages ID the reaction was attached to.
+        message_id: Option<String>,
+    },
 }
 
 impl ApiState {
