@@ -2724,7 +2724,15 @@ async fn transcribe_audio_attachment(
     }
 
     let (provider_id, model_name) = match deps.llm_manager.resolve_model(voice_model) {
-        Ok(parts) => parts,
+        Ok(parts) => {
+            tracing::debug!(
+                provider = %parts.0,
+                model = %parts.1,
+                voice_config = %voice_model,
+                "resolved voice model for transcription"
+            );
+            parts
+        }
         Err(error) => {
             tracing::warn!(%error, model = %voice_model, "invalid voice model route");
             return UserContent::text(format!(
@@ -2735,7 +2743,15 @@ async fn transcribe_audio_attachment(
     };
 
     let provider = match deps.llm_manager.get_provider(&provider_id) {
-        Ok(provider) => provider,
+        Ok(provider) => {
+            tracing::debug!(
+                provider = %provider_id,
+                base_url = %provider.base_url,
+                api_type = ?provider.api_type,
+                "got provider for voice transcription"
+            );
+            provider
+        }
         Err(error) => {
             tracing::warn!(%error, provider = %provider_id, "voice provider not configured");
             return UserContent::text(format!(
@@ -2759,6 +2775,11 @@ async fn transcribe_audio_attachment(
     let endpoint = format!(
         "{}/v1/chat/completions",
         provider.base_url.trim_end_matches('/')
+    );
+    tracing::debug!(
+        endpoint = %endpoint,
+        model = %model_name,
+        "sending voice transcription request"
     );
     let body = serde_json::json!({
         "model": model_name,

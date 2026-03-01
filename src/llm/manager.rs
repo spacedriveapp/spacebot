@@ -291,12 +291,20 @@ impl LlmManager {
     }
 
     /// Resolve a model name to provider and model components.
-    /// Format: "provider/model-name" or just "model-name" (defaults to anthropic).
+    /// Format: "provider/model-name" or just "model-name" (defaults to openai for voice models).
     pub fn resolve_model(&self, model_name: &str) -> Result<(String, String)> {
         if let Some((provider, model)) = model_name.split_once('/') {
+            tracing::debug!(provider = %provider, model = %model, "resolved model with explicit provider");
             Ok((provider.to_string(), model.to_string()))
         } else {
-            Ok(("anthropic".into(), model_name.into()))
+            // Default to openai for voice models (most common for Whisper/vision)
+            // rather than anthropic, since anthropic doesn't support input_audio
+            tracing::debug!(
+                model = %model_name,
+                "no provider prefix specified in model name, defaulting to 'openai'. \
+                 Specify as 'provider/model' (e.g., 'openai/whisper-1') to use a different provider."
+            );
+            Ok(("openai".into(), model_name.into()))
         }
     }
 
