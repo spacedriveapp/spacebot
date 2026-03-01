@@ -109,6 +109,13 @@ export interface ToolCompletedEvent {
 	result: string;
 }
 
+export interface ReactionEvent {
+	type: "reaction";
+	agent_id: string;
+	channel_id: string;
+	emoji: string;
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -119,7 +126,8 @@ export type ApiEvent =
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ToolStartedEvent
-	| ToolCompletedEvent;
+	| ToolCompletedEvent
+	| ReactionEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);
@@ -137,6 +145,7 @@ export interface TimelineMessage {
 	sender_id: string | null;
 	content: string;
 	created_at: string;
+	reaction?: string | null;
 }
 
 export interface TimelineBranchRun {

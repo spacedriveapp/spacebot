@@ -5,6 +5,7 @@ import {
 	type BranchStartedEvent,
 	type InboundMessageEvent,
 	type OutboundMessageEvent,
+	type ReactionEvent,
 	type TimelineItem,
 	type ToolCompletedEvent,
 	type ToolStartedEvent,
@@ -568,6 +569,24 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		}
 	}, []);
 
+	const handleReaction = useCallback((data: unknown) => {
+		const event = data as ReactionEvent;
+		setLiveStates((prev) => {
+			const state = prev[event.channel_id];
+			if (!state) return prev;
+			// Find the most recent user message to attach the reaction to
+			const timeline = [...state.timeline];
+			for (let i = timeline.length - 1; i >= 0; i--) {
+				const item = timeline[i];
+				if (item.type === "message" && item.role === "user") {
+					timeline[i] = { ...item, reaction: event.emoji };
+					break;
+				}
+			}
+			return { ...prev, [event.channel_id]: { ...state, timeline } };
+		});
+	}, []);
+
 	const loadOlderMessages = useCallback((channelId: string) => {
 		setLiveStates((prev) => {
 			const state = prev[channelId];
@@ -621,6 +640,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		branch_completed: handleBranchCompleted,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,
+		reaction: handleReaction,
 	};
 
 	return { liveStates, handlers, syncStatusSnapshot, loadOlderMessages };

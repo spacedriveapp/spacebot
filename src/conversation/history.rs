@@ -104,6 +104,31 @@ impl ConversationLogger {
         });
     }
 
+    /// Set a reaction emoji on the most recent user message in a channel. Fire-and-forget.
+    pub fn log_reaction(&self, channel_id: &ChannelId, emoji: &str) {
+        let pool = self.pool.clone();
+        let channel_id = channel_id.to_string();
+        let emoji = emoji.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "UPDATE conversation_messages SET reaction = ? \
+                 WHERE id = ( \
+                     SELECT id FROM conversation_messages \
+                     WHERE channel_id = ? AND role = 'user' \
+                     ORDER BY created_at DESC LIMIT 1 \
+                 )",
+            )
+            .bind(&emoji)
+            .bind(&channel_id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, "failed to persist reaction");
+            }
+        });
+    }
+
     /// Load recent messages for a channel (oldest first).
     pub async fn load_recent(
         &self,
@@ -196,6 +221,8 @@ pub enum TimelineItem {
         sender_id: Option<String>,
         content: String,
         created_at: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reaction: Option<String>,
     },
     BranchRun {
         id: String,
@@ -360,17 +387,17 @@ impl ProcessRunLogger {
 
         let query_str = format!(
             "SELECT * FROM ( \
-                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, \
+                SELECT 'message' AS item_type, id, role, sender_name, sender_id, content, reaction, \
                        NULL AS description, NULL AS conclusion, NULL AS task, NULL AS result, NULL AS status, \
                        created_at AS timestamp, NULL AS completed_at \
                 FROM conversation_messages WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'branch_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL, \
                        description, conclusion, NULL, NULL, NULL, \
                        started_at AS timestamp, completed_at \
                 FROM branch_runs WHERE channel_id = ?1 \
                 UNION ALL \
-                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, \
+                SELECT 'worker_run' AS item_type, id, NULL, NULL, NULL, NULL, NULL, \
                        NULL, NULL, task, result, status, \
                        started_at AS timestamp, completed_at \
                 FROM worker_runs WHERE channel_id = ?1 \
@@ -403,6 +430,7 @@ impl ProcessRunLogger {
                             .try_get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
                             .map(|t| t.to_rfc3339())
                             .unwrap_or_default(),
+                        reaction: row.try_get("reaction").ok().flatten(),
                     }),
                     "branch_run" => Some(TimelineItem::BranchRun {
                         id: row.try_get("id").unwrap_or_default(),

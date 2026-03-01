@@ -184,24 +184,33 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 						</div>
 					)}
 
-					{timeline.map((item) => {
-						if (item.type !== "message") return null;
-						return (
-							<div key={item.id}>
-								{item.role === "user" ? (
-									<div className="flex justify-end">
-										<div className="max-w-[85%] rounded-2xl rounded-br-md bg-accent/10 px-4 py-2.5">
+				{timeline.map((item) => {
+					if (item.type !== "message") return null;
+					return (
+						<div key={item.id}>
+							{item.role === "user" ? (
+								<div className="flex justify-end">
+									<div className="relative max-w-[85%]">
+										<div className="rounded-2xl rounded-br-md bg-app-box/60 px-4 py-2.5">
 											<p className="text-sm text-ink">{item.content}</p>
 										</div>
+									{item.reaction && (
+										<div className="absolute -bottom-2.5 left-1">
+											<span className="flex h-6 items-center rounded-full bg-app-box/60 px-1.5 text-sm leading-none">
+												{item.reaction}
+											</span>
+										</div>
+									)}
 									</div>
-								) : (
-									<div className="text-sm text-ink-dull">
-										<Markdown>{item.content}</Markdown>
-									</div>
-								)}
-							</div>
-						);
-					})}
+								</div>
+							) : (
+								<div className="text-sm text-ink-dull">
+									<Markdown>{item.content}</Markdown>
+								</div>
+							)}
+						</div>
+					);
+				})}
 
 					{/* Typing indicator */}
 					{isTyping && <ThinkingIndicator />}

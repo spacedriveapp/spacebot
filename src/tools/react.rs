@@ -1,6 +1,7 @@
 //! React tool for adding emoji reactions to messages (channel only).
 
-use crate::OutboundResponse;
+use crate::conversation::ConversationLogger;
+use crate::{ChannelId, OutboundResponse};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -11,11 +12,21 @@ use tokio::sync::mpsc;
 #[derive(Debug, Clone)]
 pub struct ReactTool {
     response_tx: mpsc::Sender<OutboundResponse>,
+    conversation_logger: ConversationLogger,
+    channel_id: ChannelId,
 }
 
 impl ReactTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>) -> Self {
-        Self { response_tx }
+    pub fn new(
+        response_tx: mpsc::Sender<OutboundResponse>,
+        conversation_logger: ConversationLogger,
+        channel_id: ChannelId,
+    ) -> Self {
+        Self {
+            response_tx,
+            conversation_logger,
+            channel_id,
+        }
     }
 }
 
@@ -64,6 +75,9 @@ impl Tool for ReactTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         tracing::info!(emoji = %args.emoji, "react tool called");
+
+        self.conversation_logger
+            .log_reaction(&self.channel_id, &args.emoji);
 
         self.response_tx
             .send(OutboundResponse::Reaction(args.emoji.clone()))
