@@ -40,6 +40,7 @@ pub mod react;
 pub mod read_skill;
 pub mod reply;
 pub mod route;
+pub mod secret_set;
 pub mod send_agent_message;
 pub mod send_file;
 pub mod send_message_to_another_channel;
@@ -80,6 +81,7 @@ pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
+pub use secret_set::{SecretSetArgs, SecretSetError, SecretSetOutput, SecretSetTool};
 pub use send_agent_message::{
     SendAgentMessageArgs, SendAgentMessageError, SendAgentMessageOutput, SendAgentMessageTool,
 };
@@ -408,10 +410,18 @@ pub fn create_worker_tool_server(
             agent_id.clone(),
             worker_id,
         ))
-        .tool(SetStatusTool::new(
-            agent_id, worker_id, channel_id, event_tx,
-        ))
-        .tool(ReadSkillTool::new(runtime_config));
+        .tool({
+            let mut status_tool = SetStatusTool::new(agent_id, worker_id, channel_id, event_tx);
+            if let Some(store) = runtime_config.secrets.load().as_ref() {
+                status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs());
+            }
+            status_tool
+        })
+        .tool(ReadSkillTool::new(runtime_config.clone()));
+
+    if let Some(store) = runtime_config.secrets.load().as_ref() {
+        server = server.tool(SecretSetTool::new(store.clone()));
+    }
 
     if browser_config.enabled {
         server = server.tool(BrowserTool::new(browser_config, screenshot_dir));

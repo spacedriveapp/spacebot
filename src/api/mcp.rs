@@ -12,8 +12,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// ── Request / Response types ────────────────────────────────────────────
-
 #[derive(Deserialize)]
 pub(super) struct CreateMcpServerRequest {
     pub name: String,
@@ -53,8 +51,6 @@ pub(super) struct MutationResponse {
     pub success: bool,
     pub message: String,
 }
-
-// ── Handlers ────────────────────────────────────────────────────────────
 
 /// GET /api/mcp/servers — list all configured MCP servers from config.toml.
 pub(super) async fn list_mcp_servers(
@@ -406,8 +402,6 @@ pub(super) async fn reconnect_mcp_server(
         message: format!("Server '{}' not found in any agent", server_name),
     }))
 }
-
-// ── Helpers ─────────────────────────────────────────────────────────────
 
 /// Look up live connection state for a server name across all agents.
 async fn get_server_state(state: &ApiState, server_name: &str) -> String {

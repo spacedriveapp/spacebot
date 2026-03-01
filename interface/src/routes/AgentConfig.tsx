@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentConfigResponse, type AgentConfigUpdateRequest } from "@/api/client";
-import { Button, SettingSidebarButton, Input, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
+import { Button, SettingSidebarButton, TextArea, Toggle, NumberStepper, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, cx } from "@/ui";
 import { ModelSelect } from "@/components/ModelSelect";
 import { TagInput } from "@/components/TagInput";
 import { Markdown } from "@/components/Markdown";
@@ -881,28 +881,6 @@ function ConfigSectionEditor({ sectionId, label, description, detail, config, on
 }
 
 // -- Form Field Components --
-
-interface ConfigFieldProps {
-	label: string;
-	description: string;
-	value: string;
-	onChange: (value: string) => void;
-}
-
-function ConfigField({ label, description, value, onChange }: ConfigFieldProps) {
-	return (
-		<div className="flex flex-col gap-1.5">
-			<label className="text-sm font-medium text-ink">{label}</label>
-			<p className="text-tiny text-ink-faint">{description}</p>
-			<Input
-				type="text"
-				value={value}
-				onChange={(e) => onChange(e.target.value)}
-				className="mt-1 border-app-line/50 bg-app-darkBox/30"
-			/>
-		</div>
-	);
-}
 
 interface ConfigToggleFieldProps {
 	label: string;

@@ -3,7 +3,6 @@ primary_region = "iad"
 
 [build]
   dockerfile = "Dockerfile"
-  target = "full"
 
 [env]
   SPACEBOT_DIR = "/data"

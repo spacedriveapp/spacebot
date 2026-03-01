@@ -61,6 +61,7 @@ notify = "7"
 # Cryptography (for secrets)
 aes-gcm = "0.10"
 sha2 = "0.10"
+argon2 = "0.5"
 rand = "0.9"
 
 # UUID generation
@@ -131,7 +132,7 @@ arrow-array = "57.3.0"
 arrow-schema = "57.3.0"
 
 # Browser automation
-chromiumoxide = { version = "0.8", features = ["tokio-runtime"], default-features = false }
+chromiumoxide = { version = "0.8", features = ["tokio-runtime", "_fetcher-rustls-tokio"], default-features = false }
 chromiumoxide_cdp = "0.8"
 
 # Templating for prompts
@@ -164,6 +165,10 @@ unimplemented = "deny"
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+# OS keystore (macOS Keychain for master key storage)
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3"
 
 [profile.release]
 lto = "thin"

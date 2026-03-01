@@ -10,8 +10,29 @@
 use anyhow::Context as _;
 use std::sync::Arc;
 
+/// Set up the secrets store thread-local so `secret:` references in config.toml
+/// resolve correctly. Mirrors the bootstrap logic in main.rs.
+fn bootstrap_secrets_for_config() {
+    let instance_dir = spacebot::config::Config::default_instance_dir();
+    let secrets_path = instance_dir.join("data").join("secrets.redb");
+    if !secrets_path.exists() {
+        return;
+    }
+    if let Ok(store) = spacebot::secrets::store::SecretsStore::new(&secrets_path) {
+        let store = Arc::new(store);
+        if store.is_encrypted() {
+            let keystore = spacebot::secrets::keystore::platform_keystore();
+            if let Some(key) = keystore.load_key("instance").ok().flatten() {
+                let _ = store.unlock(&key);
+            }
+        }
+        spacebot::config::set_resolve_secrets_store(store);
+    }
+}
+
 /// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
 async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::config::Config)> {
+    bootstrap_secrets_for_config();
     let config =
         spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
 
@@ -334,6 +355,7 @@ async fn dump_worker_context() {
             false,
             Vec::new(),
             Vec::new(),
+            &[],
         )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
@@ -506,6 +528,7 @@ async fn dump_all_contexts() {
             false,
             Vec::new(),
             Vec::new(),
+            &[],
         )
         .expect("failed to render worker prompt");
     let browser_config = (**rc.browser_config.load()).clone();
