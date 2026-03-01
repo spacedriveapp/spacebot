@@ -100,7 +100,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV SPACEBOT_DIR=/data
 ENV SPACEBOT_DEPLOYMENT=docker
-EXPOSE 19898 18789
+EXPOSE 19898 18789 9090
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:19898/api/health || exit 1
