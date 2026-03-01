@@ -3782,10 +3782,13 @@ impl Config {
         let mut api = ApiConfig::default();
         api.bind = hosted_api_bind(api.bind);
 
+        let mut defaults = DefaultsConfig::default();
+        defaults.browser.chrome_cache_dir = instance_dir.join("chrome_cache");
+
         Ok(Self {
             instance_dir: instance_dir.to_path_buf(),
             llm,
-            defaults: DefaultsConfig::default(),
+            defaults,
             agents,
             links: Vec::new(),
             groups: Vec::new(),
