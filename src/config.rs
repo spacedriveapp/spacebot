@@ -2661,7 +2661,7 @@ fn warn_unknown_config_keys(content: &str) {
             tracing::warn!(
                 "config.toml contains top-level key `{key}` which is not recognised \
                  and will be ignored. MCP servers should be defined under [defaults] \
-                 as [[defaults.mcp]] (or per-agent under [[agents]].mcp). \
+                 as [[defaults.mcp]] (or per-agent under [[agents.mcp]]). \
                  See docs/design-docs/mcp.md for the correct format."
             );
         } else {
@@ -8373,10 +8373,9 @@ guild_id = "123456"
     }
 
     #[test]
-    fn warn_unknown_config_keys_detects_mcp_servers() {
-        // `[[mcp_servers]]` at the top level is a common misconfiguration (issue #221).
-        // The function should not panic and should process without error —
-        // actual warning output goes through tracing.
+    fn warn_unknown_config_keys_no_panic() {
+        // Smoke test: the function should not panic for any input shape.
+        // Actual warning output goes through tracing (not asserted here).
         let toml_with_mcp_servers = r#"
 [[mcp_servers]]
 name = "test"
