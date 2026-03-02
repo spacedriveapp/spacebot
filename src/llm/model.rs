@@ -1393,6 +1393,7 @@ fn parse_anthropic_response(
             cached_input_tokens: cached,
         },
         raw_response: RawResponse { body },
+        message_id: None,
     })
 }
 
@@ -1493,6 +1494,7 @@ fn parse_openai_response(
             cached_input_tokens: cached,
         },
         raw_response: RawResponse { body },
+        message_id: None,
     })
 }
 
@@ -1665,6 +1667,7 @@ fn parse_openai_responses_response(
             cached_input_tokens: cached,
         },
         raw_response: RawResponse { body },
+        message_id: None,
     })
 }
 
@@ -1811,6 +1814,7 @@ mod tests {
             raw_response: RawResponse {
                 body: serde_json::json!({}),
             },
+            message_id: None,
         };
 
         reverse_map_tool_names(&mut completion, &original_tools);

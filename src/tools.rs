@@ -170,16 +170,20 @@ pub const MAX_DIR_ENTRIES: usize = 500;
 /// Cuts at the last valid char boundary before `max_bytes` so we never split
 /// a multi-byte character. The truncation notice tells the LLM the original
 /// size and how to get the rest (pipe through head/tail or read with offset).
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
 
-    // Find the last char boundary at or before max_bytes
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = truncate_at_char_boundary(value, max_bytes);
 
     let total = value.len();
     let truncated_bytes = total - end;
@@ -188,6 +192,17 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
          Use head/tail/offset to read specific sections]",
         &value[..end]
     )
+}
+
+/// Truncate to a byte limit and append `...`, preserving UTF-8 boundaries.
+pub fn truncate_utf8_ellipsis(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    let end = truncate_at_char_boundary(value, max_bytes);
+
+    format!("{}...", &value[..end])
 }
 
 /// Returns true when text looks like structured/tool payloads that should never
@@ -576,5 +591,12 @@ mod tests {
             "I can skip that if you want."
         ));
         assert!(!should_block_user_visible_text("- first\n- second"));
+    }
+
+    #[test]
+    fn truncate_helpers_preserve_utf8_boundaries() {
+        let text = "🙂🙂🙂";
+        assert_eq!(truncate_utf8_ellipsis(text, 5), "🙂...");
+        assert!(truncate_output(text, 5).starts_with("🙂"));
     }
 }

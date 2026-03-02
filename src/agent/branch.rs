@@ -7,7 +7,7 @@ use crate::llm::SpacebotModel;
 use crate::llm::routing::is_context_overflow_error;
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, ProcessId, ProcessType};
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel, Prompt};
+use rig::completion::CompletionModel;
 use rig::tool::server::ToolServerHandle;
 use uuid::Uuid;
 
@@ -104,17 +104,17 @@ impl Branch {
         let mut overflow_retries = 0;
 
         let conclusion = loop {
-            match agent
-                .prompt(&current_prompt)
-                .with_history(&mut self.history)
-                .with_hook(self.hook.clone())
+            match self
+                .hook
+                .prompt_once(&agent, &mut self.history, &current_prompt)
                 .await
             {
                 Ok(response) => break response,
                 Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                    let partial = extract_last_assistant_text(&self.history).unwrap_or_else(|| {
-                        "Branch exhausted its turns without a final conclusion.".into()
-                    });
+                    let partial = crate::agent::extract_last_assistant_text(&self.history)
+                        .unwrap_or_else(|| {
+                            "Branch exhausted its turns without a final conclusion.".into()
+                        });
                     tracing::warn!(branch_id = %self.id, "branch hit max turns, returning partial result");
                     break partial;
                 }
@@ -131,7 +131,7 @@ impl Branch {
                             "branch context overflow unrecoverable after {MAX_OVERFLOW_RETRIES} attempts"
                         );
                         // Return partial conclusion if we have one rather than hard-failing
-                        break extract_last_assistant_text(&self.history)
+                        break crate::agent::extract_last_assistant_text(&self.history)
                             .unwrap_or_else(|| format!("Branch failed: context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts"));
                     }
 
@@ -221,26 +221,4 @@ impl Branch {
         );
         self.history.insert(0, rig::message::Message::from(marker));
     }
-}
-
-/// Extract the last assistant text message from a history.
-fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
-    for message in history.iter().rev() {
-        if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|c| {
-                    if let rig::message::AssistantContent::Text(t) = c {
-                        Some(t.text.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !texts.is_empty() {
-                return Some(texts.join("\n"));
-            }
-        }
-    }
-    None
 }

@@ -9,6 +9,7 @@
 //! The cortex also observes system-wide activity via signals for future use in
 //! health monitoring and memory consolidation.
 
+use crate::agent::channel_dispatch::{WorkerCompletionError, map_worker_completion_result};
 use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
@@ -19,7 +20,7 @@ use crate::tasks::{TaskStatus, UpdateTaskInput};
 use crate::{AgentDeps, ProcessEvent, ProcessType};
 
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel, Prompt};
+use rig::completion::{CompletionModel, Prompt, TypedPrompt};
 use serde::Serialize;
 use sqlx::{Row as _, SqlitePool};
 
@@ -832,8 +833,13 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone());
 
-    // No tools needed — the LLM just synthesizes the pre-gathered data
-    let agent = AgentBuilder::new(model).preamble(&bulletin_prompt).build();
+    // No tools needed — the LLM just synthesizes the pre-gathered data.
+    // Attach CortexHook so observation/termination semantics stay consistent
+    // with other process types.
+    let agent = AgentBuilder::new(model)
+        .preamble(&bulletin_prompt)
+        .hook(CortexHook::new())
+        .build();
 
     let synthesis_prompt = match prompt_engine
         .render_system_cortex_synthesis(cortex_config.bulletin_max_words, &raw_sections)
@@ -953,7 +959,7 @@ impl AgentProfileRow {
 }
 
 /// LLM response shape for profile generation.
-#[derive(serde::Deserialize)]
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 struct ProfileLlmResponse {
     display_name: Option<String>,
     status: Option<String>,
@@ -1012,83 +1018,64 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone());
 
-    let agent = AgentBuilder::new(model).preamble(&profile_prompt).build();
+    let agent = AgentBuilder::new(model)
+        .preamble(&profile_prompt)
+        .hook(CortexHook::new())
+        .build();
 
-    match agent.prompt(&synthesis_prompt).await {
-        Ok(response) => {
-            // Strip markdown code fences if the LLM wraps the JSON
-            let cleaned = response
-                .trim()
-                .trim_start_matches("```json")
-                .trim_start_matches("```")
-                .trim_end_matches("```")
-                .trim();
+    match agent
+        .prompt_typed::<ProfileLlmResponse>(&synthesis_prompt)
+        .await
+    {
+        Ok(profile_data) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            let agent_id = &deps.agent_id;
 
-            match serde_json::from_str::<ProfileLlmResponse>(cleaned) {
-                Ok(profile_data) => {
-                    let duration_ms = started.elapsed().as_millis() as u64;
-                    let agent_id = &deps.agent_id;
+            // Use the agent ID as a stable avatar seed
+            let avatar_seed = agent_id.to_string();
 
-                    // Use the agent ID as a stable avatar seed
-                    let avatar_seed = agent_id.to_string();
-
-                    if let Err(error) = sqlx::query(
-                        "INSERT INTO agent_profile (agent_id, display_name, status, bio, avatar_seed, generated_at, updated_at) \
-                         VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now')) \
-                         ON CONFLICT(agent_id) DO UPDATE SET \
-                         display_name = excluded.display_name, \
-                         status = excluded.status, \
-                         bio = excluded.bio, \
-                         avatar_seed = excluded.avatar_seed, \
-                         updated_at = datetime('now')",
-                    )
-                    .bind(agent_id.as_ref())
-                    .bind(&profile_data.display_name)
-                    .bind(&profile_data.status)
-                    .bind(&profile_data.bio)
-                    .bind(&avatar_seed)
-                    .execute(&deps.sqlite_pool)
-                    .await
-                    {
-                        tracing::warn!(%error, "failed to persist agent profile");
-                        return;
-                    }
-
-                    tracing::info!(
-                        display_name = ?profile_data.display_name,
-                        status = ?profile_data.status,
-                        duration_ms,
-                        "agent profile generated"
-                    );
-                    logger.log(
-                        "profile_generated",
-                        &format!(
-                            "Profile generated: {} — \"{}\" ({duration_ms}ms)",
-                            profile_data.display_name.as_deref().unwrap_or("unnamed"),
-                            profile_data.status.as_deref().unwrap_or("no status"),
-                        ),
-                        Some(serde_json::json!({
-                            "display_name": profile_data.display_name,
-                            "status": profile_data.status,
-                            "duration_ms": duration_ms,
-                            "model": model_name,
-                        })),
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(%error, raw = %cleaned, "failed to parse profile LLM response as JSON");
-                    logger.log(
-                        "profile_failed",
-                        &format!(
-                            "Profile generation failed: could not parse LLM response — {error}"
-                        ),
-                        Some(serde_json::json!({
-                            "error": error.to_string(),
-                            "raw_response": cleaned,
-                        })),
-                    );
-                }
+            if let Err(error) = sqlx::query(
+                "INSERT INTO agent_profile (agent_id, display_name, status, bio, avatar_seed, generated_at, updated_at) \
+                 VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now')) \
+                 ON CONFLICT(agent_id) DO UPDATE SET \
+                 display_name = excluded.display_name, \
+                 status = excluded.status, \
+                 bio = excluded.bio, \
+                 avatar_seed = excluded.avatar_seed, \
+                 updated_at = datetime('now')",
+            )
+            .bind(agent_id.as_ref())
+            .bind(&profile_data.display_name)
+            .bind(&profile_data.status)
+            .bind(&profile_data.bio)
+            .bind(&avatar_seed)
+            .execute(&deps.sqlite_pool)
+            .await
+            {
+                tracing::warn!(%error, "failed to persist agent profile");
+                return;
             }
+
+            tracing::info!(
+                display_name = ?profile_data.display_name,
+                status = ?profile_data.status,
+                duration_ms,
+                "agent profile generated"
+            );
+            logger.log(
+                "profile_generated",
+                &format!(
+                    "Profile generated: {} — \"{}\" ({duration_ms}ms)",
+                    profile_data.display_name.as_deref().unwrap_or("unnamed"),
+                    profile_data.status.as_deref().unwrap_or("no status"),
+                ),
+                Some(serde_json::json!({
+                    "display_name": profile_data.display_name,
+                    "status": profile_data.status,
+                    "duration_ms": duration_ms,
+                    "model": model_name,
+                })),
+            );
         }
         Err(error) => {
             let duration_ms = started.elapsed().as_millis() as u64;
@@ -1326,17 +1313,20 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                 )
                 .await;
 
+                let (result, notify, success) = map_worker_completion_result(Ok(result_text));
                 let _ = event_tx.send(ProcessEvent::WorkerComplete {
                     agent_id: Arc::from(agent_id.as_str()),
                     worker_id,
                     channel_id: None,
-                    result: result_text,
-                    notify: true,
-                    success: true,
+                    result,
+                    notify,
+                    success,
                 });
             }
             Err(error) => {
-                let error_message = format!("Worker failed: {error}");
+                let (error_message, notify, success) = map_worker_completion_result(Err(
+                    WorkerCompletionError::failed(error.to_string()),
+                ));
                 run_logger.log_worker_completed(worker_id, &error_message, false);
 
                 let requeue_result = task_store
@@ -1380,7 +1370,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                 notify_delegation_completion(
                     &task,
                     &error_message,
-                    false,
+                    success,
                     &agent_id,
                     &links,
                     &agent_names,
@@ -1393,9 +1383,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                     agent_id: Arc::from(agent_id.as_str()),
                     worker_id,
                     channel_id: None,
-                    result: format!("Worker failed: {error}"),
-                    notify: true,
-                    success: false,
+                    result: error_message,
+                    notify,
+                    success,
                 });
             }
         }

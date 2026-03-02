@@ -4,4 +4,4 @@ pub mod cortex;
 pub mod spacebot;
 
 pub use cortex::CortexHook;
-pub use spacebot::SpacebotHook;
+pub use spacebot::{SpacebotHook, ToolNudgePolicy};

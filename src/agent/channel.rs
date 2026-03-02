@@ -22,7 +22,7 @@ use crate::{
     ProcessType, WorkerId,
 };
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel, Prompt};
+use rig::completion::CompletionModel;
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
@@ -343,13 +343,28 @@ impl Channel {
                         }
                     }
                 }
-                Ok(event) = self.event_rx.recv() => {
-                    // Events bypass coalescing - flush buffer first if needed
-                    if let Err(error) = self.flush_coalesce_buffer().await {
-                        tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
-                    }
-                    if let Err(error) = self.handle_event(event).await {
-                        tracing::error!(%error, channel_id = %self.id, "error handling event");
+                event = self.event_rx.recv() => {
+                    match event {
+                        Ok(event) => {
+                            // Events bypass coalescing - flush buffer first if needed
+                            if let Err(error) = self.flush_coalesce_buffer().await {
+                                tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer");
+                            }
+                            if let Err(error) = self.handle_event(event).await {
+                                tracing::error!(%error, channel_id = %self.id, "error handling event");
+                            }
+                        }
+                        Err(error) => {
+                            match super::classify_event_recv_error(&error) {
+                                super::EventRecvDisposition::Continue { .. } => {
+                                    tracing::debug!(channel_id = %self.id, %error, "event receiver lagged, continuing channel loop");
+                                }
+                                super::EventRecvDisposition::Stop => {
+                                    tracing::info!(channel_id = %self.id, %error, "event receiver closed, stopping channel loop");
+                                    break;
+                                }
+                            }
+                        }
                     }
                 }
                 _ = tokio::time::sleep(sleep_duration), if next_deadline.is_some() => {
@@ -1160,11 +1175,7 @@ impl Channel {
         };
         let history_len_before = history.len();
 
-        let mut result = agent
-            .prompt(user_text)
-            .with_history(&mut history)
-            .with_hook(self.hook.clone())
-            .await;
+        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
         // to use the tool calling API. Inject a correction and retry a couple
@@ -1187,10 +1198,9 @@ impl Channel {
 
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
-            result = agent
-                .prompt(&correction)
-                .with_history(&mut history)
-                .with_hook(self.hook.clone())
+            result = self
+                .hook
+                .prompt_once(&agent, &mut history, &correction)
                 .await;
         }
 

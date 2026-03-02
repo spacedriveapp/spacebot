@@ -9,13 +9,15 @@
 //! skipped on the next run.
 
 use crate::AgentDeps;
+use crate::ProcessId;
 use crate::ProcessType;
 use crate::config::IngestionConfig;
+use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 
 use anyhow::Context as _;
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel, Prompt};
+use rig::completion::{CompletionModel, PromptError};
 use rig::tool::server::ToolServerHandle;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
@@ -23,6 +25,7 @@ use sqlx::SqlitePool;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// Spawn the ingestion polling loop for an agent.
 ///
@@ -488,11 +491,31 @@ async fn process_chunk(
         .tool_server_handle(tool_server)
         .build();
 
+    let hook = SpacebotHook::new(
+        deps.agent_id.clone(),
+        ProcessId::Branch(Uuid::new_v4()),
+        ProcessType::Branch,
+        None,
+        deps.event_tx.clone(),
+    );
+
     let user_prompt =
         prompt_engine.render_system_ingestion_chunk(filename, chunk_number, total_chunks, chunk)?;
 
     let mut history = Vec::new();
-    match agent.prompt(&user_prompt).with_history(&mut history).await {
+    let result = hook.prompt_once(&agent, &mut history, &user_prompt).await;
+    classify_chunk_prompt_result(result, filename, chunk_number, total_chunks)?;
+
+    Ok(())
+}
+
+fn classify_chunk_prompt_result(
+    result: std::result::Result<String, PromptError>,
+    filename: &str,
+    chunk_number: usize,
+    total_chunks: usize,
+) -> anyhow::Result<()> {
+    match result {
         Ok(response) => {
             tracing::debug!(
                 file = %filename,
@@ -500,20 +523,20 @@ async fn process_chunk(
                 response = %response.chars().take(200).collect::<String>(),
                 "chunk processed"
             );
+            Ok(())
         }
-        Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+        Err(PromptError::MaxTurnsError { .. }) => {
             tracing::warn!(
                 file = %filename,
                 chunk = %format!("{chunk_number}/{total_chunks}"),
                 "chunk processing hit max turns"
             );
+            Err(anyhow::anyhow!(
+                "chunk processing hit max turns for {filename} ({chunk_number}/{total_chunks})"
+            ))
         }
-        Err(error) => {
-            return Err(error.into());
-        }
+        Err(error) => Err(error.into()),
     }
-
-    Ok(())
 }
 
 #[cfg(test)]
@@ -617,6 +640,24 @@ mod tests {
         assert!(
             !had_failure,
             "had_failure must stay false when all chunks succeed"
+        );
+    }
+
+    #[test]
+    fn test_max_turns_classified_as_chunk_failure() {
+        let result = classify_chunk_prompt_result(
+            Err(PromptError::MaxTurnsError {
+                max_turns: 10,
+                chat_history: Box::new(Vec::new()),
+                prompt: Box::new(rig::message::Message::from("chunk prompt")),
+            }),
+            "notes.txt",
+            1,
+            3,
+        );
+        assert!(
+            result.is_err(),
+            "max turns must be treated as chunk failure for retry"
         );
     }
 }

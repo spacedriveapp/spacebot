@@ -1,7 +1,9 @@
 use super::state::ApiState;
 
 use crate::agent::cortex::{CortexEvent, CortexLogger};
-use crate::agent::cortex_chat::{CortexChatEvent, CortexChatMessage, CortexChatStore};
+use crate::agent::cortex_chat::{
+    CortexChatEvent, CortexChatMessage, CortexChatSendError, CortexChatStore,
+};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -58,6 +60,13 @@ pub(super) struct CortexEventsQuery {
 
 fn default_cortex_events_limit() -> i64 {
     50
+}
+
+fn map_cortex_chat_send_error(error: &CortexChatSendError) -> StatusCode {
+    match error {
+        CortexChatSendError::Busy => StatusCode::CONFLICT,
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
 }
 
 /// Load persisted cortex chat history for a thread.
@@ -122,8 +131,11 @@ pub(super) async fn cortex_chat_send(
         .send_message_with_events(&thread_id, &message, channel_ref)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, "failed to start cortex chat send");
-            StatusCode::INTERNAL_SERVER_ERROR
+            let status = map_cortex_chat_send_error(&error);
+            if status == StatusCode::INTERNAL_SERVER_ERROR {
+                tracing::warn!(%error, "failed to start cortex chat send");
+            }
+            status
         })?;
 
     let stream = async_stream::stream! {
@@ -176,4 +188,27 @@ pub(super) async fn cortex_events(
     })?;
 
     Ok(Json(CortexEventsResponse { events, total }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::map_cortex_chat_send_error;
+    use crate::agent::cortex_chat::CortexChatSendError;
+    use axum::http::StatusCode;
+
+    #[test]
+    fn maps_busy_send_error_to_conflict() {
+        assert_eq!(
+            map_cortex_chat_send_error(&CortexChatSendError::Busy),
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[test]
+    fn maps_database_send_error_to_internal_server_error() {
+        assert_eq!(
+            map_cortex_chat_send_error(&CortexChatSendError::Database(sqlx::Error::RowNotFound)),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+    }
 }

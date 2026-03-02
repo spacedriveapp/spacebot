@@ -282,6 +282,8 @@ Two hook implementations control process behavior:
 
 Hooks return `Continue`, `Terminate`, or `Skip` after each LLM turn, giving the system fine-grained control over process lifecycle.
 
+For profile synthesis, cortex uses Rig structured output (`prompt_typed`) so profile fields are schema-validated instead of parsed from free-form fenced JSON.
+
 ### Max Turns
 
 Rig defaults to 0 (single call). Spacebot sets explicit limits per process type:

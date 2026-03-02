@@ -482,10 +482,16 @@ impl ApiState {
                             _ => {}
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(count)) => {
-                        tracing::debug!(agent_id = %agent_id, count, "API event forwarder lagged, skipped events");
+                    Err(error) => {
+                        if let crate::agent::EventRecvDisposition::Continue { lagged_count } =
+                            crate::agent::classify_event_recv_error(&error)
+                        {
+                            let count = lagged_count.unwrap_or(0);
+                            tracing::debug!(agent_id = %agent_id, count, "API event forwarder lagged, skipped events");
+                        } else {
+                            break;
+                        }
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
                 }
             }
         });
