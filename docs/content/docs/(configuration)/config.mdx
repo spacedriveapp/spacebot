@@ -558,7 +558,7 @@ See [Sandbox](/docs/sandbox) for a full explanation of how containment, environm
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for passthrough (env sanitization still applies) |
+| `mode` | string | `"enabled"` | `"enabled"` for kernel-enforced containment, `"disabled"` for passthrough (full host filesystem access; env sanitization still applies) |
 | `writable_paths` | string[] | `[]` | Additional directories the agent can write to beyond its workspace |
 | `passthrough_env` | string[] | `[]` | Environment variable names to forward from the parent process to worker subprocesses |
 
@@ -571,7 +571,7 @@ When `mode = "enabled"`, shell and exec commands run inside a mount namespace wh
 
 The agent's data directory (databases, config) is explicitly re-mounted read-only even if it would otherwise be writable due to path overlap.
 
-Regardless of mode, all worker subprocesses start with a clean environment. Only `PATH` (with `tools/bin` prepended), safe variables (`HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`), and any `passthrough_env` entries are injected. Use `passthrough_env` with least privilege: only forward variables required by worker tools (for example specific credentials set in Docker Compose or systemd), and avoid forwarding broad or highly sensitive credentials.
+Regardless of mode, all worker subprocesses start with a clean environment. Only `PATH` (with `tools/bin` prepended), safe variables (`HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`), and any `passthrough_env` entries are injected. `HOME` is mode-dependent: workspace path when sandboxed, parent `HOME` when passthrough is enabled. Use `passthrough_env` with least privilege: only forward variables required by worker tools (for example specific credentials set in Docker Compose or systemd), and avoid forwarding broad or highly sensitive credentials.
 
 If the sandbox backend isn't available (e.g. bubblewrap not installed), processes run unsandboxed with a warning at startup.
 

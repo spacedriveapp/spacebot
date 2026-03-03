@@ -156,6 +156,20 @@ impl StatusBlock {
         });
     }
 
+    /// Remove an active worker from the status block.
+    pub fn remove_worker(&mut self, worker_id: WorkerId) -> bool {
+        if let Some(position) = self
+            .active_workers
+            .iter()
+            .position(|worker| worker.id == worker_id)
+        {
+            self.active_workers.remove(position);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Render the status block as a string for context injection.
     pub fn render(&self) -> String {
         self.render_with_time_context(None)

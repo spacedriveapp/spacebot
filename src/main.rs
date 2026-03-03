@@ -2075,6 +2075,27 @@ async fn initialize_agents(
                 )
             })?;
 
+        let run_logger = spacebot::conversation::ProcessRunLogger::new(db.sqlite.clone());
+        let orphaned_workers = run_logger
+            .reconcile_running_workers_for_agent(
+                &agent_config.id,
+                "Worker interrupted: Spacebot restarted before completion.",
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to reconcile stale running workers for agent '{}'",
+                    agent_config.id
+                )
+            })?;
+        if orphaned_workers > 0 {
+            tracing::warn!(
+                agent_id = %agent_config.id,
+                orphaned_workers,
+                "marked stale running workers as failed during startup"
+            );
+        }
+
         // Per-agent settings store (redb-backed)
         let settings_path = agent_config.data_dir.join("settings.redb");
         let settings_store = Arc::new(

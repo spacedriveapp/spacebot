@@ -5,7 +5,7 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use tokio::process::Command;
@@ -159,23 +159,33 @@ impl Tool for ExecTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Validate working_dir stays within workspace if specified
+        // Relative working_dir values resolve from the workspace.
+        // Workspace boundary enforcement only applies when sandbox mode is enabled.
         let working_dir = if let Some(ref dir) = args.working_dir {
-            let path = std::path::Path::new(dir);
-            let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-            let workspace_canonical = self
-                .workspace
-                .canonicalize()
-                .unwrap_or_else(|_| self.workspace.clone());
-            if !canonical.starts_with(&workspace_canonical) {
-                return Err(ExecError {
-                    message: format!(
-                        "working_dir must be within the workspace ({}).",
-                        self.workspace.display()
-                    ),
-                    exit_code: -1,
-                });
+            let raw_path = Path::new(dir);
+            let resolved = if raw_path.is_absolute() {
+                raw_path.to_path_buf()
+            } else {
+                self.workspace.join(raw_path)
+            };
+            let canonical = resolved.canonicalize().unwrap_or(resolved);
+
+            if self.sandbox.mode_enabled() {
+                let workspace_canonical = self
+                    .workspace
+                    .canonicalize()
+                    .unwrap_or_else(|_| self.workspace.clone());
+                if !canonical.starts_with(&workspace_canonical) {
+                    return Err(ExecError {
+                        message: format!(
+                            "working_dir must be within the workspace ({}).",
+                            self.workspace.display()
+                        ),
+                        exit_code: -1,
+                    });
+                }
             }
+
             canonical
         } else {
             self.workspace.clone()

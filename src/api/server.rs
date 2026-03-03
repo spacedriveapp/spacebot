@@ -86,6 +86,7 @@ pub async fn start_http_server(
             "/channels",
             get(channels::list_channels).delete(channels::delete_channel),
         )
+        .route("/channels/archive", put(channels::set_channel_archive))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/workers", get(workers::list_workers))

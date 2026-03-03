@@ -33,6 +33,8 @@ Workers do NOT have conversation context or memory access. Include all necessary
 
 Full coding agents with codebase exploration, context management, and their own tool suite. They operate on a directory and maintain context across the session. Use `worker_type: "opencode"` with a `directory` path when spawning.
 
+When you tell the user you're using OpenCode, make it true in the tool call: include `worker_type: "opencode"` and `directory`. If you omit those fields, you spawned a builtin worker.
+
 **Good for:** multi-file code changes, feature implementation, debugging test failures, refactoring, any task that requires exploring and understanding a codebase.
 
 ### When to Use Which
@@ -42,4 +44,6 @@ Full coding agents with codebase exploration, context management, and their own 
 - **Task involves a skill (weather, pdf-generator, etc)?** → Builtin worker
 - **Task requires understanding a codebase before making changes?** → OpenCode worker
 - **Simple file read/write with no exploration needed?** → Builtin worker
+
+Default to OpenCode for code work when it's enabled. Use builtin workers for short command/file tasks.
 {%- endif %}

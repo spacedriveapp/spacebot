@@ -18,7 +18,8 @@ Worker calls shell("npm test")
       - Read access to a minimal system allowlist + workspace
       - Writable access only to the workspace + configured writable paths + /tmp
       - Clean environment (no inherited secrets)
-      - HOME set to workspace, TMPDIR set to /tmp
+      - HOME set to workspace in sandbox mode, parent HOME in passthrough mode
+      - TMPDIR set to /tmp
       - tools/bin prepended to PATH
   → stdout/stderr captured and returned to worker
 ```
@@ -96,7 +97,7 @@ A worker running `printenv` sees only:
 | Variable | Source | Value |
 |----------|--------|-------|
 | `PATH` | Always | `{instance_dir}/tools/bin:{system_path}` |
-| `HOME` | Always | Worker workspace path |
+| `HOME` | Mode-dependent | Workspace path (sandbox enabled), parent `HOME` (sandbox disabled) |
 | `TMPDIR` | Always | `/tmp` |
 | `USER` | Always | From parent (if set) |
 | `LANG` | Always | From parent (if set) |
@@ -147,7 +148,14 @@ The `GET /agents/tools` API endpoint lists installed binaries for dashboard obse
 
 ## Leak Detection
 
-All tool output (shell, exec, file, browser) is scanned for known secret patterns before being returned to the LLM. This runs in the `SpacebotHook` after every tool execution.
+Secret-pattern detection is enforced at **channel egress** (outbound user-visible text), not as a hard-stop for worker tool execution.
+
+Channel output is blocked when patterns are detected in:
+
+- `reply` tool content
+- Plaintext fallback sends when a model returns raw text instead of calling `reply`
+
+Worker and branch tool outputs no longer terminate the process on pattern hits. This keeps long-running jobs from failing when secrets are handled internally.
 
 Detected patterns include:
 
@@ -163,16 +171,16 @@ Detected patterns include:
 
 Detection also covers encoded forms -- secrets wrapped in base64, URL encoding, or hex are decoded and checked against the same patterns.
 
-If a leak is detected, the process is terminated immediately with an error. The raw leaked value is never logged or returned to the LLM -- only the detection event, encoding type, and a truncated non-reversible fingerprint are recorded for debugging.
+If a channel egress leak is detected, outbound text is blocked. The raw leaked value is never logged -- only the detection event and a truncated non-reversible fingerprint are recorded for debugging.
 
 ### OpenCode Workers
 
-OpenCode workers (external coding agent processes) are covered by the same protection. SSE output events are scanned through both:
+OpenCode workers (external coding agent processes) apply the same output scrubbing, and also scan SSE text/tool output for secret patterns for observability:
 
 1. **Output scrubbing** (exact-match redaction of known secret values) -- runs first
-2. **Leak detection** (regex pattern matching for unknown secrets) -- runs second
+2. **Leak-pattern scan** (regex pattern matching for unknown secrets) -- runs second
 
-The ordering ensures that stored tool secrets are redacted before leak detection runs, so expected secret values in worker output don't trigger false-positive kills.
+The ordering ensures that stored tool secrets are redacted before pattern scanning runs, so expected secret values in worker output don't trigger false positives.
 
 ## Dynamic Mode Switching
 
@@ -214,7 +222,7 @@ The sandbox is one layer in a defense-in-depth model:
 | **Env sanitization** | Clean environment, no inherited secrets | All subprocesses (including passthrough mode) |
 | **File tool workspace guard** | Path validation against workspace boundary | File tool only (in-process) |
 | **Exec env var blocklist** | Blocks `LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc. | Exec tool |
-| **Leak detection** | Regex scan of all tool output for secret patterns | All tools via SpacebotHook |
+| **Leak detection** | Regex scan of outbound channel text for secret patterns | Channel egress (`reply` + plaintext fallback) |
 | **Output scrubbing** | Exact-match redaction of known secret values | Worker output, status updates, OpenCode events |
 | **[Secret store](/docs/secrets)** | Categorized credential storage, config resolution, tool secret injection | All agents |
 | **Permissions system** | Application-level tool access control | All tools |

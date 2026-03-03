@@ -493,9 +493,14 @@ pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
 
 /// App attribution headers sent with every OpenRouter API request.
 /// See <https://openrouter.ai/docs/app-attribution>.
+///
+/// We send both legacy (`X-Title`) and new (`X-OpenRouter-Title`) header names
+/// because (as of 2026-03-01) OpenRouter's backend still keys on the legacy names for populating
+/// the app listing (title, etc.).
 fn openrouter_extra_headers() -> Vec<(String, String)> {
     vec![
         ("HTTP-Referer".into(), "https://spacebot.sh/".into()),
+        ("X-Title".into(), "Spacebot".into()),
         ("X-OpenRouter-Title".into(), "Spacebot".into()),
         (
             "X-OpenRouter-Categories".into(),
@@ -937,7 +942,7 @@ impl Default for BrowserConfig {
 }
 
 /// OpenCode subprocess worker configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeConfig {
     /// Whether OpenCode workers are available.
     pub enabled: bool,
@@ -2631,6 +2636,52 @@ pub struct WebhookConfig {
 
 // -- TOML deserialization types --
 
+/// Known top-level keys in config.toml (must match `TomlConfig` field names).
+const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
+    "llm",
+    "defaults",
+    "agents",
+    "links",
+    "groups",
+    "humans",
+    "messaging",
+    "bindings",
+    "api",
+    "metrics",
+    "telemetry",
+];
+
+/// Pre-parse check that warns about unrecognised top-level keys in a config
+/// file.  Serde's default behaviour silently drops unknown fields, which leads
+/// to confusing "my setting does nothing" bugs (see issue #221).
+fn warn_unknown_config_keys(content: &str) {
+    let table: toml::Table = match content.parse() {
+        Ok(t) => t,
+        Err(_) => return, // the typed parse will report the real error
+    };
+
+    for key in table.keys() {
+        if KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()) {
+            continue;
+        }
+
+        if key == "mcp_servers" || key == "mcp" {
+            tracing::warn!(
+                "config.toml contains top-level key `{key}` which is not recognised \
+                 and will be ignored. MCP servers should be defined under [defaults] \
+                 as [[defaults.mcp]] (or per-agent under [[agents.mcp]]). \
+                 See docs/design-docs/mcp.md for the correct format."
+            );
+        } else {
+            tracing::warn!(
+                "config.toml contains unknown top-level key `{key}` — \
+                 it will be silently ignored by the parser. Check for typos \
+                 or consult the configuration reference."
+            );
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct TomlConfig {
     #[serde(default)]
@@ -3748,6 +3799,8 @@ impl Config {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("failed to read config from {}", path.display()))?;
 
+        warn_unknown_config_keys(&content);
+
         let toml_config: TomlConfig = toml::from_str(&content)
             .with_context(|| format!("failed to parse config from {}", path.display()))?;
 
@@ -4227,6 +4280,8 @@ impl Config {
     /// Validate a raw TOML string as a valid Spacebot config.
     /// Returns Ok(()) if the config is structurally valid, or an error describing what's wrong.
     pub fn validate_toml(content: &str) -> Result<()> {
+        warn_unknown_config_keys(content);
+
         let toml_config: TomlConfig =
             toml::from_str(content).context("failed to parse config TOML")?;
         // Run full conversion to catch semantic errors (env resolution, defaults, etc.)
@@ -5657,7 +5712,7 @@ pub struct RuntimeConfig {
     pub skills: ArcSwap<crate::skills::SkillSet>,
     pub opencode: ArcSwap<OpenCodeConfig>,
     /// Shared pool of OpenCode server processes. Lazily initialized on first use.
-    pub opencode_server_pool: Arc<crate::opencode::OpenCodeServerPool>,
+    pub opencode_server_pool: ArcSwap<crate::opencode::OpenCodeServerPool>,
     /// Cron store, set after agent initialization.
     pub cron_store: ArcSwap<Option<Arc<crate::cron::CronStore>>>,
     /// Cron scheduler, set after agent initialization.
@@ -5718,7 +5773,7 @@ impl RuntimeConfig {
             identity: ArcSwap::from_pointee(identity),
             skills: ArcSwap::from_pointee(skills),
             opencode: ArcSwap::from_pointee(defaults.opencode.clone()),
-            opencode_server_pool: Arc::new(server_pool),
+            opencode_server_pool: ArcSwap::from_pointee(server_pool),
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
@@ -5806,6 +5861,26 @@ impl RuntimeConfig {
         self.cortex.store(Arc::new(resolved.cortex));
         self.warmup.store(Arc::new(resolved.warmup));
         self.sandbox.store(Arc::new(resolved.sandbox.clone()));
+
+        let old_opencode = self.opencode.load().as_ref().clone();
+        let new_opencode = config.defaults.opencode.clone();
+        self.opencode.store(Arc::new(new_opencode.clone()));
+
+        let should_rebuild_opencode_pool = old_opencode.path != new_opencode.path
+            || old_opencode.max_servers != new_opencode.max_servers
+            || old_opencode.permissions != new_opencode.permissions;
+        if should_rebuild_opencode_pool {
+            let new_pool = crate::opencode::OpenCodeServerPool::new(
+                new_opencode.path.clone(),
+                new_opencode.permissions.clone(),
+                new_opencode.max_servers,
+            );
+            self.opencode_server_pool.store(Arc::new(new_pool));
+            tracing::info!(
+                agent_id,
+                "reloaded opencode server pool with updated path/permissions/limits"
+            );
+        }
 
         mcp_manager.reconcile(&old_mcp, &new_mcp).await;
 
@@ -6990,7 +7065,7 @@ openrouter_key = "legacy-openrouter-key"
         assert_eq!(openrouter_provider.api_type, ApiType::OpenAiCompletions);
         assert_eq!(openrouter_provider.base_url, OPENROUTER_PROVIDER_BASE_URL);
         assert_eq!(openrouter_provider.api_key, "legacy-openrouter-key");
-        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        assert_eq!(openrouter_provider.extra_headers.len(), 4);
         let find_header = |name: &str| -> Option<&str> {
             openrouter_provider
                 .extra_headers
@@ -6999,6 +7074,7 @@ openrouter_key = "legacy-openrouter-key"
                 .map(|(_, value)| value.as_str())
         };
         assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-Title"), Some("Spacebot"));
         assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
         assert_eq!(
             find_header("X-OpenRouter-Categories"),
@@ -7058,7 +7134,7 @@ name = "My OpenRouter"
         assert_eq!(openrouter_provider.name.as_deref(), Some("My OpenRouter"));
 
         // Verify attribution headers are injected even for explicit TOML config
-        assert_eq!(openrouter_provider.extra_headers.len(), 3);
+        assert_eq!(openrouter_provider.extra_headers.len(), 4);
         let find_header = |name: &str| -> Option<&str> {
             openrouter_provider
                 .extra_headers
@@ -7067,6 +7143,7 @@ name = "My OpenRouter"
                 .map(|(_, value)| value.as_str())
         };
         assert_eq!(find_header("HTTP-Referer"), Some("https://spacebot.sh/"));
+        assert_eq!(find_header("X-Title"), Some("Spacebot"));
         assert_eq!(find_header("X-OpenRouter-Title"), Some("Spacebot"));
         assert_eq!(
             find_header("X-OpenRouter-Categories"),
@@ -8336,5 +8413,61 @@ guild_id = "123456"
             Some("support".into())
         );
         assert_eq!(normalize_adapter(Some("ops".into())), Some("ops".into()));
+    }
+
+    #[test]
+    fn warn_unknown_config_keys_no_panic() {
+        // Smoke test: the function should not panic for any input shape.
+        // Actual warning output goes through tracing (not asserted here).
+        let toml_with_mcp_servers = r#"
+[[mcp_servers]]
+name = "test"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        warn_unknown_config_keys(toml_with_mcp_servers);
+
+        // Top-level `mcp` should also be caught
+        let toml_with_mcp = r#"
+[[mcp]]
+name = "test"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        warn_unknown_config_keys(toml_with_mcp);
+
+        // Generic unknown key
+        let toml_with_unknown = r#"
+[foobar]
+something = true
+"#;
+        warn_unknown_config_keys(toml_with_unknown);
+
+        // Valid keys should not warn
+        let toml_valid = r#"
+[llm]
+[defaults]
+[messaging]
+[api]
+"#;
+        warn_unknown_config_keys(toml_valid);
+    }
+
+    #[test]
+    fn top_level_mcp_servers_silently_ignored_by_serde() {
+        // Demonstrates the root cause of issue #221: serde drops unknown fields.
+        // `[[mcp_servers]]` at the top level deserializes fine but the data is lost.
+        let toml = r#"
+[[agents]]
+id = "test-agent"
+
+[[mcp_servers]]
+name = "my-server"
+transport = "stdio"
+command = "/usr/bin/test"
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("should parse without error");
+        // The mcp_servers data is silently dropped — verify it's not accessible
+        assert!(parsed.defaults.mcp.is_empty());
     }
 }

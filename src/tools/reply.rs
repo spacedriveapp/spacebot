@@ -372,6 +372,17 @@ impl Tool for ReplyTool {
             ));
         }
 
+        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
+            tracing::error!(
+                conversation_id = %self.conversation_id,
+                leak_prefix = %&leak[..leak.len().min(8)],
+                "reply tool blocked content matching secret pattern"
+            );
+            return Err(ReplyError(
+                "blocked reply content: potential secret detected".into(),
+            ));
+        }
+
         self.conversation_logger.log_bot_message_with_name(
             &self.channel_id,
             &converted_content,
