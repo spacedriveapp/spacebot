@@ -397,9 +397,10 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
         );
     }
 
-    let socket_path = current
+    let socket_path = capability
         .socket_path
         .as_deref()
+        .or(current.socket_path.as_deref())
         .ok_or_else(|| anyhow::anyhow!("container socket path not available"))?;
 
     let latest_version = current
