@@ -24,6 +24,8 @@ pub mod secrets;
 pub mod settings;
 pub mod skills;
 pub mod tasks;
+#[cfg(feature = "stt-whisper")]
+pub mod stt;
 #[cfg(feature = "metrics")]
 pub mod telemetry;
 pub mod tools;

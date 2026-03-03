@@ -51,6 +51,7 @@ pub mod spawn_worker;
 pub mod task_create;
 pub mod task_list;
 pub mod task_update;
+pub mod transcribe_audio;
 pub mod web_search;
 pub mod worker_inspect;
 
@@ -96,6 +97,9 @@ pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, Spa
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
+pub use transcribe_audio::{
+    TranscribeAudioArgs, TranscribeAudioError, TranscribeAudioOutput, TranscribeAudioTool,
+};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
@@ -103,6 +107,7 @@ pub use worker_inspect::{
 
 use crate::agent::channel::ChannelState;
 use crate::config::{BrowserConfig, RuntimeConfig};
+use crate::llm::manager::LlmManager;
 use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
@@ -400,6 +405,9 @@ pub fn create_worker_tool_server(
     sandbox: Arc<Sandbox>,
     mcp_tools: Vec<McpToolAdapter>,
     runtime_config: Arc<RuntimeConfig>,
+    voice_model: String,
+    llm_manager: Arc<LlmManager>,
+    http: reqwest::Client,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
@@ -421,6 +429,14 @@ pub fn create_worker_tool_server(
 
     if let Some(store) = runtime_config.secrets.load().as_ref() {
         server = server.tool(SecretSetTool::new(store.clone()));
+    }
+
+    if !voice_model.is_empty() {
+        server = server.tool(TranscribeAudioTool::new(
+            voice_model,
+            llm_manager,
+            http,
+        ));
     }
 
     if browser_config.enabled {
