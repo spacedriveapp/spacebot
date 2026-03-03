@@ -32,6 +32,7 @@ export function SettingSectionNav({groups, activeSection, onSectionChange}: Sett
 							{group.sections.map((section) => (
 								<SettingSidebarButton
 									key={section.id}
+									type="button"
 									onClick={() => onSectionChange(section.id)}
 									active={activeSection === section.id}
 								>
@@ -56,6 +57,7 @@ export function SettingSectionNav({groups, activeSection, onSectionChange}: Sett
 							return (
 								<button
 									key={section.id}
+									type="button"
 									onClick={() => onSectionChange(section.id)}
 									className={`relative whitespace-nowrap px-3 text-sm transition-colors ${
 										isActive ? "text-ink" : "text-ink-faint hover:text-ink-dull"

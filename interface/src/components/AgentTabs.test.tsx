@@ -10,10 +10,10 @@ vi.mock("@tanstack/react-router", () => ({
 }));
 
 describe("AgentTabs", () => {
-	it("renders 10 tab links", () => {
+	it("renders 11 tab links", () => {
 		const { container } = render(<AgentTabs agentId="main" />);
 		const links = container.querySelectorAll("a");
-		expect(links).toHaveLength(10);
+		expect(links).toHaveLength(11);
 	});
 
 	it("container has flex and h-12 classes", () => {
