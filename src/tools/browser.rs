@@ -25,6 +25,7 @@ use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
@@ -149,6 +150,11 @@ struct BrowserState {
     /// Per-launch temp directory for Chrome's user data. Cleaned up on drop to
     /// prevent stale singleton locks from blocking subsequent launches.
     user_data_dir: Option<PathBuf>,
+    /// True when connected to an external browser process rather than a locally launched one.
+    connected: bool,
+    /// Shared flag set to `false` by the handler task when the WebSocket connection drops.
+    /// Only meaningful when `connected` is true.
+    connection_alive: Arc<AtomicBool>,
 }
 
 impl Drop for BrowserState {
@@ -180,6 +186,11 @@ impl std::fmt::Debug for BrowserState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("BrowserState")
             .field("has_browser", &self.browser.is_some())
+            .field("connected", &self.connected)
+            .field(
+                "connection_alive",
+                &self.connection_alive.load(Ordering::Relaxed),
+            )
             .field("pages", &self.pages.len())
             .field("active_target", &self.active_target)
             .field("element_refs", &self.element_refs.len())
@@ -210,6 +221,8 @@ impl BrowserTool {
                 element_refs: HashMap::new(),
                 next_ref: 0,
                 user_data_dir: None,
+                connected: false,
+                connection_alive: Arc::new(AtomicBool::new(false)),
             })),
             config,
             screenshot_dir,
@@ -505,6 +518,58 @@ impl BrowserTool {
             }
         }
 
+        let is_connect = self
+            .config
+            .connect_url
+            .as_deref()
+            .is_some_and(|url| !url.is_empty());
+
+        if is_connect {
+            self.connect_external().await
+        } else {
+            self.launch_local().await
+        }
+    }
+
+    async fn connect_external(&self) -> Result<BrowserOutput, BrowserError> {
+        let connect_url = self.config.connect_url.as_deref().unwrap();
+
+        tracing::info!(connect_url, "connecting to external browser");
+
+        let (browser, mut handler) = Browser::connect(connect_url).await.map_err(|error| {
+            BrowserError::new(format!(
+                "failed to connect to browser at {connect_url}: {error}"
+            ))
+        })?;
+
+        let connection_alive = Arc::new(AtomicBool::new(true));
+        let alive_flag = connection_alive.clone();
+        let handler_task = tokio::spawn(async move {
+            while handler.next().await.is_some() {}
+            alive_flag.store(false, Ordering::Release);
+        });
+
+        let mut state = self.state.lock().await;
+
+        // Guard against a concurrent launch that won the race.
+        if state.browser.is_some() {
+            drop(browser);
+            handler_task.abort();
+            return Ok(BrowserOutput::success("Browser already running"));
+        }
+
+        state.browser = Some(browser);
+        state._handler_task = Some(handler_task);
+        state.connected = true;
+        state.connection_alive = connection_alive;
+
+        tracing::info!(connect_url, "connected to external browser");
+        Ok(BrowserOutput::success(format!(
+            "Connected to external browser at {connect_url}"
+        )))
+    }
+
+    async fn launch_local(&self) -> Result<BrowserOutput, BrowserError> {
         // Resolve the Chrome executable path (may download ~150MB on first use):
         //   1. Explicit config override
         //   2. CHROME / CHROME_PATH env vars
@@ -551,6 +616,7 @@ impl BrowserTool {
             // Another call launched while we were downloading/starting. Clean up
             // the browser we just created and return success.
             drop(browser);
+            handler_task.abort();
             let _ = std::fs::remove_dir_all(&user_data_dir);
             return Ok(BrowserOutput::success("Browser already running"));
         }
@@ -558,6 +624,7 @@ impl BrowserTool {
         state.browser = Some(browser);
         state._handler_task = Some(handler_task);
         state.user_data_dir = Some(user_data_dir);
+        state.connected = false;
 
         tracing::info!("browser launched");
         Ok(BrowserOutput::success("Browser launched successfully"))
@@ -1013,17 +1080,48 @@ impl BrowserTool {
     async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
         let mut state = self.state.lock().await;
 
+        if state.connected {
+            self.disconnect(&mut state).await
+        } else {
+            self.close(&mut state).await
+        }
+    }
+
+    async fn disconnect(&self, state: &mut BrowserState) -> Result<BrowserOutput, BrowserError> {
+        // Close all pages we opened so they don't linger as orphan tabs in the container.
+        for (id, page) in state.pages.drain() {
+            if let Err(error) = page.close().await {
+                tracing::debug!(target_id = %id, %error, "failed to close page during disconnect");
+            }
+        }
+        // Drop without Browser.close — that CDP command would terminate the external process.
+        state.browser.take();
+        self.reset_state(state).await;
+        tracing::info!("external browser disconnected");
+        Ok(BrowserOutput::success("Browser disconnected"))
+    }
+
+    async fn close(&self, state: &mut BrowserState) -> Result<BrowserOutput, BrowserError> {
         if let Some(mut browser) = state.browser.take()
             && let Err(error) = browser.close().await
         {
-            tracing::warn!(%error, "browser close returned error");
+            tracing::warn!(%error, "embedded browser close returned error");
         }
+        self.reset_state(state).await;
+        tracing::info!("embedded browser closed");
+        Ok(BrowserOutput::success("Browser closed"))
+    }
 
+    async fn reset_state(&self, state: &mut BrowserState) {
         state.pages.clear();
         state.active_target = None;
         state.element_refs.clear();
         state.next_ref = 0;
-        state._handler_task = None;
+        if let Some(task) = state._handler_task.take() {
+            task.abort();
+        }
+        state.connected = false;
+        state.connection_alive = Arc::new(AtomicBool::new(false));
 
         // Clean up the per-launch user data dir to free disk space.
         if let Some(dir) = state.user_data_dir.take()
@@ -1035,9 +1133,6 @@ impl BrowserTool {
                 "failed to clean up browser user data dir"
             );
         }
-
-        tracing::info!("browser closed");
-        Ok(BrowserOutput::success("Browser closed"))
     }
 
     /// Get the active page, or create a first one if the browser has no pages yet.
@@ -1046,6 +1141,12 @@ impl BrowserTool {
         state: &'a mut BrowserState,
         url: Option<&str>,
     ) -> Result<&'a chromiumoxide::Page, BrowserError> {
+        if state.connected && !state.connection_alive.load(Ordering::Acquire) {
+            return Err(BrowserError::new(
+                "external browser connection lost — reconnect with launch",
+            ));
+        }
+
         if let Some(target) = state.active_target.as_ref()
             && state.pages.contains_key(target)
         {
@@ -1075,6 +1176,12 @@ impl BrowserTool {
         &self,
         state: &'a BrowserState,
     ) -> Result<&'a chromiumoxide::Page, BrowserError> {
+        if state.connected && !state.connection_alive.load(Ordering::Acquire) {
+            return Err(BrowserError::new(
+                "external browser connection lost — reconnect with launch",
+            ));
+        }
+
         let target = state
             .active_target
             .as_ref()
