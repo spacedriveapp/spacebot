@@ -1,27 +1,205 @@
 //! Memory recall tool for branches.
 
+use crate::config::RuntimeConfig;
 use crate::error::Result;
 use crate::memory::MemorySearch;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort, curate_results};
-use crate::memory::types::Memory;
+use crate::memory::types::{Memory, MemorySearchResult, MemoryType};
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
 /// Tool for recalling memories using hybrid search.
 #[derive(Debug, Clone)]
 pub struct MemoryRecallTool {
     memory_search: Arc<MemorySearch>,
+    runtime_config: Option<Arc<RuntimeConfig>>,
 }
 
 impl MemoryRecallTool {
     /// Create a new memory recall tool.
     pub fn new(memory_search: Arc<MemorySearch>) -> Self {
-        Self { memory_search }
+        Self {
+            memory_search,
+            runtime_config: None,
+        }
+    }
+
+    /// Create a memory recall tool with runtime warm-recall cache support.
+    pub fn with_runtime(
+        memory_search: Arc<MemorySearch>,
+        runtime_config: Arc<RuntimeConfig>,
+    ) -> Self {
+        Self {
+            memory_search,
+            runtime_config: Some(runtime_config),
+        }
+    }
+
+    async fn warm_cache_results(
+        &self,
+        query: &str,
+        memory_type: Option<MemoryType>,
+        max_results: usize,
+    ) -> Vec<MemorySearchResult> {
+        let Some(runtime_config) = self.runtime_config.as_ref() else {
+            return Vec::new();
+        };
+        let _warm_recall_cache_guard = runtime_config.warm_recall_cache_lock.lock().await;
+
+        let now_unix_ms = chrono::Utc::now().timestamp_millis();
+        let refreshed_at_unix_ms = *runtime_config
+            .warm_recall_refreshed_at_unix_ms
+            .load()
+            .as_ref();
+        let Some(age_secs) = warm_cache_age_secs(refreshed_at_unix_ms, now_unix_ms) else {
+            return Vec::new();
+        };
+        let warmup_refresh_secs = runtime_config.warmup.load().as_ref().refresh_secs.max(1);
+        if age_secs > warmup_refresh_secs {
+            return Vec::new();
+        }
+
+        let warm_memories = runtime_config.warm_recall_memories.load();
+        let inflight_forget_ids = snapshot_inflight_forget_ids(runtime_config);
+        score_warm_memories(
+            query,
+            warm_memories.as_ref(),
+            memory_type,
+            max_results,
+            &inflight_forget_ids,
+        )
+    }
+}
+
+fn snapshot_inflight_forget_ids(runtime_config: &RuntimeConfig) -> BTreeSet<String> {
+    let counts = match runtime_config.warm_recall_inflight_forget_counts.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => {
+            tracing::warn!("warm recall inflight forget counts lock poisoned; recovering state");
+            poisoned.into_inner()
+        }
+    };
+    counts.keys().cloned().collect()
+}
+
+fn warm_cache_age_secs(refreshed_at_unix_ms: Option<i64>, now_unix_ms: i64) -> Option<u64> {
+    refreshed_at_unix_ms.map(|refresh_ms| {
+        if now_unix_ms > refresh_ms {
+            ((now_unix_ms - refresh_ms) / 1000) as u64
+        } else {
+            0
+        }
+    })
+}
+
+fn tokenize_query_terms(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|term| term.len() >= 2)
+        .map(|term| term.to_lowercase())
+        .collect()
+}
+
+fn score_warm_memories(
+    query: &str,
+    warm_memories: &[Memory],
+    memory_type: Option<MemoryType>,
+    max_results: usize,
+    inflight_forget_ids: &BTreeSet<String>,
+) -> Vec<MemorySearchResult> {
+    if max_results == 0 {
+        return Vec::new();
+    }
+
+    let query_terms = tokenize_query_terms(query);
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+
+    for memory in warm_memories {
+        if let Some(score) =
+            score_memory_with_terms(&query_terms, memory, memory_type, inflight_forget_ids)
+        {
+            results.push(MemorySearchResult {
+                memory: memory.clone(),
+                score,
+                rank: 0,
+            });
+        }
+    }
+
+    results.sort_by(|left, right| {
+        right
+            .score
+            .total_cmp(&left.score)
+            .then_with(|| right.memory.importance.total_cmp(&left.memory.importance))
+    });
+    results.truncate(max_results);
+
+    for (index, result) in results.iter_mut().enumerate() {
+        result.rank = index + 1;
+    }
+
+    results
+}
+
+fn score_memory_with_terms(
+    query_terms: &[String],
+    memory: &Memory,
+    memory_type: Option<MemoryType>,
+    inflight_forget_ids: &BTreeSet<String>,
+) -> Option<f32> {
+    if memory.forgotten {
+        return None;
+    }
+
+    if inflight_forget_ids.contains(&memory.id) {
+        return None;
+    }
+
+    if memory_type.is_some_and(|kind| memory.memory_type != kind) {
+        return None;
+    }
+
+    let content = memory.content.to_lowercase();
+    let matched_terms = query_terms
+        .iter()
+        .filter(|term| content.contains(term.as_str()))
+        .count();
+    if matched_terms == 0 {
+        return None;
+    }
+
+    let coverage = matched_terms as f32 / query_terms.len() as f32;
+    Some(coverage * 0.85 + memory.importance.clamp(0.0, 1.0) * 0.15)
+}
+
+fn select_hybrid_results(
+    warm_results: Vec<MemorySearchResult>,
+    search_result: std::result::Result<Vec<MemorySearchResult>, MemoryRecallError>,
+) -> std::result::Result<(Vec<MemorySearchResult>, Option<String>), MemoryRecallError> {
+    match search_result {
+        Ok(search_results) => Ok((search_results, None)),
+        Err(error) => {
+            if warm_results.is_empty() {
+                return Err(error);
+            }
+            let search_error = error.0;
+            tracing::warn!(
+                error = %search_error,
+                warm_matches = warm_results.len(),
+                "hybrid search failed, returning partial warm recall results"
+            );
+            Ok((warm_results, Some(search_error)))
+        }
     }
 }
 
@@ -111,6 +289,10 @@ pub struct MemoryRecallOutput {
     pub memories: Vec<MemoryOutput>,
     /// Total number of results found before curation.
     pub total_found: usize,
+    /// True when hybrid search failed and warm cache fallback was returned.
+    pub degraded_fallback_used: bool,
+    /// Root-cause error from hybrid search when degraded fallback was used.
+    pub degraded_fallback_error: Option<String>,
     /// Formatted summary of the memories.
     pub summary: String,
 }
@@ -221,11 +403,36 @@ impl Tool for MemoryRecallTool {
         };
 
         let query = args.query.as_deref().unwrap_or("");
-        let search_results = self
-            .memory_search
-            .search(query, &config)
-            .await
-            .map_err(|e| MemoryRecallError(format!("Search failed: {e}")))?;
+        let (search_results, degraded_fallback_error) = if mode == SearchMode::Hybrid {
+            let search_result = self
+                .memory_search
+                .search(query, &config)
+                .await
+                .map_err(|e| MemoryRecallError(format!("Search failed: {e}")));
+            let warm_results = if search_result.is_err() {
+                self.warm_cache_results(query, memory_type, config.max_results_per_source)
+                    .await
+            } else {
+                Vec::new()
+            };
+            let (selected, degraded_fallback_error) =
+                select_hybrid_results(warm_results, search_result)?;
+            if selected.len() < args.max_results {
+                tracing::debug!(
+                    matched = selected.len(),
+                    requested = args.max_results,
+                    "memory recall returned partial warm or hybrid results"
+                );
+            }
+            (selected, degraded_fallback_error)
+        } else {
+            let search_results = self
+                .memory_search
+                .search(query, &config)
+                .await
+                .map_err(|e| MemoryRecallError(format!("Search failed: {e}")))?;
+            (search_results, None)
+        };
 
         let curated = curate_results(&search_results, args.max_results);
 
@@ -260,6 +467,8 @@ impl Tool for MemoryRecallTool {
         Ok(MemoryRecallOutput {
             memories,
             total_found,
+            degraded_fallback_used: degraded_fallback_error.is_some(),
+            degraded_fallback_error,
             summary,
         })
     }
@@ -324,6 +533,7 @@ pub async fn memory_recall(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::MemoryType;
 
     #[test]
     fn test_parse_search_mode_valid() {
@@ -373,5 +583,166 @@ mod tests {
     #[test]
     fn test_parse_memory_type_invalid() {
         assert!(parse_memory_type("invalid").is_err());
+    }
+
+    #[test]
+    fn test_warm_cache_age_secs_none_stays_none() {
+        assert_eq!(warm_cache_age_secs(None, 10_000), None);
+    }
+
+    #[test]
+    fn test_warm_cache_age_secs_clamps_future_to_zero() {
+        assert_eq!(warm_cache_age_secs(Some(5_000), 4_000), Some(0));
+    }
+
+    #[test]
+    fn test_score_warm_memories_prefers_stronger_term_match() {
+        let mut auth_memory = Memory::new("auth token rotation policy", MemoryType::Fact);
+        auth_memory.importance = 0.4;
+        let mut cache_memory = Memory::new("cache eviction details", MemoryType::Fact);
+        cache_memory.importance = 0.9;
+
+        let results = score_warm_memories(
+            "auth token",
+            &[cache_memory, auth_memory.clone()],
+            None,
+            10,
+            &BTreeSet::new(),
+        );
+
+        assert!(!results.is_empty());
+        assert_eq!(results[0].memory.id, auth_memory.id);
+    }
+
+    #[test]
+    fn test_score_warm_memories_applies_memory_type_filter() {
+        let fact_memory = Memory::new("auth strategy", MemoryType::Fact);
+        let decision_memory = Memory::new("auth decision", MemoryType::Decision);
+
+        let results = score_warm_memories(
+            "auth decision",
+            &[fact_memory, decision_memory.clone()],
+            Some(MemoryType::Decision),
+            10,
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].memory.memory_type, MemoryType::Decision);
+        assert_eq!(results[0].memory.id, decision_memory.id);
+    }
+
+    #[test]
+    fn test_score_warm_memories_returns_empty_for_non_word_query() {
+        let memory = Memory::new("auth strategy", MemoryType::Fact);
+        let results = score_warm_memories("...", &[memory], None, 10, &BTreeSet::new());
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_score_warm_memories_excludes_inflight_forget_ids() {
+        let memory = Memory::new("auth strategy", MemoryType::Fact);
+        let mut inflight_forget_ids = BTreeSet::new();
+        inflight_forget_ids.insert(memory.id.clone());
+
+        let results = score_warm_memories("auth", &[memory], None, 10, &inflight_forget_ids);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_select_hybrid_results_uses_partial_warm_results_on_search_error() {
+        let warm_memory = Memory::new("auth strategy", MemoryType::Fact);
+        let warm_results = vec![MemorySearchResult {
+            memory: warm_memory,
+            score: 0.9,
+            rank: 1,
+        }];
+
+        let selected = select_hybrid_results(
+            warm_results.clone(),
+            Err(MemoryRecallError("Search failed: boom".to_string())),
+        )
+        .expect("expected warm fallback");
+
+        assert_eq!(selected.0.len(), warm_results.len());
+        assert_eq!(selected.0[0].rank, warm_results[0].rank);
+        assert_eq!(selected.1, Some("Search failed: boom".to_string()));
+    }
+
+    #[test]
+    fn test_select_hybrid_results_prefers_search_results_when_search_succeeds() {
+        let warm_memory = Memory::new("warm cache result", MemoryType::Fact);
+        let search_memory = Memory::new("hybrid result", MemoryType::Fact);
+        let warm_results = vec![MemorySearchResult {
+            memory: warm_memory,
+            score: 0.95,
+            rank: 1,
+        }];
+        let search_results = vec![MemorySearchResult {
+            memory: search_memory.clone(),
+            score: 0.5,
+            rank: 1,
+        }];
+
+        let selected =
+            select_hybrid_results(warm_results, Ok(search_results.clone())).expect("select");
+
+        assert_eq!(selected.0.len(), 1);
+        assert_eq!(selected.0[0].memory.id, search_memory.id);
+        assert!(selected.1.is_none());
+    }
+
+    #[test]
+    fn test_select_hybrid_results_returns_error_when_search_fails_and_warm_is_empty() {
+        let result = select_hybrid_results(
+            Vec::new(),
+            Err(MemoryRecallError("Search failed: boom".to_string())),
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_score_memory_with_terms_filters_type_and_content() {
+        let query_terms = vec!["auth".to_string()];
+        let memory = Memory::new("auth strategy", MemoryType::Fact);
+        let wrong_type_score = score_memory_with_terms(
+            &query_terms,
+            &memory,
+            Some(MemoryType::Decision),
+            &BTreeSet::new(),
+        );
+        let no_match_score = score_memory_with_terms(
+            &["billing".to_string()],
+            &memory,
+            Some(MemoryType::Fact),
+            &BTreeSet::new(),
+        );
+        let match_score = score_memory_with_terms(
+            &query_terms,
+            &memory,
+            Some(MemoryType::Fact),
+            &BTreeSet::new(),
+        );
+
+        assert!(wrong_type_score.is_none());
+        assert!(no_match_score.is_none());
+        assert!(match_score.is_some());
+    }
+
+    #[test]
+    fn test_score_memory_with_terms_filters_inflight_forget() {
+        let query_terms = vec!["auth".to_string()];
+        let memory = Memory::new("auth strategy", MemoryType::Fact);
+        let mut inflight_forget_ids = BTreeSet::new();
+        inflight_forget_ids.insert(memory.id.clone());
+
+        let score = score_memory_with_terms(
+            &query_terms,
+            &memory,
+            Some(MemoryType::Fact),
+            &inflight_forget_ids,
+        );
+
+        assert!(score.is_none());
     }
 }
