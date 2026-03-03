@@ -501,7 +501,7 @@ Thresholds are fractions of `context_window`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `tick_interval_secs` | integer | 30 | How often the cortex checks system state |
+| `tick_interval_secs` | integer | 30 | How often the cortex runtime loop runs maintenance ticks while continuously observing events |
 | `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
@@ -515,7 +515,7 @@ Thresholds are fractions of `context_window`.
 | `refresh_secs` | integer | 900 | Seconds between background warmup passes |
 | `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
 
-When warmup is enabled, it is the primary bulletin refresh path. The cortex bulletin loop remains as a fallback generator when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+When warmup is enabled, it is the primary bulletin refresh path. The cortex runtime loop still performs fallback bulletin/profile refresh when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
 
 Dispatch readiness is derived from warmup runtime state:
 

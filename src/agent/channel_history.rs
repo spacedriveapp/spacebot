@@ -352,30 +352,70 @@ pub(crate) fn extract_message_id(message: &InboundMessage) -> Option<String> {
 /// channel's workers would leak into sibling channels (e.g. threads).
 pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId) -> bool {
     match event {
-        ProcessEvent::BranchResult {
+        ProcessEvent::BranchStarted {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::BranchResult {
             channel_id: event_channel,
             ..
         } => event_channel == channel_id,
-        ProcessEvent::WorkerComplete {
+        ProcessEvent::WorkerStarted {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::WorkerComplete {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::WorkerStatus {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::ToolStarted {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::ToolCompleted {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::MemorySaved {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::WorkerPermission {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::WorkerQuestion {
             channel_id: event_channel,
             ..
         } => event_channel.as_ref() == Some(channel_id),
-        ProcessEvent::WorkerStatus {
+        ProcessEvent::CompactionTriggered {
             channel_id: event_channel,
             ..
-        } => event_channel.as_ref() == Some(channel_id),
-        // Status block updates, tool events, etc. — match on agent_id which
-        // is already filtered by the event bus subscription. Let them through.
-        _ => true,
+        }
+        | ProcessEvent::AgentMessageSent {
+            channel_id: event_channel,
+            ..
+        }
+        | ProcessEvent::AgentMessageReceived {
+            channel_id: event_channel,
+            ..
+        } => event_channel == channel_id,
+        ProcessEvent::StatusUpdate { .. } | ProcessEvent::TaskUpdated { .. } => false,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::apply_history_after_turn;
+    use super::{apply_history_after_turn, event_is_for_channel};
+    use crate::{ChannelId, ProcessEvent, ProcessId};
     use rig::completion::{CompletionError, PromptError};
     use rig::message::Message;
     use rig::tool::ToolSetError;
+    use std::sync::Arc;
 
     fn user_msg(text: &str) -> Message {
         Message::User {
@@ -1021,5 +1061,50 @@ mod tests {
             formatted.contains("[attachment or empty message]"),
             "batched formatting should use placeholder for empty/whitespace text"
         );
+    }
+
+    #[test]
+    fn event_filter_scopes_tool_events_by_channel() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let other_channel: ChannelId = Arc::from("channel-b");
+        let process_id = ProcessId::Worker(uuid::Uuid::new_v4());
+
+        let related_event = ProcessEvent::ToolStarted {
+            agent_id: Arc::from("agent"),
+            process_id: process_id.clone(),
+            channel_id: Some(channel_id.clone()),
+            tool_name: "memory_save".to_string(),
+            args: "{}".to_string(),
+        };
+        let unrelated_event = ProcessEvent::ToolStarted {
+            agent_id: Arc::from("agent"),
+            process_id,
+            channel_id: Some(other_channel),
+            tool_name: "memory_save".to_string(),
+            args: "{}".to_string(),
+        };
+
+        assert!(event_is_for_channel(&related_event, &channel_id));
+        assert!(!event_is_for_channel(&unrelated_event, &channel_id));
+    }
+
+    #[test]
+    fn event_filter_scopes_agent_message_events_by_channel() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let related_event = ProcessEvent::AgentMessageReceived {
+            from_agent_id: Arc::from("agent-a"),
+            to_agent_id: Arc::from("agent-b"),
+            link_id: "link-1".to_string(),
+            channel_id: channel_id.clone(),
+        };
+        let unrelated_event = ProcessEvent::AgentMessageReceived {
+            from_agent_id: Arc::from("agent-a"),
+            to_agent_id: Arc::from("agent-b"),
+            link_id: "link-1".to_string(),
+            channel_id: Arc::from("channel-b"),
+        };
+
+        assert!(event_is_for_channel(&related_event, &channel_id));
+        assert!(!event_is_for_channel(&unrelated_event, &channel_id));
     }
 }

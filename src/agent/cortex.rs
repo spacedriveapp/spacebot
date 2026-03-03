@@ -16,16 +16,19 @@ use crate::llm::SpacebotModel;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
 use crate::tasks::{TaskStatus, UpdateTaskInput};
-use crate::{AgentDeps, ProcessEvent, ProcessType};
+use crate::{
+    AgentDeps, AgentId, BranchId, ChannelId, ProcessEvent, ProcessId, ProcessType, WorkerId,
+};
 
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt};
 use serde::Serialize;
 use sqlx::{Row as _, SqlitePool};
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 
 fn update_warmup_status<F>(deps: &AgentDeps, update: F)
 where
@@ -168,7 +171,7 @@ pub struct Cortex {
     pub deps: AgentDeps,
     pub hook: CortexHook,
     /// Recent activity signals (rolling window).
-    pub signal_buffer: Arc<RwLock<Vec<Signal>>>,
+    pub signal_buffer: Arc<RwLock<VecDeque<Signal>>>,
     /// System prompt loaded from prompts/CORTEX.md.
     pub system_prompt: String,
 }
@@ -176,30 +179,100 @@ pub struct Cortex {
 /// A high-level activity signal (not raw conversation).
 #[derive(Debug, Clone)]
 pub enum Signal {
-    /// Channel started.
-    ChannelStarted { channel_id: String },
-    /// Channel ended.
-    ChannelEnded { channel_id: String },
-    /// Memory was saved.
-    MemorySaved {
-        memory_type: String,
-        content_summary: String,
-        importance: f32,
+    /// Branch started.
+    BranchStarted {
+        branch_id: BranchId,
+        channel_id: ChannelId,
+        description: String,
+    },
+    /// Branch produced a result.
+    BranchResult {
+        branch_id: BranchId,
+        channel_id: ChannelId,
+        conclusion: String,
+    },
+    /// Worker started.
+    WorkerStarted {
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        task_summary: String,
+        worker_type: String,
+    },
+    /// Worker status update.
+    WorkerStatus {
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        status: String,
     },
     /// Worker completed.
     WorkerCompleted {
-        task_summary: String,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        success: bool,
         result_summary: String,
     },
-    /// Compaction occurred.
-    Compaction {
-        channel_id: String,
-        turns_compacted: i64,
+    /// Tool execution started.
+    ToolStarted {
+        process_id: ProcessId,
+        channel_id: Option<ChannelId>,
+        tool_name: String,
     },
-    /// Error occurred.
-    Error {
-        component: String,
-        error_summary: String,
+    /// Tool execution completed.
+    ToolCompleted {
+        process_id: ProcessId,
+        channel_id: Option<ChannelId>,
+        tool_name: String,
+        result_summary: String,
+    },
+    /// Memory was saved.
+    MemorySaved {
+        memory_id: String,
+        channel_id: Option<ChannelId>,
+        memory_type: MemoryType,
+        content_summary: String,
+        importance: f32,
+    },
+    /// Compaction threshold was reached.
+    CompactionTriggered {
+        channel_id: ChannelId,
+        threshold_reached: f32,
+    },
+    /// Generic status update.
+    StatusUpdate {
+        process_id: ProcessId,
+        status: String,
+    },
+    /// Worker requested a permission decision.
+    WorkerPermission {
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        permission_id: String,
+        description: String,
+    },
+    /// Worker asked one or more questions.
+    WorkerQuestion {
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        question_id: String,
+        question_count: usize,
+    },
+    /// Agent sent a linked message.
+    AgentMessageSent {
+        from_agent_id: AgentId,
+        to_agent_id: AgentId,
+        channel_id: ChannelId,
+    },
+    /// Agent received a linked message.
+    AgentMessageReceived {
+        from_agent_id: AgentId,
+        to_agent_id: AgentId,
+        channel_id: ChannelId,
+    },
+    /// Task lifecycle update.
+    TaskUpdated {
+        task_number: i64,
+        status: String,
+        action: String,
     },
 }
 
@@ -332,66 +405,348 @@ impl Cortex {
         Self {
             deps,
             hook,
-            signal_buffer: Arc::new(RwLock::new(Vec::with_capacity(100))),
+            signal_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(100))),
             system_prompt: system_prompt.into(),
         }
     }
 
     /// Process a process event and extract signals.
     pub async fn observe(&self, event: ProcessEvent) {
-        let signal = match &event {
-            ProcessEvent::MemorySaved { memory_id, .. } => Some(Signal::MemorySaved {
-                memory_type: "unknown".into(),
-                content_summary: format!("memory {}", memory_id),
-                importance: 0.5,
-            }),
-            ProcessEvent::WorkerComplete { result, .. } => Some(Signal::WorkerCompleted {
-                task_summary: "completed task".into(),
-                result_summary: result.lines().next().unwrap_or("done").into(),
-            }),
-            ProcessEvent::CompactionTriggered {
-                channel_id,
-                threshold_reached,
-                ..
-            } => Some(Signal::Compaction {
-                channel_id: channel_id.to_string(),
-                turns_compacted: (*threshold_reached * 100.0) as i64,
-            }),
-            _ => None,
+        let signal = signal_from_event(event);
+        let buffer_len = {
+            let mut buffer = self.signal_buffer.write().await;
+            push_signal_into_buffer(&mut buffer, signal);
+            buffer.len()
         };
 
-        if let Some(signal) = signal {
-            let mut buffer = self.signal_buffer.write().await;
-            buffer.push(signal);
-
-            if buffer.len() > 100 {
-                buffer.remove(0);
-            }
-
-            tracing::debug!("cortex received signal, buffer size: {}", buffer.len());
-        }
+        tracing::trace!(buffer_len, "cortex received signal");
     }
 
     /// Run periodic consolidation (future: health monitoring, memory maintenance).
     pub async fn run_consolidation(&self) -> Result<()> {
-        tracing::info!("cortex running consolidation");
+        tracing::debug!("cortex running consolidation");
         Ok(())
     }
 }
 
-/// Spawn the cortex bulletin loop for an agent.
+fn summarize_signal_text(value: &str) -> String {
+    crate::summarize_first_non_empty_line(value, crate::EVENT_SUMMARY_MAX_CHARS)
+}
+
+fn signal_from_event(event: ProcessEvent) -> Signal {
+    match event {
+        ProcessEvent::BranchStarted {
+            branch_id,
+            channel_id,
+            description,
+            ..
+        } => Signal::BranchStarted {
+            branch_id,
+            channel_id,
+            description,
+        },
+        ProcessEvent::BranchResult {
+            branch_id,
+            channel_id,
+            conclusion,
+            ..
+        } => Signal::BranchResult {
+            branch_id,
+            channel_id,
+            conclusion: summarize_signal_text(&conclusion),
+        },
+        ProcessEvent::WorkerStarted {
+            worker_id,
+            channel_id,
+            task,
+            worker_type,
+            ..
+        } => Signal::WorkerStarted {
+            worker_id,
+            channel_id,
+            task_summary: summarize_signal_text(&task),
+            worker_type,
+        },
+        ProcessEvent::WorkerStatus {
+            worker_id,
+            channel_id,
+            status,
+            ..
+        } => Signal::WorkerStatus {
+            worker_id,
+            channel_id,
+            status: summarize_signal_text(&status),
+        },
+        ProcessEvent::WorkerComplete {
+            worker_id,
+            channel_id,
+            result,
+            success,
+            ..
+        } => Signal::WorkerCompleted {
+            worker_id,
+            channel_id,
+            success,
+            result_summary: summarize_signal_text(&result),
+        },
+        ProcessEvent::ToolStarted {
+            process_id,
+            channel_id,
+            tool_name,
+            ..
+        } => Signal::ToolStarted {
+            process_id,
+            channel_id,
+            tool_name,
+        },
+        ProcessEvent::ToolCompleted {
+            process_id,
+            channel_id,
+            tool_name,
+            result,
+            ..
+        } => Signal::ToolCompleted {
+            process_id,
+            channel_id,
+            tool_name,
+            result_summary: summarize_signal_text(&result),
+        },
+        ProcessEvent::MemorySaved {
+            memory_id,
+            channel_id,
+            memory_type,
+            importance,
+            content_summary,
+            ..
+        } => Signal::MemorySaved {
+            memory_id,
+            channel_id,
+            memory_type,
+            content_summary,
+            importance,
+        },
+        ProcessEvent::CompactionTriggered {
+            channel_id,
+            threshold_reached,
+            ..
+        } => Signal::CompactionTriggered {
+            channel_id,
+            threshold_reached,
+        },
+        ProcessEvent::StatusUpdate {
+            process_id, status, ..
+        } => Signal::StatusUpdate {
+            process_id,
+            status: summarize_signal_text(&status),
+        },
+        ProcessEvent::WorkerPermission {
+            worker_id,
+            channel_id,
+            permission_id,
+            description,
+            ..
+        } => Signal::WorkerPermission {
+            worker_id,
+            channel_id,
+            permission_id,
+            description: summarize_signal_text(&description),
+        },
+        ProcessEvent::WorkerQuestion {
+            worker_id,
+            channel_id,
+            question_id,
+            questions,
+            ..
+        } => Signal::WorkerQuestion {
+            worker_id,
+            channel_id,
+            question_id,
+            question_count: questions.len(),
+        },
+        ProcessEvent::AgentMessageSent {
+            from_agent_id,
+            to_agent_id,
+            channel_id,
+            ..
+        } => Signal::AgentMessageSent {
+            from_agent_id,
+            to_agent_id,
+            channel_id,
+        },
+        ProcessEvent::AgentMessageReceived {
+            from_agent_id,
+            to_agent_id,
+            channel_id,
+            ..
+        } => Signal::AgentMessageReceived {
+            from_agent_id,
+            to_agent_id,
+            channel_id,
+        },
+        ProcessEvent::TaskUpdated {
+            task_number,
+            status,
+            action,
+            ..
+        } => Signal::TaskUpdated {
+            task_number,
+            status: summarize_signal_text(&status),
+            action,
+        },
+    }
+}
+
+fn push_signal_into_buffer(buffer: &mut VecDeque<Signal>, signal: Signal) {
+    if let Some(previous) = buffer.back_mut()
+        && coalesce_signal(previous, &signal)
+    {
+        return;
+    }
+
+    buffer.push_back(signal);
+    if buffer.len() > 100 {
+        buffer.pop_front();
+    }
+}
+
+fn coalesce_signal(previous: &mut Signal, next: &Signal) -> bool {
+    match (previous, next) {
+        (
+            Signal::StatusUpdate {
+                process_id: previous_process_id,
+                status: previous_status,
+            },
+            Signal::StatusUpdate {
+                process_id: next_process_id,
+                status: next_status,
+            },
+        ) if previous_process_id == next_process_id => {
+            *previous_status = next_status.clone();
+            true
+        }
+        (
+            Signal::WorkerStatus {
+                worker_id: previous_worker_id,
+                channel_id: previous_channel_id,
+                status: previous_status,
+            },
+            Signal::WorkerStatus {
+                worker_id: next_worker_id,
+                channel_id: next_channel_id,
+                status: next_status,
+            },
+        ) if previous_worker_id == next_worker_id && previous_channel_id == next_channel_id => {
+            *previous_status = next_status.clone();
+            true
+        }
+        (
+            Signal::TaskUpdated {
+                task_number: previous_task_number,
+                status: previous_status,
+                action: previous_action,
+            },
+            Signal::TaskUpdated {
+                task_number: next_task_number,
+                status: next_status,
+                action: next_action,
+            },
+        ) if previous_task_number == next_task_number => {
+            *previous_status = next_status.clone();
+            *previous_action = next_action.clone();
+            true
+        }
+        _ => false,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReceiverClosedBehavior {
+    StopLoop,
+    DisableStream,
+}
+
+#[derive(Debug, Clone)]
+enum CortexReceiverOutcome {
+    Observe(ProcessEvent),
+    Lagged { dropped: u64 },
+    StopLoop,
+    DisableStream,
+}
+
+fn handle_cortex_receiver_result(
+    result: std::result::Result<ProcessEvent, broadcast::error::RecvError>,
+    receiver_name: &'static str,
+    close_behavior: ReceiverClosedBehavior,
+    lagged_since_last_warning: &mut u64,
+    last_lag_warning: &mut Option<Instant>,
+    warning_interval_secs: u64,
+) -> CortexReceiverOutcome {
+    match crate::classify_broadcast_recv_result(result) {
+        crate::BroadcastRecvResult::Event(event) => CortexReceiverOutcome::Observe(event),
+        crate::BroadcastRecvResult::Lagged(count) => {
+            if let Some(dropped) = crate::drain_lag_warning_count(
+                lagged_since_last_warning,
+                last_lag_warning,
+                count,
+                Duration::from_secs(warning_interval_secs),
+            ) {
+                tracing::warn!(
+                    receiver = receiver_name,
+                    dropped,
+                    "cortex event receiver lagged, dropping old events"
+                );
+            }
+            CortexReceiverOutcome::Lagged { dropped: count }
+        }
+        crate::BroadcastRecvResult::Closed => match close_behavior {
+            ReceiverClosedBehavior::StopLoop => {
+                tracing::warn!(
+                    receiver = receiver_name,
+                    "cortex event bus closed, stopping cortex loop"
+                );
+                CortexReceiverOutcome::StopLoop
+            }
+            ReceiverClosedBehavior::DisableStream => {
+                tracing::warn!(
+                    receiver = receiver_name,
+                    "cortex memory event bus closed, continuing without memory events"
+                );
+                CortexReceiverOutcome::DisableStream
+            }
+        },
+    }
+}
+
+/// Spawn the cortex runtime loop for an agent.
 ///
-/// Runs bulletin/profile maintenance on a configurable interval.
-///
-/// When warmup is enabled, warmup is the primary bulletin refresher and this
-/// loop skips duplicate bulletin synthesis while the cached bulletin is fresh.
-/// When warmup is disabled (or stale), this loop generates the bulletin.
-pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+/// The loop observes process events and runs periodic cortex maintenance ticks.
+/// Bulletin generation and profile refresh happen inside this tick loop.
+pub fn spawn_cortex_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(error) = run_bulletin_loop(&deps, &logger).await {
-            tracing::error!(%error, "cortex bulletin loop exited with error");
+        let prompt_engine = deps.runtime_config.prompts.load();
+        let system_prompt = match prompt_engine.render_static("cortex") {
+            Ok(prompt) => prompt,
+            Err(error) => {
+                tracing::warn!(%error, "failed to render cortex prompt, using empty preamble");
+                String::new()
+            }
+        };
+        drop(prompt_engine);
+
+        let cortex = Cortex::new(deps.clone(), system_prompt);
+        let mut event_rx = deps.event_tx.subscribe();
+        let mut memory_event_rx = deps.memory_event_tx.subscribe();
+        if let Err(error) =
+            run_cortex_loop(&cortex, &logger, &mut event_rx, &mut memory_event_rx).await
+        {
+            tracing::error!(%error, "cortex loop exited with error");
         }
     })
+}
+
+/// Backwards-compatible alias while callers migrate to `spawn_cortex_loop`.
+pub fn spawn_bulletin_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+    spawn_cortex_loop(deps, logger)
 }
 
 /// Spawn the warmup loop for an agent.
@@ -553,19 +908,41 @@ pub fn trigger_forced_warmup(deps: AgentDeps, dispatch_type: &'static str) {
     });
 }
 
-async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
-    tracing::info!("cortex bulletin loop started");
-
-    const MAX_RETRIES: u32 = 3;
-    const RETRY_DELAY_SECS: u64 = 15;
-
-    // Run immediately on startup, with retries
-    for attempt in 0..=MAX_RETRIES {
-        let bulletin_ok = maybe_generate_bulletin_under_lock(
+fn spawn_bulletin_refresh_task(
+    deps: AgentDeps,
+    logger: CortexLogger,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        maybe_generate_bulletin_under_lock(
             deps.runtime_config.warmup_lock.as_ref(),
             &deps.runtime_config.warmup,
             &deps.runtime_config.warmup_status,
-            || generate_bulletin(deps, logger),
+            || generate_bulletin(&deps, &logger),
+        )
+        .await;
+        generate_profile(&deps, &logger).await;
+    })
+}
+
+async fn run_cortex_loop(
+    cortex: &Cortex,
+    logger: &CortexLogger,
+    event_rx: &mut broadcast::Receiver<ProcessEvent>,
+    memory_event_rx: &mut broadcast::Receiver<ProcessEvent>,
+) -> anyhow::Result<()> {
+    tracing::info!("cortex loop started");
+
+    const MAX_RETRIES: u32 = 3;
+    const RETRY_DELAY_SECS: u64 = 15;
+    const LAG_WARNING_INTERVAL_SECS: u64 = 30;
+
+    // Run bulletin generation immediately on startup, with retries.
+    for attempt in 0..=MAX_RETRIES {
+        let bulletin_ok = maybe_generate_bulletin_under_lock(
+            cortex.deps.runtime_config.warmup_lock.as_ref(),
+            &cortex.deps.runtime_config.warmup,
+            &cortex.deps.runtime_config.warmup_status,
+            || generate_bulletin(&cortex.deps, logger),
         )
         .await;
 
@@ -591,23 +968,123 @@ async fn run_bulletin_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::R
         }
     }
 
-    // Generate initial profile after bulletin
-    generate_profile(deps, logger).await;
+    // Generate an initial profile after startup bulletin synthesis.
+    generate_profile(&cortex.deps, logger).await;
+    let mut last_bulletin_refresh = Instant::now();
+    let mut tick_interval_secs = cortex
+        .deps
+        .runtime_config
+        .cortex
+        .load()
+        .tick_interval_secs
+        .max(1);
+    let mut tick_period = Duration::from_secs(tick_interval_secs);
+    let mut tick_timer =
+        tokio::time::interval_at(tokio::time::Instant::now() + tick_period, tick_period);
+    tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut lagged_since_last_warning: u64 = 0;
+    let mut last_lag_warning: Option<Instant> = None;
+    let mut memory_event_stream_open = true;
+    let mut refresh_task: Option<tokio::task::JoinHandle<()>> = None;
 
     loop {
-        let cortex_config = **deps.runtime_config.cortex.load();
-        let interval = cortex_config.bulletin_interval_secs;
+        tokio::select! {
+            event = event_rx.recv() => {
+                match handle_cortex_receiver_result(
+                    event,
+                    "control",
+                    ReceiverClosedBehavior::StopLoop,
+                    &mut lagged_since_last_warning,
+                    &mut last_lag_warning,
+                    LAG_WARNING_INTERVAL_SECS,
+                ) {
+                    CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
+                    CortexReceiverOutcome::Lagged { dropped } => {
+                        #[cfg(feature = "metrics")]
+                        crate::telemetry::Metrics::global()
+                            .event_receiver_lagged_events_total
+                            .with_label_values(&[&*cortex.deps.agent_id, "cortex_control"])
+                            .inc_by(dropped);
+                        #[cfg(not(feature = "metrics"))]
+                        let _ = dropped;
+                    }
+                    CortexReceiverOutcome::StopLoop => {
+                        if let Some(task) = refresh_task.take() {
+                            task.abort();
+                        }
+                        return Ok(());
+                    }
+                    CortexReceiverOutcome::DisableStream => unreachable!("control stream cannot disable itself"),
+                }
+            },
+            event = memory_event_rx.recv(), if memory_event_stream_open => {
+                match handle_cortex_receiver_result(
+                    event,
+                    "memory",
+                    ReceiverClosedBehavior::DisableStream,
+                    &mut lagged_since_last_warning,
+                    &mut last_lag_warning,
+                    LAG_WARNING_INTERVAL_SECS,
+                ) {
+                    CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
+                    CortexReceiverOutcome::Lagged { dropped } => {
+                        #[cfg(feature = "metrics")]
+                        crate::telemetry::Metrics::global()
+                            .event_receiver_lagged_events_total
+                            .with_label_values(&[&*cortex.deps.agent_id, "cortex_memory"])
+                            .inc_by(dropped);
+                        #[cfg(not(feature = "metrics"))]
+                        let _ = dropped;
+                    }
+                    CortexReceiverOutcome::StopLoop => {
+                        if let Some(task) = refresh_task.take() {
+                            task.abort();
+                        }
+                        return Ok(());
+                    }
+                    CortexReceiverOutcome::DisableStream => {
+                        memory_event_stream_open = false;
+                    }
+                }
+            },
+            _ = tick_timer.tick() => {
+                if let Err(error) = cortex.run_consolidation().await {
+                    tracing::warn!(%error, "cortex consolidation tick failed");
+                }
 
-        tokio::time::sleep(Duration::from_secs(interval)).await;
+                if refresh_task
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                {
+                    if let Some(task) = refresh_task.take()
+                        && let Err(error) = task.await
+                    {
+                        tracing::warn!(%error, "cortex bulletin refresh task failed");
+                    }
+                    last_bulletin_refresh = Instant::now();
+                }
 
-        maybe_generate_bulletin_under_lock(
-            deps.runtime_config.warmup_lock.as_ref(),
-            &deps.runtime_config.warmup,
-            &deps.runtime_config.warmup_status,
-            || generate_bulletin(deps, logger),
-        )
-        .await;
-        generate_profile(deps, logger).await;
+                let cortex_config = **cortex.deps.runtime_config.cortex.load();
+                let bulletin_interval = Duration::from_secs(cortex_config.bulletin_interval_secs.max(1));
+                if refresh_task.is_none() && last_bulletin_refresh.elapsed() >= bulletin_interval {
+                    refresh_task = Some(spawn_bulletin_refresh_task(
+                        cortex.deps.clone(),
+                        logger.clone(),
+                    ));
+                }
+
+                let updated_tick_interval_secs = cortex_config.tick_interval_secs.max(1);
+                if updated_tick_interval_secs != tick_interval_secs {
+                    tick_interval_secs = updated_tick_interval_secs;
+                    tick_period = Duration::from_secs(tick_interval_secs);
+                    tick_timer = tokio::time::interval_at(
+                        tokio::time::Instant::now() + tick_period,
+                        tick_period,
+                    );
+                    tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                }
+            }
+        }
     }
 }
 
@@ -1682,12 +2159,17 @@ async fn fetch_memories_for_association(
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_cancelled_warmup_status, has_completed_initial_warmup,
-        maybe_generate_bulletin_under_lock, should_execute_warmup,
-        should_generate_bulletin_from_bulletin_loop,
+        CortexReceiverOutcome, ReceiverClosedBehavior, Signal, apply_cancelled_warmup_status,
+        handle_cortex_receiver_result, has_completed_initial_warmup,
+        maybe_generate_bulletin_under_lock, push_signal_into_buffer, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
     };
+    use crate::ProcessEvent;
+    use crate::memory::MemoryType;
+    use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Instant;
 
     #[test]
     fn run_warmup_once_semantics_skip_when_disabled_without_force() {
@@ -1880,5 +2362,323 @@ mod tests {
         let result = task.await.expect("task should join");
         assert!(result);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[test]
+    fn summarize_signal_text_uses_first_non_empty_line() {
+        let text = "\n\nfirst line\nsecond line";
+        assert_eq!(summarize_signal_text(text), "first line");
+    }
+
+    #[test]
+    fn summarize_signal_text_truncates_long_text() {
+        let text = "a".repeat(200);
+        let summary = summarize_signal_text(&text);
+        assert_eq!(summary.chars().count(), crate::EVENT_SUMMARY_MAX_CHARS);
+    }
+
+    #[test]
+    fn signal_from_event_maps_memory_saved_values() {
+        let event = ProcessEvent::MemorySaved {
+            agent_id: Arc::from("agent"),
+            memory_id: "mem-1".to_string(),
+            channel_id: Some(Arc::from("channel-1")),
+            memory_type: MemoryType::Decision,
+            importance: 0.92,
+            content_summary: "persisted decision".to_string(),
+        };
+
+        let signal = signal_from_event(event);
+        match signal {
+            Signal::MemorySaved {
+                memory_id,
+                channel_id,
+                memory_type,
+                content_summary,
+                importance,
+            } => {
+                assert_eq!(memory_id, "mem-1");
+                assert_eq!(channel_id.as_deref(), Some("channel-1"));
+                assert_eq!(memory_type, MemoryType::Decision);
+                assert_eq!(content_summary, "persisted decision");
+                assert_eq!(importance, 0.92);
+            }
+            _ => panic!("expected memory-saved signal"),
+        }
+    }
+
+    #[test]
+    fn signal_from_event_handles_every_process_event_variant() {
+        let agent_id: crate::AgentId = Arc::from("agent");
+        let channel_id: crate::ChannelId = Arc::from("channel");
+        let worker_id = uuid::Uuid::new_v4();
+        let branch_id = uuid::Uuid::new_v4();
+
+        let events = vec![
+            ProcessEvent::BranchStarted {
+                agent_id: agent_id.clone(),
+                branch_id,
+                channel_id: channel_id.clone(),
+                description: "branch start".to_string(),
+                reply_to_message_id: Some("message-1".to_string()),
+            },
+            ProcessEvent::BranchResult {
+                agent_id: agent_id.clone(),
+                branch_id,
+                channel_id: channel_id.clone(),
+                conclusion: "branch done".to_string(),
+            },
+            ProcessEvent::WorkerStarted {
+                agent_id: agent_id.clone(),
+                worker_id,
+                channel_id: Some(channel_id.clone()),
+                task: "do work".to_string(),
+                worker_type: "shell".to_string(),
+            },
+            ProcessEvent::WorkerStatus {
+                agent_id: agent_id.clone(),
+                worker_id,
+                channel_id: Some(channel_id.clone()),
+                status: "running".to_string(),
+            },
+            ProcessEvent::WorkerComplete {
+                agent_id: agent_id.clone(),
+                worker_id,
+                channel_id: Some(channel_id.clone()),
+                result: "ok".to_string(),
+                notify: false,
+                success: true,
+            },
+            ProcessEvent::ToolStarted {
+                agent_id: agent_id.clone(),
+                process_id: crate::ProcessId::Worker(worker_id),
+                channel_id: Some(channel_id.clone()),
+                tool_name: "shell".to_string(),
+                args: "echo hi".to_string(),
+            },
+            ProcessEvent::ToolCompleted {
+                agent_id: agent_id.clone(),
+                process_id: crate::ProcessId::Worker(worker_id),
+                channel_id: Some(channel_id.clone()),
+                tool_name: "shell".to_string(),
+                result: "done".to_string(),
+            },
+            ProcessEvent::MemorySaved {
+                agent_id: agent_id.clone(),
+                memory_id: "memory-1".to_string(),
+                channel_id: Some(channel_id.clone()),
+                memory_type: MemoryType::Fact,
+                importance: 0.6,
+                content_summary: "saved memory".to_string(),
+            },
+            ProcessEvent::CompactionTriggered {
+                agent_id: agent_id.clone(),
+                channel_id: channel_id.clone(),
+                threshold_reached: 0.86,
+            },
+            ProcessEvent::StatusUpdate {
+                agent_id: agent_id.clone(),
+                process_id: crate::ProcessId::Worker(worker_id),
+                status: "active".to_string(),
+            },
+            ProcessEvent::WorkerPermission {
+                agent_id: agent_id.clone(),
+                worker_id,
+                channel_id: Some(channel_id.clone()),
+                permission_id: "perm-1".to_string(),
+                description: "allow network".to_string(),
+                patterns: vec!["https://example.com".to_string()],
+            },
+            ProcessEvent::WorkerQuestion {
+                agent_id: agent_id.clone(),
+                worker_id,
+                channel_id: Some(channel_id.clone()),
+                question_id: "q-1".to_string(),
+                questions: vec![],
+            },
+            ProcessEvent::AgentMessageSent {
+                from_agent_id: agent_id.clone(),
+                to_agent_id: Arc::from("agent-2"),
+                link_id: "link-1".to_string(),
+                channel_id: channel_id.clone(),
+            },
+            ProcessEvent::AgentMessageReceived {
+                from_agent_id: Arc::from("agent-2"),
+                to_agent_id: agent_id,
+                link_id: "link-1".to_string(),
+                channel_id: channel_id.clone(),
+            },
+            ProcessEvent::TaskUpdated {
+                agent_id: Arc::from("agent"),
+                task_number: 7,
+                status: "created".to_string(),
+                action: "created".to_string(),
+            },
+        ];
+
+        for event in events {
+            let _signal = signal_from_event(event);
+        }
+    }
+
+    #[test]
+    fn push_signal_into_buffer_coalesces_status_updates_for_same_process() {
+        let mut buffer = VecDeque::new();
+        let process_id = crate::ProcessId::Worker(uuid::Uuid::new_v4());
+
+        push_signal_into_buffer(
+            &mut buffer,
+            Signal::StatusUpdate {
+                process_id: process_id.clone(),
+                status: "running".to_string(),
+            },
+        );
+        push_signal_into_buffer(
+            &mut buffer,
+            Signal::StatusUpdate {
+                process_id,
+                status: "done".to_string(),
+            },
+        );
+
+        assert_eq!(buffer.len(), 1);
+        match buffer.back() {
+            Some(Signal::StatusUpdate { status, .. }) => assert_eq!(status, "done"),
+            _ => panic!("expected status-update signal"),
+        }
+    }
+
+    #[test]
+    fn push_signal_into_buffer_keeps_distinct_status_updates() {
+        let mut buffer = VecDeque::new();
+
+        push_signal_into_buffer(
+            &mut buffer,
+            Signal::StatusUpdate {
+                process_id: crate::ProcessId::Worker(uuid::Uuid::new_v4()),
+                status: "running".to_string(),
+            },
+        );
+        push_signal_into_buffer(
+            &mut buffer,
+            Signal::StatusUpdate {
+                process_id: crate::ProcessId::Worker(uuid::Uuid::new_v4()),
+                status: "running".to_string(),
+            },
+        );
+
+        assert_eq!(buffer.len(), 2);
+    }
+
+    #[test]
+    fn memory_receiver_closed_disables_stream_without_stopping_loop() {
+        let mut lagged_since_last_warning = 0;
+        let mut last_lag_warning = None;
+
+        let outcome = handle_cortex_receiver_result(
+            Err(tokio::sync::broadcast::error::RecvError::Closed),
+            "memory",
+            ReceiverClosedBehavior::DisableStream,
+            &mut lagged_since_last_warning,
+            &mut last_lag_warning,
+            30,
+        );
+
+        assert!(matches!(outcome, CortexReceiverOutcome::DisableStream));
+    }
+
+    #[test]
+    fn memory_receiver_lagged_continues_loop_and_tracks_drop_count() {
+        let mut lagged_since_last_warning = 0;
+        let mut last_lag_warning = Some(Instant::now());
+
+        let outcome = handle_cortex_receiver_result(
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(7)),
+            "memory",
+            ReceiverClosedBehavior::DisableStream,
+            &mut lagged_since_last_warning,
+            &mut last_lag_warning,
+            30,
+        );
+
+        assert!(matches!(
+            outcome,
+            CortexReceiverOutcome::Lagged { dropped: 7 }
+        ));
+        assert_eq!(lagged_since_last_warning, 7);
+    }
+
+    #[tokio::test]
+    async fn run_cortex_loop_tick_not_starved_by_events() {
+        use std::time::Duration;
+
+        const TEST_DURATION: Duration = Duration::from_millis(750);
+        const TICK_PERIOD: Duration = Duration::from_millis(25);
+        const MAX_DROPPED_EVENTS_BUDGET: u64 = 512;
+
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel::<ProcessEvent>(1024);
+        let event_tx_for_sender = event_tx.clone();
+        let mut tick_timer =
+            tokio::time::interval_at(tokio::time::Instant::now() + TICK_PERIOD, TICK_PERIOD);
+        tick_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        let sender = tokio::spawn(async move {
+            let agent_id: crate::AgentId = Arc::from("agent");
+            let process_id = crate::ProcessId::Worker(uuid::Uuid::new_v4());
+            let deadline = tokio::time::Instant::now() + TEST_DURATION;
+            while tokio::time::Instant::now() < deadline {
+                for _ in 0..8 {
+                    let _ = event_tx_for_sender.send(ProcessEvent::StatusUpdate {
+                        agent_id: agent_id.clone(),
+                        process_id: process_id.clone(),
+                        status: "busy".to_string(),
+                    });
+                }
+                tokio::task::yield_now().await;
+            }
+        });
+
+        let deadline = tokio::time::Instant::now() + TEST_DURATION + Duration::from_millis(250);
+        let mut tick_count = 0_u64;
+        let mut lagged_dropped_events = 0_u64;
+        let mut receiver_closed = false;
+
+        while tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                _ = tick_timer.tick() => {
+                    tick_count = tick_count.saturating_add(1);
+                }
+                event = event_rx.recv() => {
+                    match event {
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            lagged_dropped_events = lagged_dropped_events.saturating_add(skipped);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {
+                            receiver_closed = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        sender.await.expect("sender task should complete");
+        drop(event_tx);
+
+        assert!(
+            !receiver_closed,
+            "receiver should not close while load test sender is active"
+        );
+        assert!(
+            tick_count >= (TEST_DURATION.as_millis() / TICK_PERIOD.as_millis() / 4) as u64,
+            "periodic tick should continue firing under sustained event load"
+        );
+        assert!(
+            lagged_dropped_events <= MAX_DROPPED_EVENTS_BUDGET,
+            "lagged dropped events exceeded budget: {} > {}",
+            lagged_dropped_events,
+            MAX_DROPPED_EVENTS_BUDGET
+        );
     }
 }

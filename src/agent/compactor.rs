@@ -10,7 +10,7 @@ use crate::{AgentDeps, ChannelId, ProcessType};
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel as _, Prompt as _};
 use rig::message::{AssistantContent, Message, UserContent};
-use rig::tool::server::{ToolServer, ToolServerHandle};
+use rig::tool::server::ToolServerHandle;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -70,6 +70,21 @@ impl Compactor {
                 ?action,
                 "compaction triggered"
             );
+            if let Err(error) = self
+                .deps
+                .event_tx
+                .send(crate::ProcessEvent::CompactionTriggered {
+                    agent_id: self.deps.agent_id.clone(),
+                    channel_id: self.channel_id.clone(),
+                    threshold_reached: usage,
+                })
+            {
+                tracing::debug!(
+                    channel_id = %self.channel_id,
+                    %error,
+                    "failed to emit compaction-triggered event"
+                );
+            }
 
             match action {
                 CompactionAction::EmergencyTruncate => {
@@ -208,11 +223,11 @@ async fn run_compaction(
         .with_routing((**routing).clone());
 
     // Give the compaction worker memory_save so it can directly persist memories
-    let tool_server: ToolServerHandle = ToolServer::new()
-        .tool(crate::tools::MemorySaveTool::new(
-            deps.memory_search.clone(),
-        ))
-        .run();
+    let tool_server: ToolServerHandle = crate::tools::create_cortex_tool_server(
+        deps.agent_id.clone(),
+        deps.memory_event_tx.clone(),
+        deps.memory_search.clone(),
+    );
 
     let agent = AgentBuilder::new(model)
         .preamble(compactor_prompt)

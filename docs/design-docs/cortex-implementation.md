@@ -1,58 +1,64 @@
 # Cortex Implementation Plan
 
-The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Today, only the bulletin works. Everything else is dead code or stubs.
+The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Phase 1 plumbing is now live; later supervision and maintenance phases remain.
 
 This doc covers the path from "bulletin generator" to "full system supervisor."
 
 ## What Exists Today
 
 **Running:**
-- `spawn_bulletin_loop()` — generates the memory bulletin on startup, refreshes hourly via LLM synthesis of pre-gathered memory data. Fully functional.
+- `spawn_cortex_loop()` — instantiates `Cortex`, subscribes to both control and memory event buses, runs a `tokio::select!` loop for event observation and periodic ticks, and refreshes bulletin/profile on interval.
+- `spawn_bulletin_loop()` — compatibility alias to `spawn_cortex_loop()`.
+- `spawn_warmup_loop()` — asynchronous warmup that keeps bulletin/embedding readiness fresh.
 
-**Defined but never instantiated:**
-- `Cortex` struct — has `observe()` (converts 3 of 12 event types into signals with hardcoded dummy values) and `run_consolidation()` (logs and returns `Ok(())`).
-- `Signal` enum — 6 variants, none ever constructed at runtime.
+**Defined and instantiated:**
+- `Cortex` struct — observes all `ProcessEvent` variants, builds a rolling signal buffer, and runs on configurable tick cadence.
+- `Signal` enum — aligned to current `ProcessEvent` surface (worker/branch/tool/memory/compaction/task/link events).
 - `CortexHook` — all methods return `Continue` with trace logging.
 
 **Implemented but never called:**
 - `memory/maintenance.rs` — `apply_decay()` and `prune_memories()` work. `merge_similar_memories()` is a stub returning `Ok(0)`.
 
-**Wired through config but never read:**
-- `CortexConfig` fields: `tick_interval_secs` (30), `worker_timeout_secs` (300), `branch_timeout_secs` (60), `circuit_breaker_threshold` (3). All resolve through `env > DB > default` and support hot-reload.
+**Wired through config:**
+- `tick_interval_secs` and `bulletin_interval_secs` are read by the running cortex loop and hot-reload during runtime.
+- `worker_timeout_secs`, `branch_timeout_secs`, and `circuit_breaker_threshold` remain future-facing for Phase 2 supervision work.
 
 **Referenced in prompts but don't exist:**
 - `memory_consolidate` tool
 - `system_monitor` tool
 
-**Event bus:**
-- 12 `ProcessEvent` variants on a `broadcast::Sender<ProcessEvent>` per agent.
-- `MemorySaved` and `CompactionTriggered` variants are defined but never emitted by any code.
+**Event buses:**
+- Two per-agent `broadcast::Sender<ProcessEvent>` streams:
+  - `event_tx` for control/lifecycle events (channel, branch, worker, compactor, task/link events)
+  - `memory_event_tx` for `MemorySaved` telemetry emitted by `memory_save`
+- `CompactionTriggered` is emitted by the compactor on `event_tx` when thresholds are reached.
 
-## Phase 1: The Tick Loop
+## Phase 1: The Tick Loop (Implemented)
 
 Get the cortex running as a persistent process that observes the event bus and ticks on an interval. Purely programmatic — no LLM.
 
-### Wire missing event emission
+### Wire missing event emission (done)
 
 - Emit `MemorySaved` from `memory_save` tool after successful save
 - Emit `CompactionTriggered` from the compactor when thresholds are hit
 
-### Instantiate the cortex
+### Instantiate the cortex (done)
 
-- Call `Cortex::new()` in `main.rs` alongside `spawn_bulletin_loop()`
-- Subscribe to the event bus via `deps.event_tx.subscribe()`
+- Call `Cortex::new()` from `spawn_cortex_loop()` during agent startup
+- Subscribe to both buses via `deps.event_tx.subscribe()` and `deps.memory_event_tx.subscribe()`
 - Run a `tokio::select!` loop:
-  - Receive events → feed through `observe()`
+  - Receive control events → feed through `observe()`
+  - Receive memory events (`MemorySaved`) → feed through `observe()`
   - Tick on `cortex_config.tick_interval_secs`
 - Move bulletin generation into the cortex's tick loop (currently a standalone free function)
 
-### Fix `observe()` to extract real values
+### Fix `observe()` to extract real values (done)
 
 - Map all 12 `ProcessEvent` variants, not just 3
 - Pull real `memory_type`, `importance`, content summaries from events
 - Enrich `MemorySaved` event variant with `memory_type` and `importance` fields so the cortex gets useful data without querying the store
 
-### Rework `Signal` enum
+### Rework `Signal` enum (done)
 
 - Align variants with what `ProcessEvent` actually provides
 - Add `WorkerStarted`, `BranchStarted`, `WorkerStatus`

@@ -348,6 +348,14 @@ pub async fn remove_channel_tools(
     Ok(())
 }
 
+fn memory_save_with_events(
+    memory_search: Arc<MemorySearch>,
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+) -> MemorySaveTool {
+    MemorySaveTool::new(memory_search).with_event_bus(agent_id, memory_event_tx)
+}
+
 /// Create a per-branch ToolServer with memory tools.
 ///
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
@@ -360,12 +368,17 @@ pub fn create_branch_tool_server(
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     runtime_config: Arc<RuntimeConfig>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save_with_events(
+            memory_search.clone(),
+            agent_id.clone(),
+            memory_event_tx.clone(),
+        ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
@@ -450,9 +463,17 @@ pub fn create_worker_tool_server(
 ///
 /// The cortex only needs memory_save for consolidation. Additional tools can be
 /// added later as cortex capabilities expand.
-pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServerHandle {
+pub fn create_cortex_tool_server(
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
     ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search))
+        .tool(memory_save_with_events(
+            memory_search,
+            agent_id,
+            memory_event_tx,
+        ))
         .run()
 }
 
@@ -466,6 +487,7 @@ pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
@@ -476,7 +498,11 @@ pub fn create_cortex_chat_tool_server(
     sandbox: Arc<Sandbox>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save_with_events(
+            memory_search.clone(),
+            agent_id.clone(),
+            memory_event_tx,
+        ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))

@@ -95,6 +95,51 @@ impl std::fmt::Display for ProcessType {
     }
 }
 
+/// Return a short summary from the first non-empty line, truncated to a
+/// character limit.
+pub const EVENT_SUMMARY_MAX_CHARS: usize = 160;
+
+pub fn summarize_first_non_empty_line(value: &str, max_chars: usize) -> String {
+    let first_line = value
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_else(|| value.trim());
+
+    truncate_to_chars(first_line, max_chars).to_string()
+}
+
+fn truncate_to_chars(value: &str, max_chars: usize) -> &str {
+    if max_chars == 0 {
+        return "";
+    }
+
+    if let Some((index, _)) = value.char_indices().nth(max_chars) {
+        &value[..index]
+    } else {
+        value
+    }
+}
+
+#[derive(Debug)]
+pub enum BroadcastRecvResult<T> {
+    Event(T),
+    Lagged(u64),
+    Closed,
+}
+
+pub fn classify_broadcast_recv_result<T>(
+    result: std::result::Result<T, tokio::sync::broadcast::error::RecvError>,
+) -> BroadcastRecvResult<T> {
+    match result {
+        Ok(event) => BroadcastRecvResult::Event(event),
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
+            BroadcastRecvResult::Lagged(count)
+        }
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => BroadcastRecvResult::Closed,
+    }
+}
+
 /// Events sent between processes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -151,6 +196,9 @@ pub enum ProcessEvent {
         agent_id: AgentId,
         memory_id: String,
         channel_id: Option<ChannelId>,
+        memory_type: crate::memory::MemoryType,
+        importance: f32,
+        content_summary: String,
     },
     CompactionTriggered {
         agent_id: AgentId,
@@ -198,6 +246,59 @@ pub enum ProcessEvent {
     },
 }
 
+/// Default broadcast capacity for the per-agent control event bus.
+pub const CONTROL_EVENT_BUS_CAPACITY: usize = 256;
+
+/// Default broadcast capacity for the per-agent memory event bus.
+pub const MEMORY_EVENT_BUS_CAPACITY: usize = 1024;
+
+/// Create the default pair of per-agent process event buses.
+///
+/// - `event_tx` carries control/lifecycle events consumed by channels and UI.
+/// - `memory_event_tx` carries memory-save telemetry consumed by the cortex.
+pub fn create_process_event_buses() -> (
+    tokio::sync::broadcast::Sender<ProcessEvent>,
+    tokio::sync::broadcast::Sender<ProcessEvent>,
+) {
+    create_process_event_buses_with_capacity(CONTROL_EVENT_BUS_CAPACITY, MEMORY_EVENT_BUS_CAPACITY)
+}
+
+/// Create per-agent process event buses with explicit capacities.
+pub fn create_process_event_buses_with_capacity(
+    control_event_capacity: usize,
+    memory_event_capacity: usize,
+) -> (
+    tokio::sync::broadcast::Sender<ProcessEvent>,
+    tokio::sync::broadcast::Sender<ProcessEvent>,
+) {
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel(control_event_capacity);
+    let (memory_event_tx, _memory_event_rx) =
+        tokio::sync::broadcast::channel(memory_event_capacity);
+    (event_tx, memory_event_tx)
+}
+
+/// Track lagged broadcast events and return the dropped count when a warning
+/// should be emitted. Returns `None` when still inside the throttle window.
+pub fn drain_lag_warning_count(
+    lagged_since_last_warning: &mut u64,
+    last_lag_warning: &mut Option<std::time::Instant>,
+    newly_lagged_count: u64,
+    warning_interval: std::time::Duration,
+) -> Option<u64> {
+    *lagged_since_last_warning = lagged_since_last_warning.saturating_add(newly_lagged_count);
+
+    let now = std::time::Instant::now();
+    let should_warn =
+        last_lag_warning.is_none_or(|last| now.saturating_duration_since(last) >= warning_interval);
+
+    if !should_warn {
+        return None;
+    }
+
+    *last_lag_warning = Some(now);
+    Some(std::mem::take(lagged_since_last_warning))
+}
+
 /// A message to be injected into a specific channel from outside the normal
 /// inbound message flow. Used for cross-agent task completion notifications.
 #[derive(Debug, Clone)]
@@ -221,6 +322,7 @@ pub struct AgentDeps {
     pub cron_tool: Option<tools::CronTool>,
     pub runtime_config: Arc<config::RuntimeConfig>,
     pub event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
+    pub memory_event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
     pub sqlite_pool: sqlx::SqlitePool,
     pub messaging_manager: Option<Arc<messaging::MessagingManager>>,
     pub sandbox: Arc<sandbox::Sandbox>,

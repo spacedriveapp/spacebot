@@ -88,7 +88,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         skills,
     ));
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(16);
+    let (event_tx, memory_event_tx) = spacebot::create_process_event_buses_with_capacity(16, 32);
 
     let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
     let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
@@ -115,6 +115,7 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
         cron_tool: None,
         runtime_config,
         event_tx,
+        memory_event_tx,
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: None,
         sandbox,

@@ -403,7 +403,8 @@ pub(super) async fn trigger_warmup(
         let task_store_registry = state.task_store_registry.clone();
         let injection_tx = state.injection_tx.clone();
         tokio::spawn(async move {
-            let (event_tx, _event_rx) = tokio::sync::broadcast::channel(16);
+            let (event_tx, memory_event_tx) =
+                crate::create_process_event_buses_with_capacity(16, 64);
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
@@ -412,6 +413,7 @@ pub(super) async fn trigger_warmup(
                 cron_tool: None,
                 runtime_config,
                 event_tx,
+                memory_event_tx,
                 sqlite_pool: sqlite_pool.clone(),
                 messaging_manager: None,
                 sandbox,
@@ -629,7 +631,7 @@ pub(super) async fn create_agent(
     ));
     let task_store = std::sync::Arc::new(crate::tasks::TaskStore::new(db.sqlite.clone()));
 
-    let (event_tx, _) = tokio::sync::broadcast::channel(256);
+    let (event_tx, memory_event_tx) = crate::create_process_event_buses();
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
 
     crate::identity::scaffold_identity_files(&agent_config.workspace)
@@ -711,6 +713,7 @@ pub(super) async fn create_agent(
         cron_tool: None,
         runtime_config: runtime_config.clone(),
         event_tx: event_tx.clone(),
+        memory_event_tx: memory_event_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
         messaging_manager: {
             let guard = state.messaging_manager.read().await;
@@ -776,6 +779,7 @@ pub(super) async fn create_agent(
         deps.agent_id.clone(),
         deps.task_store.clone(),
         memory_search.clone(),
+        deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
         run_logger,
@@ -794,8 +798,7 @@ pub(super) async fn create_agent(
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
     let _warmup_loop = crate::agent::cortex::spawn_warmup_loop(deps.clone(), cortex_logger.clone());
-    let _bulletin_loop =
-        crate::agent::cortex::spawn_bulletin_loop(deps.clone(), cortex_logger.clone());
+    let _cortex_loop = crate::agent::cortex::spawn_cortex_loop(deps.clone(), cortex_logger.clone());
     let _association_loop =
         crate::agent::cortex::spawn_association_loop(deps.clone(), cortex_logger);
     crate::agent::cortex::spawn_ready_task_loop(
