@@ -945,6 +945,80 @@ export interface UpdateTaskRequest {
 	approved_by?: string;
 }
 
+// -- Topic Types --
+
+export type TopicStatus = "active" | "paused" | "archived";
+export type SearchMode = "hybrid" | "vector" | "fulltext" | "typed" | "recent";
+export type SearchSort = "recent" | "importance" | "most_accessed";
+
+export interface TopicCriteria {
+	query?: string;
+	memory_types?: MemoryType[];
+	min_importance?: number;
+	channel_ids?: string[];
+	max_age?: string;
+	mode?: SearchMode;
+	sort_by?: SearchSort;
+	max_memories?: number;
+}
+
+export interface TopicItem {
+	id: string;
+	agent_id: string;
+	title: string;
+	content: string;
+	criteria: TopicCriteria;
+	pin_ids: string[];
+	status: TopicStatus;
+	max_words: number;
+	last_memory_at: string | null;
+	last_synced_at: string | null;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface TopicVersion {
+	id: string;
+	topic_id: string;
+	content: string;
+	memory_count: number;
+	created_at: string;
+}
+
+export interface TopicListResponse {
+	topics: TopicItem[];
+}
+
+export interface TopicResponse {
+	topic: TopicItem;
+}
+
+export interface TopicActionResponse {
+	success: boolean;
+	message: string;
+}
+
+export interface TopicVersionsResponse {
+	versions: TopicVersion[];
+}
+
+export interface CreateTopicRequest {
+	title: string;
+	criteria?: TopicCriteria;
+	pin_ids?: string[];
+	status?: TopicStatus;
+	max_words?: number;
+}
+
+export interface UpdateTopicRequest {
+	title?: string;
+	criteria?: TopicCriteria;
+	pin_ids?: string[];
+	status?: TopicStatus;
+	max_words?: number;
+	content?: string;
+}
+
 // -- Messaging / Bindings Types --
 
 export interface PlatformStatus {
@@ -1998,6 +2072,54 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
+
+	// Topics API
+	listTopics: (agentId: string, status?: TopicStatus) => {
+		const search = new URLSearchParams({ agent_id: agentId });
+		if (status) search.set("status", status);
+		return fetchJson<TopicListResponse>(`/agents/topics?${search}`);
+	},
+	getTopic: (agentId: string, topicId: string) =>
+		fetchJson<TopicResponse>(`/agents/topics/${encodeURIComponent(topicId)}?agent_id=${encodeURIComponent(agentId)}`),
+	createTopic: async (agentId: string, request: CreateTopicRequest): Promise<TopicResponse> => {
+		const response = await fetch(`${API_BASE}/agents/topics`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TopicResponse>;
+	},
+	updateTopic: async (agentId: string, topicId: string, request: UpdateTopicRequest): Promise<TopicResponse> => {
+		const response = await fetch(`${API_BASE}/agents/topics/${encodeURIComponent(topicId)}`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ ...request, agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TopicResponse>;
+	},
+	deleteTopic: async (agentId: string, topicId: string): Promise<TopicActionResponse> => {
+		const response = await fetch(
+			`${API_BASE}/agents/topics/${encodeURIComponent(topicId)}?agent_id=${encodeURIComponent(agentId)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TopicActionResponse>;
+	},
+	syncTopic: async (agentId: string, topicId: string): Promise<TopicResponse> => {
+		const response = await fetch(`${API_BASE}/agents/topics/${encodeURIComponent(topicId)}/sync`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TopicResponse>;
+	},
+	topicVersions: (agentId: string, topicId: string, limit = 20) =>
+		fetchJson<TopicVersionsResponse>(
+			`/agents/topics/${encodeURIComponent(topicId)}/versions?agent_id=${encodeURIComponent(agentId)}&limit=${limit}`,
+		),
 
 	// Secrets API
 	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),

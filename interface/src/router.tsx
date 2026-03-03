@@ -21,6 +21,7 @@ import {AgentIngest} from "@/routes/AgentIngest";
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentTasks} from "@/routes/AgentTasks";
+import {AgentTopics} from "@/routes/AgentTopics";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
@@ -219,6 +220,22 @@ const agentTasksRoute = createRoute({
 	},
 });
 
+const agentTopicsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/topics",
+	component: function AgentTopicsPage() {
+		const {agentId} = agentTopicsRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentHeader agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentTopics agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
 const agentCronRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/agents/$agentId/cron",
@@ -323,6 +340,7 @@ const routeTree = rootRoute.addChildren([
 	agentIngestRoute,
 	agentWorkersRoute,
 	agentTasksRoute,
+	agentTopicsRoute,
 	agentCortexRoute,
 	agentSkillsRoute,
 	agentCronRoute,

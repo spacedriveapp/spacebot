@@ -65,6 +65,10 @@ impl PromptEngine {
         env.add_template("ingestion", crate::prompts::text::get("ingestion"))?;
         env.add_template("cortex_chat", crate::prompts::text::get("cortex_chat"))?;
         env.add_template(
+            "cortex_topic_synthesis",
+            crate::prompts::text::get("cortex_topic_synthesis"),
+        )?;
+        env.add_template(
             "cortex_profile",
             crate::prompts::text::get("cortex_profile"),
         )?;
@@ -392,6 +396,16 @@ impl PromptEngine {
             context! {
                 max_words => max_words,
                 raw_sections => raw_sections,
+            },
+        )
+    }
+
+    /// Convenience method for rendering topic synthesis system prompt.
+    pub fn render_topic_synthesis_prompt(&self, title: &str) -> Result<String> {
+        self.render(
+            "cortex_topic_synthesis",
+            context! {
+                title => title,
             },
         )
     }

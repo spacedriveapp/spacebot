@@ -328,7 +328,8 @@ impl CortexChatSession {
         let prompt_engine = runtime_config.prompts.load();
 
         let identity_context = runtime_config.identity.load().render();
-        let memory_bulletin = runtime_config.memory_bulletin.load();
+
+        let context_content = runtime_config.memory_bulletin.load().to_string();
 
         let browser_enabled = runtime_config.browser_config.load().enabled;
         let web_search_enabled = runtime_config.brave_search_key.load().is_some();
@@ -350,7 +351,7 @@ impl CortexChatSession {
 
         prompt_engine.render_cortex_chat_prompt(
             empty_to_none(identity_context),
-            empty_to_none(memory_bulletin.to_string()),
+            empty_to_none(context_content),
             channel_transcript,
             worker_capabilities,
         )

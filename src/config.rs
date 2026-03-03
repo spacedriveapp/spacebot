@@ -985,6 +985,8 @@ pub struct CortexConfig {
     pub association_updates_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
+    /// Interval in seconds between topic sync passes.
+    pub topic_sync_interval_secs: u64,
 }
 
 impl Default for CortexConfig {
@@ -1001,6 +1003,7 @@ impl Default for CortexConfig {
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
+            topic_sync_interval_secs: 600,
         }
     }
 }
@@ -2972,6 +2975,7 @@ struct TomlCortexConfig {
     association_similarity_threshold: Option<f32>,
     association_updates_threshold: Option<f32>,
     association_max_per_pass: Option<usize>,
+    topic_sync_interval_secs: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -4807,6 +4811,9 @@ impl Config {
                     association_max_per_pass: c
                         .association_max_per_pass
                         .unwrap_or(base_defaults.cortex.association_max_per_pass),
+                    topic_sync_interval_secs: c
+                        .topic_sync_interval_secs
+                        .unwrap_or(base_defaults.cortex.topic_sync_interval_secs),
                 })
                 .unwrap_or(base_defaults.cortex),
             warmup: toml
@@ -5013,6 +5020,9 @@ impl Config {
                         association_max_per_pass: c
                             .association_max_per_pass
                             .unwrap_or(defaults.cortex.association_max_per_pass),
+                        topic_sync_interval_secs: c
+                            .topic_sync_interval_secs
+                            .unwrap_or(defaults.cortex.topic_sync_interval_secs),
                     }),
                     warmup: a.warmup.map(|w| WarmupConfig {
                         enabled: w.enabled.unwrap_or(defaults.warmup.enabled),

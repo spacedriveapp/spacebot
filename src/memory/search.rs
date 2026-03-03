@@ -8,7 +8,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 /// Which search strategy to use.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchMode {
     /// Full hybrid: vector + FTS + graph + RRF. Requires a query string.
     #[default]
@@ -22,7 +23,8 @@ pub enum SearchMode {
 }
 
 /// Sort order for non-hybrid search modes.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SearchSort {
     /// Most recent first (created_at DESC).
     #[default]

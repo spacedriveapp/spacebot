@@ -240,6 +240,7 @@ pub async fn spawn_worker_from_state(
     task: impl Into<String>,
     interactive: bool,
     suggested_skills: &[&str],
+    topic_ids: &[String],
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
     ensure_dispatch_readiness(state, "worker");
@@ -248,9 +249,25 @@ pub async fn spawn_worker_from_state(
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let temporal_context = TemporalContext::from_runtime(rc.as_ref());
-    let worker_task =
+    let mut worker_task =
         build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
+
+    // Inject topic context if topic_ids were provided.
+    if !topic_ids.is_empty() {
+        let mut topic_context = String::from("## Topic Context\n\n");
+        for topic_id in topic_ids {
+            if let Ok(Some(topic)) = state.deps.topic_store.get(topic_id).await
+                && !topic.content.is_empty()
+            {
+                topic_context.push_str(&format!("### {}\n\n{}\n\n", topic.title, topic.content));
+            }
+        }
+        if topic_context.len() > "## Topic Context\n\n".len() {
+            worker_task = format!("{topic_context}---\n\n{worker_task}");
+        }
+    }
+
     let sandbox_enabled = state.deps.sandbox.mode_enabled();
     let sandbox_containment_active = state.deps.sandbox.containment_active();
     let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();

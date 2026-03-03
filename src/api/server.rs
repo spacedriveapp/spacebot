@@ -3,7 +3,7 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, secrets, settings, skills, system, tasks, tools, webchat, workers,
+    models, providers, secrets, settings, skills, system, tasks, tools, topics, webchat, workers,
 };
 
 use axum::Json;
@@ -130,6 +130,18 @@ pub async fn start_http_server(
         )
         .route("/agents/tasks/{number}/approve", post(tasks::approve_task))
         .route("/agents/tasks/{number}/execute", post(tasks::execute_task))
+        .route(
+            "/agents/topics",
+            get(topics::list_topics).post(topics::create_topic),
+        )
+        .route(
+            "/agents/topics/{id}",
+            get(topics::get_topic)
+                .put(topics::update_topic)
+                .delete(topics::delete_topic),
+        )
+        .route("/agents/topics/{id}/sync", post(topics::sync_topic))
+        .route("/agents/topics/{id}/versions", get(topics::topic_versions))
         .route("/channels/cancel", post(channels::cancel_process))
         .route(
             "/agents/ingest/files",

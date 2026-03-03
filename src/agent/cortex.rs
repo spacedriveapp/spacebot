@@ -339,6 +339,8 @@ impl Cortex {
 
     /// Process a process event and extract signals.
     pub async fn observe(&self, event: ProcessEvent) {
+        let is_memory_saved = matches!(&event, ProcessEvent::MemorySaved { .. });
+
         let signal = match &event {
             ProcessEvent::MemorySaved { memory_id, .. } => Some(Signal::MemorySaved {
                 memory_type: "unknown".into(),
@@ -369,6 +371,18 @@ impl Cortex {
             }
 
             tracing::debug!("cortex received signal, buffer size: {}", buffer.len());
+        }
+
+        // When a memory is saved, mark all active topics as stale so the
+        // topic sync loop re-synthesizes them on its next pass.
+        if is_memory_saved
+            && let Err(error) = self
+                .deps
+                .topic_store
+                .mark_all_stale(&self.deps.agent_id)
+                .await
+        {
+            tracing::warn!(%error, "failed to mark topics stale after memory save");
         }
     }
 
@@ -1201,6 +1215,25 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         }
     }
 
+    // Inject topic content from task metadata if topic_ids are present.
+    if let Some(topic_ids) = task.metadata.get("topic_ids").and_then(|v| v.as_array()) {
+        let topic_ids: Vec<&str> = topic_ids.iter().filter_map(|v| v.as_str()).collect();
+        if !topic_ids.is_empty() {
+            let mut topic_content = String::new();
+            for topic_id in &topic_ids {
+                if let Ok(Some(topic)) = deps.topic_store.get(topic_id).await
+                    && !topic.content.is_empty()
+                {
+                    topic_content.push_str(&format!("\n## {}\n{}\n", topic.title, topic.content));
+                }
+            }
+            if !topic_content.is_empty() {
+                task_prompt.push_str("\n\n---\nRelevant Context:\n");
+                task_prompt.push_str(&topic_content);
+            }
+        }
+    }
+
     let screenshot_dir = deps
         .runtime_config
         .workspace_dir
@@ -1677,6 +1710,236 @@ async fn fetch_memories_for_association(
     };
 
     Ok(rows.iter().map(|row| row.get("id")).collect())
+}
+
+// ---------------------------------------------------------------------------
+// Topic Sync Loop
+// ---------------------------------------------------------------------------
+
+/// Spawn the topic sync loop. Runs alongside bulletin and association loops.
+pub fn spawn_topic_sync_loop(deps: AgentDeps, logger: CortexLogger) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        if let Err(error) = run_topic_sync_loop(&deps, &logger).await {
+            tracing::error!(%error, "cortex topic sync loop exited with error");
+        }
+    })
+}
+
+async fn run_topic_sync_loop(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    tracing::info!("cortex topic sync loop started");
+
+    // Initial sync on startup — sync all active topics.
+    if let Err(error) = sync_all_topics(deps, logger).await {
+        tracing::warn!(%error, "initial topic sync pass failed");
+    }
+
+    loop {
+        let interval = deps.runtime_config.cortex.load().topic_sync_interval_secs;
+        tokio::select! {
+            () = tokio::time::sleep(Duration::from_secs(interval.max(30))) => {},
+            () = deps.topic_sync_notify.notified() => {
+                tracing::info!("topic sync loop woken by notify");
+            },
+        }
+
+        if let Err(error) = sync_all_topics(deps, logger).await {
+            tracing::warn!(%error, "topic sync pass failed");
+        }
+    }
+}
+
+/// Run a sync pass over all active topics, only synthesizing stale ones.
+async fn sync_all_topics(deps: &AgentDeps, logger: &CortexLogger) -> anyhow::Result<()> {
+    let topics = deps.topic_store.list_active(&deps.agent_id).await?;
+    if topics.is_empty() {
+        return Ok(());
+    }
+
+    let mut synced_count = 0usize;
+    for topic in &topics {
+        match sync_one_topic(deps, logger, topic).await {
+            Ok(true) => synced_count += 1,
+            Ok(false) => {} // Not stale, skipped.
+            Err(error) => {
+                tracing::warn!(
+                    topic_id = %topic.id,
+                    topic_title = %topic.title,
+                    %error,
+                    "topic sync failed"
+                );
+                logger.log(
+                    "topic_sync_failed",
+                    &format!("Topic sync failed for '{}': {error}", topic.title),
+                    Some(serde_json::json!({
+                        "topic_id": topic.id,
+                        "title": topic.title,
+                    })),
+                );
+            }
+        }
+    }
+
+    if synced_count > 0 {
+        tracing::info!(
+            synced = synced_count,
+            total = topics.len(),
+            "topic sync pass complete"
+        );
+    }
+
+    Ok(())
+}
+
+/// Sync a single topic: check staleness, gather memories, synthesize via LLM,
+/// update content + version. Returns `true` if the topic was synced.
+async fn sync_one_topic(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+    topic: &crate::topics::Topic,
+) -> anyhow::Result<bool> {
+    use anyhow::Context as _;
+
+    let search_config = topic.criteria.to_search_config();
+    let query = topic.criteria.query.as_deref().unwrap_or("");
+
+    // Staleness check: query newest memory matching criteria and compare to last_memory_at.
+    let newest_results = deps
+        .memory_search
+        .search(
+            query,
+            &SearchConfig {
+                max_results: 1,
+                sort_by: SearchSort::Recent,
+                ..search_config.clone()
+            },
+        )
+        .await
+        .unwrap_or_default();
+
+    let newest_memory_at = newest_results
+        .first()
+        .map(|result| result.memory.created_at.to_rfc3339());
+
+    let is_stale = topic.last_synced_at.is_none()
+        || match (&newest_memory_at, &topic.last_memory_at) {
+            (Some(newest), Some(last)) => newest.as_str() > last.as_str(),
+            (Some(_), None) => true,
+            _ => false,
+        };
+
+    if !is_stale {
+        return Ok(false);
+    }
+
+    // Gather memories matching criteria.
+    let mut results = deps
+        .memory_search
+        .search(query, &search_config)
+        .await
+        .unwrap_or_default();
+
+    // Merge pinned memories (prepend, dedup).
+    if !topic.pin_ids.is_empty() {
+        let store = deps.memory_search.store();
+        for pin_id in &topic.pin_ids {
+            if let Ok(Some(memory)) = store.load(pin_id).await {
+                // Only add if not already in results.
+                if !results.iter().any(|r| r.memory.id == memory.id) {
+                    results.insert(
+                        0,
+                        crate::memory::types::MemorySearchResult {
+                            memory,
+                            score: 1.0,
+                            rank: 0,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    if results.is_empty() {
+        return Ok(false);
+    }
+
+    let memory_count = results.len();
+
+    // Format as raw sections.
+    let mut raw_sections = String::new();
+    for result in &results {
+        raw_sections.push_str(&format!(
+            "- [{}] (importance: {:.1}) {}\n",
+            result.memory.memory_type,
+            result.memory.importance,
+            result
+                .memory
+                .content
+                .lines()
+                .next()
+                .unwrap_or(&result.memory.content),
+        ));
+    }
+
+    // LLM synthesis.
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let system_prompt = prompt_engine
+        .render_topic_synthesis_prompt(&topic.title)
+        .context("failed to render topic synthesis prompt")?;
+
+    let synthesis_prompt = prompt_engine
+        .render_system_cortex_synthesis(topic.max_words, &raw_sections)
+        .context("failed to render cortex synthesis user prompt")?;
+
+    let routing = deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
+
+    let agent = rig::agent::AgentBuilder::new(model)
+        .preamble(&system_prompt)
+        .build();
+
+    let content = agent
+        .prompt(&synthesis_prompt)
+        .await
+        .map_err(|error| anyhow::anyhow!("topic synthesis LLM call failed: {error}"))?;
+
+    // Update topic content and timestamps.
+    let now = chrono::Utc::now().to_rfc3339();
+    let mut updated_topic = topic.clone();
+    updated_topic.content = content.clone();
+    updated_topic.last_synced_at = Some(now.clone());
+    updated_topic.last_memory_at = newest_memory_at;
+    deps.topic_store.update(&updated_topic).await?;
+
+    // Save version snapshot.
+    let version = crate::topics::TopicVersion {
+        id: uuid::Uuid::new_v4().to_string(),
+        topic_id: topic.id.clone(),
+        content,
+        memory_count: memory_count as i64,
+        created_at: now,
+    };
+    deps.topic_store.save_version(&version).await?;
+
+    let word_count = updated_topic.content.split_whitespace().count();
+    logger.log(
+        "topic_synced",
+        &format!(
+            "Topic '{}' synced: {word_count} words from {memory_count} memories",
+            topic.title
+        ),
+        Some(serde_json::json!({
+            "topic_id": topic.id,
+            "title": topic.title,
+            "word_count": word_count,
+            "memory_count": memory_count,
+            "model": model_name,
+        })),
+    );
+
+    Ok(true)
 }
 
 #[cfg(test)]
