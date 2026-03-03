@@ -592,11 +592,15 @@ impl Sandbox {
         }
         cmd.current_dir(working_dir);
 
+        let home_dir = std::env::var_os("HOME")
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| self.workspace.as_os_str().to_os_string());
+
         // Clear all inherited environment variables, then re-inject only
         // approved vars. Prevents system secrets from leaking to workers.
         cmd.env_clear();
         cmd.env("PATH", path_env);
-        cmd.env("HOME", &self.workspace);
+        cmd.env("HOME", home_dir);
         cmd.env("TMPDIR", "/tmp");
         for var_name in SAFE_ENV_VARS {
             if let Ok(value) = std::env::var(var_name) {
@@ -728,6 +732,19 @@ impl Sandbox {
         );
 
         profile
+    }
+
+    /// Create a minimal sandbox for unit tests without probing for backends.
+    #[cfg(test)]
+    pub fn new_for_test(config: Arc<ArcSwap<SandboxConfig>>, workspace: PathBuf) -> Self {
+        Self {
+            config,
+            workspace,
+            data_dir: PathBuf::new(),
+            tools_bin: PathBuf::new(),
+            backend: SandboxBackend::None,
+            secrets_store: ArcSwap::from_pointee(None),
+        }
     }
 }
 

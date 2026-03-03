@@ -827,7 +827,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     };
 
     let routing = deps.runtime_config.routing.load();
-    let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+    let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone());
@@ -1007,7 +1007,7 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     };
 
     let routing = deps.runtime_config.routing.load();
-    let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+    let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone());

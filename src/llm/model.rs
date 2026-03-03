@@ -616,11 +616,9 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
             return Err(CompletionError::ProviderError(format!(
-                "OpenAI API error ({status}): {message}"
+                "OpenAI API error ({})",
+                format_api_error(status, &response_body)
             )));
         }
 
@@ -842,11 +840,9 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
             return Err(CompletionError::ProviderError(format!(
-                "{provider_display_name} API error ({status}): {message}"
+                "{provider_display_name} API error ({})",
+                format_api_error(status, &response_body)
             )));
         }
 
@@ -941,11 +937,9 @@ impl SpacebotModel {
             })?;
 
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
             return Err(CompletionError::ProviderError(format!(
-                "{provider_display_name} API error ({status}): {message}"
+                "{provider_display_name} API error ({})",
+                format_api_error(status, &response_body)
             )));
         }
 
@@ -1570,6 +1564,43 @@ fn parse_openai_error_message(response_text: &str) -> Option<String> {
         .map(ToOwned::to_owned)
 }
 
+/// Build a detailed error string from an OpenAI-compatible error response.
+///
+/// OpenRouter (and potentially other proxies) return additional context in
+/// `error.metadata` — e.g. `provider_name` and `raw` (the upstream error).
+/// Including this in the error message helps users diagnose issues like
+/// misconfigured presets or model-specific rejections (see issue #262).
+fn format_api_error(status: reqwest::StatusCode, body: &serde_json::Value) -> String {
+    let message = body["error"]["message"].as_str().unwrap_or("unknown error");
+
+    let provider_name = body["error"]["metadata"]["provider_name"]
+        .as_str()
+        .filter(|s| !s.is_empty());
+    let raw = match &body["error"]["metadata"]["raw"] {
+        serde_json::Value::String(s) if !s.is_empty() => Some(s.clone()),
+        serde_json::Value::Null => None,
+        other => {
+            let s = other.to_string();
+            if s == "null" { None } else { Some(s) }
+        }
+    };
+
+    match (provider_name, raw.as_deref()) {
+        (Some(provider), Some(raw_err)) => {
+            format!("{status}: {message} (upstream provider {provider}: {raw_err})")
+        }
+        (Some(provider), None) => {
+            format!("{status}: {message} (upstream provider: {provider})")
+        }
+        (None, Some(raw_err)) => {
+            format!("{status}: {message} ({raw_err})")
+        }
+        (None, None) => {
+            format!("{status}: {message}")
+        }
+    }
+}
+
 fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
     if provider == "zai-coding-plan" {
         // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
@@ -1720,5 +1751,61 @@ mod tests {
         let error = parse_anthropic_response(body).expect_err("should fail");
         assert!(matches!(error, CompletionError::ResponseError(_)));
         assert!(error.to_string().contains("stop_reason: max_tokens"));
+    }
+
+    #[test]
+    fn format_api_error_includes_openrouter_metadata() {
+        let status = reqwest::StatusCode::BAD_REQUEST;
+
+        // OpenRouter-style error with provider_name and raw upstream error
+        let body = serde_json::json!({
+            "error": {
+                "message": "Provider returned error",
+                "metadata": {
+                    "provider_name": "Moonshot",
+                    "raw": "Invalid request: tool_use not supported"
+                }
+            }
+        });
+        let msg = format_api_error(status, &body);
+        assert!(msg.contains("Provider returned error"));
+        assert!(msg.contains("Moonshot"));
+        assert!(msg.contains("tool_use not supported"));
+
+        // Standard OpenAI error without metadata
+        let body = serde_json::json!({
+            "error": {
+                "message": "Invalid model ID"
+            }
+        });
+        let msg = format_api_error(status, &body);
+        assert_eq!(msg, "400 Bad Request: Invalid model ID");
+
+        // Metadata with provider_name but no raw
+        let body = serde_json::json!({
+            "error": {
+                "message": "Provider returned error",
+                "metadata": {
+                    "provider_name": "Azure"
+                }
+            }
+        });
+        let msg = format_api_error(status, &body);
+        assert!(msg.contains("Azure"));
+        assert!(!msg.contains("raw"));
+
+        // Structured JSON raw error (not a string)
+        let body = serde_json::json!({
+            "error": {
+                "message": "Provider returned error",
+                "metadata": {
+                    "provider_name": "Google",
+                    "raw": {"code": 400, "detail": "invalid schema"}
+                }
+            }
+        });
+        let msg = format_api_error(status, &body);
+        assert!(msg.contains("Google"));
+        assert!(msg.contains("invalid schema"));
     }
 }

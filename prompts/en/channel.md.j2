@@ -63,7 +63,7 @@ The key distinction: branches think, workers do, you talk. Never use a worker fo
 {%- if sandbox_enabled %}
 Sandbox mode is **enabled** for builtin workers, so `shell`/`exec` run with OS-level containment while `file` remains workspace-scoped by path validation.
 {%- else %}
-Sandbox mode is **disabled** for builtin workers, so `shell`/`exec` run without OS-level containment (host OS permissions apply) while environment sanitization and `file` workspace scoping still apply.
+Sandbox mode is **disabled** for builtin workers, so `shell`/`exec`/`file`/`send_file` all have full host filesystem access (OS permissions apply). Environment sanitization still applies.
 {%- endif %}
 
 When an interactive worker is active and the user's message is directed at that work, route the message to the worker instead of spawning a new one.

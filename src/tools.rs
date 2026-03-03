@@ -287,6 +287,7 @@ pub async fn add_channel_tools(
         .add_tool(SendFileTool::new(
             response_tx.clone(),
             state.deps.runtime_config.workspace_dir.clone(),
+            state.deps.sandbox.clone(),
         ))
         .await?;
     handle.add_tool(CancelTool::new(state)).await?;
@@ -403,7 +404,7 @@ pub fn create_worker_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
-        .tool(FileTool::new(workspace.clone()))
+        .tool(FileTool::new(workspace.clone(), sandbox.clone()))
         .tool(ExecTool::new(workspace, sandbox))
         .tool(TaskUpdateTool::for_worker(
             task_store,
@@ -481,7 +482,7 @@ pub fn create_cortex_chat_tool_server(
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
-        .tool(FileTool::new(workspace.clone()))
+        .tool(FileTool::new(workspace.clone(), sandbox.clone()))
         .tool(ExecTool::new(workspace, sandbox));
 
     if browser_config.enabled {

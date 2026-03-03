@@ -10,6 +10,7 @@ use crate::agent::channel_prompt::{TemporalContext, build_worker_task_with_tempo
 use crate::agent::worker::Worker;
 use crate::error::AgentError;
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, WorkerId};
+use futures::FutureExt as _;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
@@ -160,6 +161,13 @@ async fn spawn_branch(
     let branch_id = branch.id;
     let prompt = prompt.to_owned();
 
+    // Capture what the spawned task needs to notify the channel on failure.
+    // branch.run() only sends BranchResult on the success path, so the
+    // spawner must handle failures to prevent orphaned branches (see #279).
+    let event_tx = state.deps.event_tx.clone();
+    let agent_id = state.deps.agent_id.clone();
+    let channel_id = state.channel_id.clone();
+
     let branch_span = tracing::info_span!(
         "branch.run",
         branch_id = %branch_id,
@@ -170,6 +178,12 @@ async fn spawn_branch(
         async move {
             if let Err(error) = branch.run(&prompt).await {
                 tracing::error!(branch_id = %branch_id, %error, "branch failed");
+                let _ = event_tx.send(crate::ProcessEvent::BranchResult {
+                    agent_id,
+                    branch_id,
+                    channel_id,
+                    conclusion: format!("Branch failed: {error}"),
+                });
             }
         }
         .instrument(branch_span),
@@ -497,8 +511,10 @@ where
             .with_label_values(&[&*agent_id])
             .inc();
 
-        let (result_text, notify, success) = match future.await {
-            Ok(text) => {
+        let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
+
+        let (result_text, notify, success) = match outcome {
+            Ok(Ok(text)) => {
                 // Scrub tool secret values from the result before it reaches
                 // the channel. The channel never sees raw secret values.
                 let scrubbed = if let Some(store) = &secrets_store {
@@ -508,9 +524,26 @@ where
                 };
                 (scrubbed, true, true)
             }
-            Err(error) => {
+            Ok(Err(error)) => {
                 tracing::error!(worker_id = %worker_id, %error, "worker failed");
                 (format!("Worker failed: {error}"), true, false)
+            }
+            Err(panic_payload) => {
+                let panic_message = panic_payload
+                    .downcast_ref::<&str>()
+                    .map(|message| (*message).to_string())
+                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+                    .unwrap_or_else(|| "unknown panic payload".to_string());
+                tracing::error!(
+                    worker_id = %worker_id,
+                    panic_message = %panic_message,
+                    "worker task panicked"
+                );
+                (
+                    format!("Worker failed: worker task panicked: {panic_message}"),
+                    true,
+                    false,
+                )
             }
         };
         #[cfg(feature = "metrics")]

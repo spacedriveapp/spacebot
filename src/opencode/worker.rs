@@ -341,15 +341,12 @@ impl OpenCodeWorker {
                         // before leak detection so they don't trigger false positives.
                         let scrubbed = self.scrub_text(text);
 
-                        // Leak detection: scan scrubbed text for known secret patterns.
-                        // OpenCode output is not scanned by SpacebotHook, so this is
-                        // the only leak protection layer for OpenCode workers.
-                        if crate::secrets::scrub::scan_for_leaks(&scrubbed).is_some() {
-                            tracing::error!(
+                        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&scrubbed) {
+                            tracing::warn!(
                                 worker_id = %self.id,
-                                "LEAK DETECTED in OpenCode worker output — terminating"
+                                leak_prefix = %&leak[..leak.len().min(8)],
+                                "potential secret detected in OpenCode worker output"
                             );
-                            return EventAction::Error("leak detected in output".to_string());
                         }
 
                         *last_text = scrubbed;
@@ -376,19 +373,19 @@ impl OpenCodeWorker {
                                     self.send_status(&format!("running: {label}"));
                                 }
                                 ToolState::Completed { output, .. } => {
-                                    // Scrub + scan tool output for leaks
+                                    // Scrub and log potential secret-pattern hits in tool output.
+                                    // Do not terminate the worker; channel egress guards enforce
+                                    // user-visible leak blocking.
                                     if let Some(tool_output) = output {
                                         let scrubbed = self.scrub_text(tool_output);
-                                        if crate::secrets::scrub::scan_for_leaks(&scrubbed)
-                                            .is_some()
+                                        if let Some(leak) =
+                                            crate::secrets::scrub::scan_for_leaks(&scrubbed)
                                         {
-                                            tracing::error!(
+                                            tracing::warn!(
                                                 worker_id = %self.id,
                                                 tool = %tool_name,
-                                                "LEAK DETECTED in OpenCode tool output — terminating"
-                                            );
-                                            return EventAction::Error(
-                                                "leak detected in tool output".to_string(),
+                                                leak_prefix = %&leak[..leak.len().min(8)],
+                                                "potential secret detected in OpenCode tool output"
                                             );
                                         }
                                     }

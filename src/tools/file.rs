@@ -1,28 +1,36 @@
 //! File tool for reading/writing/listing files (task workers only).
 
+use crate::sandbox::Sandbox;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-/// Tool for file operations, restricted to the agent's workspace directory.
+/// Tool for file operations with sandbox-aware path validation.
+///
+/// When sandbox mode is enabled, file access is restricted to the workspace
+/// boundary. When sandbox is disabled, any path accessible to the process is
+/// allowed (relative paths are still resolved against the workspace root).
 #[derive(Debug, Clone)]
 pub struct FileTool {
     workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
 }
 
 impl FileTool {
-    /// Create a new file tool restricted to the given workspace directory.
-    pub fn new(workspace: PathBuf) -> Self {
-        Self { workspace }
+    /// Create a new file tool with sandbox-aware path validation.
+    pub fn new(workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
+        Self { workspace, sandbox }
     }
 
-    /// Resolve and validate a path, ensuring it stays within the workspace boundary.
+    /// Resolve and validate a path.
     ///
-    /// Relative paths are resolved against the workspace root. Absolute paths are
-    /// accepted only if they fall within the workspace. Symlink traversal and `..`
-    /// components are handled via canonicalization.
+    /// Relative paths are resolved against the workspace root. When sandbox mode
+    /// is enabled, absolute paths must fall within the workspace and symlink
+    /// traversal is blocked. When sandbox is disabled, any readable/writable
+    /// path is accepted.
     fn resolve_path(&self, raw: &str) -> Result<PathBuf, FileError> {
         let path = Path::new(raw);
         let resolved = if path.is_absolute() {
@@ -34,6 +42,11 @@ impl FileTool {
         // For writes, the target may not exist yet. Canonicalize the deepest
         // existing ancestor and append the remaining components.
         let canonical = best_effort_canonicalize(&resolved);
+
+        // When sandbox is disabled, skip workspace boundary enforcement.
+        if !self.sandbox.mode_enabled() {
+            return Ok(canonical);
+        }
 
         let workspace_canonical = self
             .workspace
@@ -200,19 +213,22 @@ impl Tool for FileTool {
         match args.operation.as_str() {
             "read" => do_file_read(&path).await,
             "write" => {
-                // Identity files remain readable, but writes must go through
-                // the dedicated identity API to keep update flow consistent.
-                let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
-                if PROTECTED_FILES
-                    .iter()
-                    .any(|f| file_name.eq_ignore_ascii_case(f))
-                {
-                    return Err(FileError(
-                        "ACCESS DENIED: Identity files are protected and cannot be modified \
-                         through file operations. Use the identity management API instead."
-                            .to_string(),
-                    ));
+                // When sandbox is enabled, identity files must go through the
+                // dedicated identity API to keep the update flow consistent.
+                // When sandbox is disabled, the user has opted into full access.
+                if self.sandbox.mode_enabled() {
+                    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+                    if PROTECTED_FILES
+                        .iter()
+                        .any(|f| file_name.eq_ignore_ascii_case(f))
+                    {
+                        return Err(FileError(
+                            "ACCESS DENIED: Identity files are protected and cannot be modified \
+                             through file operations. Use the identity management API instead."
+                                .to_string(),
+                        ));
+                    }
                 }
 
                 let content = args.content.ok_or_else(|| {
@@ -401,4 +417,157 @@ pub async fn file_list(path: impl AsRef<Path>) -> crate::error::Result<Vec<FileE
             size: e.size,
         })
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::sandbox::{Sandbox, SandboxConfig, SandboxMode};
+    use std::fs;
+
+    fn create_sandbox(mode: SandboxMode, workspace: &Path) -> Arc<Sandbox> {
+        let config = SandboxConfig {
+            mode,
+            ..Default::default()
+        };
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(config));
+        Arc::new(Sandbox::new_for_test(config, workspace.to_path_buf()))
+    }
+
+    #[tokio::test]
+    async fn sandbox_enabled_rejects_read_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("secret.txt");
+        fs::write(&file, "secret data").expect("failed to write file");
+
+        let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
+        let tool = FileTool::new(workspace, sandbox);
+
+        let result = tool
+            .call(FileArgs {
+                operation: "read".to_string(),
+                path: file.to_string_lossy().into_owned(),
+                content: None,
+                create_dirs: false,
+            })
+            .await;
+
+        let error = result
+            .expect_err("should reject path outside workspace")
+            .to_string();
+        assert!(error.contains("ACCESS DENIED"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_disabled_allows_read_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("report.txt");
+        fs::write(&file, "public data").expect("failed to write file");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let tool = FileTool::new(workspace, sandbox);
+
+        let result = tool
+            .call(FileArgs {
+                operation: "read".to_string(),
+                path: file.to_string_lossy().into_owned(),
+                content: None,
+                create_dirs: false,
+            })
+            .await
+            .expect("should succeed when sandbox is disabled");
+
+        assert!(result.success);
+        assert_eq!(result.content.as_deref(), Some("public data"));
+    }
+
+    #[tokio::test]
+    async fn sandbox_disabled_allows_write_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("output.txt");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let tool = FileTool::new(workspace, sandbox);
+
+        let result = tool
+            .call(FileArgs {
+                operation: "write".to_string(),
+                path: file.to_string_lossy().into_owned(),
+                content: Some("written outside workspace".to_string()),
+                create_dirs: false,
+            })
+            .await
+            .expect("should succeed when sandbox is disabled");
+
+        assert!(result.success);
+        let written = fs::read_to_string(&file).expect("failed to read written file");
+        assert_eq!(written, "written outside workspace");
+    }
+
+    #[tokio::test]
+    async fn sandbox_enabled_blocks_identity_file_write() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+        let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
+        let tool = FileTool::new(workspace.clone(), sandbox);
+
+        let result = tool
+            .call(FileArgs {
+                operation: "write".to_string(),
+                path: workspace.join("SOUL.md").to_string_lossy().into_owned(),
+                content: Some("overwritten".to_string()),
+                create_dirs: false,
+            })
+            .await;
+
+        let error = result
+            .expect_err("should block identity file write")
+            .to_string();
+        assert!(
+            error.contains("Identity files are protected"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_disabled_allows_identity_file_write() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let tool = FileTool::new(workspace.clone(), sandbox);
+
+        let result = tool
+            .call(FileArgs {
+                operation: "write".to_string(),
+                path: workspace.join("IDENTITY.md").to_string_lossy().into_owned(),
+                content: Some("new identity".to_string()),
+                create_dirs: false,
+            })
+            .await
+            .expect("should allow identity file write when sandbox is disabled");
+
+        assert!(result.success);
+        let written =
+            fs::read_to_string(workspace.join("IDENTITY.md")).expect("failed to read file");
+        assert_eq!(written, "new identity");
+    }
 }

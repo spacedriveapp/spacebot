@@ -95,16 +95,20 @@ where
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
-        // Scan tool arguments for secrets before execution
-        if let Some(leak) = self.scan_for_leaks(args) {
+        // Leak blocking is enforced at channel egress (`reply`). Worker and
+        // branch tool calls may legitimately handle secrets internally.
+        if self.process_type == ProcessType::Channel
+            && tool_name == "reply"
+            && let Some(leak) = self.scan_for_leaks(args)
+        {
             tracing::error!(
                 process_id = %self.process_id,
                 tool_name = %tool_name,
                 leak_prefix = %&leak[..leak.len().min(8)],
-                "secret leak detected in tool arguments, blocking call"
+                "secret leak detected in reply arguments, blocking call"
             );
             return ToolCallHookAction::Skip {
-                reason: "Tool call blocked: arguments contained a secret.".into(),
+                reason: "Reply blocked: content contained a secret.".into(),
             };
         }
 
@@ -141,20 +145,21 @@ where
         _args: &str,
         result: &str,
     ) -> HookAction {
-        // Scan for potential leaks in tool output and terminate if found.
-        // The result is already in Rig's history at this point, but terminating
-        // prevents the agent from forwarding the leaked content to external
-        // services via subsequent tool calls.
-        if let Some(leak) = self.scan_for_leaks(result) {
+        // Only enforce hard-stop leak blocking on channel egress (`reply`).
+        // Worker and branch tool outputs are internal and should not terminate
+        // long-running jobs.
+        if self.process_type == ProcessType::Channel
+            && tool_name == "reply"
+            && let Some(leak) = self.scan_for_leaks(result)
+        {
             tracing::error!(
                 process_id = %self.process_id,
                 tool_name = %tool_name,
                 leak_prefix = %&leak[..leak.len().min(8)],
-                "secret leak detected in tool output, terminating agent"
+                "secret leak detected in reply result, terminating channel turn"
             );
             return HookAction::Terminate {
-                reason: "Tool output contained a secret. Agent terminated to prevent exfiltration."
-                    .into(),
+                reason: "Reply contained a secret. Channel turn terminated.".into(),
             };
         }
 

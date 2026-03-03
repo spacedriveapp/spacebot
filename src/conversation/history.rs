@@ -368,6 +368,62 @@ impl ProcessRunLogger {
         });
     }
 
+    /// Mark all orphaned running workers as failed for an agent.
+    ///
+    /// Called at startup to reconcile rows that were left in `running` when the
+    /// process exited before a `WorkerComplete` event was persisted.
+    pub async fn reconcile_running_workers_for_agent(
+        &self,
+        agent_id: &str,
+        failure_message: &str,
+    ) -> crate::error::Result<u64> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP), \
+                 result = CASE \
+                     WHEN result IS NULL OR result = '' THEN ? \
+                     ELSE result \
+                 END \
+             WHERE status = 'running' AND (agent_id = ? OR agent_id IS NULL)",
+        )
+        .bind(failure_message)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected())
+    }
+
+    /// Mark a detached running worker as cancelled.
+    ///
+    /// Used by API cancellation when the in-memory channel state no longer has
+    /// a live handle for this worker (for example after restart).
+    pub async fn cancel_running_worker(
+        &self,
+        channel_id: &str,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET result = CASE \
+                     WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
+                     ELSE result \
+                 END, \
+                 status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
+             WHERE id = ? AND channel_id = ? AND status = 'running'",
+        )
+        .bind(worker_id.to_string())
+        .bind(channel_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
     /// interleaved chronologically (oldest first).
     ///

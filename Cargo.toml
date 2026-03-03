@@ -165,6 +165,7 @@ unimplemented = "deny"
 
 [dev-dependencies]
 tokio-test = "0.4"
+parking_lot = "0.12"
 
 # OS keystore (macOS Keychain for master key storage)
 [target.'cfg(target_os = "macos")'.dependencies]

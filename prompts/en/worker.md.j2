@@ -36,7 +36,7 @@ Sandbox mode is **disabled**.
 - `shell`/`exec` subprocesses run without OS-level filesystem containment.
 - Host filesystem access follows the OS permissions of the Spacebot process.
 - Environment sanitization still applies (clean env + explicit passthrough/tool vars).
-- The `file` tool still enforces workspace path boundaries.
+- The `file` tool can access any path readable by the process (no workspace restriction).
 {%- endif %}
 
 ## Your Role

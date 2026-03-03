@@ -202,7 +202,7 @@ async fn run_compaction(
 
     // 3. Run the compaction LLM to produce summary + extracted memories
     let routing = deps.runtime_config.routing.load();
-    let model_name = routing.resolve(ProcessType::Worker, None).to_string();
+    let model_name = routing.resolve(ProcessType::Compactor, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "compactor")
         .with_routing((**routing).clone());

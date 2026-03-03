@@ -1,11 +1,13 @@
 //! Send file tool for delivering file attachments to users (channel only).
 
 use crate::OutboundResponse;
+use crate::sandbox::Sandbox;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 /// Tool for sending files to users.
@@ -13,18 +15,25 @@ use tokio::sync::mpsc;
 /// Reads a file from the local filesystem and sends it as an attachment
 /// in the conversation. The channel process creates a response sender per
 /// conversation turn and this tool routes file responses through it.
-/// File access is restricted to the agent's workspace boundary.
+/// When sandbox mode is enabled, file access is restricted to the agent's
+/// workspace boundary. When sandbox is disabled, any readable path is allowed.
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
     response_tx: mpsc::Sender<OutboundResponse>,
     workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
 }
 
 impl SendFileTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>, workspace: PathBuf) -> Self {
+    pub fn new(
+        response_tx: mpsc::Sender<OutboundResponse>,
+        workspace: PathBuf,
+        sandbox: Arc<Sandbox>,
+    ) -> Self {
         Self {
             response_tx,
             workspace,
+            sandbox,
         }
     }
 
@@ -142,7 +151,16 @@ impl Tool for SendFileTool {
             return Err(SendFileError("file_path must be an absolute path".into()));
         }
 
-        let path = self.validate_workspace_path(&raw_path)?;
+        let path = if self.sandbox.mode_enabled() {
+            self.validate_workspace_path(&raw_path)?
+        } else {
+            raw_path.canonicalize().map_err(|error| {
+                SendFileError(format!(
+                    "can't resolve path '{}': {error}",
+                    raw_path.display()
+                ))
+            })?
+        };
 
         let metadata = tokio::fs::metadata(&path).await.map_err(|error| {
             SendFileError(format!("can't read file '{}': {error}", path.display()))
@@ -207,11 +225,22 @@ impl Tool for SendFileTool {
 mod tests {
     use super::*;
 
+    use crate::sandbox::{SandboxConfig, SandboxMode};
     use std::fs;
 
+    fn create_sandbox(mode: SandboxMode, workspace: &std::path::Path) -> Arc<Sandbox> {
+        let config = SandboxConfig {
+            mode,
+            ..Default::default()
+        };
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(config));
+        Arc::new(Sandbox::new_for_test(config, workspace.to_path_buf()))
+    }
+
     fn create_tool(workspace: PathBuf) -> SendFileTool {
+        let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
         let (response_tx, _response_rx) = mpsc::channel(1);
-        SendFileTool::new(response_tx, workspace)
+        SendFileTool::new(response_tx, workspace, sandbox)
     }
 
     #[test]
@@ -258,5 +287,64 @@ mod tests {
             error.contains("Symlinks are not allowed"),
             "unexpected error: {error}"
         );
+    }
+
+    #[test]
+    fn sandbox_enabled_rejects_file_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("secret.txt");
+        fs::write(&file, "secret data").expect("failed to write file");
+
+        let tool = create_tool(workspace);
+        let result = tool.validate_workspace_path(&file);
+
+        assert!(result.is_err(), "should reject path outside workspace");
+        let error = result.expect_err("missing expected error").to_string();
+        assert!(error.contains("ACCESS DENIED"), "unexpected error: {error}");
+    }
+
+    #[tokio::test]
+    async fn sandbox_disabled_allows_file_outside_workspace() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let outside = temp_dir.path().join("outside");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&outside).expect("failed to create outside dir");
+
+        let file = outside.join("report.txt");
+        fs::write(&file, "public data").expect("failed to write file");
+
+        let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
+        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let tool = SendFileTool::new(response_tx, workspace, sandbox);
+
+        let result = tool
+            .call(SendFileArgs {
+                file_path: file.to_string_lossy().into_owned(),
+                caption: None,
+            })
+            .await
+            .expect("should succeed when sandbox is disabled");
+
+        assert!(result.success);
+        assert_eq!(result.filename, "report.txt");
+        assert_eq!(result.size_bytes, 11);
+
+        // Verify the file data was actually sent through the channel.
+        let response = response_rx
+            .try_recv()
+            .expect("should have received response");
+        match response {
+            crate::OutboundResponse::File { filename, data, .. } => {
+                assert_eq!(filename, "report.txt");
+                assert_eq!(data, b"public data");
+            }
+            other => panic!("expected File response, got {other:?}"),
+        }
     }
 }
