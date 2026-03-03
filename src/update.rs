@@ -144,7 +144,7 @@ pub async fn check_for_update(status: &SharedUpdateStatus) {
         can_apply: capability.can_apply,
         cannot_apply_reason: capability.cannot_apply_reason,
         docker_image: capability.docker_image,
-        socket_path: current.socket_path.clone(),
+        socket_path: capability.socket_path,
         checked_at: Some(chrono::Utc::now()),
         ..Default::default()
     };
@@ -284,6 +284,7 @@ struct ApplyCapability {
     can_apply: bool,
     cannot_apply_reason: Option<String>,
     docker_image: Option<String>,
+    socket_path: Option<String>,
 }
 
 async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
@@ -294,6 +295,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 "Native/source installs update manually (rebuild + restart).".to_string(),
             ),
             docker_image: None,
+            socket_path: None,
         },
         Deployment::Hosted => ApplyCapability {
             can_apply: false,
@@ -301,6 +303,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 "Hosted instances are updated by platform rollout, not self-service.".to_string(),
             ),
             docker_image: None,
+            socket_path: None,
         },
         Deployment::Docker => {
             let Some(socket_path) = resolve_container_socket() else {
@@ -310,6 +313,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                         "No container socket found. Mount the Docker or Podman socket to enable one-click updates.".to_string(),
                     ),
                     docker_image: None,
+                    socket_path: None,
                 };
             };
 
@@ -326,6 +330,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                             "Container socket is present but cannot be opened: {error}"
                         )),
                         docker_image: None,
+                        socket_path: None,
                     };
                 }
             };
@@ -337,6 +342,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                         "Docker socket is mounted but engine is not reachable: {error}"
                     )),
                     docker_image: None,
+                    socket_path: None,
                 };
             }
 
@@ -346,6 +352,7 @@ async fn detect_apply_capability(deployment: Deployment) -> ApplyCapability {
                 can_apply: true,
                 cannot_apply_reason: None,
                 docker_image,
+                socket_path: Some(socket_path),
             }
         }
     }
@@ -591,9 +598,14 @@ pub async fn apply_docker_update(status: &SharedUpdateStatus) -> anyhow::Result<
 /// Read this container's ID from /proc/self/mountinfo or the hostname.
 fn get_own_container_id() -> anyhow::Result<String> {
     // Try /proc/self/mountinfo first — works for both Docker and Podman
-    if let Ok(content) = std::fs::read_to_string("/proc/self/mountinfo") {
-        if let Some(id) = parse_container_id_from_mountinfo(&content) {
-            return Ok(id);
+    match std::fs::read_to_string("/proc/self/mountinfo") {
+        Ok(content) => {
+            if let Some(id) = parse_container_id_from_mountinfo(&content) {
+                return Ok(id);
+            }
+        }
+        Err(error) => {
+            tracing::debug!(%error, "failed to read /proc/self/mountinfo; falling back to /etc/hostname");
         }
     }
 
@@ -613,13 +625,10 @@ fn get_own_container_id() -> anyhow::Result<String> {
 /// Recognises both Docker (`/docker/containers/<id>/`) and Podman
 /// (`/overlay-containers/<id>/`) storage path patterns.
 fn parse_container_id_from_mountinfo(content: &str) -> Option<String> {
-    for (marker, offset) in &[
-        ("/docker/containers/", 19usize),
-        ("/overlay-containers/", 20usize),
-    ] {
+    for marker in &["/docker/containers/", "/overlay-containers/"] {
         for line in content.lines() {
             if let Some(pos) = line.find(marker) {
-                let after = &line[pos + offset..];
+                let after = &line[pos + marker.len()..];
                 if let Some(end) = after.find('/') {
                     let id = &after[..end];
                     if id.len() == 64 && id.chars().all(|c| c.is_ascii_hexdigit()) {

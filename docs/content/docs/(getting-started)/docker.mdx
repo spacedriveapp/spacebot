@@ -272,7 +272,7 @@ curl http://localhost:19898/api/update/check
 # Force a fresh check
 curl -X POST http://localhost:19898/api/update/check
 
-# Apply update (requires Docker socket)
+# Apply update (requires container runtime socket — Docker or Podman)
 curl -X POST http://localhost:19898/api/update/apply
 ```
 
