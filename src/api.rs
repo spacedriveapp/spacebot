@@ -10,6 +10,7 @@ mod channels;
 mod config;
 mod cortex;
 mod cron;
+mod files;
 mod ingest;
 mod links;
 mod mcp;

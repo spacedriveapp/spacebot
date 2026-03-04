@@ -17,7 +17,7 @@ import {ChannelDetail} from "@/routes/ChannelDetail";
 import {AgentMemories} from "@/routes/AgentMemories";
 import {AgentConfig} from "@/routes/AgentConfig";
 import {AgentCron} from "@/routes/AgentCron";
-import {AgentIngest} from "@/routes/AgentIngest";
+import {AgentFiles} from "@/routes/AgentFiles";
 import {AgentSkills} from "@/routes/AgentSkills";
 import {AgentWorkers} from "@/routes/AgentWorkers";
 import {AgentTasks} from "@/routes/AgentTasks";
@@ -168,16 +168,19 @@ const agentMemoriesRoute = createRoute({
 	},
 });
 
-const agentIngestRoute = createRoute({
+const agentFilesRoute = createRoute({
 	getParentRoute: () => rootRoute,
-	path: "/agents/$agentId/ingest",
-	component: function AgentIngestPage() {
-		const {agentId} = agentIngestRoute.useParams();
+	path: "/agents/$agentId/files",
+	validateSearch: (search: Record<string, unknown>): {path?: string} => ({
+		path: typeof search.path === "string" ? search.path : undefined,
+	}),
+	component: function AgentFilesPage() {
+		const {agentId} = agentFilesRoute.useParams();
 		return (
 			<div className="flex h-full flex-col">
 				<AgentHeader agentId={agentId} />
 				<div className="flex-1 overflow-hidden">
-					<AgentIngest agentId={agentId} />
+					<AgentFiles agentId={agentId} />
 				</div>
 			</div>
 		);
@@ -320,7 +323,7 @@ const routeTree = rootRoute.addChildren([
 	agentChatRoute,
 	agentChannelsRoute,
 	agentMemoriesRoute,
-	agentIngestRoute,
+	agentFilesRoute,
 	agentWorkersRoute,
 	agentTasksRoute,
 	agentCortexRoute,

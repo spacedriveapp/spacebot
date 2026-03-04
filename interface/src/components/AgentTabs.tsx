@@ -6,7 +6,7 @@ const tabs = [
 	{ label: "Chat", to: "/agents/$agentId/chat" as const, exact: false },
 	{ label: "Channels", to: "/agents/$agentId/channels" as const, exact: false },
 	{ label: "Memories", to: "/agents/$agentId/memories" as const, exact: false },
-	{ label: "Ingest", to: "/agents/$agentId/ingest" as const, exact: false },
+	{ label: "Files", to: "/agents/$agentId/files" as const, exact: false },
 	{ label: "Workers", to: "/agents/$agentId/workers" as const, exact: false },
 	{ label: "Tasks", to: "/agents/$agentId/tasks" as const, exact: false },
 	{ label: "Cortex", to: "/agents/$agentId/cortex" as const, exact: false },

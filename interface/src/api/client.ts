@@ -819,6 +819,42 @@ export interface IngestDeleteResponse {
 	success: boolean;
 }
 
+// -- Filesystem Types --
+
+export interface FilesystemEntry {
+	name: string;
+	entry_type: "file" | "directory" | "other";
+	size: number;
+	modified_at: string | null;
+}
+
+export interface FileListResponse {
+	entries: FilesystemEntry[];
+	path: string;
+}
+
+export interface FileReadResponse {
+	content: string;
+	size: number;
+	truncated: boolean;
+}
+
+export interface FileWriteResponse {
+	success: boolean;
+}
+
+export interface FileDeleteResponse {
+	success: boolean;
+}
+
+export interface FileRenameResponse {
+	success: boolean;
+}
+
+export interface FileUploadResponse {
+	uploaded: string[];
+}
+
 // -- Skills Types --
 
 export interface SkillInfo {
@@ -1630,6 +1666,61 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<IngestDeleteResponse>;
+	},
+
+	// Filesystem API
+	filesystemList: (agentId: string, path = "") => {
+		const params = new URLSearchParams({ agent_id: agentId, path });
+		return fetchJson<FileListResponse>(`/agents/files/list?${params}`);
+	},
+
+	filesystemRead: (agentId: string, path: string) => {
+		const params = new URLSearchParams({ agent_id: agentId, path });
+		return fetchJson<FileReadResponse>(`/agents/files/read?${params}`);
+	},
+
+	filesystemDownloadUrl: (agentId: string, path: string) => {
+		const params = new URLSearchParams({ agent_id: agentId, path });
+		return `${API_BASE}/agents/files/download?${params}`;
+	},
+
+	filesystemWrite: async (agentId: string, path: string, content?: string, isDirectory = false) => {
+		const response = await fetch(`${API_BASE}/agents/files/write`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, path, content, is_directory: isDirectory }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<FileWriteResponse>;
+	},
+
+	filesystemDelete: async (agentId: string, path: string) => {
+		const params = new URLSearchParams({ agent_id: agentId, path });
+		const response = await fetch(`${API_BASE}/agents/files/delete?${params}`, { method: "DELETE" });
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<FileDeleteResponse>;
+	},
+
+	filesystemRename: async (agentId: string, oldPath: string, newPath: string) => {
+		const response = await fetch(`${API_BASE}/agents/files/rename`, {
+			method: "PUT",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ agent_id: agentId, old_path: oldPath, new_path: newPath }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<FileRenameResponse>;
+	},
+
+	filesystemUpload: async (agentId: string, path: string, files: File[]) => {
+		const formData = new FormData();
+		for (const file of files) formData.append("files", file);
+		const params = new URLSearchParams({ agent_id: agentId, path });
+		const response = await fetch(`${API_BASE}/agents/files/upload?${params}`, {
+			method: "POST",
+			body: formData,
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<FileUploadResponse>;
 	},
 
 	// Messaging / Bindings API

@@ -2,8 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, secrets, settings, skills, system, tasks, tools, webchat, workers,
+    agents, bindings, channels, config, cortex, cron, files, ingest, links, mcp, memories,
+    messaging, models, providers, secrets, settings, skills, system, tasks, tools, webchat,
+    workers,
 };
 
 use axum::Json;
@@ -137,6 +138,14 @@ pub async fn start_http_server(
             get(ingest::list_ingest_files).delete(ingest::delete_ingest_file),
         )
         .route("/agents/ingest/upload", post(ingest::upload_ingest_file))
+        // Workspace filesystem explorer
+        .route("/agents/files/list", get(files::list_files))
+        .route("/agents/files/read", get(files::read_file))
+        .route("/agents/files/download", get(files::download_file))
+        .route("/agents/files/write", post(files::write_file))
+        .route("/agents/files/delete", delete(files::delete_file))
+        .route("/agents/files/rename", put(files::rename_file))
+        .route("/agents/files/upload", post(files::upload_files))
         .route("/agents/skills", get(skills::list_skills))
         .route("/agents/skills/install", post(skills::install_skill))
         .route("/agents/skills/remove", delete(skills::remove_skill))

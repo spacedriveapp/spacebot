@@ -91,7 +91,7 @@ impl FileTool {
 /// Canonicalize as much of the path as possible. For paths where the final
 /// components don't exist yet (e.g. writing a new file), canonicalize the
 /// deepest existing ancestor and append the rest.
-fn best_effort_canonicalize(path: &Path) -> PathBuf {
+pub(crate) fn best_effort_canonicalize(path: &Path) -> PathBuf {
     if let Ok(canonical) = path.canonicalize() {
         return canonical;
     }
