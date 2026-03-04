@@ -140,7 +140,8 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     ) -> HookAction {
         let guard_action = self.spacebot_hook.guard_tool_result(tool_name, result);
         if !matches!(guard_action, HookAction::Continue) {
-            self.spacebot_hook.record_tool_result_metrics(tool_name, internal_call_id);
+            self.spacebot_hook
+                .record_tool_result_metrics(tool_name, internal_call_id);
             return guard_action;
         }
         let preview = crate::tools::truncate_utf8_ellipsis(result, 200);
