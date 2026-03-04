@@ -1,11 +1,14 @@
 //! Memory maintenance integration coverage.
 
-use spacebot::memory::maintenance::run_maintenance;
+use spacebot::memory::maintenance::{run_maintenance, run_maintenance_with_cancel};
 use spacebot::memory::{MemoryStore, RelationType, maintenance::MaintenanceConfig};
 use tempfile::tempdir;
+use tokio::sync::watch;
 
-#[tokio::test]
-async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
+async fn make_memory_maintenance_fixture() -> (
+    std::sync::Arc<MemoryStore>,
+    spacebot::memory::EmbeddingTable,
+) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .in_memory(true)
         .create_if_missing(true);
@@ -22,13 +25,20 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
     let store: std::sync::Arc<MemoryStore> = MemoryStore::new(pool);
 
     let dir = tempdir().expect("failed to create temp dir");
-    let lance_conn = lancedb::connect(dir.path().to_str().expect("temp dir path"))
+    let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
         .execute()
         .await
         .expect("failed to connect to lancedb");
     let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&lance_conn)
         .await
         .expect("failed to create embedding table");
+
+    (store, embedding_table)
+}
+
+#[tokio::test]
+async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
+    let (store, embedding_table) = make_memory_maintenance_fixture().await;
 
     let survivor = {
         let memory = spacebot::memory::Memory::new(
@@ -146,4 +156,32 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
         .await
         .expect("failed to query merged embedding");
     assert!(similar_to_merged.is_empty());
+}
+
+#[tokio::test]
+async fn maintenance_run_can_be_cancelled() {
+    let (store, embedding_table) = make_memory_maintenance_fixture().await;
+    let maintenance_config = MaintenanceConfig::default();
+
+    let (cancel_tx, cancel_rx) = watch::channel(false);
+    cancel_tx.send_replace(true);
+
+    let maintenance_task = tokio::spawn(async move {
+        run_maintenance_with_cancel(&store, &embedding_table, &maintenance_config, cancel_rx).await
+    });
+
+    let result = maintenance_task
+        .await
+        .expect("maintenance task should have completed");
+
+    assert!(
+        result.is_err(),
+        "maintenance should stop after cancellation is requested"
+    );
+    let error_message = result.unwrap_err().to_string();
+    assert!(
+        error_message.contains("memory maintenance cancelled"),
+        "expected cancellation error, got: {}",
+        error_message,
+    );
 }

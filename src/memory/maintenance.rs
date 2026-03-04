@@ -5,8 +5,11 @@ use crate::memory::{Association, EmbeddingTable, Memory, MemoryStore, MemoryType
 use anyhow::Context;
 
 use sqlx::Row;
+use sqlx::sqlite::SqliteRow;
+use tokio::sync::watch;
 
 use std::collections::HashSet;
+use std::future::Future;
 
 /// Maintenance configuration.
 #[derive(Debug, Clone)]
@@ -38,18 +41,34 @@ pub async fn run_maintenance(
     embedding_table: &EmbeddingTable,
     config: &MaintenanceConfig,
 ) -> Result<MaintenanceReport> {
+    let (_maintenance_cancel_tx, maintenance_cancel_rx) = watch::channel(false);
+    run_maintenance_with_cancel(memory_store, embedding_table, config, maintenance_cancel_rx).await
+}
+
+/// Run maintenance tasks with a cancellation signal.
+///
+/// The signal allows maintenance to exit quickly when the caller decides to stop it.
+pub async fn run_maintenance_with_cancel(
+    memory_store: &MemoryStore,
+    embedding_table: &EmbeddingTable,
+    config: &MaintenanceConfig,
+    mut maintenance_cancel_rx: watch::Receiver<bool>,
+) -> Result<MaintenanceReport> {
     let mut report = MaintenanceReport::default();
+    check_maintenance_cancellation(&mut maintenance_cancel_rx).await?;
 
     // Apply decay to all non-identity memories
     // Fields are assigned sequentially because the values are async — can't use struct literal.
     #[allow(clippy::field_reassign_with_default)]
     {
-        report.decayed = apply_decay(memory_store, config.decay_rate).await?;
-        report.pruned = prune_memories(memory_store, config).await?;
+        report.decayed =
+            apply_decay(memory_store, config.decay_rate, &mut maintenance_cancel_rx).await?;
+        report.pruned = prune_memories(memory_store, config, &mut maintenance_cancel_rx).await?;
         report.merged = merge_similar_memories(
             memory_store,
             embedding_table,
             config.merge_similarity_threshold,
+            &mut maintenance_cancel_rx,
         )
         .await?;
     }
@@ -58,7 +77,13 @@ pub async fn run_maintenance(
 }
 
 /// Apply importance decay based on recency and access patterns.
-async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usize> {
+async fn apply_decay(
+    memory_store: &MemoryStore,
+    decay_rate: f32,
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<usize> {
+    check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
     // Get all non-identity memories
     let all_types: Vec<_> = MemoryType::ALL
         .iter()
@@ -69,9 +94,15 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
     let mut decayed_count = 0;
 
     for mem_type in all_types {
-        let memories = memory_store.get_by_type(mem_type, 1000).await?;
+        let memories = maintenance_cancelable_op(
+            maintenance_cancel_rx,
+            memory_store.get_by_type(mem_type, 1000),
+        )
+        .await?;
 
         for mut memory in memories {
+            check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
             let now = chrono::Utc::now();
             let days_old = (now - memory.updated_at).num_days();
             let days_since_access = (now - memory.last_accessed_at).num_days();
@@ -91,7 +122,8 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
             if (new_importance - memory.importance).abs() > 0.01 {
                 memory.importance = new_importance.clamp(0.0, 1.0);
                 memory.updated_at = now;
-                memory_store.update(&memory).await?;
+                maintenance_cancelable_op(maintenance_cancel_rx, memory_store.update(&memory))
+                    .await?;
                 decayed_count += 1;
             }
         }
@@ -101,30 +133,40 @@ async fn apply_decay(memory_store: &MemoryStore, decay_rate: f32) -> Result<usiz
 }
 
 /// Prune memories that have fallen below the importance threshold.
-async fn prune_memories(memory_store: &MemoryStore, config: &MaintenanceConfig) -> Result<usize> {
+async fn prune_memories(
+    memory_store: &MemoryStore,
+    config: &MaintenanceConfig,
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<usize> {
+    check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
     let now = chrono::Utc::now();
     let min_age = chrono::Duration::days(config.min_age_days);
     let cutoff_date = now - min_age;
 
     // Get all memories below threshold that are old enough
-    let candidates = sqlx::query(
-        r#"
+    let candidates: Vec<SqliteRow> = maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        sqlx::query(
+            r#"
         SELECT id FROM memories
         WHERE importance < ? 
         AND memory_type != 'identity'
         AND created_at < ?
         "#,
+        )
+        .bind(config.prune_threshold)
+        .bind(cutoff_date)
+        .fetch_all(memory_store.pool()),
     )
-    .bind(config.prune_threshold)
-    .bind(cutoff_date)
-    .fetch_all(memory_store.pool())
     .await?;
 
     let mut pruned_count = 0;
 
     for row in candidates {
         let id: String = row.try_get("id")?;
-        memory_store.delete(&id).await?;
+        check_maintenance_cancellation(maintenance_cancel_rx).await?;
+        maintenance_cancelable_op(maintenance_cancel_rx, memory_store.delete(&id)).await?;
         pruned_count += 1;
     }
 
@@ -136,8 +178,9 @@ async fn merge_similar_memories(
     memory_store: &MemoryStore,
     embedding_table: &EmbeddingTable,
     similarity_threshold: f32,
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<usize> {
-    let memory_ids = fetch_candidate_memory_ids(memory_store).await?;
+    let memory_ids = fetch_candidate_memory_ids(memory_store, maintenance_cancel_rx).await?;
     if memory_ids.is_empty() {
         return Ok(0);
     }
@@ -146,11 +189,15 @@ async fn merge_similar_memories(
     let mut merged_memory_ids = HashSet::new();
 
     for source_id in memory_ids {
+        check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
         if merged_memory_ids.contains(&source_id) {
             continue;
         }
 
-        let Some(source_memory) = memory_store.load(&source_id).await? else {
+        let Some(source_memory) =
+            maintenance_cancelable_op(maintenance_cancel_rx, memory_store.load(&source_id)).await?
+        else {
             continue;
         };
         if source_memory.forgotten {
@@ -161,9 +208,11 @@ async fn merge_similar_memories(
             continue;
         }
 
-        let similar = match embedding_table
-            .find_similar(&source_memory.id, similarity_threshold, 25)
-            .await
+        let similar = match maintenance_cancelable_op(
+            maintenance_cancel_rx,
+            embedding_table.find_similar(&source_memory.id, similarity_threshold, 25),
+        )
+        .await
         {
             Ok(similar) => similar,
             Err(error) => {
@@ -184,11 +233,15 @@ async fn merge_similar_memories(
         let mut source_merged = false;
 
         for (candidate_id, _similarity) in similar {
+            check_maintenance_cancellation(maintenance_cancel_rx).await?;
             if merged_memory_ids.contains(&candidate_id) || candidate_id == active_survivor.id {
                 continue;
             }
 
-            let Some(candidate_memory) = memory_store.load(&candidate_id).await? else {
+            let Some(candidate_memory) =
+                maintenance_cancelable_op(maintenance_cancel_rx, memory_store.load(&candidate_id))
+                    .await?
+            else {
                 continue;
             };
             if candidate_memory.forgotten {
@@ -196,7 +249,14 @@ async fn merge_similar_memories(
             }
 
             let (winner, loser) = choose_merge_pair(&active_survivor, &candidate_memory);
-            merge_pair(memory_store, embedding_table, &winner, &loser).await?;
+            merge_pair(
+                memory_store,
+                embedding_table,
+                &winner,
+                &loser,
+                maintenance_cancel_rx,
+            )
+            .await?;
             merged_memory_ids.insert(loser.id.clone());
             merged_count += 1;
 
@@ -253,20 +313,35 @@ async fn merge_pair(
     embedding_table: &EmbeddingTable,
     survivor: &Memory,
     merged: &Memory,
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<()> {
+    check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
     let mut updated_survivor = survivor.clone();
     updated_survivor.content = merged_memory_content(updated_survivor.content, &merged.content);
     updated_survivor.updated_at = chrono::Utc::now();
 
-    memory_store.update(&updated_survivor).await?;
+    maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        memory_store.update(&updated_survivor),
+    )
+    .await?;
 
-    let merged_associations = memory_store.get_associations(&merged.id).await?;
+    let merged_associations = maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        memory_store.get_associations(&merged.id),
+    )
+    .await?;
     if !merged_associations.is_empty() {
-        memory_store
-            .delete_associations_for_memory(&merged.id)
-            .await?;
+        maintenance_cancelable_op(
+            maintenance_cancel_rx,
+            memory_store.delete_associations_for_memory(&merged.id),
+        )
+        .await?;
 
         for mut association in merged_associations {
+            check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
             if association.source_id == updated_survivor.id {
                 continue;
             }
@@ -282,24 +357,40 @@ async fn merge_pair(
                 continue;
             }
 
-            memory_store.create_association(&association).await?;
+            maintenance_cancelable_op(
+                maintenance_cancel_rx,
+                memory_store.create_association(&association),
+            )
+            .await?;
         }
     }
 
     let updates_assoc =
         Association::new(&updated_survivor.id, &merged.id, RelationType::Updates).with_weight(1.0);
-    memory_store.create_association(&updates_assoc).await?;
+    maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        memory_store.create_association(&updates_assoc),
+    )
+    .await?;
 
-    memory_store.forget(&merged.id).await?;
-    embedding_table.delete(&merged.id).await?;
+    maintenance_cancelable_op(maintenance_cancel_rx, memory_store.forget(&merged.id)).await?;
+    maintenance_cancelable_op(maintenance_cancel_rx, embedding_table.delete(&merged.id)).await?;
     Ok(())
 }
 
-async fn fetch_candidate_memory_ids(memory_store: &MemoryStore) -> Result<Vec<String>> {
-    let rows = sqlx::query(
-        "SELECT id FROM memories WHERE forgotten = 0 ORDER BY importance DESC, created_at DESC, id ASC",
+async fn fetch_candidate_memory_ids(
+    memory_store: &MemoryStore,
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<Vec<String>> {
+    check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
+    let rows: Vec<SqliteRow> = maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        sqlx::query(
+            "SELECT id FROM memories WHERE forgotten = 0 ORDER BY importance DESC, created_at DESC, id ASC",
+        )
+        .fetch_all(memory_store.pool()),
     )
-    .fetch_all(memory_store.pool())
     .await
     .with_context(|| "failed to fetch candidate memories for maintenance")?;
 
@@ -314,6 +405,47 @@ async fn fetch_candidate_memory_ids(memory_store: &MemoryStore) -> Result<Vec<St
     Ok(ids)
 }
 
+async fn check_maintenance_cancellation(
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
+) -> Result<()> {
+    if *maintenance_cancel_rx.borrow() {
+        return Err(anyhow::anyhow!("memory maintenance cancelled").into());
+    }
+
+    if maintenance_cancel_rx
+        .has_changed()
+        .map_err(|error| anyhow::anyhow!(error))?
+    {
+        maintenance_cancel_rx
+            .changed()
+            .await
+            .map_err(|error| anyhow::anyhow!(error))?;
+        if *maintenance_cancel_rx.borrow() {
+            return Err(anyhow::anyhow!("memory maintenance cancelled").into());
+        }
+    }
+
+    Ok(())
+}
+
+async fn maintenance_cancelable_op<T, E>(
+    maintenance_cancel_rx: &mut watch::Receiver<bool>,
+    operation: impl Future<Output = std::result::Result<T, E>>,
+) -> Result<T>
+where
+    E: Into<crate::error::Error>,
+{
+    check_maintenance_cancellation(maintenance_cancel_rx).await?;
+
+    tokio::select! {
+        biased;
+        _ = maintenance_cancel_rx.changed() => {
+            Err(anyhow::anyhow!("memory maintenance cancelled").into())
+        }
+        result = operation => result.map_err(Into::into),
+    }
+}
+
 /// Maintenance report.
 #[derive(Debug, Default)]
 pub struct MaintenanceReport {
@@ -326,6 +458,7 @@ pub struct MaintenanceReport {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+    use tokio::time::Duration;
 
     async fn create_memory_with_embedding(
         store: &MemoryStore,
@@ -483,5 +616,43 @@ mod tests {
             duplicate_associations[0].relation_type,
             RelationType::Updates
         );
+    }
+
+    #[tokio::test]
+    async fn run_maintenance_with_cancel_stops_when_cancel_requested() {
+        let store = MemoryStore::connect_in_memory().await;
+
+        let dir = tempdir().expect("failed to create temp dir");
+        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
+            .execute()
+            .await
+            .expect("failed to connect to lancedb");
+        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
+            .await
+            .expect("failed to create embedding table");
+
+        let (_cancel_tx, maintenance_cancel_rx) = tokio::sync::watch::channel(true);
+        let result = run_maintenance_with_cancel(
+            &store,
+            &embedding_table,
+            &MaintenanceConfig::default(),
+            maintenance_cancel_rx,
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "maintenance should stop immediately when cancellation is requested"
+        );
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("memory maintenance cancelled"),
+            "expected explicit maintenance cancellation error"
+        );
+
+        tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
