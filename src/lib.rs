@@ -197,6 +197,13 @@ pub enum ProcessEvent {
         /// "created", "updated", or "deleted".
         action: String,
     },
+    /// An OpenCode worker created a session, recording metadata for the web UI embed.
+    OpenCodeSessionCreated {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        session_id: String,
+        port: u16,
+    },
 }
 
 /// A message to be injected into a specific channel from outside the normal

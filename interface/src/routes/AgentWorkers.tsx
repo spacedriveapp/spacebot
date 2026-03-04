@@ -16,6 +16,13 @@ import {LiveDuration} from "@/components/LiveDuration";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {cx} from "@/ui/utils";
 
+/** RFC 4648 base64url encoding (no padding), matching OpenCode's directory encoding. */
+function base64UrlEncode(value: string): string {
+	const bytes = new TextEncoder().encode(value);
+	const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
+	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+}
+
 const STATUS_FILTERS = ["all", "running", "done", "failed"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
 
@@ -139,6 +146,7 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 				has_transcript: false,
 				live_status: live.status,
 				tool_calls: live.toolCalls,
+				opencode_port: null,
 			}));
 
 		return [...synthetic, ...merged];
@@ -177,6 +185,8 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 			completed_at: null,
 			transcript: null,
 			tool_calls: live.toolCalls,
+			opencode_session_id: null,
+			opencode_port: null,
 		};
 	}, [detailData, scopedActiveWorkers, selectedWorkerId]);
 
@@ -339,6 +349,8 @@ function WorkerCard({
 	);
 }
 
+type DetailTab = "opencode" | "transcript";
+
 function WorkerDetail({
 	detail,
 	liveWorker,
@@ -353,6 +365,21 @@ function WorkerDetail({
 	const displayStatus = liveWorker?.status;
 	const currentTool = liveWorker?.currentTool;
 	const toolCalls = liveWorker?.toolCalls ?? detail.tool_calls ?? 0;
+
+	const hasOpenCodeEmbed =
+		detail.worker_type === "opencode" &&
+		detail.opencode_port != null &&
+		detail.opencode_session_id != null;
+
+	const [activeTab, setActiveTab] = useState<DetailTab>(
+		hasOpenCodeEmbed ? "opencode" : "transcript",
+	);
+
+	// Reset tab when switching workers
+	useEffect(() => {
+		setActiveTab(hasOpenCodeEmbed ? "opencode" : "transcript");
+	}, [detail.id, hasOpenCodeEmbed]);
+
 	// Use persisted transcript if available, otherwise fall back to live SSE transcript.
 	// Strip the final action step if it duplicates the result text shown above.
 	const rawTranscript = detail.transcript ?? (isRunning ? liveTranscript : null);
@@ -373,10 +400,10 @@ function WorkerDetail({
 
 	// Auto-scroll to latest transcript step for running workers
 	useEffect(() => {
-		if (isRunning && transcriptRef.current) {
+		if (isRunning && activeTab === "transcript" && transcriptRef.current) {
 			transcriptRef.current.scrollTop = transcriptRef.current.scrollHeight;
 		}
-	}, [isRunning, transcript?.length]);
+	}, [isRunning, activeTab, transcript?.length]);
 
 	return (
 		<div className="flex h-full flex-col">
@@ -444,57 +471,148 @@ function WorkerDetail({
 				)}
 			</div>
 
-			{/* Content */}
-			<div ref={transcriptRef} className="flex-1 overflow-y-auto">
-				{/* Result section */}
-				{detail.result && (
-					<div className="border-b border-app-line/30 px-6 py-4">
-						<h3 className="mb-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
-							Result
-						</h3>
-						<div className="text-xs text-ink">
-							<Markdown>{detail.result}</Markdown>
-						</div>
-					</div>
-				)}
+			{/* Tab bar (only for OpenCode workers with embed data) */}
+			{hasOpenCodeEmbed && (
+				<div className="flex border-b border-app-line/50">
+					<button
+						onClick={() => setActiveTab("opencode")}
+						className={cx(
+							"px-4 py-2 text-xs font-medium transition-colors",
+							activeTab === "opencode"
+								? "border-b-2 border-accent text-accent"
+								: "text-ink-faint hover:text-ink-dull",
+						)}
+					>
+						OpenCode
+					</button>
+					<button
+						onClick={() => setActiveTab("transcript")}
+						className={cx(
+							"px-4 py-2 text-xs font-medium transition-colors",
+							activeTab === "transcript"
+								? "border-b-2 border-accent text-accent"
+								: "text-ink-faint hover:text-ink-dull",
+						)}
+					>
+						Transcript
+					</button>
+				</div>
+			)}
 
-				{/* Transcript section */}
-				{transcript && transcript.length > 0 ? (
-					<div className="px-6 py-4">
-						<h3 className="mb-3 text-tiny font-medium uppercase tracking-wider text-ink-faint">
-							{isRunning ? "Live Transcript" : "Transcript"}
-						</h3>
-						<div className="flex flex-col gap-3">
-							{transcript.map((step, index) => (
-								<motion.div
-									key={`${step.type}-${index}`}
-									initial={{opacity: 0, y: 6}}
-									animate={{opacity: 1, y: 0}}
-									transition={{duration: 0.2, ease: "easeOut"}}
-								>
-									<TranscriptStepView step={step} />
-								</motion.div>
-							))}
-							{isRunning && currentTool && (
-								<div className="flex items-center gap-2 py-2 text-tiny text-accent">
-									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
-									Running {currentTool}...
-								</div>
-							)}
+			{/* Content */}
+			{activeTab === "opencode" && hasOpenCodeEmbed ? (
+				<OpenCodeEmbed
+					port={detail.opencode_port!}
+					sessionId={detail.opencode_session_id!}
+				/>
+			) : (
+				<div ref={transcriptRef} className="flex-1 overflow-y-auto">
+					{/* Result section */}
+					{detail.result && (
+						<div className="border-b border-app-line/30 px-6 py-4">
+							<h3 className="mb-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
+								Result
+							</h3>
+							<div className="text-xs text-ink">
+								<Markdown>{detail.result}</Markdown>
+							</div>
 						</div>
-					</div>
-				) : isRunning ? (
-					<div className="flex flex-col items-center justify-center gap-2 py-12 text-ink-faint">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
-						<p className="text-xs">Waiting for first tool call...</p>
-					</div>
-				) : (
-					<div className="px-6 py-8 text-center text-xs text-ink-faint">
-						Full transcript not available for this worker
-					</div>
-				)}
-			</div>
+					)}
+
+					{/* Transcript section */}
+					{transcript && transcript.length > 0 ? (
+						<div className="px-6 py-4">
+							<h3 className="mb-3 text-tiny font-medium uppercase tracking-wider text-ink-faint">
+								{isRunning ? "Live Transcript" : "Transcript"}
+							</h3>
+							<div className="flex flex-col gap-3">
+								{transcript.map((step, index) => (
+									<motion.div
+										key={`${step.type}-${index}`}
+										initial={{opacity: 0, y: 6}}
+										animate={{opacity: 1, y: 0}}
+										transition={{duration: 0.2, ease: "easeOut"}}
+									>
+										<TranscriptStepView step={step} />
+									</motion.div>
+								))}
+								{isRunning && currentTool && (
+									<div className="flex items-center gap-2 py-2 text-tiny text-accent">
+										<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+										Running {currentTool}...
+									</div>
+								)}
+							</div>
+						</div>
+					) : isRunning ? (
+						<div className="flex flex-col items-center justify-center gap-2 py-12 text-ink-faint">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+							<p className="text-xs">Waiting for first tool call...</p>
+						</div>
+					) : (
+						<div className="px-6 py-8 text-center text-xs text-ink-faint">
+							Full transcript not available for this worker
+						</div>
+					)}
+				</div>
+			)}
 		</div>
+	);
+}
+
+function OpenCodeEmbed({port, sessionId}: {port: number; sessionId: string}) {
+	const [state, setState] = useState<"loading" | "ready" | "error">("loading");
+
+	useEffect(() => {
+		setState("loading");
+		const controller = new AbortController();
+
+		fetch(`/api/opencode/${port}/global/health`, {signal: controller.signal})
+			.then((response) => {
+				setState(response.ok ? "ready" : "error");
+			})
+			.catch(() => {
+				setState("error");
+			});
+
+		return () => controller.abort();
+	}, [port, sessionId]);
+
+	if (state === "loading") {
+		return (
+			<div className="flex flex-1 items-center justify-center">
+				<div className="flex items-center gap-2 text-xs text-ink-faint">
+					<span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+					Connecting to OpenCode...
+				</div>
+			</div>
+		);
+	}
+
+	if (state === "error") {
+		return (
+			<div className="flex flex-1 flex-col items-center justify-center gap-2 text-ink-faint">
+				<p className="text-xs">OpenCode server is not reachable</p>
+				<p className="text-tiny">
+					The server may have been stopped. Try the Transcript tab for available data.
+				</p>
+			</div>
+		);
+	}
+
+	// Build the iframe URL. OpenCode uses base64url-encoded directory paths
+	// in its SPA routing. We load the root and let the app navigate — the
+	// server knows its directory, and the session list will show this session.
+	// Direct deep-linking: /api/opencode/{port}/{base64dir}/session/{sessionId}
+	const iframeSrc = `/api/opencode/${port}/`;
+
+	return (
+		<iframe
+			src={iframeSrc}
+			className="h-full w-full flex-1 border-0"
+			title="OpenCode"
+			sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+		/>
 	);
 }
 

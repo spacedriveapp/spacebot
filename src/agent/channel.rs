@@ -1574,6 +1574,14 @@ impl Channel {
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
             }
+            ProcessEvent::OpenCodeSessionCreated {
+                worker_id,
+                session_id,
+                port,
+                ..
+            } => {
+                run_logger.log_opencode_metadata(*worker_id, session_id, *port);
+            }
             _ => {}
         }
 

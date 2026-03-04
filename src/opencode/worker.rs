@@ -136,9 +136,24 @@ impl OpenCodeWorker {
         };
         let session_id = session.id.clone();
 
+        // Record metadata so the web UI can embed the OpenCode interface
+        let opencode_port = {
+            let guard = server.lock().await;
+            guard.port()
+        };
+        self.event_tx
+            .send(ProcessEvent::OpenCodeSessionCreated {
+                agent_id: self.agent_id.clone(),
+                worker_id: self.id,
+                session_id: session_id.clone(),
+                port: opencode_port,
+            })
+            .ok();
+
         tracing::info!(
             worker_id = %self.id,
             session_id = %session_id,
+            port = opencode_port,
             directory = %self.directory.display(),
             "OpenCode session created"
         );

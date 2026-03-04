@@ -368,6 +368,30 @@ impl ProcessRunLogger {
         });
     }
 
+    /// Record OpenCode session metadata on a worker run. Fire-and-forget.
+    ///
+    /// Stores the session ID and server port so the frontend can construct
+    /// an iframe URL to the embedded OpenCode web UI.
+    pub fn log_opencode_metadata(&self, worker_id: WorkerId, session_id: &str, port: u16) {
+        let pool = self.pool.clone();
+        let id = worker_id.to_string();
+        let session_id = session_id.to_string();
+
+        tokio::spawn(async move {
+            if let Err(error) = sqlx::query(
+                "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
+            )
+            .bind(&session_id)
+            .bind(port as i32)
+            .bind(&id)
+            .execute(&pool)
+            .await
+            {
+                tracing::warn!(%error, worker_id = %id, "failed to persist OpenCode metadata");
+            }
+        });
+    }
+
     /// Mark all orphaned running workers as failed for an agent.
     ///
     /// Called at startup to reconcile rows that were left in `running` when the
@@ -549,7 +573,7 @@ impl ProcessRunLogger {
         let list_query = format!(
             "SELECT w.id, w.task, w.status, w.worker_type, w.channel_id, w.started_at, \
                     w.completed_at, w.transcript IS NOT NULL as has_transcript, \
-                    w.tool_calls, c.display_name as channel_name \
+                    w.tool_calls, w.opencode_port, c.display_name as channel_name \
              FROM worker_runs w \
              LEFT JOIN channels c ON w.channel_id = c.id \
              {list_where_clause} \
@@ -601,6 +625,7 @@ impl ProcessRunLogger {
                     .map(|t| t.to_rfc3339()),
                 has_transcript: row.try_get::<bool, _>("has_transcript").unwrap_or(false),
                 tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+                opencode_port: row.try_get::<i32, _>("opencode_port").ok(),
             })
             .collect();
 
@@ -616,6 +641,7 @@ impl ProcessRunLogger {
         let row = sqlx::query(
             "SELECT w.id, w.task, w.result, w.status, w.worker_type, w.channel_id, \
                     w.started_at, w.completed_at, w.transcript, w.tool_calls, \
+                    w.opencode_session_id, w.opencode_port, \
                     c.display_name as channel_name \
              FROM worker_runs w \
              LEFT JOIN channels c ON w.channel_id = c.id \
@@ -647,6 +673,8 @@ impl ProcessRunLogger {
                 .map(|t| t.to_rfc3339()),
             transcript_blob: row.try_get("transcript").ok(),
             tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
+            opencode_session_id: row.try_get("opencode_session_id").ok(),
+            opencode_port: row.try_get::<i32, _>("opencode_port").ok(),
         }))
     }
 }
@@ -664,6 +692,7 @@ pub struct WorkerRunRow {
     pub completed_at: Option<String>,
     pub has_transcript: bool,
     pub tool_calls: i64,
+    pub opencode_port: Option<i32>,
 }
 
 /// A worker run row with full detail including the transcript blob.
@@ -680,4 +709,6 @@ pub struct WorkerDetailRow {
     pub completed_at: Option<String>,
     pub transcript_blob: Option<Vec<u8>>,
     pub tool_calls: i64,
+    pub opencode_session_id: Option<String>,
+    pub opencode_port: Option<i32>,
 }

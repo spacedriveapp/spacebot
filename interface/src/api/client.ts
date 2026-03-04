@@ -219,6 +219,7 @@ export interface WorkerRunInfo {
 	has_transcript: boolean;
 	live_status: string | null;
 	tool_calls: number;
+	opencode_port: number | null;
 }
 
 export interface WorkerDetailResponse {
@@ -233,6 +234,8 @@ export interface WorkerDetailResponse {
 	completed_at: string | null;
 	transcript: TranscriptStep[] | null;
 	tool_calls: number;
+	opencode_session_id: string | null;
+	opencode_port: number | null;
 }
 
 export interface WorkerListResponse {
