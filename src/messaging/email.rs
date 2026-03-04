@@ -14,6 +14,7 @@ use mailparse::{DispositionType, MailAddr, MailHeaderMap};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, watch};
@@ -34,8 +35,8 @@ enum ImapSession {
 impl ImapSession {
     fn select(&mut self, folder: &str) -> imap::error::Result<imap::types::Mailbox> {
         match self {
-            Self::Tls(s) => s.select(folder),
-            Self::Plain(s) => s.select(folder),
+            Self::Tls(session) => session.select(folder),
+            Self::Plain(session) => session.select(folder),
         }
     }
 
@@ -45,8 +46,8 @@ impl ImapSession {
         query: &str,
     ) -> imap::error::Result<imap::types::ZeroCopy<Vec<imap::types::Fetch>>> {
         match self {
-            Self::Tls(s) => s.uid_fetch(uid_set, query),
-            Self::Plain(s) => s.uid_fetch(uid_set, query),
+            Self::Tls(session) => session.uid_fetch(uid_set, query),
+            Self::Plain(session) => session.uid_fetch(uid_set, query),
         }
     }
 
@@ -56,22 +57,22 @@ impl ImapSession {
         query: impl AsRef<str>,
     ) -> imap::error::Result<imap::types::ZeroCopy<Vec<imap::types::Fetch>>> {
         match self {
-            Self::Tls(s) => s.uid_store(uid_set, query),
-            Self::Plain(s) => s.uid_store(uid_set, query),
+            Self::Tls(session) => session.uid_store(uid_set, query),
+            Self::Plain(session) => session.uid_store(uid_set, query),
         }
     }
 
     fn uid_search(&mut self, query: impl AsRef<str>) -> imap::error::Result<HashSet<u32>> {
         match self {
-            Self::Tls(s) => s.uid_search(query),
-            Self::Plain(s) => s.uid_search(query),
+            Self::Tls(session) => session.uid_search(query),
+            Self::Plain(session) => session.uid_search(query),
         }
     }
 
     fn logout(&mut self) -> imap::error::Result<()> {
         match self {
-            Self::Tls(s) => s.logout(),
-            Self::Plain(s) => s.logout(),
+            Self::Tls(session) => session.logout(),
+            Self::Plain(session) => session.logout(),
         }
     }
 }
@@ -679,6 +680,14 @@ fn build_smtp_transport(config: &EmailConfig) -> crate::Result<AsyncSmtpTranspor
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
             .with_context(|| format!("invalid SMTP host '{}'", config.smtp_host))?
     } else {
+        if !is_local_mail_host(&config.smtp_host) {
+            return Err(anyhow::anyhow!(
+                "refusing plaintext SMTP for non-local host '{}'; enable STARTTLS or use a localhost bridge",
+                config.smtp_host
+            )
+            .into());
+        }
+
         // Plain TCP (no TLS) — used by local bridges like Proton Bridge.
         // `builder_dangerous` allows unencrypted SMTP, which is safe for
         // localhost connections where the bridge itself encrypts upstream.
@@ -784,14 +793,36 @@ fn open_imap_session(config: &EmailPollConfig) -> anyhow::Result<ImapSession> {
 
         Ok(ImapSession::Tls(session))
     } else {
+        if !is_local_mail_host(&config.imap_host) {
+            return Err(anyhow::anyhow!(
+                "refusing plaintext IMAP for non-local host '{}'; enable TLS or use a localhost bridge",
+                config.imap_host
+            ));
+        }
+
         // Plain TCP (no TLS) — used by local bridges like Proton Bridge
-        let tcp = std::net::TcpStream::connect((config.imap_host.as_str(), config.imap_port))
+        let address = (config.imap_host.as_str(), config.imap_port)
+            .to_socket_addrs()
+            .with_context(|| {
+                format!(
+                    "failed to resolve IMAP server '{}:{}'",
+                    config.imap_host, config.imap_port
+                )
+            })?
+            .next()
+            .context("no IMAP socket addresses resolved")?;
+
+        let tcp = std::net::TcpStream::connect_timeout(&address, Duration::from_secs(10))
             .with_context(|| {
                 format!(
                     "failed to connect to IMAP server '{}:{}'",
                     config.imap_host, config.imap_port
                 )
             })?;
+        tcp.set_read_timeout(Some(Duration::from_secs(30)))
+            .context("failed to set IMAP read timeout")?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))
+            .context("failed to set IMAP write timeout")?;
 
         let client = imap::Client::new(tcp);
 
@@ -802,6 +833,23 @@ fn open_imap_session(config: &EmailPollConfig) -> anyhow::Result<ImapSession> {
 
         Ok(ImapSession::Plain(session))
     }
+}
+
+fn is_local_mail_host(host: &str) -> bool {
+    let normalized_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.');
+
+    if normalized_host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    normalized_host
+        .parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
 }
 
 fn parse_inbound_email(
@@ -1685,7 +1733,7 @@ struct EmailReplyContext {
 mod tests {
     use super::{
         EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, derive_thread_key,
-        extract_message_ids, normalize_email_target, normalize_reply_subject,
+        extract_message_ids, is_local_mail_host, normalize_email_target, normalize_reply_subject,
         normalize_search_folders, parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
@@ -1725,6 +1773,23 @@ mod tests {
             normalize_reply_subject("Existing thread"),
             "Re: Existing thread"
         );
+    }
+
+    #[test]
+    fn is_local_mail_host_accepts_loopback_hosts() {
+        assert!(is_local_mail_host("localhost"));
+        assert!(is_local_mail_host("LOCALHOST"));
+        assert!(is_local_mail_host("localhost."));
+        assert!(is_local_mail_host(" 127.0.0.1 "));
+        assert!(is_local_mail_host("::1"));
+        assert!(is_local_mail_host("[::1]"));
+    }
+
+    #[test]
+    fn is_local_mail_host_rejects_non_loopback_hosts() {
+        assert!(!is_local_mail_host("mail.example.com"));
+        assert!(!is_local_mail_host("192.168.1.10"));
+        assert!(!is_local_mail_host("8.8.8.8"));
     }
 
     #[test]
