@@ -112,10 +112,11 @@ Add to `ApiState` in `src/api/state.rs`:
 | Method | Path | Description |
 |--------|------|-------------|
 | `GET` | `/api/cortex-chat/messages?agent_id=...&limit=50` | Load persisted history |
-| `POST` | `/api/cortex-chat/send` | Send message, returns SSE stream |
+| `POST` | `/api/cortex-chat/send` | Send message, returns SSE stream (`409` when a send is already in flight) |
 | `DELETE` | `/api/cortex-chat/messages?agent_id=...` | Clear history |
 
-POST accepts `{ agent_id, message, channel_id? }` and returns `Content-Type: text/event-stream`:
+POST accepts `{ agent_id, message, channel_id? }` and returns `Content-Type: text/event-stream`.
+If a prior send is still running for the same agent session, the endpoint now returns `409 CONFLICT` with no stream; clients should wait briefly and retry:
 
 ```
 event: text_delta

@@ -8,12 +8,94 @@ use crate::agent::branch::Branch;
 use crate::agent::channel::ChannelState;
 use crate::agent::channel_prompt::{TemporalContext, build_worker_task_with_temporal_context};
 use crate::agent::worker::Worker;
-use crate::error::AgentError;
+use crate::error::{AgentError, Error as SpacebotError};
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, WorkerId};
 use futures::FutureExt as _;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
+
+/// Validate worker capacity for a channel based on current active worker count.
+pub(crate) fn reserve_worker_slot_local(
+    active_worker_count: usize,
+    channel_id: &Arc<str>,
+    max_workers: usize,
+) -> std::result::Result<(), AgentError> {
+    if active_worker_count >= max_workers {
+        return Err(AgentError::WorkerLimitReached {
+            channel_id: channel_id.to_string(),
+            max: max_workers,
+        });
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerCompletionKind {
+    Success,
+    Cancelled,
+    Failed,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum WorkerCompletionError {
+    Cancelled { reason: String },
+    Failed { message: String },
+}
+
+impl WorkerCompletionError {
+    pub(crate) fn failed(message: impl Into<String>) -> Self {
+        Self::Failed {
+            message: message.into(),
+        }
+    }
+
+    fn from_spacebot_error(error: SpacebotError) -> Self {
+        match error {
+            SpacebotError::Agent(agent_error) => match *agent_error {
+                AgentError::Cancelled { reason } => Self::Cancelled { reason },
+                other => Self::Failed {
+                    message: other.to_string(),
+                },
+            },
+            other => Self::Failed {
+                message: other.to_string(),
+            },
+        }
+    }
+}
+
+fn classify_worker_completion_result(
+    result: std::result::Result<String, WorkerCompletionError>,
+) -> (String, WorkerCompletionKind) {
+    match result {
+        Ok(text) => (text, WorkerCompletionKind::Success),
+        Err(WorkerCompletionError::Cancelled { reason }) => (
+            format!("Worker cancelled: {reason}"),
+            WorkerCompletionKind::Cancelled,
+        ),
+        Err(WorkerCompletionError::Failed { message }) => (
+            format!("Worker failed: {message}"),
+            WorkerCompletionKind::Failed,
+        ),
+    }
+}
+
+fn completion_flags(kind: WorkerCompletionKind) -> (bool, bool) {
+    let notify = true;
+    let success = matches!(kind, WorkerCompletionKind::Success);
+    (notify, success)
+}
+
+/// Normalize worker completion into event payload fields.
+pub(crate) fn map_worker_completion_result(
+    result: std::result::Result<String, WorkerCompletionError>,
+) -> (String, bool, bool) {
+    let (result_text, kind) = classify_worker_completion_result(result);
+    let (notify, success) = completion_flags(kind);
+    (result_text, notify, success)
+}
 
 /// Spawn a branch from a ChannelState. Used by the BranchTool.
 pub async fn spawn_branch_from_state(
@@ -225,14 +307,8 @@ async fn spawn_branch(
 /// Check whether the channel has capacity for another worker.
 async fn check_worker_limit(state: &ChannelState) -> std::result::Result<(), AgentError> {
     let max_workers = **state.deps.runtime_config.max_concurrent_workers.load();
-    let workers = state.active_workers.read().await;
-    if workers.len() >= max_workers {
-        return Err(AgentError::WorkerLimitReached {
-            channel_id: state.channel_id.to_string(),
-            max: max_workers,
-        });
-    }
-    Ok(())
+    let active_worker_count = state.active_workers.read().await.len();
+    reserve_worker_slot_local(active_worker_count, &state.channel_id, max_workers)
 }
 
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
@@ -395,7 +471,7 @@ pub async fn spawn_opencode_worker_from_state(
         )));
     }
 
-    let server_pool = rc.opencode_server_pool.clone();
+    let server_pool = rc.opencode_server_pool.load().clone();
 
     let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
 
@@ -449,8 +525,8 @@ pub async fn spawn_opencode_worker_from_state(
         Some(state.channel_id.clone()),
         oc_secrets_store,
         async move {
-            let result = worker.run().await?;
-            Ok::<String, anyhow::Error>(result.result_text)
+            let result = worker.run().await.map_err(SpacebotError::from)?;
+            Ok::<String, SpacebotError>(result.result_text)
         }
         .instrument(worker_span),
     );
@@ -489,7 +565,7 @@ pub async fn spawn_opencode_worker_from_state(
 /// The result text is scrubbed through the secret store's tool secret values
 /// before being sent via the event — tool secret values are replaced with
 /// `[REDACTED:<name>]` so they never propagate to channel context.
-pub(crate) fn spawn_worker_task<F, E>(
+pub(crate) fn spawn_worker_task<F>(
     worker_id: WorkerId,
     event_tx: broadcast::Sender<ProcessEvent>,
     agent_id: crate::AgentId,
@@ -498,8 +574,7 @@ pub(crate) fn spawn_worker_task<F, E>(
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
-    F: std::future::Future<Output = std::result::Result<String, E>> + Send + 'static,
-    E: std::fmt::Display + Send + 'static,
+    F: std::future::Future<Output = crate::Result<String>> + Send + 'static,
 {
     tokio::spawn(async move {
         #[cfg(feature = "metrics")]
@@ -512,8 +587,7 @@ where
             .inc();
 
         let outcome = std::panic::AssertUnwindSafe(future).catch_unwind().await;
-
-        let (result_text, notify, success) = match outcome {
+        let worker_result: std::result::Result<String, WorkerCompletionError> = match outcome {
             Ok(Ok(text)) => {
                 // Scrub tool secret values from the result before it reaches
                 // the channel. The channel never sees raw secret values.
@@ -522,11 +596,21 @@ where
                 } else {
                     text
                 };
-                (scrubbed, true, true)
+                Ok(scrubbed)
             }
             Ok(Err(error)) => {
-                tracing::error!(worker_id = %worker_id, %error, "worker failed");
-                (format!("Worker failed: {error}"), true, false)
+                let failure = WorkerCompletionError::from_spacebot_error(error);
+                match failure {
+                    WorkerCompletionError::Cancelled { .. } => Err(failure),
+                    WorkerCompletionError::Failed { message } => {
+                        let scrubbed = if let Some(store) = &secrets_store {
+                            crate::secrets::scrub::scrub_with_store(&message, store)
+                        } else {
+                            message
+                        };
+                        Err(WorkerCompletionError::Failed { message: scrubbed })
+                    }
+                }
             }
             Err(panic_payload) => {
                 let panic_message = panic_payload
@@ -539,13 +623,22 @@ where
                     panic_message = %panic_message,
                     "worker task panicked"
                 );
-                (
-                    format!("Worker failed: worker task panicked: {panic_message}"),
-                    true,
-                    false,
-                )
+                Err(WorkerCompletionError::failed(format!(
+                    "worker task panicked: {panic_message}"
+                )))
             }
         };
+        let (result_text, kind) = classify_worker_completion_result(worker_result);
+        match kind {
+            WorkerCompletionKind::Success => {}
+            WorkerCompletionKind::Cancelled => {
+                tracing::info!(worker_id = %worker_id, result = %result_text, "worker cancelled");
+            }
+            WorkerCompletionKind::Failed => {
+                tracing::error!(worker_id = %worker_id, result = %result_text, "worker failed");
+            }
+        };
+        let (notify, success) = completion_flags(kind);
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -568,4 +661,69 @@ where
             success,
         });
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WorkerCompletionError, map_worker_completion_result, spawn_worker_task};
+    use crate::{ProcessEvent, WorkerId};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::broadcast;
+    use uuid::Uuid;
+
+    #[test]
+    fn cancelled_errors_are_classified_as_cancelled_results() {
+        let (text, notify, success) =
+            map_worker_completion_result(Err(WorkerCompletionError::Cancelled {
+                reason: "user requested".to_string(),
+            }));
+        assert_eq!(text, "Worker cancelled: user requested");
+        assert!(notify);
+        assert!(!success);
+    }
+
+    #[tokio::test]
+    async fn spawn_worker_task_emits_cancelled_completion_event() {
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        let worker_id: WorkerId = Uuid::new_v4();
+
+        let handle = spawn_worker_task(
+            worker_id,
+            event_tx,
+            Arc::<str>::from("agent"),
+            Some(Arc::<str>::from("channel")),
+            None,
+            async {
+                Err::<String, crate::Error>(
+                    crate::error::AgentError::Cancelled {
+                        reason: "user requested".to_string(),
+                    }
+                    .into(),
+                )
+            },
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("worker completion event should be delivered")
+            .expect("broadcast receive should succeed");
+        handle.await.expect("worker task should join cleanly");
+
+        match event {
+            ProcessEvent::WorkerComplete {
+                worker_id: completed_worker_id,
+                result,
+                notify,
+                success,
+                ..
+            } => {
+                assert_eq!(completed_worker_id, worker_id);
+                assert_eq!(result, "Worker cancelled: user requested");
+                assert!(notify);
+                assert!(!success);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 }

@@ -189,6 +189,12 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/task_update") => {
             include_str!("../../prompts/en/tools/task_update_description.md.j2")
         }
+        ("en", "tools/spacebot_docs") => {
+            include_str!("../../prompts/en/tools/spacebot_docs_description.md.j2")
+        }
+        ("en", "tools/config_inspect") => {
+            include_str!("../../prompts/en/tools/config_inspect_description.md.j2")
+        }
 
         // Fallback: unknown language or key -> try English
         (lang, key) if lang != "en" => {

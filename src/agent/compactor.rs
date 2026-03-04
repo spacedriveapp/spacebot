@@ -5,14 +5,16 @@
 //! + memory extraction) happens in the spawned worker, not here.
 
 use crate::error::Result;
+use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::{AgentDeps, ChannelId, ProcessType};
+use crate::{AgentDeps, ChannelId, ProcessId, ProcessType};
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel as _, Prompt as _};
+use rig::completion::CompletionModel;
 use rig::message::{AssistantContent, Message, UserContent};
 use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use uuid::Uuid;
 
 /// Programmatic monitor that watches channel context size and triggers compaction.
 pub struct Compactor {
@@ -119,7 +121,8 @@ impl Compactor {
         };
 
         tokio::spawn(async move {
-            let result = run_compaction(&deps, &compactor_prompt, &history, fraction).await;
+            let result =
+                run_compaction(&deps, &compactor_prompt, &history, &channel_id, fraction).await;
 
             match result {
                 Ok(turns_compacted) => {
@@ -181,6 +184,7 @@ async fn run_compaction(
     deps: &AgentDeps,
     compactor_prompt: &str,
     history: &Arc<RwLock<Vec<Message>>>,
+    channel_id: &ChannelId,
     fraction: f32,
 ) -> Result<usize> {
     // 1. Read and remove the oldest messages from history
@@ -220,10 +224,17 @@ async fn run_compaction(
         .tool_server_handle(tool_server)
         .build();
 
+    let hook = SpacebotHook::new(
+        deps.agent_id.clone(),
+        ProcessId::Worker(Uuid::new_v4()),
+        ProcessType::Compactor,
+        Some(channel_id.clone()),
+        deps.event_tx.clone(),
+    );
+
     let mut compaction_history = Vec::new();
-    let response = agent
-        .prompt(&transcript)
-        .with_history(&mut compaction_history)
+    let response = hook
+        .prompt_once(&agent, &mut compaction_history, &transcript)
         .await;
 
     let summary = match response {
@@ -296,7 +307,21 @@ fn estimate_assistant_content_chars(content: &AssistantContent) -> usize {
         AssistantContent::ToolCall(tc) => {
             tc.function.name.len() + tc.function.arguments.to_string().len()
         }
-        AssistantContent::Reasoning(r) => r.reasoning.iter().map(|s| s.len()).sum(),
+        AssistantContent::Reasoning(r) => r
+            .content
+            .iter()
+            .map(|content| match content {
+                rig::message::ReasoningContent::Text { text, signature } => {
+                    text.len() + signature.as_ref().map_or(0, String::len)
+                }
+                rig::message::ReasoningContent::Encrypted(data) => data.len(),
+                rig::message::ReasoningContent::Redacted { data } => data.len(),
+                rig::message::ReasoningContent::Summary(summary) => summary.len(),
+                // Future variants default to 0; update this match when new variants are added
+                #[allow(unreachable_patterns)]
+                _ => 0,
+            })
+            .sum(),
         AssistantContent::Image(_) => 500,
     }
 }

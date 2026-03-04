@@ -3,12 +3,12 @@
 use crate::agent::compactor::estimate_history_tokens;
 use crate::config::BrowserConfig;
 use crate::error::Result;
-use crate::hooks::SpacebotHook;
+use crate::hooks::{SpacebotHook, ToolNudgePolicy};
 use crate::llm::SpacebotModel;
 use crate::llm::routing::is_context_overflow_error;
 use crate::{AgentDeps, ChannelId, ProcessId, ProcessType, WorkerId};
 use rig::agent::AgentBuilder;
-use rig::completion::{CompletionModel, Prompt};
+use rig::completion::CompletionModel;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
@@ -65,9 +65,8 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Create a new fire-and-forget worker.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    fn build(
         channel_id: Option<ChannelId>,
         task: impl Into<String>,
         system_prompt: impl Into<String>,
@@ -76,6 +75,7 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
+        input_rx: Option<mpsc::Receiver<String>>,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
@@ -96,7 +96,7 @@ impl Worker {
             deps,
             hook,
             system_prompt: system_prompt.into(),
-            input_rx: None,
+            input_rx,
             browser_config,
             screenshot_dir,
             brave_search_key,
@@ -104,6 +104,31 @@ impl Worker {
             status_tx,
             status_rx,
         }
+    }
+
+    /// Create a new fire-and-forget worker.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        channel_id: Option<ChannelId>,
+        task: impl Into<String>,
+        system_prompt: impl Into<String>,
+        deps: AgentDeps,
+        browser_config: BrowserConfig,
+        screenshot_dir: PathBuf,
+        brave_search_key: Option<String>,
+        logs_dir: PathBuf,
+    ) -> Self {
+        Self::build(
+            channel_id,
+            task,
+            system_prompt,
+            deps,
+            browser_config,
+            screenshot_dir,
+            brave_search_key,
+            logs_dir,
+            None,
+        )
     }
 
     /// Create a new interactive worker.
@@ -118,34 +143,18 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
     ) -> (Self, mpsc::Sender<String>) {
-        let id = Uuid::new_v4();
-        let process_id = ProcessId::Worker(id);
-        let hook = SpacebotHook::new(
-            deps.agent_id.clone(),
-            process_id,
-            ProcessType::Worker,
-            channel_id.clone(),
-            deps.event_tx.clone(),
-        );
-        let (status_tx, status_rx) = watch::channel("starting".to_string());
         let (input_tx, input_rx) = mpsc::channel(32);
-
-        let worker = Self {
-            id,
+        let worker = Self::build(
             channel_id,
-            task: task.into(),
-            state: WorkerState::Running,
+            task,
+            system_prompt,
             deps,
-            hook,
-            system_prompt: system_prompt.into(),
-            input_rx: Some(input_rx),
             browser_config,
             screenshot_dir,
             brave_search_key,
             logs_dir,
-            status_tx,
-            status_rx,
-        };
+            Some(input_rx),
+        );
 
         (worker, input_tx)
     }
@@ -232,10 +241,9 @@ impl Worker {
         let result = loop {
             segments_run += 1;
 
-            match agent
-                .prompt(&prompt)
-                .with_history(&mut history)
-                .with_hook(self.hook.clone())
+            match self
+                .hook
+                .prompt_with_tool_nudge_retry(&agent, &mut history, &prompt)
                 .await
             {
                 Ok(response) => {
@@ -251,26 +259,12 @@ impl Worker {
                             "worker hit max segments, returning partial result"
                         );
                         self.hook.send_status("done (max segments)");
-                        break history
-                            .iter()
-                            .rev()
-                            .find_map(|message| {
-                                if let rig::message::Message::Assistant { content, .. } = message {
-                                    content.iter().find_map(|part| {
-                                        if let rig::message::AssistantContent::Text(text) = part {
-                                            Some(text.text.clone())
-                                        } else {
-                                            None
-                                        }
-                                    })
-                                } else {
-                                    None
-                                }
-                            })
-                            .unwrap_or_else(|| {
+                        break crate::agent::extract_last_assistant_text(&history).unwrap_or_else(
+                            || {
                                 "Worker reached maximum segments without a final response."
                                     .to_string()
-                            });
+                            },
+                        );
                     }
 
                     self.maybe_compact_history(&mut compacted_history, &mut history)
@@ -292,7 +286,7 @@ impl Worker {
                     self.write_failure_log(&history, &format!("cancelled: {reason}"));
                     self.persist_transcript(&compacted_history, &history);
                     tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
-                    return Ok(format!("Worker cancelled: {reason}"));
+                    return Err(crate::error::AgentError::Cancelled { reason }.into());
                 }
                 Err(error) if is_context_overflow_error(&error.to_string()) => {
                     overflow_retries += 1;
@@ -331,6 +325,7 @@ impl Worker {
         };
 
         // For interactive workers, enter a follow-up loop
+        let mut follow_up_failure: Option<String> = None;
         if let Some(mut input_rx) = self.input_rx.take() {
             self.state = WorkerState::WaitingForInput;
             self.hook.send_status("waiting for input");
@@ -345,21 +340,26 @@ impl Worker {
 
                 let mut follow_up_prompt = follow_up.clone();
                 let mut follow_up_overflow_retries = 0;
+                let follow_up_hook = self
+                    .hook
+                    .clone()
+                    .with_tool_nudge_policy(ToolNudgePolicy::Disabled);
 
-                let follow_up_ok = loop {
-                    match agent
-                        .prompt(&follow_up_prompt)
-                        .with_history(&mut history)
-                        .with_hook(self.hook.clone())
+                let follow_up_result: std::result::Result<(), String> = loop {
+                    match follow_up_hook
+                        .prompt_once(&agent, &mut history, &follow_up_prompt)
                         .await
                     {
-                        Ok(_response) => break true,
+                        Ok(_response) => break Ok(()),
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {
-                                self.write_failure_log(&history, &format!("follow-up context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
+                                let failure_reason = format!(
+                                    "follow-up context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"
+                                );
+                                self.write_failure_log(&history, &failure_reason);
                                 tracing::error!(worker_id = %self.id, %error, "follow-up context overflow unrecoverable");
-                                break false;
+                                break Err(failure_reason);
                             }
                             tracing::warn!(
                                 worker_id = %self.id,
@@ -375,22 +375,30 @@ impl Worker {
                             follow_up_prompt = format!("{follow_up}\n\n{overflow_msg}");
                         }
                         Err(error) => {
-                            self.write_failure_log(&history, &format!("follow-up failed: {error}"));
+                            let failure_reason = format!("follow-up failed: {error}");
+                            self.write_failure_log(&history, &failure_reason);
                             tracing::error!(worker_id = %self.id, %error, "worker follow-up failed");
-                            break false;
+                            break Err(failure_reason);
                         }
                     }
                 };
 
-                if follow_up_ok {
-                    self.state = WorkerState::WaitingForInput;
-                    self.hook.send_status("waiting for input");
-                } else {
+                if let Err(failure_reason) = follow_up_result {
                     self.state = WorkerState::Failed;
                     self.hook.send_status("failed");
+                    follow_up_failure = Some(failure_reason);
                     break;
                 }
+
+                self.state = WorkerState::WaitingForInput;
+                self.hook.send_status("waiting for input");
             }
+        }
+
+        if let Some(failure_reason) = follow_up_failure {
+            self.persist_transcript(&compacted_history, &history);
+            tracing::error!(worker_id = %self.id, reason = %failure_reason, "worker failed");
+            return Err(crate::error::AgentError::Other(anyhow::anyhow!(failure_reason)).into());
         }
 
         self.state = WorkerState::Done;
@@ -767,27 +775,4 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
     } else {
         recap
     }
-}
-
-/// Extract the last assistant text message from a history.
-#[allow(dead_code)]
-fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {
-    for message in history.iter().rev() {
-        if let rig::message::Message::Assistant { content, .. } = message {
-            let texts: Vec<String> = content
-                .iter()
-                .filter_map(|c| {
-                    if let rig::message::AssistantContent::Text(t) = c {
-                        Some(t.text.clone())
-                    } else {
-                        None
-                    }
-                })
-                .collect();
-            if !texts.is_empty() {
-                return Some(texts.join("\n"));
-            }
-        }
-    }
-    None
 }

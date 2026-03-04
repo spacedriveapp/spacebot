@@ -102,13 +102,19 @@ pub(super) async fn events_sse(
                             .data(json));
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(count)) => {
-                    tracing::debug!(count, "SSE client lagged");
-                    yield Ok(axum::response::sse::Event::default()
-                        .event("lagged")
-                        .data(format!("{{\"skipped\":{count}}}")));
+                Err(error) => {
+                    if let crate::agent::EventRecvDisposition::Continue { lagged_count } =
+                        crate::agent::classify_event_recv_error(&error)
+                    {
+                        let count = lagged_count.unwrap_or(0);
+                        tracing::debug!(count, "SSE client lagged");
+                        yield Ok(axum::response::sse::Event::default()
+                            .event("lagged")
+                            .data(format!("{{\"skipped\":{count}}}")));
+                    } else {
+                        break;
+                    }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
             }
         }
     };

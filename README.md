@@ -490,7 +490,7 @@ OAuth tokens are stored in `anthropic_oauth.json` and auto-refresh transparently
 | --------------- | --------------------------------------------------------------------------------------------------------------- |
 | Language        | **Rust** (edition 2024)                                                                                         |
 | Async runtime   | **Tokio**                                                                                                       |
-| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.30 — agentic loop, tool execution, hooks                     |
+| LLM framework   | **[Rig](https://github.com/0xPlaygrounds/rig)** v0.31 — agentic loop, tool execution, hooks                     |
 | Relational data | **SQLite** (sqlx) — conversations, memory graph, cron jobs                                                      |
 | Vector + FTS    | **[LanceDB](https://lancedb.github.io/lancedb/)** — embeddings (HNSW), full-text (Tantivy), hybrid search (RRF) |
 | Key-value       | **[redb](https://github.com/cberner/redb)** — settings, encrypted secrets                                       |

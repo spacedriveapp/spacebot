@@ -13,6 +13,7 @@
 //!
 //! **Branch ToolServer** (one per branch, isolated):
 //! - `memory_save` + `memory_recall` + `memory_delete` + `channel_recall`
+//! - `spacebot_docs` for embedded self-documentation lookup
 //! - `task_create` + `task_list` + `task_update`
 //! - `spawn_worker` is included for channel-originated branches only
 //!
@@ -23,11 +24,15 @@
 //!
 //! **Cortex ToolServer** (one per agent):
 //! - `memory_save` — registered at startup
+//!
+//! **Cortex Chat ToolServer** (interactive admin chat):
+//! - branch + worker tool superset plus `spacebot_docs` and `config_inspect`
 
 pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
+pub mod config_inspect;
 pub mod cron;
 pub mod email_search;
 pub mod exec;
@@ -47,6 +52,7 @@ pub mod send_message_to_another_channel;
 pub mod set_status;
 pub mod shell;
 pub mod skip;
+pub mod spacebot_docs;
 pub mod spawn_worker;
 pub mod task_create;
 pub mod task_list;
@@ -62,6 +68,9 @@ pub use browser::{
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
+};
+pub use config_inspect::{
+    ConfigInspectArgs, ConfigInspectError, ConfigInspectOutput, ConfigInspectTool,
 };
 pub use cron::{CronArgs, CronError, CronOutput, CronTool};
 pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, EmailSearchTool};
@@ -92,6 +101,9 @@ pub use send_message_to_another_channel::{
 pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool};
 pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
+pub use spacebot_docs::{
+    SpacebotDocContent, SpacebotDocsArgs, SpacebotDocsError, SpacebotDocsOutput, SpacebotDocsTool,
+};
 pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
@@ -170,16 +182,20 @@ pub const MAX_DIR_ENTRIES: usize = 500;
 /// Cuts at the last valid char boundary before `max_bytes` so we never split
 /// a multi-byte character. The truncation notice tells the LLM the original
 /// size and how to get the rest (pipe through head/tail or read with offset).
+fn truncate_at_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 pub fn truncate_output(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();
     }
 
-    // Find the last char boundary at or before max_bytes
-    let mut end = max_bytes;
-    while end > 0 && !value.is_char_boundary(end) {
-        end -= 1;
-    }
+    let end = truncate_at_char_boundary(value, max_bytes);
 
     let total = value.len();
     let truncated_bytes = total - end;
@@ -188,6 +204,30 @@ pub fn truncate_output(value: &str, max_bytes: usize) -> String {
          Use head/tail/offset to read specific sections]",
         &value[..end]
     )
+}
+
+/// Truncate to a byte limit and append `...`, preserving UTF-8 boundaries.
+///
+/// The returned string will never exceed `max_bytes`. If there's not enough
+/// room for both content and "...", only the content is returned (truncated
+/// to fit within `max_bytes`).
+pub fn truncate_utf8_ellipsis(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_string();
+    }
+
+    // Try to leave room for "..." (3 bytes)
+    let available = max_bytes.saturating_sub(3);
+    let end = truncate_at_char_boundary(value, available);
+
+    // If we have room for "...", append it; otherwise just return truncated content
+    if end > 0 && end + 3 <= max_bytes {
+        format!("{}...", &value[..end])
+    } else {
+        // Not enough room for "...", return as much as fits
+        let end = truncate_at_char_boundary(value, max_bytes);
+        value[..end].to_string()
+    }
 }
 
 /// Returns true when text looks like structured/tool payloads that should never
@@ -215,12 +255,19 @@ pub fn should_block_user_visible_text(value: &str) -> bool {
         return false;
     }
 
-    if trimmed.starts_with('{') || trimmed.starts_with('[') {
+    if trimmed.starts_with('{') || trimmed.starts_with('[') || trimmed.starts_with('(') {
         return true;
     }
 
     let lower = trimmed.to_ascii_lowercase();
     if TOOL_PREFIXES.iter().any(|prefix| lower.starts_with(prefix)) {
+        return true;
+    }
+
+    let punctuation_trimmed = lower.trim_matches(|character: char| {
+        character.is_ascii_punctuation() || character.is_ascii_whitespace()
+    });
+    if punctuation_trimmed == "skip" {
         return true;
     }
 
@@ -344,8 +391,8 @@ pub async fn remove_channel_tools(
 /// Create a per-branch ToolServer with memory tools.
 ///
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
-/// visible to the channel. Both `memory_save` and `memory_recall` are
-/// registered at creation.
+/// visible to the channel. Includes memory tools, task-board tools, and
+/// `spacebot_docs` for on-demand self-documentation lookup.
 #[allow(clippy::too_many_arguments)]
 pub fn create_branch_tool_server(
     state: Option<ChannelState>,
@@ -362,6 +409,7 @@ pub fn create_branch_tool_server(
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(SpacebotDocsTool::new())
         .tool(EmailSearchTool::new(runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
@@ -454,6 +502,8 @@ pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServer
 /// Combines branch tools (memory) with worker tools (shell, file, exec) to give
 /// the interactive cortex full capabilities. Does not include channel-specific
 /// tools (reply, react, skip) since the cortex chat doesn't talk to platforms.
+/// Adds `config_inspect` for live runtime config introspection and
+/// `spacebot_docs` for embedded docs/changelog retrieval.
 #[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
@@ -467,12 +517,15 @@ pub fn create_cortex_chat_tool_server(
     brave_search_key: Option<String>,
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
+    runtime_config: Arc<RuntimeConfig>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(MemorySaveTool::new(memory_search.clone()))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
+        .tool(SpacebotDocsTool::new())
+        .tool(ConfigInspectTool::new(agent_id.to_string(), runtime_config))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
             task_store.clone(),
@@ -546,6 +599,14 @@ mod tests {
         assert!(should_block_user_visible_text("{\"content\":\"hello\"}"));
         assert!(should_block_user_visible_text("[\"one\",\"two\"]"));
         assert!(should_block_user_visible_text(
+            "(just commentary - skipping)"
+        ));
+        assert!(should_block_user_visible_text(
+            "(Empty response: {'content': [{'type': 'thinking'}]})"
+        ));
+        assert!(should_block_user_visible_text("skip"));
+        assert!(should_block_user_visible_text("  SKIP  "));
+        assert!(should_block_user_visible_text(
             "[reply]\n{\"content\":\"hello\"}"
         ));
         assert!(should_block_user_visible_text(
@@ -556,6 +617,21 @@ mod tests {
     #[test]
     fn allows_normal_plaintext_output() {
         assert!(!should_block_user_visible_text("hello team"));
+        assert!(!should_block_user_visible_text("skipping for now"));
+        assert!(!should_block_user_visible_text(
+            "I can skip that if you want."
+        ));
         assert!(!should_block_user_visible_text("- first\n- second"));
+    }
+
+    #[test]
+    fn truncate_helpers_preserve_utf8_boundaries() {
+        let text = "🙂🙂🙂";
+        // For max_bytes=5: can fit "🙂" (4 bytes) but not "🙂..." (7 bytes)
+        // So we get just "🙂" without ellipsis since it wouldn't fit
+        assert_eq!(truncate_utf8_ellipsis(text, 5), "🙂");
+        // For larger max_bytes=10: can fit "🙂..." (7 bytes)
+        assert_eq!(truncate_utf8_ellipsis(text, 10), "🙂...");
+        assert!(truncate_output(text, 5).starts_with("🙂"));
     }
 }

@@ -501,7 +501,7 @@ pub struct OpenCodeEnvConfig {
 }
 
 /// Permission settings for headless OpenCode operation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OpenCodePermissions {
     pub edit: String,
     pub bash: String,

@@ -784,6 +784,7 @@ pub(super) async fn create_agent(
         brave_search_key,
         runtime_config.workspace_dir.clone(),
         sandbox.clone(),
+        runtime_config.clone(),
     );
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(

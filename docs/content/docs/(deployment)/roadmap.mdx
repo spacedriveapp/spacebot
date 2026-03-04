@@ -36,7 +36,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Telegram adapter** — full teloxide implementation (long polling, typing indicators, attachment extraction, chat/DM filtering, 4096 char splitting)
 - **Slack adapter** — full slack-morphism implementation (Socket Mode, thread replies, file upload v2, reactions, streaming via edit, workspace/channel/DM filtering via hot-reloadable permissions)
 - **Webhook adapter** — Axum HTTP server (POST /send, GET `/poll/{id}`, GET /health)
-- **Tools** — 16 tools implement Rig's `Tool` trait with real logic (reply, branch, spawn_worker, route, cancel, skip, react, memory_save, memory_recall, set_status, shell, file, exec, browser, cron, web_search)
+- **Tools** — 20+ tools implement Rig's `Tool` trait with real logic (including task board tools, memory tools, `spacebot_docs`, and `config_inspect` alongside reply/branch/worker/browser/shell primitives)
 - **Workspace containment** — file tool validates paths stay within workspace boundary, shell/exec tools block instance directory traversal, sensitive file access, and secret env var leakage
 - **Conversation persistence** — `ConversationLogger` with fire-and-forget SQLite writes, compaction archiving
 - **Cron** — scheduler with timers, active hours, circuit breaker (3 failures → disable), creates real channels. CronTool wired into channel tool factory.

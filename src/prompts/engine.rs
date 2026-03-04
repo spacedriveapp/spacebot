@@ -491,11 +491,15 @@ impl PromptEngine {
     }
 
     /// Render the cortex chat system prompt with optional channel context.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_cortex_chat_prompt(
         &self,
         identity_context: Option<String>,
         memory_bulletin: Option<String>,
         channel_transcript: Option<String>,
+        agents_manifest: Option<String>,
+        changelog_highlights: Option<String>,
+        runtime_config_snapshot: Option<String>,
         worker_capabilities: String,
     ) -> Result<String> {
         self.render(
@@ -504,6 +508,9 @@ impl PromptEngine {
                 identity_context => identity_context,
                 memory_bulletin => memory_bulletin,
                 channel_transcript => channel_transcript,
+                agents_manifest => agents_manifest,
+                changelog_highlights => changelog_highlights,
+                runtime_config_snapshot => runtime_config_snapshot,
                 worker_capabilities => worker_capabilities,
             },
         )

@@ -67,7 +67,7 @@ Creating a branch is `let branch_history = channel_history.clone()`.
 
 The branch result is injected into the channel's history as a distinct message type. Then the branch is deleted. Multiple branches can run concurrently per channel (configurable limit). First done, first incorporated.
 
-**Tools:** memory_recall, memory_save, channel_recall, spawn_worker  
+**Tools:** memory_recall, memory_save, memory_delete, channel_recall, spacebot_docs, task_create, task_list, task_update, spawn_worker  
 **Context:** Clone of channel history at fork time  
 **Lifecycle:** Short-lived. Returns a conclusion, then deleted.
 
@@ -106,6 +106,7 @@ System-level observer. Primary job: generate the **memory bulletin** — a perio
 Also observes system-wide signals for future health monitoring and memory consolidation.
 
 **Tools (bulletin generation):** memory_recall, memory_save  
+**Tools (interactive cortex chat):** memory + worker tools, `spacebot_docs`, `config_inspect`, task board tools  
 **Tools (future health monitoring):** memory_consolidate, system_monitor  
 **Context:** Fresh per bulletin run. No compaction needed.
 
@@ -179,6 +180,11 @@ src/
 │   ├── file.rs         — read/write/list files (task workers)
 │   ├── exec.rs         — run subprocess (task workers)
 │   ├── browser.rs      — web browsing (task workers)
+│   ├── task_create.rs  — create task-board task (branch + cortex chat)
+│   ├── task_list.rs    — list task-board tasks (branch + cortex chat)
+│   ├── task_update.rs  — update task-board task (branch + cortex chat)
+│   ├── spacebot_docs.rs — read embedded Spacebot docs/changelog (branch + cortex chat)
+│   ├── config_inspect.rs — inspect live runtime config (cortex chat)
 │   └── cron.rs         — cron management (channel only)
 │
 ├── memory.rs           → memory/
@@ -285,7 +291,7 @@ let branch_history = channel_history.clone();
 
 **ToolServer topology:**
 - Per-channel `ToolServer` (no memory tools, just channel action tools added per turn)
-- Per-branch `ToolServer` with memory tools (memory_save, memory_recall)
+- Per-branch `ToolServer` with memory tools (memory_save, memory_recall, memory_delete), channel recall, docs introspection (`spacebot_docs`), and task-board tools
 - Per-worker `ToolServer` with task-specific tools (shell, file, exec)
 - Per-cortex `ToolServer` with memory_save
 

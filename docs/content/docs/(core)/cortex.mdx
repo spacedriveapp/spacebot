@@ -140,6 +140,17 @@ The cortex is the only singleton in the system (per agent). There's one cortex p
 
 **The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages the memory bulletin, and will eventually handle memory coherence and system health.
 
+## Interactive Cortex Chat
+
+Spacebot also exposes a direct admin chat session with the cortex. This is intentionally self-referential and diagnostic-focused:
+
+- The system prompt includes embedded architecture context (`AGENTS.md`) and changelog highlights.
+- The prompt includes a live redacted runtime-config snapshot so behavior can be diagnosed against current resolved values.
+- `config_inspect` returns live hot-reloaded config sections on demand.
+- `spacebot_docs` reads embedded Spacebot docs/changelog/AGENTS content directly from the binary.
+
+This makes cortex chat a practical control-room interface for troubleshooting, validation, and operations — not a user-facing conversation mode.
+
 ## Configuration
 
 ```toml

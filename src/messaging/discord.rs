@@ -930,7 +930,10 @@ async fn build_metadata(
         let reply_content = resolve_mentions(&referenced.content, &referenced.mentions);
         // Truncate to avoid bloating context with long quoted messages
         let truncated = if reply_content.len() > 200 {
-            format!("{}...", &reply_content[..200])
+            format!(
+                "{}...",
+                &reply_content[..reply_content.floor_char_boundary(200)]
+            )
         } else {
             reply_content
         };

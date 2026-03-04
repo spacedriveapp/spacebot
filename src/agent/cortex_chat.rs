@@ -6,8 +6,9 @@
 //! into the system prompt as context.
 
 use crate::conversation::history::ProcessRunLogger;
+use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
-use crate::{AgentDeps, ProcessType};
+use crate::{AgentDeps, ProcessId, ProcessType};
 
 use rig::agent::{AgentBuilder, HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{AssistantContent, CompletionModel, CompletionResponse, Message, Prompt};
@@ -17,6 +18,7 @@ use sqlx::SqlitePool;
 use tokio::sync::mpsc;
 
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Mutex;
 
 /// A persisted cortex chat message.
@@ -49,15 +51,29 @@ pub enum CortexChatEvent {
     Error { message: String },
 }
 
+#[derive(Debug, thiserror::Error)]
+pub enum CortexChatSendError {
+    #[error("cortex chat session is busy")]
+    Busy,
+    #[error(transparent)]
+    Database(#[from] sqlx::Error),
+    #[error(transparent)]
+    Prompt(#[from] crate::error::Error),
+}
+
 /// Prompt hook that forwards tool events to an mpsc channel for SSE streaming.
 #[derive(Clone)]
 struct CortexChatHook {
     event_tx: mpsc::Sender<CortexChatEvent>,
+    spacebot_hook: SpacebotHook,
 }
 
 impl CortexChatHook {
-    fn new(event_tx: mpsc::Sender<CortexChatEvent>) -> Self {
-        Self { event_tx }
+    fn new(event_tx: mpsc::Sender<CortexChatEvent>, spacebot_hook: SpacebotHook) -> Self {
+        Self {
+            event_tx,
+            spacebot_hook,
+        }
     }
 
     async fn send(&self, event: CortexChatEvent) {
@@ -65,34 +81,72 @@ impl CortexChatHook {
     }
 }
 
+fn try_acquire_send_lock(
+    send_lock: &Arc<Mutex<()>>,
+) -> std::result::Result<tokio::sync::OwnedMutexGuard<()>, CortexChatSendError> {
+    send_lock
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| CortexChatSendError::Busy)
+}
+
+async fn persist_and_emit_cortex_chat_error(
+    store: &CortexChatStore,
+    event_tx: &mpsc::Sender<CortexChatEvent>,
+    thread_id: &str,
+    channel_ref: Option<&str>,
+    message: String,
+) {
+    let _ = store
+        .save_message(thread_id, "assistant", &message, channel_ref)
+        .await;
+    let _ = event_tx.send(CortexChatEvent::Error { message }).await;
+}
+
 impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
     async fn on_tool_call(
         &self,
         tool_name: &str,
-        _tool_call_id: Option<String>,
-        _internal_call_id: &str,
-        _args: &str,
+        tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
     ) -> ToolCallHookAction {
+        let action = <SpacebotHook as PromptHook<M>>::on_tool_call(
+            &self.spacebot_hook,
+            tool_name,
+            tool_call_id,
+            internal_call_id,
+            args,
+        )
+        .await;
+        if !matches!(action, ToolCallHookAction::Continue) {
+            return action;
+        }
+
         self.send(CortexChatEvent::ToolStarted {
             tool: tool_name.to_string(),
         })
         .await;
-        ToolCallHookAction::Continue
+        action
     }
 
     async fn on_tool_result(
         &self,
         tool_name: &str,
         _tool_call_id: Option<String>,
-        _internal_call_id: &str,
+        internal_call_id: &str,
         _args: &str,
         result: &str,
     ) -> HookAction {
-        let preview = if result.len() > 200 {
-            format!("{}...", &result[..200])
-        } else {
-            result.to_string()
-        };
+        let guard_action = self.spacebot_hook.guard_tool_result(tool_name, result);
+        if !matches!(guard_action, HookAction::Continue) {
+            return guard_action;
+        }
+        let preview = crate::tools::truncate_utf8_ellipsis(result, 200);
+        self.spacebot_hook
+            .emit_tool_completed_event_from_capped(tool_name, preview.clone());
+        self.spacebot_hook
+            .record_tool_result_metrics(tool_name, internal_call_id);
         self.send(CortexChatEvent::ToolCompleted {
             tool: tool_name.to_string(),
             result_preview: preview,
@@ -101,16 +155,22 @@ impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
         HookAction::Continue
     }
 
-    async fn on_completion_call(&self, _prompt: &Message, _history: &[Message]) -> HookAction {
-        HookAction::Continue
+    async fn on_completion_call(&self, prompt: &Message, history: &[Message]) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_completion_call(&self.spacebot_hook, prompt, history)
+            .await
     }
 
     async fn on_completion_response(
         &self,
-        _prompt: &Message,
-        _response: &CompletionResponse<M::Response>,
+        prompt: &Message,
+        response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        HookAction::Continue
+        <SpacebotHook as PromptHook<M>>::on_completion_response(
+            &self.spacebot_hook,
+            prompt,
+            response,
+        )
+        .await
     }
 }
 
@@ -211,7 +271,7 @@ pub struct CortexChatSession {
     pub tool_server: ToolServerHandle,
     pub store: CortexChatStore,
     /// Prevent concurrent sends — only one request at a time per agent.
-    send_lock: Mutex<()>,
+    send_lock: Arc<Mutex<()>>,
 }
 
 impl CortexChatSession {
@@ -220,7 +280,7 @@ impl CortexChatSession {
             deps,
             tool_server,
             store,
-            send_lock: Mutex::new(()),
+            send_lock: Arc::new(Mutex::new(())),
         }
     }
 
@@ -234,8 +294,8 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
-    ) -> Result<mpsc::Receiver<CortexChatEvent>, anyhow::Error> {
-        let _guard = self.send_lock.lock().await;
+    ) -> std::result::Result<mpsc::Receiver<CortexChatEvent>, CortexChatSendError> {
+        let send_guard = try_acquire_send_lock(&self.send_lock)?;
 
         // Save the user message
         self.store
@@ -265,8 +325,8 @@ impl CortexChatSession {
         let routing = self.deps.runtime_config.routing.load();
         let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
-            .with_context(&*self.deps.agent_id, "cortex")
-            .with_routing((**routing).clone());
+            .with_context(self.deps.agent_id.as_ref(), "cortex")
+            .with_routing(routing.as_ref().clone());
 
         let agent = AgentBuilder::new(model)
             .preamble(&system_prompt)
@@ -275,25 +335,43 @@ impl CortexChatSession {
             .build();
 
         let (event_tx, event_rx) = mpsc::channel(256);
-        let hook = CortexChatHook::new(event_tx.clone());
+        let spacebot_hook = SpacebotHook::new(
+            self.deps.agent_id.clone(),
+            ProcessId::Worker(uuid::Uuid::new_v4()),
+            ProcessType::Cortex,
+            channel_context_id.map(std::sync::Arc::<str>::from),
+            self.deps.event_tx.clone(),
+        );
+        let hook = CortexChatHook::new(event_tx.clone(), spacebot_hook);
 
         // Clone what the spawned task needs
         let user_text = user_text.to_string();
         let thread_id = thread_id.to_string();
         let channel_context_id = channel_context_id.map(|s| s.to_string());
         let store = self.store.clone();
+        let prompt_timeout = Duration::from_secs(
+            self.deps
+                .runtime_config
+                .cortex
+                .load()
+                .branch_timeout_secs
+                .max(1),
+        );
 
         tokio::spawn(async move {
+            let _send_guard = send_guard;
             let channel_ref = channel_context_id.as_deref();
+            let prompt_result = tokio::time::timeout(
+                prompt_timeout,
+                agent
+                    .prompt(&user_text)
+                    .with_hook(hook.clone())
+                    .with_history(&mut history),
+            )
+            .await;
 
-            let result = agent
-                .prompt(&user_text)
-                .with_hook(hook)
-                .with_history(&mut history)
-                .await;
-
-            match result {
-                Ok(response) => {
+            match prompt_result {
+                Ok(Ok(response)) => {
                     let _ = store
                         .save_message(&thread_id, "assistant", &response, channel_ref)
                         .await;
@@ -303,16 +381,34 @@ impl CortexChatSession {
                         })
                         .await;
                 }
-                Err(error) => {
+                Ok(Err(error)) => {
                     let error_text = format!("Cortex chat error: {error}");
-                    let _ = store
-                        .save_message(&thread_id, "assistant", &error_text, channel_ref)
-                        .await;
-                    let _ = event_tx
-                        .send(CortexChatEvent::Error {
-                            message: error_text,
-                        })
-                        .await;
+                    persist_and_emit_cortex_chat_error(
+                        &store,
+                        &event_tx,
+                        &thread_id,
+                        channel_ref,
+                        error_text,
+                    )
+                    .await;
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        timeout_secs = prompt_timeout.as_secs(),
+                        "cortex chat prompt timed out"
+                    );
+                    let error_text = format!(
+                        "Cortex chat timed out after {}s while waiting for a model response.",
+                        prompt_timeout.as_secs()
+                    );
+                    persist_and_emit_cortex_chat_error(
+                        &store,
+                        &event_tx,
+                        &thread_id,
+                        channel_ref,
+                        error_text,
+                    )
+                    .await;
                 }
             }
         });
@@ -329,6 +425,12 @@ impl CortexChatSession {
 
         let identity_context = runtime_config.identity.load().render();
         let memory_bulletin = runtime_config.memory_bulletin.load();
+        let agents_manifest = crate::self_awareness::agents_manifest_for_prompt();
+        let changelog_highlights = crate::self_awareness::changelog_highlights();
+        let runtime_config_snapshot = crate::self_awareness::runtime_snapshot_pretty(
+            self.deps.agent_id.as_ref(),
+            runtime_config,
+        );
 
         let browser_enabled = runtime_config.browser_config.load().enabled;
         let web_search_enabled = runtime_config.brave_search_key.load().is_some();
@@ -352,6 +454,9 @@ impl CortexChatSession {
             empty_to_none(identity_context),
             empty_to_none(memory_bulletin.to_string()),
             channel_transcript,
+            empty_to_none(agents_manifest),
+            empty_to_none(changelog_highlights),
+            empty_to_none(runtime_config_snapshot),
             worker_capabilities,
         )
     }
@@ -404,5 +509,57 @@ impl CortexChatSession {
                 None
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CortexChatSendError, try_acquire_send_lock};
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::Mutex;
+
+    #[test]
+    fn preview_utf8_truncates_on_char_boundary() {
+        let text = "🙂🙂🙂";
+        // For max_bytes=5: can fit "🙂" (4 bytes) but not "🙂..." (7 bytes)
+        let preview = crate::tools::truncate_utf8_ellipsis(text, 5);
+        assert_eq!(preview, "🙂");
+        // For max_bytes=10: can fit "🙂..." (7 bytes)
+        let preview = crate::tools::truncate_utf8_ellipsis(text, 10);
+        assert_eq!(preview, "🙂...");
+    }
+
+    #[test]
+    fn preview_utf8_keeps_short_text() {
+        let text = "done";
+        let preview = crate::tools::truncate_utf8_ellipsis(text, 200);
+        assert_eq!(preview, text);
+    }
+
+    #[tokio::test]
+    async fn send_lock_returns_busy_when_already_held() {
+        let send_lock = Arc::new(Mutex::new(()));
+        let _first_guard = try_acquire_send_lock(&send_lock).expect("first lock should succeed");
+        let second = try_acquire_send_lock(&send_lock);
+        assert!(matches!(second, Err(CortexChatSendError::Busy)));
+    }
+
+    #[tokio::test]
+    async fn send_lock_released_after_timeout_path() {
+        let send_lock = Arc::new(Mutex::new(()));
+        let send_guard = try_acquire_send_lock(&send_lock).expect("first lock should succeed");
+        let timed_task = tokio::spawn(async move {
+            let _send_guard = send_guard;
+            tokio::time::timeout(Duration::from_millis(5), std::future::pending::<()>()).await
+        });
+        let timeout_result = timed_task.await.expect("timeout task should complete");
+        assert!(timeout_result.is_err(), "pending prompt should time out");
+
+        let second = try_acquire_send_lock(&send_lock);
+        assert!(
+            second.is_ok(),
+            "single-flight lock should be released after timeout path"
+        );
     }
 }

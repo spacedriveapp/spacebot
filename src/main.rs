@@ -2815,6 +2815,7 @@ async fn initialize_agents(
                 brave_search_key,
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.sandbox.clone(),
+                agent.deps.runtime_config.clone(),
             );
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
             let session = spacebot::agent::cortex_chat::CortexChatSession::new(

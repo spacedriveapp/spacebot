@@ -21,6 +21,7 @@ pub mod opencode;
 pub mod prompts;
 pub mod sandbox;
 pub mod secrets;
+pub mod self_awareness;
 pub mod settings;
 pub mod skills;
 pub mod tasks;
