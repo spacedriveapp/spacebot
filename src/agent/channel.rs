@@ -314,13 +314,8 @@ impl Channel {
             .listen_only_mode;
     }
 
-    fn set_listen_only_mode(&mut self, enabled: bool) {
-        self.listen_only_mode = enabled;
-        self.deps.runtime_config.channel_config.rcu(|current| {
-            let mut next = **current;
-            next.listen_only_mode = enabled;
-            Arc::new(next)
-        });
+    fn set_listen_only_mode(&mut self, enabled: bool) -> bool {
+        let mut persisted = true;
         if let Some(settings_store) = self
             .deps
             .runtime_config
@@ -331,6 +326,7 @@ impl Channel {
             .cloned()
             && let Err(error) = settings_store.set_channel_listen_only_mode(enabled)
         {
+            persisted = false;
             tracing::warn!(
                 %error,
                 channel_id = %self.id,
@@ -338,6 +334,14 @@ impl Channel {
                 "failed to persist listen_only_mode setting"
             );
         }
+
+        self.listen_only_mode = enabled;
+        self.deps.runtime_config.channel_config.rcu(|current| {
+            let mut next = **current;
+            next.listen_only_mode = enabled;
+            Arc::new(next)
+        });
+        persisted
     }
 
     fn persist_inbound_user_message(&self, message: &InboundMessage, raw_text: &str) {
@@ -539,22 +543,24 @@ impl Channel {
                 return Ok(true);
             }
             "/quiet" => {
-                self.set_listen_only_mode(true);
-                self.send_builtin_text(
+                let persisted = self.set_listen_only_mode(true);
+                let body = if persisted {
                     "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message."
-                        .to_string(),
-                    "quiet",
-                )
-                .await;
+                        .to_string()
+                } else {
+                    "quiet mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                self.send_builtin_text(body, "quiet").await;
                 return Ok(true);
             }
             "/active" => {
-                self.set_listen_only_mode(false);
-                self.send_builtin_text(
-                    "active mode enabled. i'll respond normally in this chat.".to_string(),
-                    "active",
-                )
-                .await;
+                let persisted = self.set_listen_only_mode(false);
+                let body = if persisted {
+                    "active mode enabled. i'll respond normally in this chat.".to_string()
+                } else {
+                    "active mode enabled for this session, but persistence failed; it may revert after restart.".to_string()
+                };
+                self.send_builtin_text(body, "active").await;
                 return Ok(true);
             }
             "/help" => {
