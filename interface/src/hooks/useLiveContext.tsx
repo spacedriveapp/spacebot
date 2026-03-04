@@ -1,6 +1,7 @@
 import { createContext, useContext, useCallback, useRef, useState, useMemo, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type WorkerStatusEvent, type TranscriptStep } from "@/api/client";
+import { generateId } from "@/lib/id";
 import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveWorker } from "@/hooks/useChannelLiveState";
 
@@ -164,7 +165,7 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		channelHandlers.tool_started(data);
 		const event = data as ToolStartedEvent;
 		if (event.process_type === "worker") {
-			const callId = crypto.randomUUID();
+			const callId = generateId();
 			const pendingByTool = pendingToolCallIdsRef.current[event.process_id] ?? {};
 			const queue = pendingByTool[event.tool_name] ?? [];
 			pendingByTool[event.tool_name] = [...queue, callId];

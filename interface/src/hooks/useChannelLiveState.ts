@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { generateId } from "@/lib/id";
 import {
 	api,
 	type BranchCompletedEvent,
@@ -218,7 +219,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		const event = data as InboundMessageEvent;
 		pushItem(event.channel_id, {
 			type: "message",
-			id: `in-${Date.now()}-${crypto.randomUUID()}`,
+			id: `in-${generateId()}`,
 			role: "user",
 			sender_name: event.sender_name ?? event.sender_id,
 			sender_id: event.sender_id,
@@ -246,7 +247,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 				} else {
 					timeline.push(
 						assistantMessageItem(
-							`out-${Date.now()}-${crypto.randomUUID()}`,
+							`out-${generateId()}`,
 							event.agent_id,
 							event.text,
 						),
@@ -271,7 +272,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 					timeline: [
 						...existing.timeline,
 						assistantMessageItem(
-							`out-${Date.now()}-${crypto.randomUUID()}`,
+							`out-${generateId()}`,
 							event.agent_id,
 							event.text,
 						),
@@ -308,7 +309,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 					};
 				}
 
-				const messageId = `stream-${Date.now()}-${crypto.randomUUID()}`;
+				const messageId = `stream-${generateId()}`;
 				return {
 					...prev,
 					[event.channel_id]: {
@@ -326,7 +327,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 				};
 			}
 
-			const messageId = `stream-${Date.now()}-${crypto.randomUUID()}`;
+			const messageId = `stream-${generateId()}`;
 			return {
 				...prev,
 				[event.channel_id]: {
