@@ -17,6 +17,7 @@ use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
 use crate::llm::SpacebotModel;
+use crate::memory::maintenance as memory_maintenance;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
 use crate::tasks::{TaskStatus, UpdateTaskInput};
@@ -1609,6 +1610,7 @@ async fn run_cortex_loop(
     let mut bulletin_refresh_failures: u32 = 0;
     let mut bulletin_refresh_circuit_open = false;
     let mut next_bulletin_refresh_allowed_at = Instant::now();
+    let mut last_maintenance = Instant::now();
 
     loop {
         tokio::select! {
@@ -1764,6 +1766,42 @@ async fn run_cortex_loop(
                         cortex.deps.clone(),
                         logger.clone(),
                     ));
+                }
+
+                if last_maintenance.elapsed() >= Duration::from_secs(
+                    cortex_config.maintenance_interval_secs.max(1),
+                ) {
+                    let maintenance_config = memory_maintenance::MaintenanceConfig {
+                        prune_threshold: cortex_config.maintenance_prune_threshold,
+                        decay_rate: cortex_config.maintenance_decay_rate,
+                        min_age_days: cortex_config.maintenance_min_age_days,
+                        merge_similarity_threshold: cortex_config
+                            .maintenance_merge_similarity_threshold,
+                    };
+
+                    let maintenance_result =
+                        memory_maintenance::run_maintenance(
+                            cortex.deps.memory_search.store(),
+                            cortex.deps.memory_search.embedding_table(),
+                            &maintenance_config,
+                        )
+                        .await;
+
+                    if let Ok(report) = maintenance_result {
+                        logger.log(
+                            "maintenance_completed",
+                            "Memory maintenance completed",
+                            Some(serde_json::json!({
+                                "decayed": report.decayed,
+                                "pruned": report.pruned,
+                                "merged": report.merged,
+                            })),
+                        );
+                    } else if let Err(error) = maintenance_result {
+                        tracing::warn!(%error, "cortex maintenance failed");
+                    }
+
+                    last_maintenance = Instant::now();
                 }
 
                 let updated_tick_interval_secs = cortex_config.tick_interval_secs.max(1);

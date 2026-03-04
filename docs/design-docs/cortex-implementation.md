@@ -17,7 +17,7 @@ This doc covers the path from "bulletin generator" to "full system supervisor."
 - `CortexHook` — all methods return `Continue` with trace logging.
 
 **Implemented but never called:**
-- `memory/maintenance.rs` — `apply_decay()` and `prune_memories()` work. `merge_similar_memories()` is a stub returning `Ok(0)`.
+- `memory/maintenance.rs` — `apply_decay()`, `prune_memories()`, and `merge_similar_memories()` are implemented and wired into the cortex loop.
 
 **Wired through config:**
 - `tick_interval_secs` and `bulletin_interval_secs` are read by the running cortex loop and hot-reload during runtime.

@@ -38,6 +38,7 @@ pub(super) struct CompactionSection {
 #[derive(Serialize, Debug)]
 pub(super) struct CortexSection {
     tick_interval_secs: u64,
+    maintenance_interval_secs: u64,
     worker_timeout_secs: u64,
     branch_timeout_secs: u64,
     detached_worker_timeout_retry_limit: u8,
@@ -46,6 +47,10 @@ pub(super) struct CortexSection {
     bulletin_interval_secs: u64,
     bulletin_max_words: usize,
     bulletin_max_turns: usize,
+    maintenance_decay_rate: f32,
+    maintenance_prune_threshold: f32,
+    maintenance_min_age_days: i64,
+    maintenance_merge_similarity_threshold: f32,
 }
 
 #[derive(Serialize, Debug)]
@@ -176,6 +181,7 @@ pub(super) struct CompactionUpdate {
 #[derive(Deserialize, Debug)]
 pub(super) struct CortexUpdate {
     tick_interval_secs: Option<u64>,
+    maintenance_interval_secs: Option<u64>,
     worker_timeout_secs: Option<u64>,
     branch_timeout_secs: Option<u64>,
     detached_worker_timeout_retry_limit: Option<u8>,
@@ -184,6 +190,10 @@ pub(super) struct CortexUpdate {
     bulletin_interval_secs: Option<u64>,
     bulletin_max_words: Option<usize>,
     bulletin_max_turns: Option<usize>,
+    maintenance_decay_rate: Option<f32>,
+    maintenance_prune_threshold: Option<f32>,
+    maintenance_min_age_days: Option<i64>,
+    maintenance_merge_similarity_threshold: Option<f32>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -281,6 +291,7 @@ pub(super) async fn get_agent_config(
         },
         cortex: CortexSection {
             tick_interval_secs: cortex.tick_interval_secs,
+            maintenance_interval_secs: cortex.maintenance_interval_secs,
             worker_timeout_secs: cortex.worker_timeout_secs,
             branch_timeout_secs: cortex.branch_timeout_secs,
             detached_worker_timeout_retry_limit: cortex.detached_worker_timeout_retry_limit,
@@ -289,6 +300,10 @@ pub(super) async fn get_agent_config(
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
             bulletin_max_turns: cortex.bulletin_max_turns,
+            maintenance_decay_rate: cortex.maintenance_decay_rate,
+            maintenance_prune_threshold: cortex.maintenance_prune_threshold,
+            maintenance_min_age_days: cortex.maintenance_min_age_days,
+            maintenance_merge_similarity_threshold: cortex.maintenance_merge_similarity_threshold,
         },
         warmup: WarmupSection {
             enabled: warmup.enabled,
@@ -628,6 +643,21 @@ fn update_cortex_table(
     if let Some(v) = cortex.bulletin_max_turns {
         table["bulletin_max_turns"] = toml_edit::value(v as i64);
     }
+    if let Some(v) = cortex.maintenance_interval_secs {
+        table["maintenance_interval_secs"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.maintenance_decay_rate {
+        table["maintenance_decay_rate"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = cortex.maintenance_prune_threshold {
+        table["maintenance_prune_threshold"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = cortex.maintenance_min_age_days {
+        table["maintenance_min_age_days"] = toml_edit::value(v);
+    }
+    if let Some(v) = cortex.maintenance_merge_similarity_threshold {
+        table["maintenance_merge_similarity_threshold"] = toml_edit::value(v as f64);
+    }
     Ok(())
 }
 
@@ -941,6 +971,7 @@ id = "main"
             find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
         let update = CortexUpdate {
             tick_interval_secs: None,
+            maintenance_interval_secs: None,
             worker_timeout_secs: None,
             branch_timeout_secs: None,
             detached_worker_timeout_retry_limit: None,
@@ -949,6 +980,10 @@ id = "main"
             bulletin_interval_secs: None,
             bulletin_max_words: None,
             bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
         };
 
         let result = update_cortex_table(&mut doc, agent_idx, &update);
@@ -957,5 +992,161 @@ id = "main"
         } else {
             assert!(result.is_ok());
         }
+    }
+
+    #[test]
+    fn test_update_cortex_table_writes_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = CortexUpdate {
+            tick_interval_secs: Some(45),
+            maintenance_interval_secs: Some(3_600),
+            worker_timeout_secs: Some(321),
+            branch_timeout_secs: Some(12),
+            detached_worker_timeout_retry_limit: Some(3),
+            supervisor_kill_budget_per_tick: Some(12),
+            circuit_breaker_threshold: Some(6),
+            bulletin_interval_secs: Some(120),
+            bulletin_max_words: Some(4000),
+            bulletin_max_turns: Some(5),
+            maintenance_decay_rate: Some(0.16),
+            maintenance_prune_threshold: Some(0.17),
+            maintenance_min_age_days: Some(15),
+            maintenance_merge_similarity_threshold: Some(0.98),
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &update).expect("failed to update cortex");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let cortex = agent
+            .get("cortex")
+            .and_then(|item| item.as_table())
+            .expect("missing cortex table");
+
+        assert_eq!(cortex["tick_interval_secs"].as_integer(), Some(45));
+        assert_eq!(
+            cortex["maintenance_interval_secs"].as_integer(),
+            Some(3_600)
+        );
+        assert_eq!(cortex["worker_timeout_secs"].as_integer(), Some(321));
+        assert_eq!(cortex["branch_timeout_secs"].as_integer(), Some(12));
+        assert_eq!(
+            cortex["detached_worker_timeout_retry_limit"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            cortex["supervisor_kill_budget_per_tick"].as_integer(),
+            Some(12)
+        );
+        assert_eq!(cortex["bulletin_interval_secs"].as_integer(), Some(120));
+        assert_eq!(cortex["bulletin_max_words"].as_integer(), Some(4000));
+        assert_eq!(cortex["bulletin_max_turns"].as_integer(), Some(5));
+        assert!((cortex["maintenance_decay_rate"].as_float().unwrap_or(0.0) - 0.16).abs() < 1e-6);
+        assert!(
+            (cortex["maintenance_prune_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.17)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(cortex["maintenance_min_age_days"].as_integer(), Some(15));
+        assert!(
+            (cortex["maintenance_merge_similarity_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.98)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(cortex["circuit_breaker_threshold"].as_integer(), Some(6));
+    }
+
+    #[test]
+    fn test_update_cortex_table_partial_update_only_sets_requested_keys() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let initial = CortexUpdate {
+            tick_interval_secs: Some(45),
+            maintenance_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &initial).expect("failed to apply initial update");
+
+        let second = CortexUpdate {
+            tick_interval_secs: Some(60),
+            maintenance_interval_secs: Some(4_800),
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: Some(0.2),
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: Some(0.85),
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &second).expect("failed to apply partial update");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let cortex = agent
+            .get("cortex")
+            .and_then(|item| item.as_table())
+            .expect("missing cortex table");
+
+        assert_eq!(cortex["tick_interval_secs"].as_integer(), Some(60));
+        assert_eq!(
+            cortex["maintenance_interval_secs"].as_integer(),
+            Some(4_800)
+        );
+        assert!((cortex["maintenance_decay_rate"].as_float().unwrap_or(0.0) - 0.2).abs() < 1e-6);
+        assert!(
+            (cortex["maintenance_merge_similarity_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.85)
+                .abs()
+                < 1e-6
+        );
+        assert!(cortex.get("worker_timeout_secs").is_none());
+        assert!(cortex.get("maintenance_prune_threshold").is_none());
     }
 }

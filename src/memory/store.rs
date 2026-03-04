@@ -252,6 +252,18 @@ impl MemoryStore {
         Ok(associations)
     }
 
+    /// Delete all associations referencing this memory.
+    pub async fn delete_associations_for_memory(&self, memory_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM associations WHERE source_id = ? OR target_id = ?")
+            .bind(memory_id)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete associations for memory {}", memory_id))?;
+
+        Ok(result.rows_affected())
+    }
+
     /// Get all associations where both source and target are in the provided set.
     /// Used by the graph view to fetch edges between a known set of visible nodes.
     pub async fn get_associations_between(
