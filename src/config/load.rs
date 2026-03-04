@@ -14,10 +14,10 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    MetricsConfig, OpenCodeConfig, ProviderConfig, SignalConfig, SignalInstanceConfig,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
+    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -2104,6 +2104,55 @@ impl Config {
                     trigger_prefix: t.trigger_prefix,
                 })
             }),
+            signal: toml.messaging.signal.and_then(|s| {
+                let instances = s
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let http_url = instance.http_url.as_deref().and_then(resolve_env_value);
+                        let account = instance.account.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && (http_url.is_none() || account.is_none()) {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "signal instance is enabled but http_url or account is missing/unresolvable — disabling"
+                            );
+                        }
+                        let has_credentials = http_url.is_some() && account.is_some();
+                        SignalInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            http_url: http_url.unwrap_or_default(),
+                            account: account.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                            group_ids: instance.group_ids,
+                            group_allowed_users: instance.group_allowed_users,
+                            ignore_stories: instance.ignore_stories,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let http_url = std::env::var("SIGNAL_HTTP_URL")
+                    .ok()
+                    .or_else(|| s.http_url.as_deref().and_then(resolve_env_value));
+                let account = std::env::var("SIGNAL_ACCOUNT")
+                    .ok()
+                    .or_else(|| s.account.as_deref().and_then(resolve_env_value));
+
+                if (http_url.is_none() || account.is_none()) && instances.is_empty() {
+                    return None;
+                }
+
+                Some(SignalConfig {
+                    enabled: s.enabled,
+                    http_url: http_url.unwrap_or_default(),
+                    account: account.unwrap_or_default(),
+                    instances,
+                    dm_allowed_users: s.dm_allowed_users,
+                    group_ids: s.group_ids,
+                    group_allowed_users: s.group_allowed_users,
+                    ignore_stories: s.ignore_stories,
+                })
+            }),
         };
 
         let bindings: Vec<Binding> = toml
@@ -2116,9 +2165,11 @@ impl Config {
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
+                group_ids: b.group_ids,
                 channel_ids: b.channel_ids,
                 require_mention: b.require_mention,
                 dm_allowed_users: b.dm_allowed_users,
+                group_allowed_users: b.group_allowed_users,
             })
             .collect();
 

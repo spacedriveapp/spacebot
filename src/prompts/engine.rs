@@ -482,6 +482,7 @@ impl PromptEngine {
     pub fn render_channel_adapter_prompt(&self, adapter: &str) -> Option<String> {
         let template_name = match adapter {
             "email" => "adapters/email",
+            "signal" => "adapters/signal",
             _ => return None,
         };
 

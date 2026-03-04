@@ -317,7 +317,15 @@ pub(crate) fn format_user_message(
         raw_text
     };
 
-    format!("{display_name}{bot_tag}{reply_context} [{timestamp_text}]: {text_content}")
+    let sender_context = message
+        .metadata
+        .get("sender_context")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    format!(
+        "{display_name}{bot_tag}{reply_context} {sender_context} [{timestamp_text}]: {text_content}"
+    )
 }
 
 pub(crate) fn format_batched_user_message(

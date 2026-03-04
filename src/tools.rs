@@ -298,6 +298,7 @@ pub async fn add_channel_tools(
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
+    current_adapter: Option<String>,
 ) -> Result<(), rig::tool::server::ToolServerError> {
     let conversation_id = conversation_id.into();
 
@@ -335,6 +336,7 @@ pub async fn add_channel_tools(
                 state.channel_store.clone(),
                 state.conversation_logger.clone(),
                 send_message_display_name,
+                current_adapter.clone(),
             ))
             .await?;
     }

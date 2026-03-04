@@ -14,7 +14,7 @@ mod watcher;
 pub use load::set_resolve_secrets_store;
 pub use onboarding::run_onboarding;
 pub use permissions::{
-    DiscordPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
+    DiscordPermissions, SignalPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
 };
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
@@ -540,9 +540,11 @@ bind = "127.0.0.1"
             guild_id: None,
             workspace_id: workspace_id.map(String::from),
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users,
+            group_allowed_users: vec![],
         }
     }
 
@@ -1312,9 +1314,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         assert_eq!(binding.runtime_adapter_key(), "telegram:sales");
     }
@@ -1328,9 +1332,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         assert!(binding.uses_default_adapter());
     }
@@ -1359,9 +1365,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         let message = test_inbound_message("telegram", None);
         assert!(binding_adapter_matches(&binding, &message));
@@ -1376,9 +1384,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         let message = test_inbound_message("telegram", Some("telegram:support"));
         assert!(binding_adapter_matches(&binding, &message));
@@ -1393,9 +1403,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         let message = test_inbound_message("telegram", None);
         assert!(!binding_adapter_matches(&binding, &message));
@@ -1410,9 +1422,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         let message = test_inbound_message("telegram", Some("telegram:support"));
         assert!(!binding_adapter_matches(&binding, &message));
@@ -1427,9 +1441,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         };
         let message = test_inbound_message("telegram", Some("telegram:sales"));
         assert!(!binding_adapter_matches(&binding, &message));
@@ -1454,6 +1470,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![
             Binding {
@@ -1463,9 +1480,11 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                group_ids: vec![],
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
+                group_allowed_users: vec![],
             },
             Binding {
                 agent_id: "support-agent".into(),
@@ -1474,9 +1493,11 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                group_ids: vec![],
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
+                group_allowed_users: vec![],
             },
         ];
         assert!(validate_named_messaging_adapters(&messaging, &bindings).is_ok());
@@ -1496,6 +1517,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1504,9 +1526,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         }];
         assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
     }
@@ -1558,6 +1582,7 @@ association_max_per_pass = 55
             }),
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1566,9 +1591,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         }];
         assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
     }
@@ -1592,6 +1619,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         // Binding targets default adapter, but no default credentials exist
         let bindings = vec![Binding {
@@ -1601,9 +1629,11 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            group_ids: vec![],
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
+            group_allowed_users: vec![],
         }];
         assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
     }

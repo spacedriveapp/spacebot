@@ -757,7 +757,7 @@ impl Channel {
         }
         let supported_source = matches!(
             message.source.as_str(),
-            "telegram" | "discord" | "slack" | "twitch"
+            "telegram" | "discord" | "slack" | "twitch" | "signal"
         );
         if !supported_source {
             return Ok(false);
@@ -1646,7 +1646,7 @@ impl Channel {
             && !replied_flag.load(std::sync::atomic::Ordering::Relaxed)
             && matches!(
                 message.source.as_str(),
-                "discord" | "telegram" | "slack" | "twitch"
+                "discord" | "telegram" | "slack" | "twitch" | "signal"
             )
         {
             self.send_builtin_text(
@@ -2036,6 +2036,7 @@ impl Channel {
             self.deps.cron_tool.clone(),
             send_agent_message_tool,
             allow_direct_reply,
+            self.current_adapter().map(|s| s.to_string()),
         )
         .await
         {
@@ -2371,7 +2372,9 @@ impl Channel {
             }
             Err(error) => {
                 // Send error to user so they know something went wrong
-                let error_msg = format!("I encountered an error: {}", error);
+                let error_msg =
+                    "Sorry — something went wrong while generating a response. Please try again."
+                        .to_string();
                 let _ = self
                     .response_tx
                     .send(OutboundResponse::Text(error_msg))

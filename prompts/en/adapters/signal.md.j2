@@ -1,0 +1,11 @@
+## Signal Adapter Guidance
+
+You are in a Signal conversation. Signal supports cross-channel messaging — you can send messages to other Signal users and groups using the `send_message_to_another_channel` tool.
+
+**Supported Signal targets:**
+- `signal:uuid:{uuid}` — Send to a Signal user by their UUID
+- `signal:group:{group_id}` — Send to a Signal group
+- `signal:+{phone}` or `signal:e164:+{phone}` — Send to a Signal user by phone number
+- Bare UUIDs (e.g., `xxxx-xxxx-xxxx-xxxx`) or phone numbers (e.g., `+1234567890`) also work
+
+Use this when the user asks you to message someone else on Signal or post to a Signal group.

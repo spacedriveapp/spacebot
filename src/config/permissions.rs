@@ -1,6 +1,7 @@
 use super::{
-    Binding, DiscordConfig, DiscordInstanceConfig, SlackConfig, SlackInstanceConfig,
-    TelegramConfig, TelegramInstanceConfig, TwitchConfig, TwitchInstanceConfig,
+    Binding, DiscordConfig, DiscordInstanceConfig, SignalConfig, SignalInstanceConfig, SlackConfig,
+    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TwitchConfig,
+    TwitchInstanceConfig,
 };
 use std::collections::HashMap;
 
@@ -324,6 +325,193 @@ impl TwitchPermissions {
     }
 }
 
+/// Hot-reloadable Signal permission filters.
+///
+/// Shared with the Signal adapter via `Arc<ArcSwap<..>>` for hot-reloading.
+/// Uses string-based identifiers since Signal users are identified by phone
+/// numbers (E.164) or UUIDs.
+///
+/// Wildcards:
+/// - `"*"` in `dm_allowed_users` means allow all DM users
+/// - `"*"` in `group_allowed_users` means allow all group users
+/// - `"*"` in `group_filter` means allow all groups
+/// - Empty array means block all (the `"*"` must be explicitly set to allow all)
+#[derive(Debug, Clone, Default)]
+pub struct SignalPermissions {
+    /// Allowed group IDs. None = block all, Some(["*"]) = allow all, Some([...]) = specific list.
+    pub group_filter: Option<Vec<String>>,
+    /// Phone numbers or UUIDs allowed to DM the bot. ["*"] = allow all, [] = block all.
+    /// Only applies to direct messages.
+    pub dm_allowed_users: Vec<String>,
+    /// Phone numbers or UUIDs allowed in group messages. ["*"] = allow all, [] = block all.
+    /// For groups, both dm_allowed_users AND group_allowed_users are checked (merged).
+    pub group_allowed_users: Vec<String>,
+}
+
+impl SignalPermissions {
+    /// Build from the current config's signal settings and bindings.
+    pub fn from_config(signal: &SignalConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            signal.dm_allowed_users.clone(),
+            signal.group_ids.clone(),
+            signal.group_allowed_users.clone(),
+            bindings,
+            None,
+        )
+    }
+
+    /// Build permissions for a named Signal adapter instance.
+    pub fn from_instance_config(instance: &SignalInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            instance.group_ids.clone(),
+            instance.group_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        seed_group_ids: Vec<String>,
+        seed_group_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let signal_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|binding| {
+                binding.channel == "signal"
+                    && binding_adapter_selector_matches(binding, adapter_selector)
+            })
+            .collect();
+
+        // Group filter: collect group_ids from signal config/instance + bindings.
+        // - "*" means allow all groups
+        // - Empty list means block all groups
+        // - Specific IDs means only those groups are allowed
+        let group_filter = {
+            let mut all_group_ids = seed_group_ids.clone();
+
+            // Check for wildcard in seed
+            if all_group_ids.iter().any(|id| id.trim() == "*") {
+                return Self {
+                    group_filter: Some(vec!["*".to_string()]),
+                    dm_allowed_users: vec!["*".to_string()],
+                    group_allowed_users: vec!["*".to_string()],
+                };
+            }
+
+            // Add group_ids from bindings (Vec<String>)
+            for binding in &signal_bindings {
+                for id in &binding.group_ids {
+                    let id = id.trim().to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    if id == "*" {
+                        // Wildcard in binding means allow all groups
+                        return Self {
+                            group_filter: Some(vec!["*".to_string()]),
+                            dm_allowed_users: vec!["*".to_string()],
+                            group_allowed_users: vec!["*".to_string()],
+                        };
+                    }
+                    // Signal group IDs are base64-encoded; validate format.
+                    if !is_valid_base64(&id) {
+                        tracing::warn!(
+                            group_id = %id,
+                            "signal: group_id is not valid base64, dropping"
+                        );
+                        continue;
+                    }
+                    if !all_group_ids.contains(&id) {
+                        all_group_ids.push(id);
+                    }
+                }
+            }
+
+            Some(all_group_ids)
+        };
+
+        // Build dm_allowed_users separately (for DMs only)
+        // - "*" means allow all DM users
+        // - Empty list means block all DMs
+        // - Specific list means only those users are allowed for DMs
+        let mut dm_users = seed_dm_allowed_users.clone();
+
+        // Check for wildcard in seed dm_allowed_users
+        if dm_users.iter().any(|id| id.trim() == "*") {
+            return Self {
+                group_filter,
+                dm_allowed_users: vec!["*".to_string()],
+                group_allowed_users: vec![],
+            };
+        }
+
+        // Add dm_allowed_users from bindings
+        for binding in &signal_bindings {
+            for id in &binding.dm_allowed_users {
+                let id = id.trim().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                if id == "*" {
+                    return Self {
+                        group_filter,
+                        dm_allowed_users: vec!["*".to_string()],
+                        group_allowed_users: vec![],
+                    };
+                }
+                if !dm_users.contains(&id) {
+                    dm_users.push(id);
+                }
+            }
+        }
+
+        // Build group_allowed_users separately (for groups only)
+        // - "*" means allow all group users
+        // - Empty list means block all group users
+        // - Specific list means only those users are allowed in groups
+        let mut group_users = seed_group_allowed_users.clone();
+
+        // Check for wildcard in seed group_allowed_users
+        if group_users.iter().any(|id| id.trim() == "*") {
+            return Self {
+                group_filter,
+                dm_allowed_users: dm_users,
+                group_allowed_users: vec!["*".to_string()],
+            };
+        }
+
+        // Add group_allowed_users from bindings
+        for binding in &signal_bindings {
+            for id in &binding.group_allowed_users {
+                let id = id.trim().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                if id == "*" {
+                    return Self {
+                        group_filter,
+                        dm_allowed_users: dm_users,
+                        group_allowed_users: vec!["*".to_string()],
+                    };
+                }
+                if !group_users.contains(&id) {
+                    group_users.push(id);
+                }
+            }
+        }
+
+        Self {
+            group_filter,
+            dm_allowed_users: dm_users,
+            group_allowed_users: group_users,
+        }
+    }
+}
+
 fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<&str>) -> bool {
     match (binding.adapter.as_deref(), adapter_selector) {
         (None, None) => true,
@@ -331,5 +519,47 @@ fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<
             binding_selector == requested_selector
         }
         _ => false,
+    }
+}
+
+/// Check if a string is valid base64 (URL-safe or standard).
+/// Signal group IDs are base64-encoded.
+fn is_valid_base64(s: &str) -> bool {
+    use base64::{
+        Engine, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
+    };
+
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    URL_SAFE_NO_PAD.decode(trimmed).is_ok() || STANDARD.decode(trimmed).is_ok()
+}
+
+#[cfg(test)]
+mod base64_tests {
+    use super::is_valid_base64;
+
+    #[test]
+    fn test_valid_url_safe_base64() {
+        // URL-safe base64 without padding (common for Signal group IDs)
+        assert!(is_valid_base64("abc123def456"));
+        assert!(is_valid_base64("abc123_def_456"));
+    }
+
+    #[test]
+    fn test_valid_standard_base64() {
+        // Standard base64
+        assert!(is_valid_base64("abc123DEF456+/="));
+        assert!(is_valid_base64("SGVsbG8gV29ybGQ="));
+    }
+
+    #[test]
+    fn test_invalid_base64() {
+        // Invalid characters not in base64 alphabet
+        assert!(!is_valid_base64("not@valid!base64"));
+        assert!(!is_valid_base64(""));
+        assert!(!is_valid_base64("   "));
     }
 }

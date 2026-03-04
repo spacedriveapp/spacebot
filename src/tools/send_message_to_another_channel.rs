@@ -23,6 +23,7 @@ pub struct SendMessageTool {
     channel_store: ChannelStore,
     conversation_logger: ConversationLogger,
     agent_display_name: String,
+    current_adapter: Option<String>,
 }
 
 impl std::fmt::Debug for SendMessageTool {
@@ -37,12 +38,14 @@ impl SendMessageTool {
         channel_store: ChannelStore,
         conversation_logger: ConversationLogger,
         agent_display_name: String,
+        current_adapter: Option<String>,
     ) -> Self {
         Self {
             messaging_manager,
             channel_store,
             conversation_logger,
             agent_display_name,
+            current_adapter,
         }
     }
 }
@@ -79,6 +82,12 @@ impl Tool for SendMessageTool {
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         let email_adapter_available = self.messaging_manager.has_adapter("email").await;
+        // Check if current adapter is Signal (e.g., "signal:gvoice1" starts with "signal")
+        let signal_adapter_available = self
+            .current_adapter
+            .as_ref()
+            .map(|adapter| adapter.starts_with("signal"))
+            .unwrap_or(false);
 
         let mut description =
             crate::prompts::text::get("tools/send_message_to_another_channel").to_string();
@@ -90,6 +99,15 @@ impl Tool for SendMessageTool {
             );
             target_description.push_str(
                 " With email enabled, explicit email targets are also allowed: `email:alice@example.com` or `alice@example.com`.",
+            );
+        }
+
+        if signal_adapter_available {
+            description.push_str(
+                " Signal messaging is enabled: you can target `signal:uuid:{uuid}`, `signal:group:{group_id}`, or `signal:+{phone}`.",
+            );
+            target_description.push_str(
+                " With Signal enabled, explicit targets are also allowed: `signal:uuid:{uuid}`, `signal:group:{group_id}`, `signal:+{phone}`, or bare UUIDs and phone numbers.",
             );
         }
 
@@ -120,6 +138,35 @@ impl Tool for SendMessageTool {
             "send_message_to_another_channel tool called"
         );
 
+        // Check for explicit Signal target first
+        if let Some(mut explicit_target) = parse_explicit_signal_target(&args.target) {
+            // Use the current adapter (e.g., "signal:gvoice1") instead of generic "signal"
+            if let Some(ref current_adapter) = self.current_adapter {
+                explicit_target.adapter = current_adapter.clone();
+            }
+            self.messaging_manager
+                .broadcast(
+                    &explicit_target.adapter,
+                    &explicit_target.target,
+                    crate::OutboundResponse::Text(args.message),
+                )
+                .await
+                .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
+
+            tracing::info!(
+                adapter = %explicit_target.adapter,
+                broadcast_target = %explicit_target.target,
+                "message sent via explicit target"
+            );
+
+            return Ok(SendMessageOutput {
+                success: true,
+                target: explicit_target.target,
+                platform: explicit_target.adapter,
+            });
+        }
+
+        // Check for explicit email target
         if let Some(explicit_target) = parse_explicit_email_target(&args.target) {
             self.messaging_manager
                 .broadcast(
@@ -199,6 +246,48 @@ impl Tool for SendMessageTool {
     }
 }
 
+fn parse_explicit_signal_target(raw: &str) -> Option<crate::messaging::target::BroadcastTarget> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    // Check if it starts with signal: prefix
+    if trimmed.starts_with("signal:uuid:")
+        || trimmed.starts_with("signal:group:")
+        || trimmed.starts_with("signal:e164:")
+        || trimmed.starts_with("signal:+")
+    {
+        return crate::messaging::target::parse_delivery_target(trimmed);
+    }
+
+    // Check for bare formats that look like Signal targets
+    // UUID format: xxxx-xxxx-xxxx-xxxx (contains dashes)
+    if trimmed.contains('-') && trimmed.len() > 8 && trimmed.chars().any(|c| c.is_ascii_digit()) {
+        return crate::messaging::target::parse_delivery_target(&format!("signal:uuid:{trimmed}"));
+    }
+
+    // Phone number format: starts with + followed by 7+ digits
+    if trimmed.starts_with('+')
+        && trimmed[1..].len() >= 7
+        && trimmed[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return crate::messaging::target::parse_delivery_target(&format!("signal:{trimmed}"));
+    }
+
+    // Bare phone number (7+ digits)
+    if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_digit()) {
+        return crate::messaging::target::parse_delivery_target(&format!("signal:+{trimmed}"));
+    }
+
+    // Group ID format: group:xxx (might be passed directly)
+    if trimmed.starts_with("group:") {
+        return crate::messaging::target::parse_delivery_target(&format!("signal:{trimmed}"));
+    }
+
+    None
+}
+
 fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::BroadcastTarget> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -218,7 +307,7 @@ fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::Br
 
 #[cfg(test)]
 mod tests {
-    use super::parse_explicit_email_target;
+    use super::{parse_explicit_email_target, parse_explicit_signal_target};
 
     #[test]
     fn parses_prefixed_email_target() {
@@ -249,5 +338,64 @@ mod tests {
     #[test]
     fn ignores_channel_name_target() {
         assert!(parse_explicit_email_target("general").is_none());
+    }
+
+    // Signal tests
+    #[test]
+    fn parses_signal_uuid_prefixed() {
+        let target =
+            parse_explicit_signal_target("signal:uuid:abc-123-def").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "uuid:abc-123-def");
+    }
+
+    #[test]
+    fn parses_signal_bare_uuid() {
+        let target = parse_explicit_signal_target("abc-123-def").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "uuid:abc-123-def");
+    }
+
+    #[test]
+    fn parses_signal_group_prefixed() {
+        let target = parse_explicit_signal_target("signal:group:grp123").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "group:grp123");
+    }
+
+    #[test]
+    fn parses_signal_phone_plus_prefixed() {
+        let target = parse_explicit_signal_target("signal:+1234567890").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "+1234567890");
+    }
+
+    #[test]
+    fn parses_signal_phone_e164_prefixed() {
+        let target =
+            parse_explicit_signal_target("signal:e164:+1234567890").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "+1234567890");
+    }
+
+    #[test]
+    fn parses_signal_bare_phone_plus() {
+        let target = parse_explicit_signal_target("+1234567890").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "+1234567890");
+    }
+
+    #[test]
+    fn parses_signal_bare_phone_digits() {
+        let target = parse_explicit_signal_target("1234567890").expect("signal target");
+        assert_eq!(target.adapter, "signal");
+        assert_eq!(target.target, "+1234567890");
+    }
+
+    #[test]
+    fn ignores_invalid_signal_target() {
+        assert!(parse_explicit_signal_target("discord:123").is_none());
+        assert!(parse_explicit_signal_target("general").is_none());
+        assert!(parse_explicit_signal_target("").is_none());
     }
 }

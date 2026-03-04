@@ -1,1 +1,7 @@
 Send a message to a DIFFERENT channel than the one you are currently in. Use this for cross-channel delivery — reminders, notifications, or when the user asks you to post something in another channel or DM them. Do NOT use this to reply in the current conversation — use the `reply` tool for that. Target channels by name or ID from the available channels in your context.
+
+For Signal messaging, you can use these explicit targets:
+- `signal:uuid:{uuid}` - Send to a Signal user by their UUID
+- `signal:group:{group_id}` - Send to a Signal group
+- `signal:e164:+{phone}` or `signal:+{phone}` - Send to a Signal user by phone number
+- Bare UUIDs or phone numbers (e.g., `xxxx-xxxx-xxxx-xxxx` or `+1234567890`) will also work

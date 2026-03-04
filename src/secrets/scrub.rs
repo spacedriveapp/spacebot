@@ -210,7 +210,7 @@ pub fn scrub_secrets(text: &str, tool_secrets: &[(String, String)]) -> String {
     // Sort by descending value length so longer secrets are replaced first.
     // This prevents partial replacement when one secret value is a prefix of another.
     let mut sorted: Vec<&(String, String)> = tool_secrets.iter().collect();
-    sorted.sort_by(|a, b| b.1.len().cmp(&a.1.len()));
+    sorted.sort_by_key(|b| std::cmp::Reverse(b.1.len()));
     let mut result = text.to_string();
     for (name, value) in sorted {
         if !value.is_empty() {
