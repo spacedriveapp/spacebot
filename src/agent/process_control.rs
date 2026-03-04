@@ -3,7 +3,7 @@
 use crate::agent::channel::WeakChannelControlHandle;
 use crate::{AgentId, BranchId, ChannelId, WorkerId};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,6 +17,26 @@ pub const DETACHED_WORKER_LIFECYCLE_ACTIVE: u8 = 0;
 pub const DETACHED_WORKER_LIFECYCLE_COMPLETING: u8 = 1;
 pub const DETACHED_WORKER_LIFECYCLE_KILLING: u8 = 2;
 pub const DETACHED_WORKER_LIFECYCLE_TERMINAL: u8 = 3;
+
+#[derive(Debug, Clone)]
+pub struct DetachedWorkerControlSnapshot {
+    pub worker_id: WorkerId,
+    pub agent_id: AgentId,
+    pub task_number: i64,
+    pub lifecycle: u8,
+}
+
+#[derive(Clone)]
+struct ChannelControlEntry {
+    handle: WeakChannelControlHandle,
+    registration_id: u64,
+}
+
+enum ChannelLookupResult {
+    Found(crate::agent::channel::ChannelControlHandle),
+    Stale(u64),
+    Missing,
+}
 
 pub struct DetachedWorkerControl {
     pub worker_id: WorkerId,
@@ -45,8 +65,9 @@ impl DetachedWorkerControl {
 }
 
 pub struct ProcessControlRegistry {
-    channels: tokio::sync::RwLock<HashMap<ChannelId, WeakChannelControlHandle>>,
+    channels: tokio::sync::RwLock<HashMap<ChannelId, ChannelControlEntry>>,
     detached_workers: tokio::sync::RwLock<HashMap<WorkerId, DetachedWorkerControl>>,
+    next_channel_registration: AtomicU64,
 }
 
 impl Default for ProcessControlRegistry {
@@ -60,11 +81,21 @@ impl ProcessControlRegistry {
         Self {
             channels: tokio::sync::RwLock::new(HashMap::new()),
             detached_workers: tokio::sync::RwLock::new(HashMap::new()),
+            next_channel_registration: AtomicU64::new(1),
         }
     }
 
     pub async fn register_channel(&self, channel_id: ChannelId, handle: WeakChannelControlHandle) {
-        self.channels.write().await.insert(channel_id, handle);
+        let registration_id = self
+            .next_channel_registration
+            .fetch_add(1, Ordering::AcqRel);
+        self.channels.write().await.insert(
+            channel_id,
+            ChannelControlEntry {
+                handle,
+                registration_id,
+            },
+        );
     }
 
     pub async fn unregister_channel(&self, channel_id: &ChannelId) -> bool {
@@ -74,7 +105,7 @@ impl ProcessControlRegistry {
     pub async fn prune_dead_channels(&self) -> usize {
         let mut channels = self.channels.write().await;
         let before = channels.len();
-        channels.retain(|_, handle| handle.upgrade().is_some());
+        channels.retain(|_, entry| entry.handle.upgrade().is_some());
         before.saturating_sub(channels.len())
     }
 
@@ -93,21 +124,36 @@ impl ProcessControlRegistry {
             .is_some()
     }
 
+    pub async fn detached_worker_snapshots(&self) -> Vec<DetachedWorkerControlSnapshot> {
+        let workers = self.detached_workers.read().await;
+        workers
+            .values()
+            .map(|control| DetachedWorkerControlSnapshot {
+                worker_id: control.worker_id,
+                agent_id: control.agent_id.clone(),
+                task_number: control.task_number,
+                lifecycle: control.lifecycle.load(Ordering::Acquire),
+            })
+            .collect()
+    }
+
     async fn lookup_channel_handle(
         &self,
         channel_id: &ChannelId,
-    ) -> std::result::Result<crate::agent::channel::ChannelControlHandle, ControlActionResult> {
-        let mut channels = self.channels.write().await;
-        let Some(weak_handle) = channels.get(channel_id).cloned() else {
-            return Err(ControlActionResult::NotFound);
+    ) -> ChannelLookupResult {
+        let handle_entry = {
+            let channels = self.channels.read().await;
+            let Some(handle_entry) = channels.get(channel_id).cloned() else {
+                return ChannelLookupResult::Missing;
+            };
+
+            handle_entry
         };
 
-        let Some(handle) = weak_handle.upgrade() else {
-            channels.remove(channel_id);
-            return Err(ControlActionResult::NotFound);
-        };
-
-        Ok(handle)
+        match handle_entry.handle.upgrade() {
+            Some(handle) => ChannelLookupResult::Found(handle),
+            None => ChannelLookupResult::Stale(handle_entry.registration_id),
+        }
     }
 
     pub async fn cancel_channel_worker(
@@ -116,12 +162,17 @@ impl ProcessControlRegistry {
         worker_id: WorkerId,
         reason: &str,
     ) -> ControlActionResult {
-        let handle = match self.lookup_channel_handle(channel_id).await {
-            Ok(handle) => handle,
-            Err(result) => return result,
-        };
-
-        handle.cancel_worker_with_reason(worker_id, reason).await
+        match self.lookup_channel_handle(channel_id).await {
+            ChannelLookupResult::Found(handle) => {
+                handle.cancel_worker_with_reason(worker_id, reason).await
+            }
+            ChannelLookupResult::Stale(registration_id) => {
+                self.remove_stale_channel_if_matches(channel_id, registration_id)
+                    .await;
+                ControlActionResult::NotFound
+            }
+            ChannelLookupResult::Missing => ControlActionResult::NotFound,
+        }
     }
 
     pub async fn cancel_channel_branch(
@@ -130,12 +181,34 @@ impl ProcessControlRegistry {
         branch_id: BranchId,
         reason: &str,
     ) -> ControlActionResult {
-        let handle = match self.lookup_channel_handle(channel_id).await {
-            Ok(handle) => handle,
-            Err(result) => return result,
-        };
+        match self.lookup_channel_handle(channel_id).await {
+            ChannelLookupResult::Found(handle) => {
+                handle.cancel_branch_with_reason(branch_id, reason).await
+            }
+            ChannelLookupResult::Stale(registration_id) => {
+                self.remove_stale_channel_if_matches(channel_id, registration_id)
+                    .await;
+                ControlActionResult::NotFound
+            }
+            ChannelLookupResult::Missing => ControlActionResult::NotFound,
+        }
+    }
 
-        handle.cancel_branch_with_reason(branch_id, reason).await
+    async fn remove_stale_channel_if_matches(
+        &self,
+        channel_id: &ChannelId,
+        expected_registration_id: u64,
+    ) -> bool {
+        let mut channels = self.channels.write().await;
+        let should_remove = channels
+            .get(channel_id)
+            .is_some_and(|current| current.registration_id == expected_registration_id);
+
+        if should_remove {
+            channels.remove(channel_id);
+        }
+
+        should_remove
     }
 
     pub async fn cancel_detached_worker(
@@ -186,8 +259,9 @@ impl ProcessControlRegistry {
 mod tests {
     use super::{
         ControlActionResult, DETACHED_WORKER_LIFECYCLE_ACTIVE, DetachedWorkerControl,
-        ProcessControlRegistry,
+        DetachedWorkerControlSnapshot, ProcessControlRegistry,
     };
+    use crate::agent::channel::WeakChannelControlHandle;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, Ordering};
 
@@ -227,6 +301,35 @@ mod tests {
 
         assert_eq!(pruned, 1);
         assert!(!registry.unregister_channel(&channel_id).await);
+    }
+
+    #[tokio::test]
+    async fn stale_channel_entry_cleanup_only_removes_matching_registration_id() {
+        let registry = ProcessControlRegistry::new();
+        let channel_id: crate::ChannelId = Arc::from("channel-stale-race");
+        let stale_handle = WeakChannelControlHandle::dangling();
+
+        registry
+            .register_channel(channel_id.clone(), stale_handle)
+            .await;
+        let stale_registration_id = {
+            let channels = registry.channels.read().await;
+            channels
+                .get(&channel_id)
+                .map(|entry| entry.registration_id)
+                .unwrap()
+        };
+
+        registry
+            .register_channel(channel_id.clone(), WeakChannelControlHandle::dangling())
+            .await;
+
+        assert!(
+            !registry
+                .remove_stale_channel_if_matches(&channel_id, stale_registration_id)
+                .await
+        );
+        assert!(registry.unregister_channel(&channel_id).await);
     }
 
     #[tokio::test]
@@ -282,5 +385,32 @@ mod tests {
             lifecycle.load(Ordering::Acquire),
             super::DETACHED_WORKER_LIFECYCLE_KILLING
         );
+    }
+
+    #[tokio::test]
+    async fn detached_worker_snapshots_capture_state() {
+        let registry = ProcessControlRegistry::new();
+        let worker_id = uuid::Uuid::new_v4();
+        let lifecycle = Arc::new(AtomicU8::new(DETACHED_WORKER_LIFECYCLE_ACTIVE));
+        let (cancel_tx, _cancel_rx) = tokio::sync::oneshot::channel();
+
+        registry
+            .register_detached_worker(DetachedWorkerControl::new(
+                worker_id,
+                Arc::from("agent"),
+                99,
+                cancel_tx,
+                lifecycle,
+            ))
+            .await;
+
+        let snapshots = registry.detached_worker_snapshots().await;
+        assert_eq!(snapshots.len(), 1);
+
+        let snapshot: DetachedWorkerControlSnapshot = snapshots[0].clone();
+        assert_eq!(snapshot.worker_id, worker_id);
+        assert_eq!(snapshot.agent_id.as_ref(), "agent");
+        assert_eq!(snapshot.task_number, 99);
+        assert_eq!(snapshot.lifecycle, DETACHED_WORKER_LIFECYCLE_ACTIVE);
     }
 }
