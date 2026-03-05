@@ -93,7 +93,7 @@ impl TelegramAdapter {
             .metadata
             .get("telegram_message_id")
             .and_then(|v| v.as_i64())
-            .map(|v| v as i32)
+            .and_then(|v| i32::try_from(v).ok())
             .context("missing telegram_message_id in metadata")?;
         Ok(MessageId(id))
     }
@@ -104,7 +104,7 @@ impl TelegramAdapter {
             .metadata
             .get("telegram_thread_id")
             .and_then(|v| v.as_i64())
-            .map(|v| v as i32)?;
+            .and_then(|v| i32::try_from(v).ok())?;
         Some(ThreadId(MessageId(id)))
     }
 
@@ -467,11 +467,11 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::StreamStart => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let mut req = self.bot.send_message(chat_id, "...");
+                let mut request = self.bot.send_message(chat_id, "...");
                 if let Some(tid) = thread_id {
-                    req = req.message_thread_id(tid);
+                    request = request.message_thread_id(tid);
                 }
-                let placeholder = req
+                let placeholder = request
                     .send()
                     .await
                     .context("failed to send stream placeholder")?;
@@ -562,11 +562,11 @@ impl Messaging for TelegramAdapter {
                 // Include thread ID so the indicator appears in the correct forum topic.
                 let handle = tokio::spawn(async move {
                     loop {
-                        let mut req = bot.send_chat_action(chat_id, ChatAction::Typing);
+                        let mut request = bot.send_chat_action(chat_id, ChatAction::Typing);
                         if let Some(tid) = thread_id {
-                            req = req.message_thread_id(tid);
+                            request = request.message_thread_id(tid);
                         }
-                        if let Err(error) = req.send().await {
+                        if let Err(error) = request.send().await {
                             tracing::debug!(%error, "failed to send typing indicator");
                             break;
                         }
