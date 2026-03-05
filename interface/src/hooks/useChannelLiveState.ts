@@ -7,6 +7,7 @@ import {
 	type InboundMessageEvent,
 	type OutboundMessageDeltaEvent,
 	type OutboundMessageEvent,
+	type ReactionEvent,
 	type TimelineItem,
 	type ToolCompletedEvent,
 	type ToolStartedEvent,
@@ -697,6 +698,28 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		}
 	}, []);
 
+	const handleReaction = useCallback((data: unknown) => {
+		const event = data as Partial<ReactionEvent>;
+		if (typeof event.channel_id !== "string" || typeof event.emoji !== "string") return;
+		const channelId = event.channel_id;
+		const emoji = event.emoji;
+		const messageId = event.message_id ?? null;
+		setLiveStates((prev) => {
+			const state = prev[channelId];
+			if (!state) return prev;
+			const timeline = [...state.timeline];
+			// Target by message_id when available, fall back to latest user message
+			for (let i = timeline.length - 1; i >= 0; i--) {
+				const item = timeline[i];
+				if (item.type !== "message" || item.role !== "user") continue;
+				if (messageId && item.id !== messageId) continue;
+				timeline[i] = { ...item, reaction: emoji };
+				break;
+			}
+			return { ...prev, [channelId]: { ...state, timeline } };
+		});
+	}, []);
+
 	const loadOlderMessages = useCallback((channelId: string) => {
 		setLiveStates((prev) => {
 			const state = prev[channelId];
@@ -751,6 +774,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		branch_completed: handleBranchCompleted,
 		tool_started: handleToolStarted,
 		tool_completed: handleToolCompleted,
+		reaction: handleReaction,
 	};
 
 	return { liveStates, handlers, syncStatusSnapshot, loadOlderMessages };

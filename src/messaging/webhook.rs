@@ -195,7 +195,7 @@ impl Messaging for WebhookAdapter {
                 caption: None,
             },
             // Reactions, status updates, and remove-reaction aren't meaningful over webhook
-            OutboundResponse::Reaction(_)
+            OutboundResponse::Reaction(..)
             | OutboundResponse::RemoveReaction(_)
             | OutboundResponse::Status(_) => return Ok(()),
             // Slack-specific rich variants — fall back to plain text

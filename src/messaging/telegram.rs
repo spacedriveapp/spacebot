@@ -403,7 +403,7 @@ impl Messaging for TelegramAdapter {
                     }
                 }
             }
-            OutboundResponse::Reaction(emoji) => {
+            OutboundResponse::Reaction(emoji, _) => {
                 let message_id = self.extract_message_id(message)?;
 
                 let reaction = ReactionType::Emoji {
