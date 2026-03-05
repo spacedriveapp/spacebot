@@ -46,6 +46,9 @@ pub struct ReplyTool {
     channel_id: ChannelId,
     replied_flag: RepliedFlag,
     agent_display_name: String,
+    /// Tool secret pairs for exact-match redaction on reply content.
+    tool_secret_pairs: Vec<(String, String)>,
+    secret_scan_mode: crate::secrets::scrub::SecretScanMode,
 }
 
 impl ReplyTool {
@@ -65,7 +68,21 @@ impl ReplyTool {
             channel_id,
             replied_flag,
             agent_display_name: agent_display_name.into(),
+            tool_secret_pairs: Vec::new(),
+            secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
         }
+    }
+
+    /// Set the secret scan mode for this reply tool.
+    pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
+        self.secret_scan_mode = mode;
+        self
+    }
+
+    /// Set tool secret pairs for exact-match redaction on reply content.
+    pub fn with_tool_secrets(mut self, pairs: Vec<(String, String)>) -> Self {
+        self.tool_secret_pairs = pairs;
+        self
     }
 }
 
@@ -378,15 +395,22 @@ impl Tool for ReplyTool {
             .map(|name| name.trim())
             .filter(|name| !name.is_empty());
 
-        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
-            tracing::error!(
-                conversation_id = %self.conversation_id,
-                leak_prefix = %&leak[..leak.len().min(8)],
-                "reply tool blocked content matching secret pattern"
-            );
-            return Err(ReplyError(
-                "blocked reply content: potential secret detected".into(),
-            ));
+        // Apply centralized scrubbing: exact-match (layer 1) + regex (layer 2) per mode.
+        let converted_content = self
+            .secret_scan_mode
+            .apply_scrubbing_with_pairs(&converted_content, &self.tool_secret_pairs);
+
+        if self.secret_scan_mode == crate::secrets::scrub::SecretScanMode::Strict {
+            if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
+                tracing::error!(
+                    conversation_id = %self.conversation_id,
+                    leak_prefix = %&leak[..leak.len().min(8)],
+                    "reply tool blocked content matching secret pattern"
+                );
+                return Err(ReplyError(
+                    "blocked reply content: potential secret detected".into(),
+                ));
+            }
         }
 
         let response = if let Some(name) = thread_name {

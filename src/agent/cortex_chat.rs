@@ -341,7 +341,8 @@ impl CortexChatSession {
             ProcessType::Cortex,
             channel_context_id.map(std::sync::Arc::<str>::from),
             self.deps.event_tx.clone(),
-        );
+        )
+        .with_secret_scan_mode(self.deps.secret_scan_mode());
         let hook = CortexChatHook::new(event_tx.clone(), spacebot_hook);
 
         // Clone what the spawned task needs

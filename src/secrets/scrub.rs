@@ -12,7 +12,95 @@
 //! redacted), and leak detection only fires on unknown/unstored secrets.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+
+/// Controls how aggressively the leak scanner operates.
+///
+/// `Strict` (default): checks tool output against hardcoded API key regex
+/// patterns. Catches unknown secrets but can false-positive on legitimate
+/// public keys found in scraped web content (e.g. Algolia search keys).
+///
+/// `OwnSecretsOnly`: skips regex-based leak detection entirely. Only the
+/// exact-match `StreamScrubber` (layer 1) redacts the agent's own stored
+/// secrets. This eliminates false positives from web scraping at the cost
+/// of not detecting unknown/unstored secrets in tool output.
+///
+/// `Disabled`: no leak detection at all. Use with caution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretScanMode {
+    /// Regex-based leak detection for unknown secrets (default).
+    #[default]
+    Strict,
+    /// Only redact secrets stored in the agent's secret store.
+    /// Eliminates false positives from scraped web content.
+    OwnSecretsOnly,
+    /// No regex-based leak detection. Exact-match scrubbing of stored
+    /// secrets (Layer 1) still runs. Use with caution.
+    Disabled,
+}
+
+impl SecretScanMode {
+    /// Apply regex-based leak scrubbing only when in `Strict` mode.
+    /// Returns the scrubbed text in Strict mode, or the input unchanged otherwise.
+    pub fn maybe_scrub_leaks(&self, text: String) -> String {
+        match self {
+            Self::Strict => scrub_leaks(&text),
+            Self::OwnSecretsOnly | Self::Disabled => text,
+        }
+    }
+
+    /// Centralized scrubbing using a `SecretsStore` reference.
+    ///
+    /// Enforces mode semantics end-to-end:
+    /// - `Strict`: exact-match (layer 1) + regex (layer 2).
+    /// - `OwnSecretsOnly`: exact-match only (layer 1).
+    /// - `Disabled`: no scrubbing at all.
+    pub fn apply_scrubbing_with_store(
+        &self,
+        text: &str,
+        store: Option<&crate::secrets::store::SecretsStore>,
+    ) -> String {
+        match self {
+            Self::Disabled => text.to_string(),
+            Self::OwnSecretsOnly => {
+                if let Some(store) = store {
+                    scrub_with_store(text, store)
+                } else {
+                    text.to_string()
+                }
+            }
+            Self::Strict => {
+                let scrubbed = if let Some(store) = store {
+                    scrub_with_store(text, store)
+                } else {
+                    text.to_string()
+                };
+                scrub_leaks(&scrubbed)
+            }
+        }
+    }
+
+    /// Centralized scrubbing using explicit secret name/value pairs.
+    ///
+    /// Same mode semantics as `apply_scrubbing_with_store` but accepts
+    /// pre-extracted pairs instead of a store reference.
+    pub fn apply_scrubbing_with_pairs(
+        &self,
+        text: &str,
+        pairs: &[(String, String)],
+    ) -> String {
+        match self {
+            Self::Disabled => text.to_string(),
+            Self::OwnSecretsOnly => scrub_secrets(text, pairs),
+            Self::Strict => {
+                let scrubbed = scrub_secrets(text, pairs);
+                scrub_leaks(&scrubbed)
+            }
+        }
+    }
+}
 
 /// Regex patterns for known API key formats. Used by `scan_for_leaks()` to
 /// detect secrets that aren't in the store.
@@ -379,5 +467,69 @@ mod tests {
             result.contains("more text"),
             "surrounding text should be preserved in: {result}"
         );
+    }
+
+    #[test]
+    fn secret_scan_mode_defaults_to_strict() {
+        assert_eq!(SecretScanMode::default(), SecretScanMode::Strict);
+    }
+
+    #[test]
+    fn secret_scan_mode_deserializes_from_toml() {
+        #[derive(Deserialize)]
+        struct Config {
+            mode: SecretScanMode,
+        }
+        let strict: Config = toml::from_str(r#"mode = "strict""#).unwrap();
+        assert_eq!(strict.mode, SecretScanMode::Strict);
+
+        let own: Config = toml::from_str(r#"mode = "own_secrets_only""#).unwrap();
+        assert_eq!(own.mode, SecretScanMode::OwnSecretsOnly);
+
+        let disabled: Config = toml::from_str(r#"mode = "disabled""#).unwrap();
+        assert_eq!(disabled.mode, SecretScanMode::Disabled);
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_strict_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::Strict.apply_scrubbing_with_pairs(input, &pairs);
+        // Layer 1: exact-match redaction
+        assert!(
+            result.contains("[REDACTED:TOKEN]"),
+            "expected exact-match redaction in: {result}"
+        );
+        // Layer 2: regex-based redaction
+        assert!(
+            result.contains("[LEAKED_SECRET_REDACTED]"),
+            "expected regex redaction in: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_own_secrets_only_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::OwnSecretsOnly.apply_scrubbing_with_pairs(input, &pairs);
+        // Layer 1: exact-match redaction should run
+        assert!(
+            result.contains("[REDACTED:TOKEN]"),
+            "expected exact-match redaction in: {result}"
+        );
+        // Layer 2: regex-based redaction should NOT run
+        assert!(
+            result.contains("sk-ant-abc123456789012345678"),
+            "regex leak pattern should pass through in OwnSecretsOnly: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_disabled_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::Disabled.apply_scrubbing_with_pairs(input, &pairs);
+        // No scrubbing at all
+        assert_eq!(result, input, "disabled mode should return input unchanged");
     }
 }

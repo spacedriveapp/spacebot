@@ -85,7 +85,9 @@ impl Worker {
             ProcessType::Worker,
             channel_id.clone(),
             deps.event_tx.clone(),
-        );
+        )
+        .with_secret_scan_mode(deps.secret_scan_mode())
+        .with_secrets_snapshot(deps.runtime_config.secrets.load().as_ref().clone());
         let (status_tx, status_rx) = watch::channel("starting".to_string());
 
         Self {

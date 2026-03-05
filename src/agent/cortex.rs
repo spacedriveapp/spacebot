@@ -2428,18 +2428,16 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let agent_names = deps.agent_names.clone();
     let sqlite_pool = deps.sqlite_pool.clone();
     let secrets_snapshot = deps.runtime_config.secrets.load().clone();
+    let scan_mode = deps.secret_scan_mode();
     let process_control_registry = deps.process_control_registry.clone();
     let runtime_config = deps.runtime_config.clone();
     tokio::spawn(async move {
         // Scrub known secrets and unknown leak patterns from all worker output
         // before persisting, logging, or emitting events.
         let scrub = |text: String| -> String {
-            let scrubbed = if let Some(store) = secrets_snapshot.as_ref() {
-                crate::secrets::scrub::scrub_with_store(&text, store)
-            } else {
-                text
-            };
-            crate::secrets::scrub::scrub_leaks(&scrubbed)
+            let store_ref: Option<&crate::secrets::store::SecretsStore> =
+                secrets_snapshot.as_ref().as_ref().map(|s| s.as_ref());
+            scan_mode.apply_scrubbing_with_store(&text, store_ref)
         };
 
         let worker_execution = async {

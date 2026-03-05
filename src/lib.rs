@@ -363,6 +363,11 @@ impl AgentDeps {
     pub fn routing(&self) -> arc_swap::Guard<Arc<llm::RoutingConfig>> {
         self.runtime_config.routing.load()
     }
+
+    /// Read the current secret scan mode from the sandbox config.
+    pub fn secret_scan_mode(&self) -> secrets::scrub::SecretScanMode {
+        self.runtime_config.sandbox.load().secret_scanner
+    }
 }
 
 /// A running agent instance with all its isolated resources.

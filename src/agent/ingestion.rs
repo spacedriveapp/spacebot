@@ -498,7 +498,8 @@ async fn process_chunk(
         ProcessType::Branch,
         None,
         deps.event_tx.clone(),
-    );
+    )
+    .with_secret_scan_mode(deps.secret_scan_mode());
 
     let user_prompt =
         prompt_engine.render_system_ingestion_chunk(filename, chunk_number, total_chunks, chunk)?;
