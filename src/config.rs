@@ -977,6 +977,43 @@ startup_delay_secs = 2
     }
 
     #[test]
+    fn test_cortex_default_and_agent_override_resolution() {
+        let toml = r#"
+[defaults.cortex]
+tick_interval_secs = 45
+detached_worker_timeout_retry_limit = 4
+supervisor_kill_budget_per_tick = 12
+bulletin_max_words = 1200
+
+[[agents]]
+id = "main"
+
+[agents.cortex]
+branch_timeout_secs = 77
+supervisor_kill_budget_per_tick = 3
+association_max_per_pass = 55
+"#;
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+        let resolved = config.agents[0].resolve(&config.instance_dir, &config.defaults);
+
+        assert_eq!(config.defaults.cortex.tick_interval_secs, 45);
+        assert_eq!(
+            config.defaults.cortex.detached_worker_timeout_retry_limit,
+            4
+        );
+        assert_eq!(config.defaults.cortex.supervisor_kill_budget_per_tick, 12);
+        assert_eq!(config.defaults.cortex.bulletin_max_words, 1200);
+
+        assert_eq!(resolved.cortex.tick_interval_secs, 45);
+        assert_eq!(resolved.cortex.branch_timeout_secs, 77);
+        assert_eq!(resolved.cortex.detached_worker_timeout_retry_limit, 4);
+        assert_eq!(resolved.cortex.supervisor_kill_budget_per_tick, 3);
+        assert_eq!(resolved.cortex.bulletin_max_words, 1200);
+        assert_eq!(resolved.cortex.association_max_per_pass, 55);
+    }
+
+    #[test]
     fn test_work_readiness_requires_warm_state() {
         let readiness = evaluate_work_readiness(
             WarmupConfig::default(),

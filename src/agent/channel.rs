@@ -11,6 +11,7 @@ use crate::agent::channel_prompt::{
     MAX_RETRIGGERS_PER_TURN, RETRIGGER_DEBOUNCE_MS, RETRIGGER_MAX_TURNS, TemporalContext,
 };
 use crate::agent::compactor::Compactor;
+use crate::agent::process_control::ControlActionResult;
 use crate::agent::status::StatusBlock;
 use crate::agent::worker::Worker;
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
@@ -28,7 +29,7 @@ use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 
@@ -103,41 +104,192 @@ impl ChannelState {
     /// Cancel a running worker by aborting its tokio task and cleaning up state.
     /// Returns an error message if the worker is not found.
     pub async fn cancel_worker(&self, worker_id: WorkerId) -> std::result::Result<(), String> {
-        let handle = self.worker_handles.write().await.remove(&worker_id);
+        self.cancel_worker_with_reason(worker_id, "cancelled by channel")
+            .await
+    }
+
+    /// Cancel a running worker by aborting its tokio task and cleaning up state.
+    /// Emits a synthetic terminal event so downstream consumers converge.
+    pub async fn cancel_worker_with_reason(
+        &self,
+        worker_id: WorkerId,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
         let removed = self
             .active_workers
             .write()
             .await
             .remove(&worker_id)
             .is_some();
-        self.worker_inputs.write().await.remove(&worker_id);
-        self.status_block.write().await.remove_worker(worker_id);
+        let handle = self.worker_handles.write().await.remove(&worker_id);
+        let removed_input = self
+            .worker_inputs
+            .write()
+            .await
+            .remove(&worker_id)
+            .is_some();
+        let removed_status = self.status_block.write().await.remove_worker(worker_id);
+        let should_emit = removed || handle.is_some();
+
+        if !should_emit {
+            if removed_input || removed_status {
+                return Ok(());
+            }
+            return Err(format!("Worker {worker_id} not found"));
+        }
 
         if let Some(handle) = handle {
             handle.abort();
-            // Mark the DB row as cancelled since the abort prevents WorkerComplete from firing
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
-            Ok(())
-        } else if removed {
-            self.process_run_logger
-                .log_worker_completed(worker_id, "Worker cancelled", false);
-            Ok(())
-        } else {
-            Err(format!("Worker {worker_id} not found"))
         }
+
+        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
+        let result = if reason.is_empty() {
+            "Worker cancelled.".to_string()
+        } else {
+            format!("Worker cancelled: {reason}")
+        };
+
+        self.process_run_logger
+            .log_worker_completed(worker_id, &result, false);
+        if let Err(error) = self.deps.event_tx.send(ProcessEvent::WorkerComplete {
+            agent_id: self.deps.agent_id.clone(),
+            worker_id,
+            channel_id: Some(self.channel_id.clone()),
+            result,
+            notify: true,
+            success: false,
+        }) {
+            tracing::warn!(
+                %error,
+                agent_id = %self.deps.agent_id,
+                worker_id = %worker_id,
+                channel_id = %self.channel_id,
+                "failed to emit synthetic worker completion event"
+            );
+        }
+
+        Ok(())
     }
 
     /// Cancel a running branch by aborting its tokio task.
     /// Returns an error message if the branch is not found.
     pub async fn cancel_branch(&self, branch_id: BranchId) -> std::result::Result<(), String> {
+        self.cancel_branch_with_reason(branch_id, "cancelled by channel")
+            .await
+    }
+
+    /// Cancel a running branch by aborting its tokio task.
+    /// Emits a synthetic terminal result so channel state converges.
+    pub async fn cancel_branch_with_reason(
+        &self,
+        branch_id: BranchId,
+        reason: &str,
+    ) -> std::result::Result<(), String> {
         let handle = self.active_branches.write().await.remove(&branch_id);
-        if let Some(handle) = handle {
-            handle.abort();
-            Ok(())
+        let removed_status = self.status_block.write().await.remove_branch(branch_id);
+        let Some(handle) = handle else {
+            if removed_status {
+                return Ok(());
+            }
+            return Err(format!("Branch {branch_id} not found"));
+        };
+
+        handle.abort();
+        let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
+        let conclusion = if reason.is_empty() {
+            "Branch cancelled.".to_string()
         } else {
-            Err(format!("Branch {branch_id} not found"))
+            format!("Branch cancelled: {reason}")
+        };
+        self.process_run_logger
+            .log_branch_completed(branch_id, &conclusion);
+        if let Err(error) = self.deps.event_tx.send(ProcessEvent::BranchResult {
+            agent_id: self.deps.agent_id.clone(),
+            branch_id,
+            channel_id: self.channel_id.clone(),
+            conclusion,
+        }) {
+            tracing::warn!(
+                %error,
+                agent_id = %self.deps.agent_id,
+                branch_id = %branch_id,
+                channel_id = %self.channel_id,
+                "failed to emit synthetic branch result event"
+            );
         }
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub struct ChannelControlHandle {
+    inner: Arc<ChannelControlState>,
+}
+
+struct ChannelControlState {
+    state: ChannelState,
+}
+
+#[derive(Clone)]
+pub struct WeakChannelControlHandle {
+    inner: Weak<ChannelControlState>,
+}
+
+impl ChannelControlHandle {
+    pub fn new(state: ChannelState) -> Self {
+        Self {
+            inner: Arc::new(ChannelControlState { state }),
+        }
+    }
+
+    pub fn downgrade(&self) -> WeakChannelControlHandle {
+        WeakChannelControlHandle {
+            inner: Arc::downgrade(&self.inner),
+        }
+    }
+
+    pub async fn cancel_worker_with_reason(
+        &self,
+        worker_id: WorkerId,
+        reason: &str,
+    ) -> ControlActionResult {
+        match self
+            .inner
+            .state
+            .cancel_worker_with_reason(worker_id, reason)
+            .await
+        {
+            Ok(()) => ControlActionResult::Cancelled,
+            Err(_) => ControlActionResult::NotFound,
+        }
+    }
+
+    pub async fn cancel_branch_with_reason(
+        &self,
+        branch_id: BranchId,
+        reason: &str,
+    ) -> ControlActionResult {
+        match self
+            .inner
+            .state
+            .cancel_branch_with_reason(branch_id, reason)
+            .await
+        {
+            Ok(()) => ControlActionResult::Cancelled,
+            Err(_) => ControlActionResult::NotFound,
+        }
+    }
+}
+
+impl WeakChannelControlHandle {
+    pub fn dangling() -> Self {
+        Self { inner: Weak::new() }
+    }
+
+    pub fn upgrade(&self) -> Option<ChannelControlHandle> {
+        self.inner
+            .upgrade()
+            .map(|inner| ChannelControlHandle { inner })
     }
 }
 
@@ -202,6 +354,8 @@ pub struct Channel {
     listen_only_mode: bool,
     /// Session-scoped override used when persistence is unavailable/failed.
     listen_only_session_override: Option<bool>,
+    /// Handle exposed to the supervision control plane.
+    control_handle: ChannelControlHandle,
 }
 
 impl Channel {
@@ -279,6 +433,7 @@ impl Channel {
 
         let self_tx = message_tx.clone();
         let resolved_listen_only_mode = deps.runtime_config.channel_config.load().listen_only_mode;
+        let control_handle = ChannelControlHandle::new(state.clone());
         let channel = Self {
             id: id.clone(),
             title: None,
@@ -307,6 +462,7 @@ impl Channel {
             send_agent_message_tool,
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
+            control_handle,
         };
 
         (channel, message_tx)
@@ -430,6 +586,12 @@ impl Channel {
 
     fn suppress_plaintext_fallback(&self) -> bool {
         matches!(self.current_adapter(), Some("email"))
+    }
+
+    /// Return a handle that allows external supervision to cancel this channel's
+    /// workers and branches without direct access to Channel internals.
+    pub fn control_handle(&self) -> ChannelControlHandle {
+        self.control_handle.clone()
     }
 
     fn rewrite_tool_routed_command_prompt(&self, raw_text: &str) -> Option<String> {
@@ -2000,11 +2162,27 @@ impl Channel {
                 conclusion,
                 ..
             } => {
-                run_logger.log_branch_completed(*branch_id, conclusion);
+                let reply_target_message_id = self.branch_reply_targets.get(branch_id).cloned();
+                let was_active = self
+                    .state
+                    .active_branches
+                    .write()
+                    .await
+                    .remove(branch_id)
+                    .is_some();
+                let was_memory_persistence = self.memory_persistence_branches.remove(branch_id);
+                if !was_active {
+                    if was_memory_persistence {
+                        tracing::info!(
+                            branch_id = %branch_id,
+                            "stale memory-persistence branch completion ignored"
+                        );
+                    }
+                    self.branch_reply_targets.remove(branch_id);
+                    return Ok(());
+                }
 
-                // Remove from active branches
-                let mut branches = self.state.active_branches.write().await;
-                branches.remove(branch_id);
+                run_logger.log_branch_completed(*branch_id, conclusion);
 
                 #[cfg(feature = "metrics")]
                 crate::telemetry::Metrics::global()
@@ -2015,8 +2193,7 @@ impl Channel {
                 // Memory persistence branches complete silently — no history
                 // injection, no re-trigger. The work (memory saves) already
                 // happened inside the branch via tool calls.
-                if self.memory_persistence_branches.remove(branch_id) {
-                    self.branch_reply_targets.remove(branch_id);
+                if was_memory_persistence {
                     tracing::info!(branch_id = %branch_id, "memory persistence branch completed");
                 } else {
                     // Regular branch: accumulate result for the next retrigger.
@@ -2030,7 +2207,7 @@ impl Channel {
                     });
                     should_retrigger = true;
 
-                    if let Some(message_id) = self.branch_reply_targets.remove(branch_id) {
+                    if let Some(message_id) = reply_target_message_id {
                         retrigger_metadata.insert(
                             crate::metadata_keys::REPLY_TO_MESSAGE_ID.to_string(),
                             serde_json::Value::from(message_id),
@@ -2039,6 +2216,7 @@ impl Channel {
 
                     tracing::info!(branch_id = %branch_id, "branch result queued for retrigger");
                 }
+                self.branch_reply_targets.remove(branch_id);
             }
             ProcessEvent::WorkerStarted {
                 worker_id,
@@ -2067,11 +2245,13 @@ impl Channel {
                 success,
                 ..
             } => {
-                run_logger.log_worker_completed(*worker_id, result, *success);
-
                 let mut workers = self.state.active_workers.write().await;
-                workers.remove(worker_id);
+                if workers.remove(worker_id).is_none() {
+                    return Ok(());
+                }
                 drop(workers);
+
+                run_logger.log_worker_completed(*worker_id, result, *success);
 
                 self.state.worker_handles.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);

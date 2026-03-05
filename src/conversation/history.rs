@@ -455,6 +455,31 @@ impl ProcessRunLogger {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Mark a detached running worker (`channel_id IS NULL`) as cancelled.
+    ///
+    /// Used by API cancellation fallback when no in-memory channel state exists.
+    pub async fn cancel_running_detached_worker(
+        &self,
+        worker_id: WorkerId,
+    ) -> crate::error::Result<bool> {
+        let result = sqlx::query(
+            "UPDATE worker_runs \
+             SET result = CASE \
+                     WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
+                     ELSE result \
+                 END, \
+                 status = 'failed', \
+                 completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
+             WHERE id = ? AND channel_id IS NULL AND status = 'running'",
+        )
+        .bind(worker_id.to_string())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| anyhow::anyhow!(error))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     /// Load a unified timeline for a channel: messages, branch runs, and worker runs
     /// interleaved chronologically (oldest first).
     ///
@@ -711,4 +736,91 @@ pub struct WorkerDetailRow {
     pub completed_at: Option<String>,
     pub transcript_blob: Option<Vec<u8>>,
     pub tool_calls: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ProcessRunLogger;
+
+    async fn setup_worker_runs_table() -> sqlx::SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create sqlite memory pool");
+
+        sqlx::query(
+            "CREATE TABLE worker_runs (
+                id TEXT PRIMARY KEY,
+                channel_id TEXT,
+                status TEXT NOT NULL,
+                result TEXT,
+                completed_at TIMESTAMP
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create worker_runs table");
+
+        pool
+    }
+
+    #[tokio::test]
+    async fn cancel_running_detached_worker_updates_null_channel_rows() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, NULL, 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("failed to insert detached worker row");
+
+        let cancelled = logger
+            .cancel_running_detached_worker(worker_id)
+            .await
+            .expect("cancel should succeed");
+        assert!(cancelled);
+
+        let row = sqlx::query("SELECT status, result FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("failed to fetch worker row");
+
+        let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
+        let result: String = sqlx::Row::try_get(&row, "result").expect("missing result");
+        assert_eq!(status, "failed");
+        assert_eq!(result, "Worker cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_detached_worker_does_not_touch_channel_bound_rows() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'channel-1', 'running', '')",
+        )
+        .bind(worker_id.to_string())
+        .execute(&pool)
+        .await
+        .expect("failed to insert channel worker row");
+
+        let cancelled = logger
+            .cancel_running_detached_worker(worker_id)
+            .await
+            .expect("cancel should not error");
+        assert!(!cancelled);
+
+        let row = sqlx::query("SELECT status FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("failed to fetch worker row");
+        let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
+        assert_eq!(status, "running");
+    }
 }

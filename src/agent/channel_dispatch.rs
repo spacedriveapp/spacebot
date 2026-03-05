@@ -659,11 +659,7 @@ where
                 }
             }
             Err(panic_payload) => {
-                let panic_message = panic_payload
-                    .downcast_ref::<&str>()
-                    .map(|message| (*message).to_string())
-                    .or_else(|| panic_payload.downcast_ref::<String>().cloned())
-                    .unwrap_or_else(|| "unknown panic payload".to_string());
+                let panic_message = crate::agent::panic_payload_to_string(&*panic_payload);
                 tracing::error!(
                     worker_id = %worker_id,
                     panic_message = %panic_message,

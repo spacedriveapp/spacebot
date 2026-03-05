@@ -170,6 +170,20 @@ impl StatusBlock {
         }
     }
 
+    /// Remove an active branch from the status block.
+    pub fn remove_branch(&mut self, branch_id: BranchId) -> bool {
+        if let Some(position) = self
+            .active_branches
+            .iter()
+            .position(|branch| branch.id == branch_id)
+        {
+            self.active_branches.remove(position);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Render the status block as a string for context injection.
     pub fn render(&self) -> String {
         self.render_with_time_context(None)
@@ -296,11 +310,24 @@ impl StatusBlock {
 #[cfg(test)]
 mod tests {
     use super::StatusBlock;
+    use uuid::Uuid;
 
     #[test]
     fn render_with_time_context_renders_current_time_when_empty() {
         let status = StatusBlock::new();
         let rendered = status.render_with_time_context(Some("2026-02-26 12:00:00 UTC"));
         assert!(rendered.contains("Current date/time: 2026-02-26 12:00:00 UTC"));
+    }
+
+    #[test]
+    fn remove_branch_removes_existing_branch() {
+        let mut status = StatusBlock::new();
+        let branch_id = Uuid::new_v4();
+        status.add_branch(branch_id, "work");
+
+        let removed = status.remove_branch(branch_id);
+
+        assert!(removed);
+        assert!(status.active_branches.is_empty());
     }
 }

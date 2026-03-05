@@ -279,6 +279,8 @@ pub fn create_process_event_buses_with_capacity(
     tokio::sync::broadcast::Sender<ProcessEvent>,
     tokio::sync::broadcast::Sender<ProcessEvent>,
 ) {
+    let control_event_capacity = control_event_capacity.max(1);
+    let memory_event_capacity = memory_event_capacity.max(1);
     let (event_tx, _event_rx) = tokio::sync::broadcast::channel(control_event_capacity);
     let (memory_event_tx, _memory_event_rx) =
         tokio::sync::broadcast::channel(memory_event_capacity);
@@ -343,6 +345,7 @@ pub struct AgentDeps {
     /// Populated after all agents are initialized.
     pub task_store_registry:
         Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
+    pub process_control_registry: Arc<agent::process_control::ProcessControlRegistry>,
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,

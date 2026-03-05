@@ -101,7 +101,7 @@ This split keeps high-volume memory writes off the control bus so channel contro
 | `WorkerComplete` | Worker | Channel | Task done, retrigger |
 | `ToolStarted` | Hook | Channel, UI | Tool call in progress |
 | `ToolCompleted` | Hook | Channel, UI | Tool call finished |
-| `MemorySaved` | `memory_save` tool (branch/compactor/cortex contexts) | Cortex | New memory telemetry for signal buffer |
+| `MemorySaved` | Branch, Cortex | Cortex | New memory telemetry for signal buffer |
 | `CompactionTriggered` | Compactor | Channel | Context compacted |
 | `StatusUpdate` | Various | UI (SSE) | Typing indicators, lifecycle |
 | `TaskUpdated` | Branch, Worker | UI | Task board change |

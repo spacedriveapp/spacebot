@@ -506,6 +506,8 @@ Thresholds are fractions of `context_window`.
 | `tick_interval_secs` | integer | 30 | How often the cortex runtime loop runs maintenance ticks while continuously observing events |
 | `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
+| `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
+| `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
 
 ### `[defaults.warmup]`

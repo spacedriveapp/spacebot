@@ -16,13 +16,13 @@ Only things the cortex **did**, not things it passively observed. Every action f
 | `memory_pruned` | Low-importance orphans removed | count, importance threshold |
 | `association_created` | Cross-channel association made | source_id, target_id, relation_type, reason |
 | `contradiction_flagged` | Contradicting memories found | memory_a_id, memory_b_id, description |
-| `worker_killed` | Cortex killed a hanging worker | worker_id, channel_id, reason (timeout, error loop) |
-| `branch_killed` | Cortex killed a stale branch | branch_id, channel_id, reason (timeout) |
-| `circuit_breaker_tripped` | Component hit failure threshold | component_key, failure_count, action_taken |
+| `worker_killed` | Cortex killed a hanging worker | worker_id, channel_id (optional), timeout_secs, reason |
+| `branch_killed` | Cortex killed a stale branch | branch_id, channel_id, timeout_secs, reason |
+| `circuit_breaker_tripped` | Component hit failure threshold | key, failure_count, threshold, action_taken |
 | `observation_created` | Cortex created an observation memory | memory_id, content_preview |
-| `health_check` | Periodic health summary | active_workers, active_branches, active_channels, memory_count |
+| `health_check` | Periodic health summary | kill_skipped_due_to_lag, kill_budget, kill_attempts, kill_actions, worker_timeout_secs, branch_timeout_secs, pruned_dead_channels |
 
-These map to the phases in `cortex-implementation.md`: bulletin (exists today), maintenance (Phase 3), health supervision (Phase 2), consolidation (Phase 4). The table schema supports all of them from day one even though only bulletin events will be emitted initially. The rest light up as the cortex implementation progresses.
+These map to the phases in `cortex-implementation.md`: bulletin (exists today), maintenance (Phase 3), health supervision (Phase 2, implemented), consolidation (Phase 4). Health supervision currently emits `worker_killed`, `branch_killed`, `circuit_breaker_tripped`, and `health_check`; maintenance and consolidation emit their own events as those phases land.
 
 ## Data Model
 
@@ -68,7 +68,9 @@ One method. The caller constructs the summary and details.
 
 **Maintenance** (Phase 3, future): The `MaintenanceReport` from `run_maintenance()` already contains decayed/pruned/merged counts — log a single `maintenance_run` event.
 
-**Health supervision** (Phase 2, future): Log `worker_killed`, `branch_killed`, `circuit_breaker_tripped` when those actions are taken.
+**Health supervision** (Phase 2, implemented): Log `worker_killed`, `branch_killed`, `circuit_breaker_tripped`, and `health_check` from the supervision tick.
+
+Phase 2 breaker state is intentionally volatile (in-memory only). After restart, counters/tripped flags reset and begin accumulating again from live events.
 
 **Consolidation** (Phase 4, future): Log `memory_merged`, `association_created`, `contradiction_flagged`, `observation_created` as the consolidation agent acts.
 
