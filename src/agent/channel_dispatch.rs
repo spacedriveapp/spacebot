@@ -739,4 +739,40 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
     }
+
+    #[tokio::test]
+    async fn spawn_worker_task_carries_channel_id() {
+        let (event_tx, mut event_rx) = broadcast::channel(8);
+        let worker_id: WorkerId = Uuid::new_v4();
+        let channel_id: crate::ChannelId = Arc::from("test-channel");
+
+        let handle = spawn_worker_task(
+            worker_id,
+            event_tx,
+            Arc::<str>::from("agent"),
+            Some(channel_id.clone()),
+            None,
+            async { Ok::<String, crate::Error>("result".to_string()) },
+        );
+
+        let event = tokio::time::timeout(Duration::from_secs(2), event_rx.recv())
+            .await
+            .expect("worker completion event should be delivered")
+            .expect("broadcast receive should succeed");
+        handle.await.expect("worker task should join cleanly");
+
+        match event {
+            ProcessEvent::WorkerComplete {
+                channel_id: event_channel_id,
+                worker_id: completed_worker_id,
+                success,
+                ..
+            } => {
+                assert_eq!(completed_worker_id, worker_id);
+                assert_eq!(event_channel_id, Some(channel_id));
+                assert!(success);
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+    }
 }
