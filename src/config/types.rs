@@ -812,6 +812,8 @@ pub struct CortexConfig {
     pub tick_interval_secs: u64,
     pub worker_timeout_secs: u64,
     pub branch_timeout_secs: u64,
+    pub detached_worker_timeout_retry_limit: u8,
+    pub supervisor_kill_budget_per_tick: usize,
     pub circuit_breaker_threshold: u8,
     /// Interval in seconds between memory bulletin refreshes.
     pub bulletin_interval_secs: u64,
@@ -835,6 +837,8 @@ impl Default for CortexConfig {
             tick_interval_secs: 30,
             worker_timeout_secs: 300,
             branch_timeout_secs: 60,
+            detached_worker_timeout_retry_limit: 2,
+            supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,

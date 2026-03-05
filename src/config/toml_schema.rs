@@ -340,6 +340,8 @@ pub(super) struct TomlCortexConfig {
     pub(super) tick_interval_secs: Option<u64>,
     pub(super) worker_timeout_secs: Option<u64>,
     pub(super) branch_timeout_secs: Option<u64>,
+    pub(super) detached_worker_timeout_retry_limit: Option<u8>,
+    pub(super) supervisor_kill_budget_per_tick: Option<usize>,
     pub(super) circuit_breaker_threshold: Option<u8>,
     pub(super) bulletin_interval_secs: Option<u64>,
     pub(super) bulletin_max_words: Option<usize>,

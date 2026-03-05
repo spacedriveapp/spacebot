@@ -10,6 +10,9 @@
 //! health monitoring and memory consolidation.
 
 use crate::agent::channel_dispatch::{WorkerCompletionError, map_worker_completion_result};
+use crate::agent::process_control::{
+    ControlActionResult, DetachedWorkerControl, ProcessControlRegistry,
+};
 use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
@@ -21,13 +24,15 @@ use crate::{
     AgentDeps, AgentId, BranchId, ChannelId, ProcessEvent, ProcessId, ProcessType, WorkerId,
 };
 
+use futures::FutureExt as _;
 use rig::agent::AgentBuilder;
 use rig::completion::{CompletionModel, Prompt, TypedPrompt};
 use serde::Serialize;
 use sqlx::{Row as _, SqlitePool};
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast};
 
@@ -245,12 +250,298 @@ impl BulletinRefreshOutcome {
     }
 }
 
+const BRANCH_LATENCY_WINDOW_SIZE: usize = 32;
+
+#[derive(Debug, Clone)]
+struct WorkerTracker {
+    worker_id: WorkerId,
+    channel_id: Option<ChannelId>,
+    worker_type: String,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+struct BranchTracker {
+    branch_id: BranchId,
+    channel_id: ChannelId,
+    started_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+enum KillTarget {
+    Worker(WorkerTracker),
+    Branch(BranchTracker),
+}
+
+#[derive(Debug, Clone, Default)]
+struct BreakerState {
+    failure_count: u32,
+    tripped: bool,
+}
+
+#[derive(Debug, Clone)]
+struct BreakerTripEvent {
+    key: String,
+    failure_count: u32,
+}
+
+#[derive(Debug, Default)]
+struct HealthRuntimeState {
+    worker_trackers: HashMap<WorkerId, WorkerTracker>,
+    branch_trackers: HashMap<BranchId, BranchTracker>,
+    branch_latency_window_ms: VecDeque<u64>,
+    breaker_state: HashMap<String, BreakerState>,
+    pending_breaker_trip_events: Vec<BreakerTripEvent>,
+    lagged_control_since_last_tick: bool,
+}
+
+impl HealthRuntimeState {
+    fn track_worker_start(
+        &mut self,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        worker_type: String,
+    ) {
+        self.worker_trackers.insert(
+            worker_id,
+            WorkerTracker {
+                worker_id,
+                channel_id,
+                worker_type,
+                started_at: Instant::now(),
+            },
+        );
+    }
+
+    fn track_worker_complete(&mut self, worker_id: WorkerId, success: bool, threshold: u8) {
+        let Some(worker_type) = self
+            .worker_trackers
+            .remove(&worker_id)
+            .map(|tracker| tracker.worker_type)
+        else {
+            return;
+        };
+        self.update_breaker(
+            format!("worker_type:{worker_type}"),
+            !success,
+            threshold.max(1),
+        );
+    }
+
+    fn track_branch_start(&mut self, branch_id: BranchId, channel_id: ChannelId) {
+        self.branch_trackers.insert(
+            branch_id,
+            BranchTracker {
+                branch_id,
+                channel_id,
+                started_at: Instant::now(),
+            },
+        );
+    }
+
+    fn track_branch_complete(&mut self, branch_id: BranchId) {
+        if let Some(tracker) = self.branch_trackers.remove(&branch_id) {
+            let elapsed = tracker.started_at.elapsed().as_millis() as u64;
+            self.branch_latency_window_ms.push_back(elapsed);
+            while self.branch_latency_window_ms.len() > BRANCH_LATENCY_WINDOW_SIZE {
+                self.branch_latency_window_ms.pop_front();
+            }
+        }
+    }
+
+    fn track_tool_completed(&mut self, tool_name: &str, result: &str, threshold: u8) {
+        let Some(structured_success) = parse_structured_success_flag(result) else {
+            return;
+        };
+
+        self.update_breaker(
+            format!("tool:{tool_name}"),
+            !structured_success,
+            threshold.max(1),
+        );
+    }
+
+    fn mark_control_receiver_lag(&mut self) {
+        self.lagged_control_since_last_tick = true;
+    }
+
+    fn update_breaker(&mut self, key: String, failure: bool, threshold: u8) {
+        let state = self.breaker_state.entry(key.clone()).or_default();
+        if failure {
+            state.failure_count = state.failure_count.saturating_add(1);
+            if !state.tripped && state.failure_count >= threshold as u32 {
+                state.tripped = true;
+                self.pending_breaker_trip_events.push(BreakerTripEvent {
+                    key,
+                    failure_count: state.failure_count,
+                });
+            }
+            return;
+        }
+
+        state.failure_count = 0;
+        state.tripped = false;
+    }
+}
+
+fn parse_structured_success_flag(result: &str) -> Option<bool> {
+    let trimmed = result.trim();
+    if !trimmed.starts_with('{') || trimmed.len() > 16_384 {
+        return None;
+    }
+
+    let value: serde_json::Value = serde_json::from_str(trimmed).ok()?;
+    let object = value.as_object()?;
+    if let Some(success) = object.get("success").and_then(|value| value.as_bool()) {
+        return Some(success);
+    }
+    object.get("ok").and_then(|value| value.as_bool())
+}
+
+fn kill_target_started_at(target: &KillTarget) -> Instant {
+    match target {
+        KillTarget::Worker(tracker) => tracker.started_at,
+        KillTarget::Branch(tracker) => tracker.started_at,
+    }
+}
+
+fn kill_target_id(target: &KillTarget) -> u128 {
+    match target {
+        KillTarget::Worker(tracker) => tracker.worker_id.as_u128(),
+        KillTarget::Branch(tracker) => tracker.branch_id.as_u128(),
+    }
+}
+
+fn build_kill_targets(
+    overdue_workers: Vec<WorkerTracker>,
+    overdue_branches: Vec<BranchTracker>,
+) -> Vec<KillTarget> {
+    let mut targets = Vec::with_capacity(overdue_workers.len() + overdue_branches.len());
+    targets.extend(overdue_workers.into_iter().map(KillTarget::Worker));
+    targets.extend(overdue_branches.into_iter().map(KillTarget::Branch));
+    targets.sort_by(|left, right| {
+        let left_started = kill_target_started_at(left);
+        let right_started = kill_target_started_at(right);
+        if left_started == right_started {
+            kill_target_id(left).cmp(&kill_target_id(right))
+        } else {
+            left_started.cmp(&right_started)
+        }
+    });
+    targets
+}
+
+fn is_terminal_control_result(result: ControlActionResult) -> bool {
+    matches!(
+        result,
+        ControlActionResult::Cancelled
+            | ControlActionResult::AlreadyTerminal
+            | ControlActionResult::NotFound
+    )
+}
+
+fn is_cancelled_control_result(result: ControlActionResult) -> bool {
+    matches!(result, ControlActionResult::Cancelled)
+}
+
+fn take_lagged_control_flag(state: &mut HealthRuntimeState) -> bool {
+    let lagged = state.lagged_control_since_last_tick;
+    state.lagged_control_since_last_tick = false;
+    lagged
+}
+
+fn detached_timeout_transition(
+    metadata: &serde_json::Value,
+    retry_limit: u8,
+) -> (u64, bool, TaskStatus) {
+    let current_timeout_count = metadata
+        .get("supervisor_timeout_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let next_timeout_count = current_timeout_count.saturating_add(1);
+    let exhausted = next_timeout_count > retry_limit as u64;
+    let status = if exhausted {
+        TaskStatus::Backlog
+    } else {
+        TaskStatus::Ready
+    };
+    (next_timeout_count, exhausted, status)
+}
+
+fn claim_detached_completion(lifecycle: &std::sync::atomic::AtomicU8) -> bool {
+    loop {
+        let current = lifecycle.load(Ordering::Acquire);
+        let claimable = current == crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE
+            || current == crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_KILLING;
+        if !claimable {
+            return false;
+        }
+
+        if lifecycle
+            .compare_exchange(
+                current,
+                crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_COMPLETING,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            return true;
+        }
+    }
+}
+
+#[doc(hidden)]
+pub async fn register_detached_worker_for_pickup(
+    process_control_registry: &ProcessControlRegistry,
+    task_store: &crate::tasks::TaskStore,
+    agent_id: &AgentId,
+    task_number: i64,
+    worker_id: WorkerId,
+) -> anyhow::Result<(Arc<AtomicU8>, tokio::sync::oneshot::Receiver<()>)> {
+    let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+    let lifecycle = Arc::new(AtomicU8::new(
+        crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE,
+    ));
+
+    process_control_registry
+        .register_detached_worker(DetachedWorkerControl::new(
+            worker_id,
+            agent_id.clone(),
+            task_number,
+            cancel_tx,
+            lifecycle.clone(),
+        ))
+        .await;
+
+    if let Err(error) = task_store
+        .update(
+            agent_id,
+            task_number,
+            UpdateTaskInput {
+                worker_id: Some(worker_id.to_string()),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        process_control_registry
+            .unregister_detached_worker(worker_id)
+            .await;
+        return Err(error.into());
+    }
+
+    Ok((lifecycle, cancel_rx))
+}
+
 /// The cortex observes system-wide activity and maintains the memory bulletin.
 pub struct Cortex {
     pub deps: AgentDeps,
     pub hook: CortexHook,
     /// Recent activity signals (rolling window).
     pub signal_buffer: Arc<RwLock<VecDeque<Signal>>>,
+    /// Runtime supervision state for timeout enforcement and breaker signals.
+    health_runtime_state: Arc<RwLock<HealthRuntimeState>>,
     /// System prompt loaded from prompts/CORTEX.md.
     pub system_prompt: String,
 }
@@ -491,12 +782,14 @@ impl Cortex {
             deps,
             hook,
             signal_buffer: Arc::new(RwLock::new(VecDeque::with_capacity(SIGNAL_BUFFER_CAPACITY))),
+            health_runtime_state: Arc::new(RwLock::new(HealthRuntimeState::default())),
             system_prompt: system_prompt.into(),
         }
     }
 
     /// Process a process event and extract signals.
     pub async fn observe(&self, event: ProcessEvent) {
+        self.observe_health_event(&event).await;
         let signal = signal_from_event(event);
         let buffer_len = {
             let mut buffer = self.signal_buffer.write().await;
@@ -507,9 +800,221 @@ impl Cortex {
         tracing::trace!(buffer_len, "cortex received signal");
     }
 
-    /// Run periodic consolidation (future: health monitoring, memory maintenance).
-    pub async fn run_consolidation(&self) -> Result<()> {
-        tracing::debug!("cortex running consolidation");
+    async fn observe_health_event(&self, event: &ProcessEvent) {
+        let threshold = self
+            .deps
+            .runtime_config
+            .cortex
+            .load()
+            .circuit_breaker_threshold;
+        let mut state = self.health_runtime_state.write().await;
+
+        match event {
+            ProcessEvent::WorkerStarted {
+                worker_id,
+                channel_id,
+                worker_type,
+                ..
+            } => state.track_worker_start(*worker_id, channel_id.clone(), worker_type.clone()),
+            ProcessEvent::WorkerComplete {
+                worker_id, success, ..
+            } => state.track_worker_complete(*worker_id, *success, threshold),
+            ProcessEvent::BranchStarted {
+                branch_id,
+                channel_id,
+                ..
+            } => state.track_branch_start(*branch_id, channel_id.clone()),
+            ProcessEvent::BranchResult { branch_id, .. } => state.track_branch_complete(*branch_id),
+            ProcessEvent::ToolCompleted {
+                tool_name, result, ..
+            } => state.track_tool_completed(tool_name, result, threshold),
+            _ => {}
+        }
+    }
+
+    pub async fn mark_control_receiver_lag(&self) {
+        self.health_runtime_state
+            .write()
+            .await
+            .mark_control_receiver_lag();
+    }
+
+    /// Run one supervision tick: emit pending breaker trips and enforce
+    /// lag-aware timeout cancellation with a bounded kill budget.
+    pub async fn run_health_tick(&self, logger: &CortexLogger) -> Result<()> {
+        let cortex_config = **self.deps.runtime_config.cortex.load();
+        let worker_timeout = Duration::from_secs(cortex_config.worker_timeout_secs.max(1));
+        let branch_timeout = Duration::from_secs(cortex_config.branch_timeout_secs.max(1));
+        let kill_budget = cortex_config.supervisor_kill_budget_per_tick;
+
+        let pruned_dead_channels = self
+            .deps
+            .process_control_registry
+            .prune_dead_channels()
+            .await;
+
+        let now = Instant::now();
+        let (lagged_control, pending_breaker_trips, overdue_workers, overdue_branches) = {
+            let mut state = self.health_runtime_state.write().await;
+            let lagged_control = take_lagged_control_flag(&mut state);
+
+            let pending_breaker_trips = std::mem::take(&mut state.pending_breaker_trip_events);
+
+            let overdue_workers = if lagged_control {
+                Vec::new()
+            } else {
+                state
+                    .worker_trackers
+                    .values()
+                    .filter(|tracker| now.duration_since(tracker.started_at) >= worker_timeout)
+                    .cloned()
+                    .collect()
+            };
+
+            let overdue_branches = if lagged_control {
+                Vec::new()
+            } else {
+                state
+                    .branch_trackers
+                    .values()
+                    .filter(|tracker| now.duration_since(tracker.started_at) >= branch_timeout)
+                    .cloned()
+                    .collect()
+            };
+
+            (
+                lagged_control,
+                pending_breaker_trips,
+                overdue_workers,
+                overdue_branches,
+            )
+        };
+
+        for trip in pending_breaker_trips {
+            logger.log(
+                "circuit_breaker_tripped",
+                &format!("Circuit breaker tripped for {}", trip.key),
+                Some(serde_json::json!({
+                    "key": trip.key,
+                    "failure_count": trip.failure_count,
+                    "threshold": cortex_config.circuit_breaker_threshold,
+                    "action_taken": "observe_only",
+                })),
+            );
+        }
+
+        if lagged_control {
+            logger.log(
+                "health_check",
+                "Skipped timeout cancellation due to lagged control receiver",
+                Some(serde_json::json!({
+                    "kill_skipped_due_to_lag": true,
+                    "kill_budget": kill_budget,
+                    "pruned_dead_channels": pruned_dead_channels,
+                })),
+            );
+            return Ok(());
+        }
+
+        let targets = build_kill_targets(overdue_workers, overdue_branches);
+
+        let mut terminal_worker_ids = Vec::new();
+        let mut terminal_branch_ids = Vec::new();
+        let mut kill_attempts = 0_usize;
+        let mut kill_actions = 0_usize;
+
+        for target in targets.into_iter().take(kill_budget) {
+            kill_attempts = kill_attempts.saturating_add(1);
+            let result = match target.clone() {
+                KillTarget::Worker(tracker) => {
+                    let reason =
+                        format!("timed out after {}s (supervisor)", worker_timeout.as_secs());
+                    if let Some(channel_id) = &tracker.channel_id {
+                        self.deps
+                            .process_control_registry
+                            .cancel_channel_worker(channel_id, tracker.worker_id, &reason)
+                            .await
+                    } else {
+                        self.deps
+                            .process_control_registry
+                            .cancel_detached_worker(tracker.worker_id, &reason)
+                            .await
+                    }
+                }
+                KillTarget::Branch(tracker) => {
+                    let reason =
+                        format!("timed out after {}s (supervisor)", branch_timeout.as_secs());
+                    self.deps
+                        .process_control_registry
+                        .cancel_channel_branch(&tracker.channel_id, tracker.branch_id, &reason)
+                        .await
+                }
+            };
+
+            if !is_terminal_control_result(result) {
+                continue;
+            }
+
+            match target {
+                KillTarget::Worker(tracker) => {
+                    terminal_worker_ids.push(tracker.worker_id);
+                    if is_cancelled_control_result(result) {
+                        logger.log(
+                            "worker_killed",
+                            &format!("Worker {} cancelled by supervisor", tracker.worker_id),
+                            Some(serde_json::json!({
+                                "worker_id": tracker.worker_id.to_string(),
+                                "channel_id": tracker.channel_id.as_deref(),
+                                "timeout_secs": worker_timeout.as_secs(),
+                                "reason": "timeout",
+                            })),
+                        );
+                        kill_actions = kill_actions.saturating_add(1);
+                    }
+                }
+                KillTarget::Branch(tracker) => {
+                    terminal_branch_ids.push(tracker.branch_id);
+                    if is_cancelled_control_result(result) {
+                        logger.log(
+                            "branch_killed",
+                            &format!("Branch {} cancelled by supervisor", tracker.branch_id),
+                            Some(serde_json::json!({
+                                "branch_id": tracker.branch_id.to_string(),
+                                "channel_id": tracker.channel_id.as_ref(),
+                                "timeout_secs": branch_timeout.as_secs(),
+                                "reason": "timeout",
+                            })),
+                        );
+                        kill_actions = kill_actions.saturating_add(1);
+                    }
+                }
+            };
+        }
+
+        if !terminal_worker_ids.is_empty() || !terminal_branch_ids.is_empty() {
+            let mut state = self.health_runtime_state.write().await;
+            for worker_id in terminal_worker_ids {
+                state.worker_trackers.remove(&worker_id);
+            }
+            for branch_id in terminal_branch_ids {
+                state.branch_trackers.remove(&branch_id);
+            }
+        }
+
+        logger.log(
+            "health_check",
+            "Cortex supervision health tick completed",
+            Some(serde_json::json!({
+                "kill_skipped_due_to_lag": false,
+                "kill_budget": kill_budget,
+                "kill_attempts": kill_attempts,
+                "kill_actions": kill_actions,
+                "worker_timeout_secs": worker_timeout.as_secs(),
+                "branch_timeout_secs": branch_timeout.as_secs(),
+                "pruned_dead_channels": pruned_dead_channels,
+            })),
+        );
+
         Ok(())
     }
 }
@@ -1118,6 +1623,7 @@ async fn run_cortex_loop(
                 ) {
                     CortexReceiverOutcome::Observe(event) => cortex.observe(event).await,
                     CortexReceiverOutcome::Lagged { dropped } => {
+                        cortex.mark_control_receiver_lag().await;
                         #[cfg(feature = "metrics")]
                         crate::telemetry::Metrics::global()
                             .event_receiver_lagged_events_total
@@ -1166,8 +1672,8 @@ async fn run_cortex_loop(
                 }
             },
             _ = tick_timer.tick() => {
-                if let Err(error) = cortex.run_consolidation().await {
-                    tracing::warn!(%error, "cortex consolidation tick failed");
+                if let Err(error) = cortex.run_health_tick(logger).await {
+                    tracing::warn!(%error, "cortex health tick failed");
                 }
 
                 if refresh_task
@@ -1882,16 +2388,14 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     );
 
     let worker_id = worker.id;
-    deps.task_store
-        .update(
-            &deps.agent_id,
-            task.task_number,
-            UpdateTaskInput {
-                worker_id: Some(worker_id.to_string()),
-                ..Default::default()
-            },
-        )
-        .await?;
+    let (detached_worker_lifecycle, mut detached_cancel_rx) = register_detached_worker_for_pickup(
+        &deps.process_control_registry,
+        deps.task_store.as_ref(),
+        &deps.agent_id,
+        task.task_number,
+        worker_id,
+    )
+    .await?;
 
     let _ = deps.event_tx.send(ProcessEvent::TaskUpdated {
         agent_id: deps.agent_id.clone(),
@@ -1924,9 +2428,11 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let agent_names = deps.agent_names.clone();
     let sqlite_pool = deps.sqlite_pool.clone();
     let secrets_snapshot = deps.runtime_config.secrets.load().clone();
+    let process_control_registry = deps.process_control_registry.clone();
+    let runtime_config = deps.runtime_config.clone();
     tokio::spawn(async move {
-        // Helper closure: scrub both known secrets (Layer 1) and unknown leak
-        // patterns (Layer 2) from text before it reaches channels or events.
+        // Scrub known secrets and unknown leak patterns from all worker output
+        // before persisting, logging, or emitting events.
         let scrub = |text: String| -> String {
             let scrubbed = if let Some(store) = secrets_snapshot.as_ref() {
                 crate::secrets::scrub::scrub_with_store(&text, store)
@@ -1936,135 +2442,438 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             crate::secrets::scrub::scrub_leaks(&scrubbed)
         };
 
-        match worker.run().await {
-            Ok(raw_result) => {
-                let result_text = scrub(raw_result);
-                let db_updated = task_store
-                    .update(
-                        &agent_id,
-                        task.task_number,
-                        UpdateTaskInput {
-                            status: Some(TaskStatus::Done),
-                            ..Default::default()
-                        },
-                    )
-                    .await;
+        let worker_execution = async {
+            let worker_future = std::panic::AssertUnwindSafe(worker.run()).catch_unwind();
+            tokio::pin!(worker_future);
 
-                if let Err(ref error) = db_updated {
-                    tracing::warn!(%error, task_number = task.task_number, "failed to mark picked-up task done");
+            let worker_result = tokio::select! {
+                biased;
+                result = &mut worker_future => {
+                    Some(result)
                 }
+                _ = &mut detached_cancel_rx => worker_future.as_mut().now_or_never(),
+            };
 
-                run_logger.log_worker_completed(worker_id, &result_text, true);
+            if let Some(worker_result) = worker_result {
+                let completion_won = claim_detached_completion(&detached_worker_lifecycle);
+                if completion_won {
+                    match worker_result {
+                        Ok(Ok(raw_result_text)) => {
+                            let result_text = scrub(raw_result_text);
+                            let db_updated = task_store
+                                .update(
+                                    &agent_id,
+                                    task.task_number,
+                                    UpdateTaskInput {
+                                        status: Some(TaskStatus::Done),
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
 
-                // Only emit task SSE event if the DB write succeeded.
-                if db_updated.is_ok() {
-                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
-                        agent_id: Arc::from(agent_id.as_str()),
-                        task_number: task.task_number,
-                        status: "done".to_string(),
-                        action: "updated".to_string(),
-                    });
+                            if let Err(ref error) = db_updated {
+                                tracing::warn!(
+                                    %error,
+                                    task_number = task.task_number,
+                                    "failed to mark picked-up task done"
+                                );
+                                run_logger.log_worker_completed(worker_id, &result_text, false);
+                                logger.log(
+                                    "task_pickup_completed_persist_failure",
+                                    &format!(
+                                        "Picked-up task #{} completed but could not persist done state: {error}",
+                                        task.task_number
+                                    ),
+                                    Some(serde_json::json!({
+                                        "task_number": task.task_number,
+                                        "worker_id": worker_id.to_string(),
+                                    })),
+                                );
+                                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                                    agent_id: Arc::from(agent_id.as_str()),
+                                    worker_id,
+                                    channel_id: None,
+                                    result: result_text,
+                                    notify: true,
+                                    success: false,
+                                });
+                            } else {
+                                run_logger.log_worker_completed(worker_id, &result_text, true);
+                                let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                                    agent_id: Arc::from(agent_id.as_str()),
+                                    task_number: task.task_number,
+                                    status: "done".to_string(),
+                                    action: "updated".to_string(),
+                                });
+
+                                logger.log(
+                                    "task_pickup_completed",
+                                    &format!("Completed picked-up task #{}", task.task_number),
+                                    Some(serde_json::json!({
+                                        "task_number": task.task_number,
+                                        "worker_id": worker_id.to_string(),
+                                    })),
+                                );
+
+                                notify_delegation_completion(
+                                    &task,
+                                    &result_text,
+                                    true,
+                                    &agent_id,
+                                    &links,
+                                    &agent_names,
+                                    &sqlite_pool,
+                                    &injection_tx,
+                                )
+                                .await;
+
+                                let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                                    agent_id: Arc::from(agent_id.as_str()),
+                                    worker_id,
+                                    channel_id: None,
+                                    result: result_text,
+                                    notify: true,
+                                    success: true,
+                                });
+                            }
+                        }
+                        Ok(Err(error)) => {
+                            let scrubbed_error = scrub(error.to_string());
+                            let (error_message, _notify, _success) = map_worker_completion_result(
+                                Err(WorkerCompletionError::failed(scrubbed_error.clone())),
+                            );
+                            let worker_complete_message = format!("Worker failed: {error}");
+                            run_logger.log_worker_completed(worker_id, &error_message, false);
+                            let requeue_result = task_store
+                                .update(
+                                    &agent_id,
+                                    task.task_number,
+                                    UpdateTaskInput {
+                                        status: Some(TaskStatus::Ready),
+                                        clear_worker_id: true,
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+
+                            if let Err(ref update_error) = requeue_result {
+                                tracing::warn!(
+                                    %update_error,
+                                    task_number = task.task_number,
+                                    "failed to return task to ready after failure"
+                                );
+                                logger.log(
+                                    "task_pickup_failed_to_persist",
+                                    &format!(
+                                        "Picked-up task #{} failed but could not persist failure state: {error}",
+                                        task.task_number
+                                    ),
+                                    Some(serde_json::json!({
+                                        "task_number": task.task_number,
+                                        "worker_id": worker_id.to_string(),
+                                        "error": error.to_string(),
+                                    })),
+                                );
+                            } else {
+                                let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                                    agent_id: Arc::from(agent_id.as_str()),
+                                    task_number: task.task_number,
+                                    status: "ready".to_string(),
+                                    action: "updated".to_string(),
+                                });
+
+                                logger.log(
+                                    "task_pickup_failed",
+                                    &format!(
+                                        "Picked-up task #{} failed: {error}",
+                                        task.task_number
+                                    ),
+                                    Some(serde_json::json!({
+                                        "task_number": task.task_number,
+                                        "worker_id": worker_id.to_string(),
+                                        "error": error.to_string(),
+                                    })),
+                                );
+
+                                notify_delegation_completion(
+                                    &task,
+                                    &error_message,
+                                    false,
+                                    &agent_id,
+                                    &links,
+                                    &agent_names,
+                                    &sqlite_pool,
+                                    &injection_tx,
+                                )
+                                .await;
+                            }
+
+                            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                                agent_id: Arc::from(agent_id.as_str()),
+                                worker_id,
+                                channel_id: None,
+                                result: worker_complete_message,
+                                notify: true,
+                                success: false,
+                            });
+                        }
+                        Err(panic_payload) => {
+                            let scrubbed_panic =
+                                scrub(crate::agent::panic_payload_to_string(&*panic_payload));
+                            let (error_message, _notify, _success) =
+                                map_worker_completion_result(Err(WorkerCompletionError::failed(
+                                    format!("worker task panicked: {scrubbed_panic}"),
+                                )));
+                            run_logger.log_worker_completed(worker_id, &error_message, false);
+                            let requeue_result = task_store
+                                .update(
+                                    &agent_id,
+                                    task.task_number,
+                                    UpdateTaskInput {
+                                        status: Some(TaskStatus::Ready),
+                                        clear_worker_id: true,
+                                        ..Default::default()
+                                    },
+                                )
+                                .await;
+
+                            if let Err(ref update_error) = requeue_result {
+                                tracing::warn!(
+                                    %update_error,
+                                    task_number = task.task_number,
+                                    "failed to return task to ready after panic"
+                                );
+                                logger.log(
+                                    "task_pickup_panic_persist_failure",
+                                    &format!(
+                                        "Picked-up task #{} panicked and could not persist failure state: {error_message}",
+                                        task.task_number
+                                    ),
+                                    Some(serde_json::json!({
+                                        "task_number": task.task_number,
+                                        "worker_id": worker_id.to_string(),
+                                    })),
+                                );
+                            } else {
+                                let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                                    agent_id: Arc::from(agent_id.as_str()),
+                                    task_number: task.task_number,
+                                    status: "ready".to_string(),
+                                    action: "updated".to_string(),
+                                });
+
+                                notify_delegation_completion(
+                                    &task,
+                                    &error_message,
+                                    false,
+                                    &agent_id,
+                                    &links,
+                                    &agent_names,
+                                    &sqlite_pool,
+                                    &injection_tx,
+                                )
+                                .await;
+                            }
+
+                            let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                                agent_id: Arc::from(agent_id.as_str()),
+                                worker_id,
+                                channel_id: None,
+                                result: error_message,
+                                notify: true,
+                                success: false,
+                            });
+                        }
+                    }
+
+                    let _ = detached_worker_lifecycle.compare_exchange(
+                        crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_COMPLETING,
+                        crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    );
+                    return;
                 }
-
-                logger.log(
-                    "task_pickup_completed",
-                    &format!("Completed picked-up task #{}", task.task_number),
-                    Some(serde_json::json!({
-                        "task_number": task.task_number,
-                        "worker_id": worker_id.to_string(),
-                    })),
-                );
-
-                // Handle delegated task completion: log to link channel and
-                // notify the delegating agent's originating channel.
-                notify_delegation_completion(
-                    &task,
-                    &result_text,
-                    true,
-                    &agent_id,
-                    &links,
-                    &agent_names,
-                    &sqlite_pool,
-                    &injection_tx,
-                )
-                .await;
-
-                let (result, notify, success) = map_worker_completion_result(Ok(result_text));
-                let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                    agent_id: Arc::from(agent_id.as_str()),
-                    worker_id,
-                    channel_id: None,
-                    result,
-                    notify,
-                    success,
-                });
             }
-            Err(error) => {
-                let (error_message, notify, success) = map_worker_completion_result(Err(
-                    WorkerCompletionError::failed(scrub(error.to_string())),
+
+            if detached_worker_lifecycle
+                .compare_exchange(
+                    crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_KILLING,
+                    crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                let timeout_retry_limit = runtime_config
+                    .cortex
+                    .load()
+                    .detached_worker_timeout_retry_limit;
+                let (next_timeout_count, exhausted, next_status) =
+                    detached_timeout_transition(&task.metadata, timeout_retry_limit);
+
+                let timeout_message = scrub(format!(
+                    "Worker cancelled by supervisor timeout (attempt {} of {}).",
+                    next_timeout_count, timeout_retry_limit
                 ));
-                run_logger.log_worker_completed(worker_id, &error_message, false);
-
-                let requeue_result = task_store
+                let update_result = task_store
                     .update(
                         &agent_id,
                         task.task_number,
                         UpdateTaskInput {
-                            status: Some(TaskStatus::Ready),
+                            status: Some(next_status),
                             clear_worker_id: true,
+                            metadata: Some(serde_json::json!({
+                                "supervisor_timeout_count": next_timeout_count,
+                                "supervisor_timeout_exhausted": exhausted,
+                            })),
                             ..Default::default()
                         },
                     )
                     .await;
 
-                if let Err(ref update_error) = requeue_result {
-                    tracing::warn!(%update_error, task_number = task.task_number, "failed to return task to ready after failure");
+                match update_result {
+                    Ok(Some(_)) => {
+                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
+                        let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                            agent_id: Arc::from(agent_id.as_str()),
+                            task_number: task.task_number,
+                            status: next_status.as_str().to_string(),
+                            action: "updated".to_string(),
+                        });
+                        logger.log(
+                            "task_pickup_timeout",
+                            &format!(
+                                "Detached worker timeout for task #{} (count: {}, exhausted: {})",
+                                task.task_number, next_timeout_count, exhausted
+                            ),
+                            Some(serde_json::json!({
+                                "task_number": task.task_number,
+                                "worker_id": worker_id.to_string(),
+                                "supervisor_timeout_count": next_timeout_count,
+                                "supervisor_timeout_exhausted": exhausted,
+                                "retry_limit": timeout_retry_limit,
+                            })),
+                        );
+
+                        notify_delegation_completion(
+                            &task,
+                            &timeout_message,
+                            false,
+                            &agent_id,
+                            &links,
+                            &agent_names,
+                            &sqlite_pool,
+                            &injection_tx,
+                        )
+                        .await;
+
+                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id: Arc::from(agent_id.as_str()),
+                            worker_id,
+                            channel_id: None,
+                            result: timeout_message,
+                            notify: true,
+                            success: false,
+                        });
+                    }
+                    Ok(None) => {
+                        tracing::warn!(
+                            task_number = task.task_number,
+                            "failed to update task status after detached timeout cancellation: task missing"
+                        );
+                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
+                        logger.log(
+                                "task_pickup_timeout_persist_failure",
+                                &format!(
+                                    "Detached worker timeout for task #{} but task update returned no row",
+                                    task.task_number
+                                ),
+                                Some(serde_json::json!({
+                                    "task_number": task.task_number,
+                                    "worker_id": worker_id.to_string(),
+                                    "supervisor_timeout_count": next_timeout_count,
+                                    "supervisor_timeout_exhausted": exhausted,
+                                    "retry_limit": timeout_retry_limit,
+                                })),
+                            );
+                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id: Arc::from(agent_id.as_str()),
+                            worker_id,
+                            channel_id: None,
+                            result: timeout_message.clone(),
+                            notify: true,
+                            success: false,
+                        });
+                    }
+                    Err(update_error) => {
+                        tracing::warn!(
+                            %update_error,
+                            task_number = task.task_number,
+                            "failed to update task status after detached timeout cancellation"
+                        );
+                        run_logger.log_worker_completed(worker_id, &timeout_message, false);
+                        logger.log(
+                            "task_pickup_timeout_persist_failure",
+                            &format!(
+                                "Detached worker timeout for task #{} but failed to persist status",
+                                task.task_number
+                            ),
+                            Some(serde_json::json!({
+                                "task_number": task.task_number,
+                                "worker_id": worker_id.to_string(),
+                                "supervisor_timeout_count": next_timeout_count,
+                                "supervisor_timeout_exhausted": exhausted,
+                                "retry_limit": timeout_retry_limit,
+                            })),
+                        );
+                        let _ = event_tx.send(ProcessEvent::WorkerComplete {
+                            agent_id: Arc::from(agent_id.as_str()),
+                            worker_id,
+                            channel_id: None,
+                            result: timeout_message.clone(),
+                            notify: true,
+                            success: false,
+                        });
+                    }
                 }
-
-                // Only emit task SSE event if the DB write succeeded.
-                if requeue_result.is_ok() {
-                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
-                        agent_id: Arc::from(agent_id.as_str()),
-                        task_number: task.task_number,
-                        status: "ready".to_string(),
-                        action: "updated".to_string(),
-                    });
-                }
-
-                logger.log(
-                    "task_pickup_failed",
-                    &format!("Picked-up task #{} failed: {error}", task.task_number),
-                    Some(serde_json::json!({
-                        "task_number": task.task_number,
-                        "worker_id": worker_id.to_string(),
-                        "error": error.to_string(),
-                    })),
-                );
-
-                // Handle delegated task failure: log to link channel and
-                // notify the delegating agent's originating channel.
-                notify_delegation_completion(
-                    &task,
-                    &error_message,
-                    success,
-                    &agent_id,
-                    &links,
-                    &agent_names,
-                    &sqlite_pool,
-                    &injection_tx,
-                )
-                .await;
-
-                let _ = event_tx.send(ProcessEvent::WorkerComplete {
-                    agent_id: Arc::from(agent_id.as_str()),
-                    worker_id,
-                    channel_id: None,
-                    result: error_message,
-                    notify,
-                    success,
-                });
             }
+        };
+
+        let execution_result = std::panic::AssertUnwindSafe(worker_execution)
+            .catch_unwind()
+            .await;
+        if let Err(panic_payload) = execution_result {
+            let panic_message = crate::agent::panic_payload_to_string(&*panic_payload);
+            tracing::warn!(
+                task_number = task.task_number,
+                %panic_message,
+                "detached worker pickup handling panicked; forcing terminal cleanup"
+            );
         }
+
+        let _ = detached_worker_lifecycle.compare_exchange(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_COMPLETING,
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = detached_worker_lifecycle.compare_exchange(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_KILLING,
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+        let _ = detached_worker_lifecycle.compare_exchange(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE,
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_TERMINAL,
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        );
+
+        process_control_registry
+            .unregister_detached_worker(worker_id)
+            .await;
     });
 
     Ok(())
@@ -2348,19 +3157,28 @@ async fn fetch_memories_for_association(
 #[cfg(test)]
 mod tests {
     use super::{
-        BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD,
-        BulletinRefreshOutcome, CortexReceiverOutcome, ReceiverClosedBehavior, Signal,
-        apply_cancelled_warmup_status, handle_cortex_receiver_result, has_completed_initial_warmup,
+        BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
+        BulletinRefreshOutcome, CortexReceiverOutcome, HealthRuntimeState, ReceiverClosedBehavior,
+        Signal, WorkerTracker, apply_cancelled_warmup_status, build_kill_targets,
+        claim_detached_completion, detached_timeout_transition, handle_cortex_receiver_result,
+        has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
         maybe_close_bulletin_refresh_circuit, maybe_generate_bulletin_under_lock,
-        push_signal_into_buffer, record_bulletin_refresh_failure, should_execute_warmup,
-        should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
+        parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
+        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
+        summarize_signal_text, take_lagged_control_flag,
     };
     use crate::ProcessEvent;
+    use crate::agent::process_control::ControlActionResult;
     use crate::memory::MemoryType;
+    use crate::tasks::TaskStatus;
+    use crate::tasks::TaskStore;
+    use futures::FutureExt;
+    use futures::future;
+    use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::VecDeque;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::Instant;
+    use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
 
     #[test]
     fn run_warmup_once_semantics_skip_when_disabled_without_force() {
@@ -2848,6 +3666,250 @@ mod tests {
     }
 
     #[test]
+    fn parse_structured_success_flag_requires_json_object_bool() {
+        assert_eq!(
+            parse_structured_success_flag(r#"{"success":false}"#),
+            Some(false)
+        );
+        assert_eq!(parse_structured_success_flag(r#"{"ok":true}"#), Some(true));
+        assert_eq!(parse_structured_success_flag("plain text"), None);
+        assert_eq!(
+            parse_structured_success_flag(r#"{"success":"false"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn detached_timeout_transition_requeues_until_limit_then_quarantines() {
+        let metadata = serde_json::json!({});
+        let (count1, exhausted1, status1) = detached_timeout_transition(&metadata, 2);
+        assert_eq!(count1, 1);
+        assert!(!exhausted1);
+        assert_eq!(status1, TaskStatus::Ready);
+        assert_eq!(status1.as_str(), "ready");
+
+        let metadata = serde_json::json!({ "supervisor_timeout_count": 2 });
+        let (count2, exhausted2, status2) = detached_timeout_transition(&metadata, 2);
+        assert_eq!(count2, 3);
+        assert!(exhausted2);
+        assert_eq!(status2, TaskStatus::Backlog);
+        assert_eq!(status2.as_str(), "backlog");
+    }
+
+    #[test]
+    fn claim_detached_completion_allows_active_or_killing_exactly_once() {
+        let lifecycle = std::sync::atomic::AtomicU8::new(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE,
+        );
+        assert!(claim_detached_completion(&lifecycle));
+        assert!(!claim_detached_completion(&lifecycle));
+
+        let lifecycle = std::sync::atomic::AtomicU8::new(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_KILLING,
+        );
+        assert!(claim_detached_completion(&lifecycle));
+    }
+
+    #[tokio::test]
+    async fn detached_worker_completion_takes_priority_when_cancel_signal_and_worker_finish_simultaneously()
+     {
+        let lifecycle = Arc::new(AtomicU8::new(
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE,
+        ));
+
+        let (_cancel_tx, mut detached_cancel_rx) = tokio::sync::oneshot::channel::<()>();
+        drop(_cancel_tx);
+
+        let worker_future = future::ready::<Result<String, String>>(Ok("done".to_string()));
+        tokio::pin!(worker_future);
+
+        let worker_result = tokio::select! {
+            biased;
+            result = &mut worker_future => Some(result),
+            _ = &mut detached_cancel_rx => worker_future.as_mut().now_or_never(),
+        };
+
+        let completion_won = match worker_result {
+            Some(Ok(result)) => {
+                assert_eq!(result, "done");
+                claim_detached_completion(&lifecycle)
+            }
+            _ => false,
+        };
+
+        assert!(completion_won);
+        assert!(!claim_detached_completion(&lifecycle));
+        assert_eq!(
+            lifecycle.load(Ordering::Acquire),
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_COMPLETING
+        );
+    }
+
+    #[tokio::test]
+    async fn register_detached_worker_for_pickup_registers_entry_and_updates_task_record() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create sqlite memory pool");
+
+        sqlx::query(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                subtasks TEXT,
+                metadata TEXT,
+                source_memory_id TEXT,
+                worker_id TEXT,
+                created_by TEXT NOT NULL,
+                approved_at TIMESTAMP,
+                approved_by TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                UNIQUE(agent_id, task_number)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create tasks table");
+
+        let task_store = TaskStore::new(pool.clone());
+        let registry = crate::agent::process_control::ProcessControlRegistry::new();
+        let agent_id: crate::AgentId = Arc::from("agent-1");
+        let task_number = 2_i64;
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO tasks (
+                id, agent_id, task_number, title, description, status, priority,
+                subtasks, metadata, source_memory_id, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&*agent_id)
+        .bind(task_number)
+        .bind("test task")
+        .bind(Some("description".to_string()))
+        .bind("ready")
+        .bind("medium")
+        .bind("[]")
+        .bind("{}")
+        .bind(Option::<String>::None)
+        .bind("system")
+        .execute(&pool)
+        .await
+        .expect("failed to insert task fixture");
+
+        let (lifecycle, _cancel_rx) = super::register_detached_worker_for_pickup(
+            &registry,
+            &task_store,
+            &agent_id,
+            task_number,
+            worker_id,
+        )
+        .await
+        .expect("bootstrap should succeed");
+        drop(_cancel_rx);
+
+        assert_eq!(
+            lifecycle.load(Ordering::Acquire),
+            crate::agent::process_control::DETACHED_WORKER_LIFECYCLE_ACTIVE
+        );
+        assert!(
+            registry.unregister_detached_worker(worker_id).await,
+            "control entry should exist after successful registration"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_detached_worker_for_pickup_unregisters_control_on_task_update_error() {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("failed to create sqlite memory pool");
+
+        sqlx::query(
+            "CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                subtasks TEXT,
+                metadata TEXT,
+                source_memory_id TEXT,
+                worker_id TEXT,
+                created_by TEXT NOT NULL,
+                approved_at TIMESTAMP,
+                approved_by TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                UNIQUE(agent_id, task_number)
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("failed to create tasks table");
+
+        let task_store = TaskStore::new(pool.clone());
+        let registry = crate::agent::process_control::ProcessControlRegistry::new();
+        let agent_id: crate::AgentId = Arc::from("agent-1");
+        let task_number = 1_i64;
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query(
+            "INSERT INTO tasks (
+                id, agent_id, task_number, title, description, status, priority,
+                subtasks, metadata, source_memory_id, created_by
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(&*agent_id)
+        .bind(task_number)
+        .bind("test task")
+        .bind(Some("description".to_string()))
+        .bind("ready")
+        .bind("medium")
+        .bind("[]")
+        .bind("{}")
+        .bind(Option::<String>::None)
+        .bind("system")
+        .execute(&pool)
+        .await
+        .expect("failed to insert task fixture");
+
+        sqlx::query("DROP TABLE tasks")
+            .execute(&pool)
+            .await
+            .expect("failed to drop tasks table");
+
+        let result = super::register_detached_worker_for_pickup(
+            &registry,
+            &task_store,
+            &agent_id,
+            task_number,
+            worker_id,
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert!(
+            !registry.unregister_detached_worker(worker_id).await,
+            "detached control entry should have been cleaned up on update failure"
+        );
+    }
+
+    #[test]
     fn bulletin_refresh_circuit_closes_after_cooldown() {
         let mut failures = BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD;
         let mut circuit_open = true;
@@ -2872,6 +3934,113 @@ mod tests {
         assert!(closed);
         assert!(!circuit_open);
         assert_eq!(failures, 0);
+    }
+
+    #[test]
+    fn take_lagged_control_flag_clears_after_one_tick() {
+        let mut state = HealthRuntimeState::default();
+        state.mark_control_receiver_lag();
+
+        assert!(take_lagged_control_flag(&mut state));
+        assert!(!take_lagged_control_flag(&mut state));
+    }
+
+    #[test]
+    fn build_kill_targets_orders_oldest_first_and_stable_by_id() {
+        let base = Instant::now();
+        let older = base - Duration::from_secs(20);
+        let newer = base - Duration::from_secs(5);
+        let shared_start = base - Duration::from_secs(10);
+
+        let worker_a = WorkerTracker {
+            worker_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000a")
+                .expect("valid uuid"),
+            channel_id: Some(Arc::from("channel-a")),
+            worker_type: "builtin".to_string(),
+            started_at: shared_start,
+        };
+        let worker_b = WorkerTracker {
+            worker_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-00000000000b")
+                .expect("valid uuid"),
+            channel_id: Some(Arc::from("channel-a")),
+            worker_type: "builtin".to_string(),
+            started_at: shared_start,
+        };
+        let branch_oldest = BranchTracker {
+            branch_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+                .expect("valid uuid"),
+            channel_id: Arc::from("channel-a"),
+            started_at: older,
+        };
+        let branch_newest = BranchTracker {
+            branch_id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000002")
+                .expect("valid uuid"),
+            channel_id: Arc::from("channel-a"),
+            started_at: newer,
+        };
+
+        let targets = build_kill_targets(
+            vec![worker_b.clone(), worker_a.clone()],
+            vec![branch_newest.clone(), branch_oldest.clone()],
+        );
+
+        let ordered_ids: Vec<String> = targets
+            .iter()
+            .map(|target| match target {
+                super::KillTarget::Worker(tracker) => tracker.worker_id.to_string(),
+                super::KillTarget::Branch(tracker) => tracker.branch_id.to_string(),
+            })
+            .collect();
+
+        assert_eq!(
+            ordered_ids,
+            vec![
+                branch_oldest.branch_id.to_string(),
+                worker_a.worker_id.to_string(),
+                worker_b.worker_id.to_string(),
+                branch_newest.branch_id.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn terminal_control_result_includes_not_found_and_already_terminal() {
+        assert!(is_terminal_control_result(ControlActionResult::Cancelled));
+        assert!(is_terminal_control_result(ControlActionResult::NotFound));
+        assert!(is_terminal_control_result(
+            ControlActionResult::AlreadyTerminal
+        ));
+    }
+
+    #[test]
+    fn cancelled_control_result_only_matches_cancelled() {
+        assert!(is_cancelled_control_result(ControlActionResult::Cancelled));
+        assert!(!is_cancelled_control_result(ControlActionResult::NotFound));
+        assert!(!is_cancelled_control_result(
+            ControlActionResult::AlreadyTerminal
+        ));
+    }
+
+    #[test]
+    fn breaker_trips_only_for_structured_failures_and_resets_on_success() {
+        let mut state = HealthRuntimeState::default();
+        state.track_tool_completed("shell", r#"{"success":false}"#, 2);
+        assert!(state.pending_breaker_trip_events.is_empty());
+
+        state.track_tool_completed("shell", r#"{"success":false}"#, 2);
+        assert_eq!(state.pending_breaker_trip_events.len(), 1);
+        assert_eq!(state.pending_breaker_trip_events[0].key, "tool:shell");
+
+        state.track_tool_completed("shell", "command failed", 2);
+        assert_eq!(state.pending_breaker_trip_events.len(), 1);
+
+        state.track_tool_completed("shell", r#"{"success":true}"#, 2);
+        let breaker = state
+            .breaker_state
+            .get("tool:shell")
+            .expect("breaker state exists");
+        assert_eq!(breaker.failure_count, 0);
+        assert!(!breaker.tripped);
     }
 
     #[tokio::test]

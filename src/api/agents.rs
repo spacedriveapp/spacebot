@@ -420,6 +420,9 @@ pub(super) async fn trigger_warmup(
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
                 task_store_registry,
+                process_control_registry: Arc::new(
+                    crate::agent::process_control::ProcessControlRegistry::new(),
+                ),
                 injection_tx,
             };
             let logger = CortexLogger::new(sqlite_pool);
@@ -725,6 +728,9 @@ pub(super) async fn create_agent(
             (**state.agent_links.load()).clone(),
         )),
         task_store_registry: state.task_store_registry.clone(),
+        process_control_registry: Arc::new(
+            crate::agent::process_control::ProcessControlRegistry::new(),
+        ),
         injection_tx: state.injection_tx.clone(),
         agent_names: {
             let configs = state.agent_configs.load();

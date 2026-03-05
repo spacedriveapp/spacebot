@@ -1607,6 +1607,11 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                     );
+                    agent
+                        .deps
+                        .process_control_registry
+                        .register_channel(channel.id.clone(), channel.control_handle().downgrade())
+                        .await;
 
                     // Register the channel's status block with the API for snapshot queries
                     api_state.register_channel_status(
@@ -1654,10 +1659,25 @@ async fn run(
                     }
 
                     // Spawn the channel's event loop
+                    let cleanup_channel_id = conversation_id.clone();
+                    let process_control_registry = agent.deps.process_control_registry.clone();
+                    let api_state_for_cleanup = api_state.clone();
                     tokio::spawn(async move {
                         if let Err(error) = channel.run().await {
                             tracing::error!(%error, "channel event loop failed");
                         }
+
+                        let scoped_channel_id: spacebot::ChannelId =
+                            Arc::from(cleanup_channel_id.as_str());
+                        process_control_registry
+                            .unregister_channel(&scoped_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_status(&cleanup_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_state(&cleanup_channel_id)
+                            .await;
                     });
 
                     // Spawn outbound response routing: reads from response_rx,
@@ -2216,6 +2236,9 @@ async fn initialize_agents(
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
             task_store_registry: task_store_registry.clone(),
+            process_control_registry: Arc::new(
+                spacebot::agent::process_control::ProcessControlRegistry::new(),
+            ),
             injection_tx: injection_tx.clone(),
         };
 
