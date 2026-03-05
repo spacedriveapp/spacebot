@@ -85,7 +85,11 @@ impl ProcessControlRegistry {
         }
     }
 
-    pub async fn register_channel(&self, channel_id: ChannelId, handle: WeakChannelControlHandle) {
+    pub async fn register_channel(
+        &self,
+        channel_id: ChannelId,
+        handle: WeakChannelControlHandle,
+    ) -> u64 {
         let registration_id = self
             .next_channel_registration
             .fetch_add(1, Ordering::AcqRel);
@@ -96,10 +100,18 @@ impl ProcessControlRegistry {
                 registration_id,
             },
         );
+        registration_id
     }
 
-    pub async fn unregister_channel(&self, channel_id: &ChannelId) -> bool {
-        self.channels.write().await.remove(channel_id).is_some()
+    pub async fn unregister_channel(&self, channel_id: &ChannelId, registration_id: u64) -> bool {
+        let mut channels = self.channels.write().await;
+        let should_remove = channels
+            .get(channel_id)
+            .is_some_and(|entry| entry.registration_id == registration_id);
+        if should_remove {
+            channels.remove(channel_id);
+        }
+        should_remove
     }
 
     pub async fn prune_dead_channels(&self) -> usize {
@@ -159,17 +171,19 @@ impl ProcessControlRegistry {
         worker_id: WorkerId,
         reason: &str,
     ) -> ControlActionResult {
-        match self.lookup_channel_handle(channel_id).await {
-            ChannelLookupResult::Found(handle) => {
-                handle.cancel_worker_with_reason(worker_id, reason).await
+        for _ in 0..2 {
+            match self.lookup_channel_handle(channel_id).await {
+                ChannelLookupResult::Found(handle) => {
+                    return handle.cancel_worker_with_reason(worker_id, reason).await;
+                }
+                ChannelLookupResult::Stale(registration_id) => {
+                    self.remove_stale_channel_if_matches(channel_id, registration_id)
+                        .await;
+                }
+                ChannelLookupResult::Missing => return ControlActionResult::NotFound,
             }
-            ChannelLookupResult::Stale(registration_id) => {
-                self.remove_stale_channel_if_matches(channel_id, registration_id)
-                    .await;
-                ControlActionResult::NotFound
-            }
-            ChannelLookupResult::Missing => ControlActionResult::NotFound,
         }
+        ControlActionResult::NotFound
     }
 
     pub async fn cancel_channel_branch(
@@ -178,17 +192,19 @@ impl ProcessControlRegistry {
         branch_id: BranchId,
         reason: &str,
     ) -> ControlActionResult {
-        match self.lookup_channel_handle(channel_id).await {
-            ChannelLookupResult::Found(handle) => {
-                handle.cancel_branch_with_reason(branch_id, reason).await
+        for _ in 0..2 {
+            match self.lookup_channel_handle(channel_id).await {
+                ChannelLookupResult::Found(handle) => {
+                    return handle.cancel_branch_with_reason(branch_id, reason).await;
+                }
+                ChannelLookupResult::Stale(registration_id) => {
+                    self.remove_stale_channel_if_matches(channel_id, registration_id)
+                        .await;
+                }
+                ChannelLookupResult::Missing => return ControlActionResult::NotFound,
             }
-            ChannelLookupResult::Stale(registration_id) => {
-                self.remove_stale_channel_if_matches(channel_id, registration_id)
-                    .await;
-                ControlActionResult::NotFound
-            }
-            ChannelLookupResult::Missing => ControlActionResult::NotFound,
         }
+        ControlActionResult::NotFound
     }
 
     async fn remove_stale_channel_if_matches(
@@ -287,7 +303,7 @@ mod tests {
     async fn prune_dead_channels_removes_stale_entries() {
         let registry = ProcessControlRegistry::new();
         let channel_id: crate::ChannelId = Arc::from("channel-1");
-        registry
+        let registration_id = registry
             .register_channel(
                 channel_id.clone(),
                 crate::agent::channel::WeakChannelControlHandle::dangling(),
@@ -297,7 +313,11 @@ mod tests {
         let pruned = registry.prune_dead_channels().await;
 
         assert_eq!(pruned, 1);
-        assert!(!registry.unregister_channel(&channel_id).await);
+        assert!(
+            !registry
+                .unregister_channel(&channel_id, registration_id)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -306,18 +326,11 @@ mod tests {
         let channel_id: crate::ChannelId = Arc::from("channel-stale-race");
         let stale_handle = WeakChannelControlHandle::dangling();
 
-        registry
+        let stale_registration_id = registry
             .register_channel(channel_id.clone(), stale_handle)
             .await;
-        let stale_registration_id = {
-            let channels = registry.channels.read().await;
-            channels
-                .get(&channel_id)
-                .map(|entry| entry.registration_id)
-                .unwrap()
-        };
 
-        registry
+        let active_registration_id = registry
             .register_channel(channel_id.clone(), WeakChannelControlHandle::dangling())
             .await;
 
@@ -326,7 +339,16 @@ mod tests {
                 .remove_stale_channel_if_matches(&channel_id, stale_registration_id)
                 .await
         );
-        assert!(registry.unregister_channel(&channel_id).await);
+        assert!(
+            !registry
+                .unregister_channel(&channel_id, stale_registration_id)
+                .await
+        );
+        assert!(
+            registry
+                .unregister_channel(&channel_id, active_registration_id)
+                .await
+        );
     }
 
     #[tokio::test]
@@ -351,6 +373,30 @@ mod tests {
         assert_eq!(
             registry.cancel_detached_worker(worker_id, "test").await,
             ControlActionResult::NotFound
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_stale_channel_entry_prunes_then_returns_not_found() {
+        let registry = ProcessControlRegistry::new();
+        let channel_id: crate::ChannelId = Arc::from("stale-channel");
+        let worker_id = uuid::Uuid::new_v4();
+
+        let registration_id = registry
+            .register_channel(channel_id.clone(), WeakChannelControlHandle::dangling())
+            .await;
+
+        assert_eq!(
+            registry
+                .cancel_channel_worker(&channel_id, worker_id, "test")
+                .await,
+            ControlActionResult::NotFound
+        );
+        assert!(
+            !registry
+                .unregister_channel(&channel_id, registration_id)
+                .await,
+            "stale entry should be pruned during cancellation retry path"
         );
     }
 

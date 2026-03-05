@@ -866,6 +866,44 @@ impl Default for CortexConfig {
     }
 }
 
+impl CortexConfig {
+    /// Validate maintenance tuning bounds used by pruning/merge logic.
+    pub fn validate_maintenance_bounds(&self) -> Result<()> {
+        validate_unit_interval_f32("maintenance_decay_rate", self.maintenance_decay_rate)?;
+        validate_unit_interval_f32(
+            "maintenance_prune_threshold",
+            self.maintenance_prune_threshold,
+        )?;
+        validate_unit_interval_f32(
+            "maintenance_merge_similarity_threshold",
+            self.maintenance_merge_similarity_threshold,
+        )?;
+        if self.maintenance_min_age_days < 0 {
+            return Err(ConfigError::Invalid(format!(
+                "maintenance_min_age_days must be >= 0, got {}",
+                self.maintenance_min_age_days
+            ))
+            .into());
+        }
+        if self.maintenance_interval_secs == 0 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_unit_interval_f32(name: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(ConfigError::Invalid(format!(
+            "{name} must be finite and between 0.0 and 1.0, got {value}"
+        ))
+        .into());
+    }
+    Ok(())
+}
+
 /// Warmup configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct WarmupConfig {

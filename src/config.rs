@@ -1026,6 +1026,45 @@ maintenance_decay_rate = 0.33
     }
 
     #[test]
+    fn test_cortex_maintenance_config_rejects_invalid_ranges() {
+        let invalid_threshold = r#"
+[defaults.cortex]
+maintenance_prune_threshold = 1.2
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_threshold).expect("failed to parse invalid threshold TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid maintenance_prune_threshold to be rejected"
+        );
+
+        let invalid_min_age = r#"
+[defaults.cortex]
+maintenance_min_age_days = -3
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_min_age).expect("failed to parse invalid min age TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected negative maintenance_min_age_days to be rejected"
+        );
+
+        let invalid_agent_override = r#"
+[[agents]]
+id = "main"
+
+[agents.cortex]
+maintenance_decay_rate = -0.1
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_agent_override).expect("failed to parse invalid agent TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid agent maintenance_decay_rate to be rejected"
+        );
+    }
+
+    #[test]
     fn test_work_readiness_requires_warm_state() {
         let readiness = evaluate_work_readiness(
             WarmupConfig::default(),

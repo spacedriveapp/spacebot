@@ -16,7 +16,7 @@ This doc covers the path from "bulletin generator" to "full system supervisor."
 - `Signal` enum — aligned to current `ProcessEvent` surface (worker/branch/tool/memory/compaction/task/link events).
 - `CortexHook` — all methods return `Continue` with trace logging.
 
-**Implemented but never called:**
+**Implemented and wired into the cortex loop:**
 - `memory/maintenance.rs` — `apply_decay()`, `prune_memories()`, and `merge_similar_memories()` are implemented and wired into the cortex loop.
 
 **Wired through config:**
@@ -134,6 +134,10 @@ Wire up the maintenance code that already exists in `memory/maintenance.rs`.
 - On the maintenance tick, call `run_maintenance()` with the current `MaintenanceConfig`
 - Log the `MaintenanceReport` (decayed, pruned, merged counts)
 - Respect hot-reload — `MaintenanceConfig` values should come from `CortexConfig`
+- Reject invalid maintenance config values at load/update time:
+  - `maintenance_interval_secs >= 1`
+  - `maintenance_decay_rate`, `maintenance_prune_threshold`, `maintenance_merge_similarity_threshold` in `[0.0, 1.0]`
+  - `maintenance_min_age_days >= 0`
 
 ### Finish `merge_similar_memories()`
 
@@ -143,6 +147,7 @@ Wire up the maintenance code that already exists in `memory/maintenance.rs`.
 - Create `Updates` association from survivor to merged memory
 - Transfer associations from the merged memory to the survivor
 - Soft-delete the merged memory
+- Bound per-pass work (candidate and merge caps) to avoid unbounded maintenance scans on large corpora
 
 **End state:** Memories decay over time, low-importance orphans get pruned, near-duplicates get merged. All on autopilot.
 

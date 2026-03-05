@@ -127,8 +127,8 @@ fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
 }
 
 impl CortexConfig {
-    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> CortexConfig {
-        CortexConfig {
+    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> Result<CortexConfig> {
+        let config = CortexConfig {
             tick_interval_secs: overrides
                 .tick_interval_secs
                 .unwrap_or(defaults.tick_interval_secs),
@@ -183,7 +183,9 @@ impl CortexConfig {
             association_max_per_pass: overrides
                 .association_max_per_pass
                 .unwrap_or(defaults.association_max_per_pass),
-        }
+        };
+        config.validate_maintenance_bounds()?;
+        Ok(config)
     }
 }
 
@@ -1405,6 +1407,7 @@ impl Config {
                 .defaults
                 .cortex
                 .map(|c| CortexConfig::resolve(c, base_defaults.cortex))
+                .transpose()?
                 .unwrap_or(base_defaults.cortex),
             warmup: toml
                 .defaults
@@ -1588,7 +1591,10 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
-                    cortex: a.cortex.map(|c| CortexConfig::resolve(c, defaults.cortex)),
+                    cortex: a
+                        .cortex
+                        .map(|c| CortexConfig::resolve(c, defaults.cortex))
+                        .transpose()?,
                     warmup: a.warmup.map(|w| WarmupConfig {
                         enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
                         eager_embedding_load: w

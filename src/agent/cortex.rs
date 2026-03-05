@@ -87,6 +87,8 @@ const BULLETIN_REFRESH_FAILURE_BACKOFF_BASE_SECS: u64 = 30;
 const BULLETIN_REFRESH_FAILURE_BACKOFF_MAX_SECS: u64 = 600;
 const BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD: u32 = 3;
 const BULLETIN_REFRESH_CIRCUIT_OPEN_SECS: u64 = 1800;
+const MAINTENANCE_CIRCUIT_OPEN_THRESHOLD: usize = 3;
+const MAINTENANCE_CIRCUIT_OPEN_SECS: u64 = 1800;
 const MAINTENANCE_TASK_TIMEOUT_MIN_SECS: u64 = 300;
 const MAINTENANCE_TASK_TIMEOUT_MAX_SECS: u64 = 3_600;
 const MAINTENANCE_TASK_TIMEOUT_MULTIPLIER: u64 = 6;
@@ -140,6 +142,38 @@ fn maybe_close_bulletin_refresh_circuit(
     *bulletin_refresh_failures = 0;
     *bulletin_refresh_circuit_open = false;
     *next_bulletin_refresh_allowed_at = now;
+    true
+}
+
+fn record_maintenance_failure(
+    maintenance_consecutive_failures: &mut usize,
+    maintenance_disabled_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    *maintenance_consecutive_failures = maintenance_consecutive_failures.saturating_add(1);
+    if *maintenance_consecutive_failures >= MAINTENANCE_CIRCUIT_OPEN_THRESHOLD
+        && maintenance_disabled_at.is_none()
+    {
+        *maintenance_disabled_at = Some(now);
+        return true;
+    }
+    false
+}
+
+fn maybe_close_maintenance_circuit(
+    maintenance_consecutive_failures: &mut usize,
+    maintenance_disabled_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    let Some(disabled_at) = *maintenance_disabled_at else {
+        return false;
+    };
+    if now.duration_since(disabled_at) < Duration::from_secs(MAINTENANCE_CIRCUIT_OPEN_SECS) {
+        return false;
+    }
+
+    *maintenance_consecutive_failures = 0;
+    *maintenance_disabled_at = None;
     true
 }
 
@@ -1663,6 +1697,8 @@ async fn run_cortex_loop(
     let mut maintenance_task_cancel_tx: Option<tokio::sync::watch::Sender<bool>> = None;
     let mut maintenance_task_cancel_requested_at: Option<Instant> = None;
     let mut maintenance_task_forced_abort_issued = false;
+    let mut maintenance_consecutive_failures: usize = 0;
+    let mut maintenance_disabled_at: Option<Instant> = None;
     let mut bulletin_refresh_failures: u32 = 0;
     let mut bulletin_refresh_circuit_open = false;
     let mut next_bulletin_refresh_allowed_at = Instant::now();
@@ -1822,6 +1858,15 @@ async fn run_cortex_loop(
                     maintenance_task_forced_abort_issued = false;
                     match task.await {
                         Ok(Ok(report)) => {
+                            if maintenance_consecutive_failures > 0 || maintenance_disabled_at.is_some()
+                            {
+                                tracing::info!(
+                                    previous_failures = maintenance_consecutive_failures,
+                                    "cortex maintenance circuit reset after successful run"
+                                );
+                            }
+                            maintenance_consecutive_failures = 0;
+                            maintenance_disabled_at = None;
                             logger.log(
                                 "maintenance_completed",
                                 "Memory maintenance completed",
@@ -1833,9 +1878,28 @@ async fn run_cortex_loop(
                             );
                         }
                         Ok(Err(error)) => {
+                            let now = Instant::now();
+                            let circuit_opened = record_maintenance_failure(
+                                &mut maintenance_consecutive_failures,
+                                &mut maintenance_disabled_at,
+                                now,
+                            );
                             tracing::warn!(%error, "cortex maintenance failed");
+                            if circuit_opened {
+                                tracing::warn!(
+                                    failures = maintenance_consecutive_failures,
+                                    cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                                    "cortex maintenance circuit opened after consecutive failures"
+                                );
+                            }
                         }
                         Err(error) => {
+                            let now = Instant::now();
+                            let circuit_opened = record_maintenance_failure(
+                                &mut maintenance_consecutive_failures,
+                                &mut maintenance_disabled_at,
+                                now,
+                            );
                             if error.is_cancelled() {
                                 tracing::warn!(
                                     %error,
@@ -1845,6 +1909,13 @@ async fn run_cortex_loop(
                                 tracing::warn!(%error, "cortex maintenance task panicked");
                             } else {
                                 tracing::warn!(%error, "cortex maintenance task failed");
+                            }
+                            if circuit_opened {
+                                tracing::warn!(
+                                    failures = maintenance_consecutive_failures,
+                                    cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                                    "cortex maintenance circuit opened after task failures"
+                                );
                             }
                         }
                     }
@@ -1863,7 +1934,7 @@ async fn run_cortex_loop(
                         MaintenanceTimeoutAction::None => {}
                         MaintenanceTimeoutAction::RequestCancel => {
                             if let Some(cancel_tx) = maintenance_task_cancel_tx.as_ref() {
-                                let _ = cancel_tx.send(true);
+                                cancel_tx.send(true).ok();
                             }
                             maintenance_task_cancel_requested_at = Some(now);
                             tracing::warn!(
@@ -1918,6 +1989,13 @@ async fn run_cortex_loop(
                 ) {
                     tracing::info!("cortex bulletin refresh circuit closed; retries re-enabled");
                 }
+                if maybe_close_maintenance_circuit(
+                    &mut maintenance_consecutive_failures,
+                    &mut maintenance_disabled_at,
+                    now,
+                ) {
+                    tracing::info!("cortex maintenance circuit closed; retries re-enabled");
+                }
                 if refresh_task.is_none()
                     && !bulletin_refresh_circuit_open
                     && last_bulletin_refresh.elapsed() >= bulletin_interval
@@ -1932,7 +2010,7 @@ async fn run_cortex_loop(
                 if last_maintenance.elapsed() >= Duration::from_secs(
                     cortex_config.maintenance_interval_secs.max(1),
                 ) {
-                    if maintenance_task.is_none() {
+                    if maintenance_task.is_none() && maintenance_disabled_at.is_none() {
                         maintenance_task_started_at = Some(Instant::now());
                         let maintenance_config = memory_maintenance::MaintenanceConfig {
                             prune_threshold: cortex_config.maintenance_prune_threshold,
@@ -1966,6 +2044,12 @@ async fn run_cortex_loop(
                         maintenance_task_cancel_tx = Some(maintenance_cancel_tx);
                         maintenance_task_cancel_requested_at = None;
                         maintenance_task_forced_abort_issued = false;
+                    } else if maintenance_disabled_at.is_some() {
+                        tracing::debug!(
+                            failures = maintenance_consecutive_failures,
+                            cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                            "maintenance scheduling skipped while maintenance circuit is open"
+                        );
                     }
 
                     last_maintenance = Instant::now();

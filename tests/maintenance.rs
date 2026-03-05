@@ -8,6 +8,7 @@ use tokio::sync::watch;
 async fn make_memory_maintenance_fixture() -> (
     std::sync::Arc<MemoryStore>,
     spacebot::memory::EmbeddingTable,
+    tempfile::TempDir,
 ) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
         .in_memory(true)
@@ -33,12 +34,12 @@ async fn make_memory_maintenance_fixture() -> (
         .await
         .expect("failed to create embedding table");
 
-    (store, embedding_table)
+    (store, embedding_table, dir)
 }
 
 #[tokio::test]
 async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
-    let (store, embedding_table) = make_memory_maintenance_fixture().await;
+    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
 
     let survivor = {
         let memory = spacebot::memory::Memory::new(
@@ -160,7 +161,7 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
 
 #[tokio::test]
 async fn maintenance_run_can_be_cancelled() {
-    let (store, embedding_table) = make_memory_maintenance_fixture().await;
+    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
     let maintenance_config = MaintenanceConfig::default();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
@@ -183,5 +184,30 @@ async fn maintenance_run_can_be_cancelled() {
         error_message.contains("memory maintenance cancelled"),
         "expected cancellation error, got: {}",
         error_message,
+    );
+}
+
+#[tokio::test]
+async fn maintenance_config_validation_rejects_negative_min_age() {
+    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
+
+    let result = run_maintenance(
+        &store,
+        &embedding_table,
+        &MaintenanceConfig {
+            prune_threshold: 0.2,
+            decay_rate: 0.05,
+            min_age_days: -5,
+            merge_similarity_threshold: 0.95,
+        },
+    )
+    .await;
+
+    assert!(result.is_err(), "negative min_age_days must be rejected");
+    let error_message = result.unwrap_err().to_string();
+    assert!(
+        error_message.contains("min_age_days must be >= 0"),
+        "unexpected error message: {}",
+        error_message
     );
 }

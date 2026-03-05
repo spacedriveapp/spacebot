@@ -1,7 +1,7 @@
 //! Memory maintenance: decay, prune, merge, reindex.
 
 use crate::error::Result;
-use crate::memory::{Association, EmbeddingTable, Memory, MemoryStore, MemoryType, RelationType};
+use crate::memory::{EmbeddingTable, Memory, MemoryStore, MemoryType};
 use anyhow::Context;
 
 use sqlx::Row;
@@ -10,6 +10,11 @@ use tokio::sync::watch;
 
 use std::collections::HashSet;
 use std::future::Future;
+
+const MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES: i64 = 2_000;
+const MAX_MAINTENANCE_MERGES_PER_PASS: usize = 500;
+const MAX_MAINTENANCE_SIMILAR_CANDIDATES: usize = 25;
+const MAX_MERGED_MEMORY_CONTENT_BYTES: usize = 50_000;
 
 /// Maintenance configuration.
 #[derive(Debug, Clone)]
@@ -56,6 +61,7 @@ pub async fn run_maintenance_with_cancel(
 ) -> Result<MaintenanceReport> {
     let mut report = MaintenanceReport::default();
     check_maintenance_cancellation(&mut maintenance_cancel_rx).await?;
+    validate_maintenance_config(config)?;
 
     // Apply decay to all non-identity memories
     // Fields are assigned sequentially because the values are async — can't use struct literal.
@@ -189,6 +195,9 @@ async fn merge_similar_memories(
     let mut merged_memory_ids = HashSet::new();
 
     for source_id in memory_ids {
+        if merged_count >= MAX_MAINTENANCE_MERGES_PER_PASS {
+            break;
+        }
         check_maintenance_cancellation(maintenance_cancel_rx).await?;
 
         if merged_memory_ids.contains(&source_id) {
@@ -208,22 +217,21 @@ async fn merge_similar_memories(
             continue;
         }
 
-        let similar = match maintenance_cancelable_op(
+        let similar = maintenance_cancelable_op(
             maintenance_cancel_rx,
-            embedding_table.find_similar(&source_memory.id, similarity_threshold, 25),
+            embedding_table.find_similar(
+                &source_memory.id,
+                similarity_threshold,
+                MAX_MAINTENANCE_SIMILAR_CANDIDATES,
+            ),
         )
         .await
-        {
-            Ok(similar) => similar,
-            Err(error) => {
-                tracing::debug!(
-                    memory_id = source_memory.id,
-                    %error,
-                    "skipping memory maintenance merge due embedding lookup failure"
-                );
-                continue;
-            }
-        };
+        .with_context(|| {
+            format!(
+                "failed to lookup similar memories during maintenance for source memory {}",
+                source_memory.id
+            )
+        })?;
 
         if similar.is_empty() {
             continue;
@@ -233,6 +241,9 @@ async fn merge_similar_memories(
         let mut source_merged = false;
 
         for (candidate_id, _similarity) in similar {
+            if merged_count >= MAX_MAINTENANCE_MERGES_PER_PASS {
+                break;
+            }
             check_maintenance_cancellation(maintenance_cancel_rx).await?;
             if merged_memory_ids.contains(&candidate_id) || candidate_id == active_survivor.id {
                 continue;
@@ -249,7 +260,7 @@ async fn merge_similar_memories(
             }
 
             let (winner, loser) = choose_merge_pair(&active_survivor, &candidate_memory);
-            merge_pair(
+            let merged_survivor = merge_pair(
                 memory_store,
                 embedding_table,
                 &winner,
@@ -265,9 +276,7 @@ async fn merge_similar_memories(
                 break;
             }
 
-            if winner.id != active_survivor.id {
-                active_survivor = winner;
-            }
+            active_survivor = merged_survivor;
         }
 
         if source_merged {
@@ -301,11 +310,18 @@ fn merged_memory_content(winner: String, loser: &str) -> String {
         return winner_trimmed.to_string();
     }
 
-    if winner_trimmed.is_empty() {
+    let merged = if winner_trimmed.is_empty() {
         loser_trimmed.to_string()
     } else {
         format!("{winner_trimmed}\n\n{loser_trimmed}")
+    };
+
+    if merged.len() <= MAX_MERGED_MEMORY_CONTENT_BYTES {
+        return merged;
     }
+
+    let boundary = merged.floor_char_boundary(MAX_MERGED_MEMORY_CONTENT_BYTES);
+    merged[..boundary].to_string()
 }
 
 async fn merge_pair(
@@ -314,7 +330,7 @@ async fn merge_pair(
     survivor: &Memory,
     merged: &Memory,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
-) -> Result<()> {
+) -> Result<Memory> {
     check_maintenance_cancellation(maintenance_cancel_rx).await?;
 
     let mut updated_survivor = survivor.clone();
@@ -323,59 +339,11 @@ async fn merge_pair(
 
     maintenance_cancelable_op(
         maintenance_cancel_rx,
-        memory_store.update(&updated_survivor),
+        memory_store.merge_memories_atomic(&updated_survivor, merged),
     )
     .await?;
-
-    let merged_associations = maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        memory_store.get_associations(&merged.id),
-    )
-    .await?;
-    if !merged_associations.is_empty() {
-        maintenance_cancelable_op(
-            maintenance_cancel_rx,
-            memory_store.delete_associations_for_memory(&merged.id),
-        )
-        .await?;
-
-        for mut association in merged_associations {
-            check_maintenance_cancellation(maintenance_cancel_rx).await?;
-
-            if association.source_id == updated_survivor.id {
-                continue;
-            }
-
-            if association.source_id == merged.id {
-                association.source_id = updated_survivor.id.clone();
-            }
-            if association.target_id == merged.id {
-                association.target_id = updated_survivor.id.clone();
-            }
-
-            if association.source_id == association.target_id {
-                continue;
-            }
-
-            maintenance_cancelable_op(
-                maintenance_cancel_rx,
-                memory_store.create_association(&association),
-            )
-            .await?;
-        }
-    }
-
-    let updates_assoc =
-        Association::new(&updated_survivor.id, &merged.id, RelationType::Updates).with_weight(1.0);
-    maintenance_cancelable_op(
-        maintenance_cancel_rx,
-        memory_store.create_association(&updates_assoc),
-    )
-    .await?;
-
-    maintenance_cancelable_op(maintenance_cancel_rx, memory_store.forget(&merged.id)).await?;
     maintenance_cancelable_op(maintenance_cancel_rx, embedding_table.delete(&merged.id)).await?;
-    Ok(())
+    Ok(updated_survivor)
 }
 
 async fn fetch_candidate_memory_ids(
@@ -387,8 +355,9 @@ async fn fetch_candidate_memory_ids(
     let rows: Vec<SqliteRow> = maintenance_cancelable_op(
         maintenance_cancel_rx,
         sqlx::query(
-            "SELECT id FROM memories WHERE forgotten = 0 ORDER BY importance DESC, created_at DESC, id ASC",
+            "SELECT id FROM memories WHERE forgotten = 0 ORDER BY importance DESC, created_at DESC, id ASC LIMIT ?",
         )
+        .bind(MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES)
         .fetch_all(memory_store.pool()),
     )
     .await
@@ -403,6 +372,33 @@ async fn fetch_candidate_memory_ids(
         .collect();
 
     Ok(ids)
+}
+
+fn validate_maintenance_config(config: &MaintenanceConfig) -> Result<()> {
+    validate_unit_interval("prune_threshold", config.prune_threshold)?;
+    validate_unit_interval("decay_rate", config.decay_rate)?;
+    validate_unit_interval(
+        "merge_similarity_threshold",
+        config.merge_similarity_threshold,
+    )?;
+    if config.min_age_days < 0 {
+        return Err(anyhow::anyhow!(
+            "maintenance min_age_days must be >= 0, got {}",
+            config.min_age_days
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_unit_interval(name: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(anyhow::anyhow!(
+            "maintenance {name} must be finite and between 0.0 and 1.0, got {value}"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn check_maintenance_cancellation(
@@ -457,6 +453,7 @@ pub struct MaintenanceReport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::{Association, RelationType};
     use tempfile::tempdir;
     use tokio::time::Duration;
 
@@ -619,6 +616,156 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn merges_multiple_duplicates_into_one_survivor_in_single_pass() {
+        let store = MemoryStore::connect_in_memory().await;
+
+        let dir = tempdir().expect("failed to create temp dir");
+        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
+            .execute()
+            .await
+            .expect("failed to connect to lancedb");
+        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
+            .await
+            .expect("failed to create embedding table");
+
+        let survivor = create_memory_with_embedding(
+            &store,
+            &embedding_table,
+            "durable rust maintenance note",
+            MemoryType::Fact,
+            0.9,
+            vec![1.0; 384],
+        )
+        .await;
+
+        let duplicate_a = create_memory_with_embedding(
+            &store,
+            &embedding_table,
+            "durable rust maintenance note update A",
+            MemoryType::Fact,
+            0.6,
+            vec![1.0; 384],
+        )
+        .await;
+        let duplicate_b = create_memory_with_embedding(
+            &store,
+            &embedding_table,
+            "durable rust maintenance note update B",
+            MemoryType::Fact,
+            0.5,
+            vec![1.0; 384],
+        )
+        .await;
+
+        let related_a = create_memory_with_embedding(
+            &store,
+            &embedding_table,
+            "related A",
+            MemoryType::Fact,
+            0.7,
+            {
+                let mut embedding = vec![0.0; 384];
+                embedding[0] = 1.0;
+                embedding
+            },
+        )
+        .await;
+        let related_b = create_memory_with_embedding(
+            &store,
+            &embedding_table,
+            "related B",
+            MemoryType::Fact,
+            0.7,
+            {
+                let mut embedding = vec![0.0; 384];
+                embedding[1] = 1.0;
+                embedding
+            },
+        )
+        .await;
+
+        store
+            .create_association(&Association::new(
+                &duplicate_a.id,
+                &related_a.id,
+                RelationType::RelatedTo,
+            ))
+            .await
+            .expect("failed to create duplicate_a association");
+        store
+            .create_association(&Association::new(
+                &related_b.id,
+                &duplicate_b.id,
+                RelationType::PartOf,
+            ))
+            .await
+            .expect("failed to create duplicate_b association");
+
+        let report = run_maintenance(
+            &store,
+            &embedding_table,
+            &MaintenanceConfig {
+                prune_threshold: 0.2,
+                decay_rate: 0.05,
+                min_age_days: 30,
+                merge_similarity_threshold: 0.95,
+            },
+        )
+        .await
+        .expect("maintenance should succeed");
+
+        assert_eq!(report.merged, 2);
+
+        let refreshed_survivor = store
+            .load(&survivor.id)
+            .await
+            .expect("failed to load survivor")
+            .expect("survivor should exist");
+        assert!(
+            refreshed_survivor
+                .content
+                .contains("durable rust maintenance note update A")
+        );
+        assert!(
+            refreshed_survivor
+                .content
+                .contains("durable rust maintenance note update B")
+        );
+
+        for duplicate_id in [&duplicate_a.id, &duplicate_b.id] {
+            let duplicate = store
+                .load(duplicate_id)
+                .await
+                .expect("failed to load duplicate")
+                .expect("duplicate should exist");
+            assert!(duplicate.forgotten);
+
+            let duplicate_embeddings = embedding_table
+                .find_similar(duplicate_id, 0.0, 10)
+                .await
+                .expect("failed to search duplicate embeddings");
+            assert!(duplicate_embeddings.is_empty());
+        }
+
+        let survivor_associations = store
+            .get_associations(&survivor.id)
+            .await
+            .expect("failed to load survivor associations");
+        assert!(
+            survivor_associations.iter().any(|association| {
+                association.source_id == survivor.id && association.target_id == related_a.id
+            }),
+            "expected duplicate_a associations to rewire to survivor"
+        );
+        assert!(
+            survivor_associations.iter().any(|association| {
+                association.source_id == related_b.id && association.target_id == survivor.id
+            }),
+            "expected duplicate_b associations to rewire to survivor"
+        );
+    }
+
+    #[tokio::test]
     async fn run_maintenance_with_cancel_stops_when_cancel_requested() {
         let store = MemoryStore::connect_in_memory().await;
 
@@ -654,5 +801,35 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    #[tokio::test]
+    async fn run_maintenance_rejects_invalid_configuration_ranges() {
+        let store = MemoryStore::connect_in_memory().await;
+        let dir = tempdir().expect("failed to create temp dir");
+        let lance_conn = lancedb::connect(dir.path().to_str().expect("temp path"))
+            .execute()
+            .await
+            .expect("failed to connect to lancedb");
+        let embedding_table = crate::memory::EmbeddingTable::open_or_create(&lance_conn)
+            .await
+            .expect("failed to create embedding table");
+
+        let invalid_config = MaintenanceConfig {
+            prune_threshold: 0.2,
+            decay_rate: 0.05,
+            min_age_days: -1,
+            merge_similarity_threshold: 0.95,
+        };
+
+        let result = run_maintenance(&store, &embedding_table, &invalid_config).await;
+        assert!(result.is_err(), "expected invalid config to fail");
+        assert!(
+            result
+                .as_ref()
+                .unwrap_err()
+                .to_string()
+                .contains("min_age_days must be >= 0")
+        );
     }
 }
