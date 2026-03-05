@@ -2435,12 +2435,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         // Scrub known secrets and unknown leak patterns from all worker output
         // before persisting, logging, or emitting events.
         let scrub = |text: String| -> String {
-            let scrubbed = if let Some(store) = secrets_snapshot.as_ref() {
-                crate::secrets::scrub::scrub_with_store(&text, store)
-            } else {
-                text
-            };
-            scan_mode.maybe_scrub_leaks(scrubbed)
+            let store_ref: Option<&crate::secrets::store::SecretsStore> =
+                secrets_snapshot.as_ref().as_ref().map(|s| s.as_ref());
+            scan_mode.apply_scrubbing_with_store(&text, store_ref)
         };
 
         let worker_execution = async {

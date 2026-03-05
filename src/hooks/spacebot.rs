@@ -40,6 +40,8 @@ pub struct SpacebotHook {
     /// is performed — regex patterns are skipped to avoid false positives
     /// on public API keys found in scraped web content.
     secret_scan_mode: crate::secrets::scrub::SecretScanMode,
+    /// Snapshot of the secrets store for exact-match scrubbing on event payloads.
+    secrets_snapshot: Option<std::sync::Arc<crate::secrets::store::SecretsStore>>,
     completion_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     saw_tool_call: std::sync::Arc<std::sync::atomic::AtomicBool>,
     nudge_request_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -69,6 +71,7 @@ impl SpacebotHook {
             event_tx,
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
             secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
+            secrets_snapshot: None,
             completion_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             saw_tool_call: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nudge_request_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -78,6 +81,15 @@ impl SpacebotHook {
     /// Override the secret scan mode for this hook.
     pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
         self.secret_scan_mode = mode;
+        self
+    }
+
+    /// Set the secrets store snapshot for exact-match scrubbing on event payloads.
+    pub fn with_secrets_snapshot(
+        mut self,
+        store: Option<std::sync::Arc<crate::secrets::store::SecretsStore>>,
+    ) -> Self {
+        self.secrets_snapshot = store;
         self
     }
 
@@ -572,12 +584,10 @@ where
         // processes, scrub leak patterns from the event payload so secrets
         // don't reach the SSE dashboard.
         if matches!(self.process_type, ProcessType::Worker | ProcessType::Branch) {
-            let scrubbed =
-                if self.secret_scan_mode == crate::secrets::scrub::SecretScanMode::Strict {
-                    crate::secrets::scrub::scrub_leaks(result)
-                } else {
-                    result.to_string()
-                };
+            let scrubbed = self.secret_scan_mode.apply_scrubbing_with_store(
+                result,
+                self.secrets_snapshot.as_ref().map(|arc| arc.as_ref()),
+            );
             let capped =
                 crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
             self.emit_tool_completed_event_from_capped(tool_name, capped);

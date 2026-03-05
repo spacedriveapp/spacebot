@@ -108,11 +108,10 @@ impl Tool for SetStatusTool {
             args.status
         };
 
-        // Scrub tool secret values before the status reaches the channel.
-        // Layer 1: exact-match redaction of known secrets from the store.
-        // Layer 2: regex-based redaction of unknown secret patterns.
-        let status = crate::secrets::scrub::scrub_secrets(&status, &self.tool_secret_pairs);
-        let status = self.secret_scan_mode.maybe_scrub_leaks(status);
+        // Apply centralized scrubbing: exact-match (layer 1) + regex (layer 2) per mode.
+        let status = self
+            .secret_scan_mode
+            .apply_scrubbing_with_pairs(&status, &self.tool_secret_pairs);
 
         let event = ProcessEvent::WorkerStatus {
             agent_id: self.agent_id.clone(),

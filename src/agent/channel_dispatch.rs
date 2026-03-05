@@ -268,12 +268,9 @@ async fn spawn_branch(
                 // Layer 1: exact-match redaction of known secrets from the store.
                 // Layer 2: regex-based redaction of unknown secret patterns.
                 let raw = format!("Branch failed: {error}");
-                let conclusion = if let Some(store) = secrets_snapshot.as_ref() {
-                    crate::secrets::scrub::scrub_with_store(&raw, store)
-                } else {
-                    raw
-                };
-                let conclusion = scan_mode.maybe_scrub_leaks(conclusion);
+                let store_ref: Option<&crate::secrets::store::SecretsStore> =
+                    secrets_snapshot.as_ref().as_ref().map(|s| s.as_ref());
+                let conclusion = scan_mode.apply_scrubbing_with_store(&raw, store_ref);
                 let _ = event_tx.send(crate::ProcessEvent::BranchResult {
                     agent_id,
                     branch_id,
@@ -489,6 +486,7 @@ pub async fn spawn_opencode_worker_from_state(
     let server_pool = rc.opencode_server_pool.load().clone();
 
     let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
+    let scan_mode = state.deps.secret_scan_mode();
 
     let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
@@ -509,7 +507,7 @@ pub async fn spawn_opencode_worker_from_state(
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
         };
-        worker.with_secret_scan_mode(state.deps.secret_scan_mode())
+        worker.with_secret_scan_mode(scan_mode)
     } else {
         let worker = crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
@@ -523,7 +521,7 @@ pub async fn spawn_opencode_worker_from_state(
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
         };
-        worker.with_secret_scan_mode(state.deps.secret_scan_mode())
+        worker.with_secret_scan_mode(scan_mode)
     };
 
     let worker_id = worker.id;
@@ -541,7 +539,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         oc_secrets_store,
-        state.deps.secret_scan_mode(),
+        scan_mode,
         async move {
             let result = worker.run().await.map_err(SpacebotError::from)?;
             Ok::<String, SpacebotError>(result.result_text)
@@ -633,14 +631,8 @@ where
             Ok(Ok(text)) => {
                 // Scrub tool secret values from the result before it reaches
                 // the channel. The channel never sees raw secret values.
-                // Layer 1: exact-match redaction of known secrets from the store.
-                // Layer 2: regex-based redaction of unknown secret patterns.
-                let scrubbed = if let Some(store) = &secrets_store {
-                    crate::secrets::scrub::scrub_with_store(&text, store)
-                } else {
-                    text
-                };
-                let scrubbed = scan_mode.maybe_scrub_leaks(scrubbed);
+                let store_ref = secrets_store.as_ref().map(|s| s.as_ref());
+                let scrubbed = scan_mode.apply_scrubbing_with_store(&text, store_ref);
                 Ok(scrubbed)
             }
             Ok(Err(error)) => {
@@ -648,12 +640,9 @@ where
                 match failure {
                     WorkerCompletionError::Cancelled { .. } => Err(failure),
                     WorkerCompletionError::Failed { message } => {
-                        let scrubbed = if let Some(store) = &secrets_store {
-                            crate::secrets::scrub::scrub_with_store(&message, store)
-                        } else {
-                            message
-                        };
-                        let scrubbed = scan_mode.maybe_scrub_leaks(scrubbed);
+                        let store_ref = secrets_store.as_ref().map(|s| s.as_ref());
+                        let scrubbed =
+                            scan_mode.apply_scrubbing_with_store(&message, store_ref);
                         Err(WorkerCompletionError::Failed { message: scrubbed })
                     }
                 }

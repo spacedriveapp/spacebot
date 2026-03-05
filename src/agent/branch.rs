@@ -51,7 +51,8 @@ impl Branch {
             Some(channel_id.clone()),
             deps.event_tx.clone(),
         )
-        .with_secret_scan_mode(deps.secret_scan_mode());
+        .with_secret_scan_mode(deps.secret_scan_mode())
+        .with_secrets_snapshot(deps.runtime_config.secrets.load().as_ref().clone());
 
         Self {
             id,

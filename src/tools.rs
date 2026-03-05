@@ -310,7 +310,14 @@ pub async fn add_channel_tools(
                     replied_flag.clone(),
                     agent_display_name,
                 )
-                .with_secret_scan_mode(state.deps.secret_scan_mode()),
+                .with_secret_scan_mode(state.deps.secret_scan_mode())
+                .with_tool_secrets({
+                    let guard = state.deps.runtime_config.secrets.load();
+                    match guard.as_ref() {
+                        Some(store) => store.tool_secret_pairs(),
+                        None => Vec::new(),
+                    }
+                }),
             )
             .await?;
     }

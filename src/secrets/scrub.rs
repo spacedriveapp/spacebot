@@ -50,6 +50,56 @@ impl SecretScanMode {
             Self::OwnSecretsOnly | Self::Disabled => text,
         }
     }
+
+    /// Centralized scrubbing using a `SecretsStore` reference.
+    ///
+    /// Enforces mode semantics end-to-end:
+    /// - `Strict`: exact-match (layer 1) + regex (layer 2).
+    /// - `OwnSecretsOnly`: exact-match only (layer 1).
+    /// - `Disabled`: no scrubbing at all.
+    pub fn apply_scrubbing_with_store(
+        &self,
+        text: &str,
+        store: Option<&crate::secrets::store::SecretsStore>,
+    ) -> String {
+        match self {
+            Self::Disabled => text.to_string(),
+            Self::OwnSecretsOnly => {
+                if let Some(store) = store {
+                    scrub_with_store(text, store)
+                } else {
+                    text.to_string()
+                }
+            }
+            Self::Strict => {
+                let scrubbed = if let Some(store) = store {
+                    scrub_with_store(text, store)
+                } else {
+                    text.to_string()
+                };
+                scrub_leaks(&scrubbed)
+            }
+        }
+    }
+
+    /// Centralized scrubbing using explicit secret name/value pairs.
+    ///
+    /// Same mode semantics as `apply_scrubbing_with_store` but accepts
+    /// pre-extracted pairs instead of a store reference.
+    pub fn apply_scrubbing_with_pairs(
+        &self,
+        text: &str,
+        pairs: &[(String, String)],
+    ) -> String {
+        match self {
+            Self::Disabled => text.to_string(),
+            Self::OwnSecretsOnly => scrub_secrets(text, pairs),
+            Self::Strict => {
+                let scrubbed = scrub_secrets(text, pairs);
+                scrub_leaks(&scrubbed)
+            }
+        }
+    }
 }
 
 /// Regex patterns for known API key formats. Used by `scan_for_leaks()` to
@@ -438,5 +488,48 @@ mod tests {
 
         let disabled: Config = toml::from_str(r#"mode = "disabled""#).unwrap();
         assert_eq!(disabled.mode, SecretScanMode::Disabled);
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_strict_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::Strict.apply_scrubbing_with_pairs(input, &pairs);
+        // Layer 1: exact-match redaction
+        assert!(
+            result.contains("[REDACTED:TOKEN]"),
+            "expected exact-match redaction in: {result}"
+        );
+        // Layer 2: regex-based redaction
+        assert!(
+            result.contains("[LEAKED_SECRET_REDACTED]"),
+            "expected regex redaction in: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_own_secrets_only_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::OwnSecretsOnly.apply_scrubbing_with_pairs(input, &pairs);
+        // Layer 1: exact-match redaction should run
+        assert!(
+            result.contains("[REDACTED:TOKEN]"),
+            "expected exact-match redaction in: {result}"
+        );
+        // Layer 2: regex-based redaction should NOT run
+        assert!(
+            result.contains("sk-ant-abc123456789012345678"),
+            "regex leak pattern should pass through in OwnSecretsOnly: {result}"
+        );
+    }
+
+    #[test]
+    fn apply_scrubbing_with_pairs_disabled_mode() {
+        let pairs = vec![("TOKEN".into(), "my-secret-token".into())];
+        let input = "key: my-secret-token and sk-ant-abc123456789012345678";
+        let result = SecretScanMode::Disabled.apply_scrubbing_with_pairs(input, &pairs);
+        // No scrubbing at all
+        assert_eq!(result, input, "disabled mode should return input unchanged");
     }
 }
