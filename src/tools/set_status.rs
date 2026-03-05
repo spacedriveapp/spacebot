@@ -16,6 +16,7 @@ pub struct SetStatusTool {
     event_tx: broadcast::Sender<ProcessEvent>,
     /// Tool secret pairs for scrubbing status text before it reaches the channel.
     tool_secret_pairs: Vec<(String, String)>,
+    secret_scan_mode: crate::secrets::scrub::SecretScanMode,
 }
 
 impl SetStatusTool {
@@ -32,12 +33,19 @@ impl SetStatusTool {
             channel_id,
             event_tx,
             tool_secret_pairs: Vec::new(),
+            secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
         }
     }
 
     /// Set tool secret pairs for output scrubbing.
     pub fn with_tool_secrets(mut self, pairs: Vec<(String, String)>) -> Self {
         self.tool_secret_pairs = pairs;
+        self
+    }
+
+    /// Set the secret scan mode for this tool.
+    pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
+        self.secret_scan_mode = mode;
         self
     }
 }
@@ -104,7 +112,7 @@ impl Tool for SetStatusTool {
         // Layer 1: exact-match redaction of known secrets from the store.
         // Layer 2: regex-based redaction of unknown secret patterns.
         let status = crate::secrets::scrub::scrub_secrets(&status, &self.tool_secret_pairs);
-        let status = crate::secrets::scrub::scrub_leaks(&status);
+        let status = self.secret_scan_mode.maybe_scrub_leaks(status);
 
         let event = ProcessEvent::WorkerStatus {
             agent_id: self.agent_id.clone(),

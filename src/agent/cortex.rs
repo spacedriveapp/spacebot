@@ -1924,6 +1924,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let agent_names = deps.agent_names.clone();
     let sqlite_pool = deps.sqlite_pool.clone();
     let secrets_snapshot = deps.runtime_config.secrets.load().clone();
+    let scan_mode = deps.secret_scan_mode();
     tokio::spawn(async move {
         // Helper closure: scrub both known secrets (Layer 1) and unknown leak
         // patterns (Layer 2) from text before it reaches channels or events.
@@ -1933,7 +1934,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             } else {
                 text
             };
-            crate::secrets::scrub::scrub_leaks(&scrubbed)
+            scan_mode.maybe_scrub_leaks(scrubbed)
         };
 
         match worker.run().await {

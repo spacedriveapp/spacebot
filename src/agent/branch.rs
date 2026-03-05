@@ -50,7 +50,8 @@ impl Branch {
             ProcessType::Branch,
             Some(channel_id.clone()),
             deps.event_tx.clone(),
-        );
+        )
+        .with_secret_scan_mode(deps.secret_scan_mode());
 
         Self {
             id,
@@ -161,7 +162,7 @@ impl Branch {
         } else {
             conclusion
         };
-        let conclusion = crate::secrets::scrub::scrub_leaks(&conclusion);
+        let conclusion = self.deps.secret_scan_mode().maybe_scrub_leaks(conclusion);
 
         // Send conclusion back to the channel
         let _ = self.deps.event_tx.send(ProcessEvent::BranchResult {

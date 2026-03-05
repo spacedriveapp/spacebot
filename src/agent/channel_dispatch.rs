@@ -251,6 +251,7 @@ async fn spawn_branch(
     let agent_id = state.deps.agent_id.clone();
     let channel_id = state.channel_id.clone();
     let secrets_snapshot = state.deps.runtime_config.secrets.load().clone();
+    let scan_mode = state.deps.secret_scan_mode();
 
     let branch_span = tracing::info_span!(
         "branch.run",
@@ -272,7 +273,7 @@ async fn spawn_branch(
                 } else {
                     raw
                 };
-                let conclusion = crate::secrets::scrub::scrub_leaks(&conclusion);
+                let conclusion = scan_mode.maybe_scrub_leaks(conclusion);
                 let _ = event_tx.send(crate::ProcessEvent::BranchResult {
                     agent_id,
                     branch_id,
@@ -421,12 +422,13 @@ pub async fn spawn_worker_from_state(
         task = %task,
     );
     let secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
-    let handle = spawn_worker_task(
+    let handle = spawn_worker_task_with_scan_mode(
         worker_id,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         secrets_store,
+        state.deps.secret_scan_mode(),
         worker.run().instrument(worker_span),
     );
 
@@ -503,10 +505,11 @@ pub async fn spawn_opencode_worker_from_state(
             .write()
             .await
             .insert(worker_id, input_tx);
-        match &oc_secrets_store {
+        let worker = match &oc_secrets_store {
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
-        }
+        };
+        worker.with_secret_scan_mode(state.deps.secret_scan_mode())
     } else {
         let worker = crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
@@ -516,10 +519,11 @@ pub async fn spawn_opencode_worker_from_state(
             server_pool,
             state.deps.event_tx.clone(),
         );
-        match &oc_secrets_store {
+        let worker = match &oc_secrets_store {
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
-        }
+        };
+        worker.with_secret_scan_mode(state.deps.secret_scan_mode())
     };
 
     let worker_id = worker.id;
@@ -531,12 +535,13 @@ pub async fn spawn_opencode_worker_from_state(
         task = %task,
         worker_type = "opencode",
     );
-    let handle = spawn_worker_task(
+    let handle = spawn_worker_task_with_scan_mode(
         worker_id,
         state.deps.event_tx.clone(),
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         oc_secrets_store,
+        state.deps.secret_scan_mode(),
         async move {
             let result = worker.run().await.map_err(SpacebotError::from)?;
             Ok::<String, SpacebotError>(result.result_text)
@@ -589,6 +594,30 @@ pub(crate) fn spawn_worker_task<F>(
 where
     F: std::future::Future<Output = crate::Result<String>> + Send + 'static,
 {
+    spawn_worker_task_with_scan_mode(
+        worker_id,
+        event_tx,
+        agent_id,
+        channel_id,
+        secrets_store,
+        crate::secrets::scrub::SecretScanMode::Strict,
+        future,
+    )
+}
+
+/// Like `spawn_worker_task` but with an explicit secret scan mode.
+pub(crate) fn spawn_worker_task_with_scan_mode<F>(
+    worker_id: WorkerId,
+    event_tx: broadcast::Sender<ProcessEvent>,
+    agent_id: crate::AgentId,
+    channel_id: Option<ChannelId>,
+    secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
+    scan_mode: crate::secrets::scrub::SecretScanMode,
+    future: F,
+) -> tokio::task::JoinHandle<()>
+where
+    F: std::future::Future<Output = crate::Result<String>> + Send + 'static,
+{
     tokio::spawn(async move {
         #[cfg(feature = "metrics")]
         let worker_start = std::time::Instant::now();
@@ -611,7 +640,7 @@ where
                 } else {
                     text
                 };
-                let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                let scrubbed = scan_mode.maybe_scrub_leaks(scrubbed);
                 Ok(scrubbed)
             }
             Ok(Err(error)) => {
@@ -624,7 +653,7 @@ where
                         } else {
                             message
                         };
-                        let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                        let scrubbed = scan_mode.maybe_scrub_leaks(scrubbed);
                         Err(WorkerCompletionError::Failed { message: scrubbed })
                     }
                 }

@@ -35,6 +35,11 @@ pub struct SpacebotHook {
     channel_id: Option<ChannelId>,
     event_tx: broadcast::Sender<ProcessEvent>,
     tool_nudge_policy: ToolNudgePolicy,
+    /// Controls whether regex-based leak detection runs on tool output.
+    /// When `OwnSecretsOnly`, only exact-match scrubbing of stored secrets
+    /// is performed — regex patterns are skipped to avoid false positives
+    /// on public API keys found in scraped web content.
+    secret_scan_mode: crate::secrets::scrub::SecretScanMode,
     completion_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     saw_tool_call: std::sync::Arc<std::sync::atomic::AtomicBool>,
     nudge_request_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -63,10 +68,17 @@ impl SpacebotHook {
             channel_id,
             event_tx,
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
+            secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
             completion_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             saw_tool_call: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nudge_request_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
+    }
+
+    /// Override the secret scan mode for this hook.
+    pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
+        self.secret_scan_mode = mode;
+        self
     }
 
     /// Override the default process-scoped nudge policy.
@@ -244,9 +256,20 @@ impl SpacebotHook {
 
     /// Scan content for potential secret leaks, including encoded forms.
     ///
-    /// Delegates to the shared implementation in `secrets::scrub`.
+    /// Respects the configured `SecretScanMode`:
+    /// - `Strict`: full regex-based detection (default).
+    /// - `OwnSecretsOnly`: skips regex detection — own secrets are already
+    ///   redacted by the `StreamScrubber` before this runs, so no further
+    ///   scanning is needed.
+    /// - `Disabled`: no scanning at all.
     fn scan_for_leaks(&self, content: &str) -> Option<String> {
-        crate::secrets::scrub::scan_for_leaks(content)
+        match self.secret_scan_mode {
+            crate::secrets::scrub::SecretScanMode::Strict => {
+                crate::secrets::scrub::scan_for_leaks(content)
+            }
+            crate::secrets::scrub::SecretScanMode::OwnSecretsOnly
+            | crate::secrets::scrub::SecretScanMode::Disabled => None,
+        }
     }
 
     /// Apply shared safety checks for tool output before any downstream handling.
@@ -549,7 +572,12 @@ where
         // processes, scrub leak patterns from the event payload so secrets
         // don't reach the SSE dashboard.
         if matches!(self.process_type, ProcessType::Worker | ProcessType::Branch) {
-            let scrubbed = crate::secrets::scrub::scrub_leaks(result);
+            let scrubbed =
+                if self.secret_scan_mode == crate::secrets::scrub::SecretScanMode::Strict {
+                    crate::secrets::scrub::scrub_leaks(result)
+                } else {
+                    result.to_string()
+                };
             let capped =
                 crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
             self.emit_tool_completed_event_from_capped(tool_name, capped);
@@ -914,5 +942,42 @@ mod tests {
                 ..
             } if text_delta == "hi" && aggregated_text == "hi"
         ));
+    }
+
+    #[test]
+    fn own_secrets_only_mode_skips_regex_leak_detection() {
+        let hook = make_hook().with_secret_scan_mode(
+            crate::secrets::scrub::SecretScanMode::OwnSecretsOnly,
+        );
+        // An API key pattern that would normally trigger detection
+        let content = "found key sk-ant-abc123456789012345678 in page";
+        assert!(
+            hook.scan_for_leaks(content).is_none(),
+            "own_secrets_only mode should skip regex detection"
+        );
+    }
+
+    #[test]
+    fn strict_mode_detects_regex_leaks() {
+        let hook = make_hook().with_secret_scan_mode(
+            crate::secrets::scrub::SecretScanMode::Strict,
+        );
+        let content = "found key sk-ant-abc123456789012345678 in page";
+        assert!(
+            hook.scan_for_leaks(content).is_some(),
+            "strict mode should detect regex-matched leaks"
+        );
+    }
+
+    #[test]
+    fn disabled_mode_skips_all_leak_detection() {
+        let hook = make_hook().with_secret_scan_mode(
+            crate::secrets::scrub::SecretScanMode::Disabled,
+        );
+        let content = "found key sk-ant-abc123456789012345678 in page";
+        assert!(
+            hook.scan_for_leaks(content).is_none(),
+            "disabled mode should skip all leak detection"
+        );
     }
 }

@@ -33,6 +33,8 @@ pub struct OpenCodeWorker {
     pub model: Option<String>,
     /// Secrets store for exact-match scrubbing of tool secret values in SSE output.
     pub secrets_store: Option<Arc<SecretsStore>>,
+    /// Controls whether regex-based leak detection runs on worker output.
+    pub secret_scan_mode: crate::secrets::scrub::SecretScanMode,
 }
 
 /// Result of an OpenCode worker run.
@@ -63,6 +65,7 @@ impl OpenCodeWorker {
             system_prompt: None,
             model: None,
             secrets_store: None,
+            secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
         }
     }
 
@@ -96,6 +99,12 @@ impl OpenCodeWorker {
     /// Set the secrets store for exact-match scrubbing of tool secret values.
     pub fn with_secrets_store(mut self, store: Arc<SecretsStore>) -> Self {
         self.secrets_store = Some(store);
+        self
+    }
+
+    /// Set the secret scan mode for this worker.
+    pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
+        self.secret_scan_mode = mode;
         self
     }
 
@@ -341,12 +350,14 @@ impl OpenCodeWorker {
                         // before leak detection so they don't trigger false positives.
                         let scrubbed = self.scrub_text(text);
 
-                        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&scrubbed) {
-                            tracing::warn!(
-                                worker_id = %self.id,
-                                leak_prefix = %&leak[..leak.len().min(8)],
-                                "potential secret detected in OpenCode worker output"
-                            );
+                        if self.secret_scan_mode == crate::secrets::scrub::SecretScanMode::Strict {
+                            if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&scrubbed) {
+                                tracing::warn!(
+                                    worker_id = %self.id,
+                                    leak_prefix = %&leak[..leak.len().min(8)],
+                                    "potential secret detected in OpenCode worker output"
+                                );
+                            }
                         }
 
                         *last_text = scrubbed;
@@ -378,15 +389,19 @@ impl OpenCodeWorker {
                                     // user-visible leak blocking.
                                     if let Some(tool_output) = output {
                                         let scrubbed = self.scrub_text(tool_output);
-                                        if let Some(leak) =
-                                            crate::secrets::scrub::scan_for_leaks(&scrubbed)
+                                        if self.secret_scan_mode
+                                            == crate::secrets::scrub::SecretScanMode::Strict
                                         {
-                                            tracing::warn!(
-                                                worker_id = %self.id,
-                                                tool = %tool_name,
-                                                leak_prefix = %&leak[..leak.len().min(8)],
-                                                "potential secret detected in OpenCode tool output"
-                                            );
+                                            if let Some(leak) =
+                                                crate::secrets::scrub::scan_for_leaks(&scrubbed)
+                                            {
+                                                tracing::warn!(
+                                                    worker_id = %self.id,
+                                                    tool = %tool_name,
+                                                    leak_prefix = %&leak[..leak.len().min(8)],
+                                                    "potential secret detected in OpenCode tool output"
+                                                );
+                                            }
                                         }
                                     }
 

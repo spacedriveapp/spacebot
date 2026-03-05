@@ -12,7 +12,45 @@
 //! redacted), and leak detection only fires on unknown/unstored secrets.
 
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
+
+/// Controls how aggressively the leak scanner operates.
+///
+/// `Strict` (default): checks tool output against hardcoded API key regex
+/// patterns. Catches unknown secrets but can false-positive on legitimate
+/// public keys found in scraped web content (e.g. Algolia search keys).
+///
+/// `OwnSecretsOnly`: skips regex-based leak detection entirely. Only the
+/// exact-match `StreamScrubber` (layer 1) redacts the agent's own stored
+/// secrets. This eliminates false positives from web scraping at the cost
+/// of not detecting unknown/unstored secrets in tool output.
+///
+/// `Disabled`: no leak detection at all. Use with caution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SecretScanMode {
+    /// Regex-based leak detection for unknown secrets (default).
+    #[default]
+    Strict,
+    /// Only redact secrets stored in the agent's secret store.
+    /// Eliminates false positives from scraped web content.
+    OwnSecretsOnly,
+    /// No regex-based leak detection. Exact-match scrubbing of stored
+    /// secrets (Layer 1) still runs. Use with caution.
+    Disabled,
+}
+
+impl SecretScanMode {
+    /// Apply regex-based leak scrubbing only when in `Strict` mode.
+    /// Returns the scrubbed text in Strict mode, or the input unchanged otherwise.
+    pub fn maybe_scrub_leaks(&self, text: String) -> String {
+        match self {
+            Self::Strict => scrub_leaks(&text),
+            Self::OwnSecretsOnly | Self::Disabled => text,
+        }
+    }
+}
 
 /// Regex patterns for known API key formats. Used by `scan_for_leaks()` to
 /// detect secrets that aren't in the store.
@@ -379,5 +417,26 @@ mod tests {
             result.contains("more text"),
             "surrounding text should be preserved in: {result}"
         );
+    }
+
+    #[test]
+    fn secret_scan_mode_defaults_to_strict() {
+        assert_eq!(SecretScanMode::default(), SecretScanMode::Strict);
+    }
+
+    #[test]
+    fn secret_scan_mode_deserializes_from_toml() {
+        #[derive(Deserialize)]
+        struct Config {
+            mode: SecretScanMode,
+        }
+        let strict: Config = toml::from_str(r#"mode = "strict""#).unwrap();
+        assert_eq!(strict.mode, SecretScanMode::Strict);
+
+        let own: Config = toml::from_str(r#"mode = "own_secrets_only""#).unwrap();
+        assert_eq!(own.mode, SecretScanMode::OwnSecretsOnly);
+
+        let disabled: Config = toml::from_str(r#"mode = "disabled""#).unwrap();
+        assert_eq!(disabled.mode, SecretScanMode::Disabled);
     }
 }

@@ -245,7 +245,8 @@ async fn run_compaction(
         ProcessType::Compactor,
         Some(channel_id.clone()),
         deps.event_tx.clone(),
-    );
+    )
+    .with_secret_scan_mode(deps.secret_scan_mode());
 
     let mut compaction_history = Vec::new();
     let response = hook

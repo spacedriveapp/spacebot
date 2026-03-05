@@ -225,7 +225,8 @@ impl Channel {
             ProcessType::Channel,
             Some(id.clone()),
             deps.event_tx.clone(),
-        );
+        )
+        .with_secret_scan_mode(deps.secret_scan_mode());
         let status_block = Arc::new(RwLock::new(StatusBlock::new()));
         let history = Arc::new(RwLock::new(Vec::new()));
         let active_branches = Arc::new(RwLock::new(HashMap::new()));
@@ -1771,7 +1772,7 @@ impl Channel {
                                 channel_id = %self.id,
                                 "blocked retrigger fallback output containing structured or tool syntax"
                             );
-                        } else if let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
+                        } else if self.deps.secret_scan_mode() == crate::secrets::scrub::SecretScanMode::Strict && let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
                             tracing::warn!(
                                 channel_id = %self.id,
                                 leak_prefix = %&leak[..leak.len().min(8)],
@@ -1836,7 +1837,7 @@ impl Channel {
                                 channel_id = %self.id,
                                 "blocked retrigger output containing structured or tool syntax"
                             );
-                        } else if let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
+                        } else if self.deps.secret_scan_mode() == crate::secrets::scrub::SecretScanMode::Strict && let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
                             tracing::warn!(
                                 channel_id = %self.id,
                                 leak_prefix = %&leak[..leak.len().min(8)],
@@ -1894,7 +1895,7 @@ impl Channel {
                             channel_id = %self.id,
                             "blocked fallback output containing structured or tool syntax"
                         );
-                    } else if let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
+                    } else if self.deps.secret_scan_mode() == crate::secrets::scrub::SecretScanMode::Strict && let Some(leak) = crate::secrets::scrub::scan_for_leaks(text) {
                         tracing::warn!(
                             channel_id = %self.id,
                             leak_prefix = %&leak[..leak.len().min(8)],

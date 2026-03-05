@@ -26,6 +26,16 @@ pub struct SandboxConfig {
     /// in the store. The field is additive either way.
     #[serde(default)]
     pub passthrough_env: Vec<String>,
+    /// Controls how the secret leak scanner operates on tool output.
+    ///
+    /// - `strict` (default): regex-based detection for unknown API key patterns.
+    ///   Catches secrets not in the store but may false-positive on public keys
+    ///   found in scraped web content (e.g. Algolia search keys).
+    /// - `own_secrets_only`: only redact the agent's own stored secrets. Skips
+    ///   regex detection entirely — eliminates false positives from web scraping.
+    /// - `disabled`: no leak detection at all.
+    #[serde(default)]
+    pub secret_scanner: crate::secrets::scrub::SecretScanMode,
 }
 
 impl Default for SandboxConfig {
@@ -34,6 +44,7 @@ impl Default for SandboxConfig {
             mode: SandboxMode::Enabled,
             writable_paths: Vec::new(),
             passthrough_env: Vec::new(),
+            secret_scanner: crate::secrets::scrub::SecretScanMode::default(),
         }
     }
 }

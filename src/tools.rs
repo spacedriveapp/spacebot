@@ -301,14 +301,17 @@ pub async fn add_channel_tools(
             .cloned()
             .unwrap_or_else(|| state.deps.agent_id.to_string());
         handle
-            .add_tool(ReplyTool::new(
-                response_tx.clone(),
-                conversation_id.clone(),
-                state.conversation_logger.clone(),
-                state.channel_id.clone(),
-                replied_flag.clone(),
-                agent_display_name,
-            ))
+            .add_tool(
+                ReplyTool::new(
+                    response_tx.clone(),
+                    conversation_id.clone(),
+                    state.conversation_logger.clone(),
+                    state.channel_id.clone(),
+                    replied_flag.clone(),
+                    agent_display_name,
+                )
+                .with_secret_scan_mode(state.deps.secret_scan_mode()),
+            )
             .await?;
     }
     handle.add_tool(BranchTool::new(state.clone())).await?;
@@ -477,7 +480,7 @@ pub fn create_worker_tool_server(
             if let Some(store) = runtime_config.secrets.load().as_ref() {
                 status_tool = status_tool.with_tool_secrets(store.tool_secret_pairs());
             }
-            status_tool
+            status_tool.with_secret_scan_mode(runtime_config.sandbox.load().secret_scanner)
         })
         .tool(ReadSkillTool::new(runtime_config.clone()));
 

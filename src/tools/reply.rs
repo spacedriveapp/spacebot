@@ -46,6 +46,7 @@ pub struct ReplyTool {
     channel_id: ChannelId,
     replied_flag: RepliedFlag,
     agent_display_name: String,
+    secret_scan_mode: crate::secrets::scrub::SecretScanMode,
 }
 
 impl ReplyTool {
@@ -65,7 +66,14 @@ impl ReplyTool {
             channel_id,
             replied_flag,
             agent_display_name: agent_display_name.into(),
+            secret_scan_mode: crate::secrets::scrub::SecretScanMode::default(),
         }
+    }
+
+    /// Set the secret scan mode for this reply tool.
+    pub fn with_secret_scan_mode(mut self, mode: crate::secrets::scrub::SecretScanMode) -> Self {
+        self.secret_scan_mode = mode;
+        self
     }
 }
 
@@ -378,15 +386,17 @@ impl Tool for ReplyTool {
             .map(|name| name.trim())
             .filter(|name| !name.is_empty());
 
-        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
-            tracing::error!(
-                conversation_id = %self.conversation_id,
-                leak_prefix = %&leak[..leak.len().min(8)],
-                "reply tool blocked content matching secret pattern"
-            );
-            return Err(ReplyError(
-                "blocked reply content: potential secret detected".into(),
-            ));
+        if self.secret_scan_mode == crate::secrets::scrub::SecretScanMode::Strict {
+            if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
+                tracing::error!(
+                    conversation_id = %self.conversation_id,
+                    leak_prefix = %&leak[..leak.len().min(8)],
+                    "reply tool blocked content matching secret pattern"
+                );
+                return Err(ReplyError(
+                    "blocked reply content: potential secret detected".into(),
+                ));
+            }
         }
 
         let response = if let Some(name) = thread_name {
