@@ -1,7 +1,7 @@
 //! Memory maintenance: decay, prune, merge, reindex.
 
 use crate::error::Result;
-use crate::memory::{EmbeddingTable, Memory, MemoryStore, MemoryType};
+use crate::memory::{EmbeddingModel, EmbeddingTable, Memory, MemoryStore, MemoryType};
 use anyhow::Context;
 
 use sqlx::Row;
@@ -10,6 +10,7 @@ use tokio::sync::watch;
 
 use std::collections::HashSet;
 use std::future::Future;
+use std::sync::Arc;
 
 const MAX_MAINTENANCE_MERGE_SOURCE_MEMORIES: i64 = 2_000;
 const MAX_MAINTENANCE_MERGES_PER_PASS: usize = 500;
@@ -44,10 +45,18 @@ impl Default for MaintenanceConfig {
 pub async fn run_maintenance(
     memory_store: &MemoryStore,
     embedding_table: &EmbeddingTable,
+    embedding_model: &Arc<EmbeddingModel>,
     config: &MaintenanceConfig,
 ) -> Result<MaintenanceReport> {
     let (_maintenance_cancel_tx, maintenance_cancel_rx) = watch::channel(false);
-    run_maintenance_with_cancel(memory_store, embedding_table, config, maintenance_cancel_rx).await
+    run_maintenance_with_cancel(
+        memory_store,
+        embedding_table,
+        embedding_model,
+        config,
+        maintenance_cancel_rx,
+    )
+    .await
 }
 
 /// Run maintenance tasks with a cancellation signal.
@@ -56,6 +65,7 @@ pub async fn run_maintenance(
 pub async fn run_maintenance_with_cancel(
     memory_store: &MemoryStore,
     embedding_table: &EmbeddingTable,
+    embedding_model: &Arc<EmbeddingModel>,
     config: &MaintenanceConfig,
     mut maintenance_cancel_rx: watch::Receiver<bool>,
 ) -> Result<MaintenanceReport> {
@@ -73,6 +83,7 @@ pub async fn run_maintenance_with_cancel(
         report.merged = merge_similar_memories(
             memory_store,
             embedding_table,
+            embedding_model,
             config.merge_similarity_threshold,
             &mut maintenance_cancel_rx,
         )
@@ -183,6 +194,7 @@ async fn prune_memories(
 async fn merge_similar_memories(
     memory_store: &MemoryStore,
     embedding_table: &EmbeddingTable,
+    embedding_model: &Arc<EmbeddingModel>,
     similarity_threshold: f32,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
 ) -> Result<usize> {
@@ -263,6 +275,7 @@ async fn merge_similar_memories(
             let merged_survivor = merge_pair(
                 memory_store,
                 embedding_table,
+                embedding_model,
                 &winner,
                 &loser,
                 maintenance_cancel_rx,
@@ -327,6 +340,7 @@ fn merged_memory_content(winner: String, loser: &str) -> String {
 async fn merge_pair(
     memory_store: &MemoryStore,
     embedding_table: &EmbeddingTable,
+    embedding_model: &Arc<EmbeddingModel>,
     survivor: &Memory,
     merged: &Memory,
     maintenance_cancel_rx: &mut watch::Receiver<bool>,
@@ -340,6 +354,26 @@ async fn merge_pair(
     maintenance_cancelable_op(
         maintenance_cancel_rx,
         memory_store.merge_memories_atomic(&updated_survivor, merged),
+    )
+    .await?;
+
+    let updated_survivor_embedding = maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        embedding_model.embed_one(&updated_survivor.content),
+    )
+    .await?;
+    maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        embedding_table.delete(&updated_survivor.id),
+    )
+    .await?;
+    maintenance_cancelable_op(
+        maintenance_cancel_rx,
+        embedding_table.store(
+            &updated_survivor.id,
+            &updated_survivor.content,
+            &updated_survivor_embedding,
+        ),
     )
     .await?;
     maintenance_cancelable_op(maintenance_cancel_rx, embedding_table.delete(&merged.id)).await?;
@@ -454,8 +488,21 @@ pub struct MaintenanceReport {
 mod tests {
     use super::*;
     use crate::memory::{Association, RelationType};
+    use std::sync::{Arc, OnceLock};
     use tempfile::tempdir;
     use tokio::time::Duration;
+
+    fn shared_embedding_model() -> Arc<crate::memory::EmbeddingModel> {
+        static MODEL: OnceLock<Arc<crate::memory::EmbeddingModel>> = OnceLock::new();
+        Arc::clone(MODEL.get_or_init(|| {
+            let cache_dir = std::env::temp_dir().join("spacebot-test-embedding-cache");
+            std::fs::create_dir_all(&cache_dir).expect("failed to create embedding cache dir");
+            Arc::new(
+                crate::memory::EmbeddingModel::new(&cache_dir)
+                    .expect("failed to initialize embedding model"),
+            )
+        }))
+    }
 
     async fn create_memory_with_embedding(
         store: &MemoryStore,
@@ -544,7 +591,8 @@ mod tests {
             merge_similarity_threshold: 0.95,
         };
 
-        let report = run_maintenance(&store, &embedding_table, &config)
+        let embedding_model = shared_embedding_model();
+        let report = run_maintenance(&store, &embedding_table, &embedding_model, &config)
             .await
             .expect("maintenance should succeed");
 
@@ -701,9 +749,11 @@ mod tests {
             .await
             .expect("failed to create duplicate_b association");
 
+        let embedding_model = shared_embedding_model();
         let report = run_maintenance(
             &store,
             &embedding_table,
+            &embedding_model,
             &MaintenanceConfig {
                 prune_threshold: 0.2,
                 decay_rate: 0.05,
@@ -779,9 +829,11 @@ mod tests {
             .expect("failed to create embedding table");
 
         let (_cancel_tx, maintenance_cancel_rx) = tokio::sync::watch::channel(true);
+        let embedding_model = shared_embedding_model();
         let result = run_maintenance_with_cancel(
             &store,
             &embedding_table,
+            &embedding_model,
             &MaintenanceConfig::default(),
             maintenance_cancel_rx,
         )
@@ -822,7 +874,9 @@ mod tests {
             merge_similarity_threshold: 0.95,
         };
 
-        let result = run_maintenance(&store, &embedding_table, &invalid_config).await;
+        let embedding_model = shared_embedding_model();
+        let result =
+            run_maintenance(&store, &embedding_table, &embedding_model, &invalid_config).await;
         assert!(result.is_err(), "expected invalid config to fail");
         assert!(
             result

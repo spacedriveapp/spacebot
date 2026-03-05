@@ -2,12 +2,26 @@
 
 use spacebot::memory::maintenance::{run_maintenance, run_maintenance_with_cancel};
 use spacebot::memory::{MemoryStore, RelationType, maintenance::MaintenanceConfig};
+use std::sync::{Arc, OnceLock};
 use tempfile::tempdir;
 use tokio::sync::watch;
+
+fn shared_embedding_model() -> Arc<spacebot::memory::EmbeddingModel> {
+    static MODEL: OnceLock<Arc<spacebot::memory::EmbeddingModel>> = OnceLock::new();
+    Arc::clone(MODEL.get_or_init(|| {
+        let cache_dir = std::env::temp_dir().join("spacebot-test-embedding-cache");
+        std::fs::create_dir_all(&cache_dir).expect("failed to create embedding cache dir");
+        Arc::new(
+            spacebot::memory::EmbeddingModel::new(&cache_dir)
+                .expect("failed to initialize embedding model"),
+        )
+    }))
+}
 
 async fn make_memory_maintenance_fixture() -> (
     std::sync::Arc<MemoryStore>,
     spacebot::memory::EmbeddingTable,
+    Arc<spacebot::memory::EmbeddingModel>,
     tempfile::TempDir,
 ) {
     let options = sqlx::sqlite::SqliteConnectOptions::new()
@@ -34,12 +48,13 @@ async fn make_memory_maintenance_fixture() -> (
         .await
         .expect("failed to create embedding table");
 
-    (store, embedding_table, dir)
+    (store, embedding_table, shared_embedding_model(), dir)
 }
 
 #[tokio::test]
 async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
-    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
+    let (store, embedding_table, embedding_model, _dir_guard) =
+        make_memory_maintenance_fixture().await;
 
     let survivor = {
         let memory = spacebot::memory::Memory::new(
@@ -111,6 +126,7 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
     let report = run_maintenance(
         &store,
         &embedding_table,
+        &embedding_model,
         &MaintenanceConfig {
             prune_threshold: 0.2,
             decay_rate: 0.05,
@@ -161,14 +177,22 @@ async fn maintenance_run_merges_duplicate_memory_and_links_updates_edge() {
 
 #[tokio::test]
 async fn maintenance_run_can_be_cancelled() {
-    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
+    let (store, embedding_table, embedding_model, _dir_guard) =
+        make_memory_maintenance_fixture().await;
     let maintenance_config = MaintenanceConfig::default();
 
     let (cancel_tx, cancel_rx) = watch::channel(false);
     cancel_tx.send_replace(true);
 
     let maintenance_task = tokio::spawn(async move {
-        run_maintenance_with_cancel(&store, &embedding_table, &maintenance_config, cancel_rx).await
+        run_maintenance_with_cancel(
+            &store,
+            &embedding_table,
+            &embedding_model,
+            &maintenance_config,
+            cancel_rx,
+        )
+        .await
     });
 
     let result = maintenance_task
@@ -189,11 +213,13 @@ async fn maintenance_run_can_be_cancelled() {
 
 #[tokio::test]
 async fn maintenance_config_validation_rejects_negative_min_age() {
-    let (store, embedding_table, _dir_guard) = make_memory_maintenance_fixture().await;
+    let (store, embedding_table, embedding_model, _dir_guard) =
+        make_memory_maintenance_fixture().await;
 
     let result = run_maintenance(
         &store,
         &embedding_table,
+        &embedding_model,
         &MaintenanceConfig {
             prune_threshold: 0.2,
             decay_rate: 0.05,

@@ -1062,6 +1062,39 @@ maintenance_decay_rate = -0.1
             Config::from_toml(parsed, PathBuf::from(".")).is_err(),
             "expected invalid agent maintenance_decay_rate to be rejected"
         );
+
+        let invalid_interval = r#"
+[defaults.cortex]
+maintenance_interval_secs = 0
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_interval).expect("failed to parse invalid interval TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected maintenance_interval_secs = 0 to be rejected"
+        );
+
+        let invalid_merge_similarity_low = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = -0.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_low)
+            .expect("failed to parse invalid low merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected low maintenance_merge_similarity_threshold to be rejected"
+        );
+
+        let invalid_merge_similarity_high = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = 1.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_high)
+            .expect("failed to parse invalid high merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected high maintenance_merge_similarity_threshold to be rejected"
+        );
     }
 
     #[test]

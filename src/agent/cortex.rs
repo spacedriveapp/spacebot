@@ -2036,6 +2036,7 @@ async fn run_cortex_loop(
                             memory_maintenance::run_maintenance_with_cancel(
                                 memory_search.store(),
                                 memory_search.embedding_table(),
+                                memory_search.embedding_model_arc(),
                                 &maintenance_config,
                                 maintenance_cancel_rx,
                             )

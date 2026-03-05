@@ -128,6 +128,15 @@ fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
 
 impl CortexConfig {
     fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> Result<CortexConfig> {
+        let maintenance_interval_secs = overrides
+            .maintenance_interval_secs
+            .unwrap_or(defaults.maintenance_interval_secs);
+        if maintenance_interval_secs < 1 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+
         let config = CortexConfig {
             tick_interval_secs: overrides
                 .tick_interval_secs
@@ -156,9 +165,7 @@ impl CortexConfig {
             bulletin_max_turns: overrides
                 .bulletin_max_turns
                 .unwrap_or(defaults.bulletin_max_turns),
-            maintenance_interval_secs: overrides
-                .maintenance_interval_secs
-                .unwrap_or(defaults.maintenance_interval_secs),
+            maintenance_interval_secs,
             maintenance_decay_rate: overrides
                 .maintenance_decay_rate
                 .unwrap_or(defaults.maintenance_decay_rate),
