@@ -1648,6 +1648,7 @@ async fn run_cortex_loop(
 
     loop {
         tokio::select! {
+            biased;
             event = event_rx.recv() => {
                 match handle_cortex_receiver_result(
                     event,
