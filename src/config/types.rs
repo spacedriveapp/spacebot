@@ -821,6 +821,16 @@ pub struct CortexConfig {
     pub bulletin_max_words: usize,
     /// Max LLM turns for bulletin generation.
     pub bulletin_max_turns: usize,
+    /// Interval in seconds between memory maintenance passes.
+    pub maintenance_interval_secs: u64,
+    /// Per-day decay applied to memory importance during maintenance.
+    pub maintenance_decay_rate: f32,
+    /// Minimum importance score for non-identity memories to avoid pruning.
+    pub maintenance_prune_threshold: f32,
+    /// Minimum age in days before a memory becomes prune-eligible.
+    pub maintenance_min_age_days: i64,
+    /// Similarity threshold above which memories are merged as near-duplicates.
+    pub maintenance_merge_similarity_threshold: f32,
     /// Interval in seconds between association passes.
     pub association_interval_secs: u64,
     /// Minimum cosine similarity to create a RelatedTo edge.
@@ -843,6 +853,11 @@ impl Default for CortexConfig {
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,
             bulletin_max_turns: 15,
+            maintenance_interval_secs: 3600,
+            maintenance_decay_rate: 0.05,
+            maintenance_prune_threshold: 0.1,
+            maintenance_min_age_days: 30,
+            maintenance_merge_similarity_threshold: 0.95,
             association_interval_secs: 300,
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,

@@ -156,6 +156,21 @@ impl CortexConfig {
             bulletin_max_turns: overrides
                 .bulletin_max_turns
                 .unwrap_or(defaults.bulletin_max_turns),
+            maintenance_interval_secs: overrides
+                .maintenance_interval_secs
+                .unwrap_or(defaults.maintenance_interval_secs),
+            maintenance_decay_rate: overrides
+                .maintenance_decay_rate
+                .unwrap_or(defaults.maintenance_decay_rate),
+            maintenance_prune_threshold: overrides
+                .maintenance_prune_threshold
+                .unwrap_or(defaults.maintenance_prune_threshold),
+            maintenance_min_age_days: overrides
+                .maintenance_min_age_days
+                .unwrap_or(defaults.maintenance_min_age_days),
+            maintenance_merge_similarity_threshold: overrides
+                .maintenance_merge_similarity_threshold
+                .unwrap_or(defaults.maintenance_merge_similarity_threshold),
             association_interval_secs: overrides
                 .association_interval_secs
                 .unwrap_or(defaults.association_interval_secs),

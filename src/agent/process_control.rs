@@ -137,10 +137,7 @@ impl ProcessControlRegistry {
             .collect()
     }
 
-    async fn lookup_channel_handle(
-        &self,
-        channel_id: &ChannelId,
-    ) -> ChannelLookupResult {
+    async fn lookup_channel_handle(&self, channel_id: &ChannelId) -> ChannelLookupResult {
         let handle_entry = {
             let channels = self.channels.read().await;
             let Some(handle_entry) = channels.get(channel_id).cloned() else {
