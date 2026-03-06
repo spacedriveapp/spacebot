@@ -112,10 +112,15 @@ async fn persist_and_emit_cortex_chat_error(
     channel_ref: Option<&str>,
     message: String,
 ) {
-    let _ = store
+    if let Err(error) = store
         .save_message(thread_id, "assistant", &message, channel_ref)
-        .await;
-    let _ = event_tx.send(CortexChatEvent::Error { message }).await;
+        .await
+    {
+        tracing::error!(%error, %thread_id, "failed to persist cortex chat error message");
+    }
+    if let Err(error) = event_tx.send(CortexChatEvent::Error { message }).await {
+        tracing::debug!(%error, %thread_id, "failed to emit cortex chat error event");
+    }
 }
 
 async fn persist_and_emit_cortex_chat_done(
@@ -125,14 +130,20 @@ async fn persist_and_emit_cortex_chat_done(
     channel_ref: Option<&str>,
     response: String,
 ) {
-    let _ = store
+    if let Err(error) = store
         .save_message(thread_id, "assistant", &response, channel_ref)
-        .await;
-    let _ = event_tx
+        .await
+    {
+        tracing::error!(%error, %thread_id, "failed to persist cortex chat response");
+    }
+    if let Err(error) = event_tx
         .send(CortexChatEvent::Done {
             full_text: response,
         })
-        .await;
+        .await
+    {
+        tracing::debug!(%error, %thread_id, "failed to emit cortex chat done event");
+    }
 }
 
 fn streaming_error_to_prompt_error(

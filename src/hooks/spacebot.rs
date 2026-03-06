@@ -510,17 +510,18 @@ where
         HookAction::Continue
     }
 
-    async fn on_text_delta(&self, text_delta: &str, _aggregated_text: &str) -> HookAction {
+    async fn on_text_delta(&self, text_delta: &str, aggregated_text: &str) -> HookAction {
         if self.process_type == ProcessType::Channel
             && let Some(channel_id) = self.channel_id.clone()
         {
             let scrubbed_text_delta = crate::secrets::scrub::scrub_leaks(text_delta);
+            let scrubbed_aggregated_text = crate::secrets::scrub::scrub_leaks(aggregated_text);
             let event = ProcessEvent::TextDelta {
                 agent_id: self.agent_id.clone(),
                 process_id: self.process_id.clone(),
                 channel_id: Some(channel_id),
-                text_delta: scrubbed_text_delta.clone(),
-                aggregated_text: scrubbed_text_delta,
+                text_delta: scrubbed_text_delta,
+                aggregated_text: scrubbed_aggregated_text,
             };
             self.event_tx.send(event).ok();
         }
@@ -1172,7 +1173,8 @@ mod tests {
         );
 
         let action =
-            <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(&hook, "hi", "hi").await;
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(&hook, "hi", "partial hi")
+                .await;
         assert!(matches!(action, HookAction::Continue));
 
         let event = event_rx.recv().await.expect("text delta event");
@@ -1182,7 +1184,7 @@ mod tests {
                 ref text_delta,
                 ref aggregated_text,
                 ..
-            } if text_delta == "hi" && aggregated_text == "hi"
+            } if text_delta == "hi" && aggregated_text == "partial hi"
         ));
     }
 

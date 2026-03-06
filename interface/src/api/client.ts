@@ -542,6 +542,9 @@ export interface CortexChatMessagesResponse {
 
 export type CortexChatSSEEvent =
 	| { type: "thinking" }
+	| { type: "text_delta"; text_delta: string }
+	| { type: "tool_started"; tool: string }
+	| { type: "tool_completed"; tool: string; result_preview: string }
 	| { type: "done"; full_text: string }
 	| { type: "error"; message: string };
 

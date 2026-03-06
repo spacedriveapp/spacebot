@@ -61,6 +61,30 @@ test("outbound stream end clears the active placeholder before the next stream",
 	});
 });
 
+test("aggregated outbound deltas replace placeholder content instead of appending", () => {
+	const afterFirstDelta = applyOutboundMessageDelta(baseLiveState(), {
+		type: "outbound_message_delta",
+		agent_id: "agent-1",
+		channel_id: "channel-1",
+		text_delta: "partial",
+		aggregated_text: "partial",
+	});
+
+	const afterAggregatedOnlyUpdate = applyOutboundMessageDelta(afterFirstDelta, {
+		type: "outbound_message_delta",
+		agent_id: "agent-1",
+		channel_id: "channel-1",
+		text_delta: "",
+		aggregated_text: "partial reply",
+	});
+
+	expect(afterAggregatedOnlyUpdate.timeline).toHaveLength(1);
+	expect(afterAggregatedOnlyUpdate.timeline[0]).toMatchObject({
+		type: "message",
+		content: "partial reply",
+	});
+});
+
 test("outbound stream end without a placeholder still clears typing", () => {
 	const updated = applyOutboundStreamEnd(baseLiveState());
 

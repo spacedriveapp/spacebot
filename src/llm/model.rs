@@ -140,6 +140,10 @@ impl SpacebotModel {
         let provider = self.provider.as_str();
 
         let tool_choice_requested = request.tool_choice.is_some();
+        let tool_choice_requires_tool_definitions = matches!(
+            request.tool_choice,
+            Some(ToolChoice::Required) | Some(ToolChoice::Specific { .. })
+        );
         let output_schema_requested = request.output_schema.is_some();
 
         if matches!(mode, RigSemanticsMode::Off) {
@@ -159,7 +163,7 @@ impl SpacebotModel {
 
         let tool_choice_supported = if !tool_choice_requested {
             true
-        } else if request.tools.is_empty() {
+        } else if tool_choice_requires_tool_definitions && request.tools.is_empty() {
             tracing::warn!(
                 provider,
                 mode = ?mode,
@@ -357,6 +361,8 @@ impl SpacebotModel {
             if let Some(rig_alignment) = self.rig_alignment.clone() {
                 model = model.with_rig_alignment(rig_alignment);
             }
+            model.agent_id = self.agent_id.clone();
+            model.process_type = self.process_type.clone();
             model
         };
 
@@ -1859,12 +1865,35 @@ fn truncate_body(body: &str) -> &str {
 }
 
 fn schema_name(output_schema: &schemars::Schema) -> String {
-    output_schema
+    const FALLBACK_SCHEMA_NAME: &str = "response_schema";
+    const MAX_SCHEMA_NAME_LEN: usize = 64;
+
+    let title = output_schema
         .as_object()
         .and_then(|schema_object| schema_object.get("title"))
         .and_then(serde_json::Value::as_str)
-        .unwrap_or("response_schema")
-        .to_string()
+        .unwrap_or(FALLBACK_SCHEMA_NAME)
+        .trim();
+
+    let mut normalized = String::with_capacity(title.len().min(MAX_SCHEMA_NAME_LEN));
+    for character in title.chars() {
+        if normalized.len() >= MAX_SCHEMA_NAME_LEN {
+            break;
+        }
+
+        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+            normalized.push(character);
+        } else if !normalized.ends_with('_') {
+            normalized.push('_');
+        }
+    }
+
+    let normalized = normalized.trim_matches('_');
+    if normalized.is_empty() {
+        FALLBACK_SCHEMA_NAME.to_string()
+    } else {
+        normalized.to_string()
+    }
 }
 
 fn sanitize_openai_schema(schema: &mut serde_json::Value) {
@@ -1872,7 +1901,14 @@ fn sanitize_openai_schema(schema: &mut serde_json::Value) {
 
     if let Value::Object(object) = schema {
         if object.contains_key("$ref") {
-            object.retain(|key, _| key == "$ref");
+            if let Some(defs) = object.get_mut("$defs")
+                && let Value::Object(defs_object) = defs
+            {
+                for schema in defs_object.values_mut() {
+                    sanitize_openai_schema(schema);
+                }
+            }
+            object.retain(|key, _| key == "$ref" || key == "$defs");
             return;
         }
 
@@ -3913,6 +3949,78 @@ mod tests {
         );
     }
 
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[schemars(
+        title = "Test Structured Response (Invalid Chars!) + Extra Long Name Segment 1234567890"
+    )]
+    struct InvalidNamedStructuredResponse {
+        answer: String,
+    }
+
+    fn invalid_named_schema() -> schemars::Schema {
+        schemars::schema_for!(InvalidNamedStructuredResponse)
+    }
+
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[schemars(title = "!!! ### ???")]
+    struct EmptyNormalizedSchemaNameResponse {
+        answer: String,
+    }
+
+    fn empty_normalized_name_schema() -> schemars::Schema {
+        schemars::schema_for!(EmptyNormalizedSchemaNameResponse)
+    }
+
+    #[test]
+    fn schema_name_normalizes_to_provider_safe_and_truncates() {
+        let mapped = map_openai_response_format(&invalid_named_schema());
+        let name = mapped["json_schema"]["name"]
+            .as_str()
+            .expect("schema name should be serialized");
+
+        assert!(name.len() <= 64);
+        assert!(
+            name.chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || character == '_'
+                    || character == '-')
+        );
+    }
+
+    #[test]
+    fn schema_name_falls_back_when_title_normalizes_empty() {
+        let mapped = map_openai_response_format(&empty_normalized_name_schema());
+        assert_eq!(mapped["json_schema"]["name"], "response_schema");
+    }
+
+    #[test]
+    fn sanitize_openai_schema_keeps_defs_with_refs() {
+        let mut schema = serde_json::json!({
+            "$ref": "#/$defs/Result",
+            "$defs": {
+                "Result": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    }
+                }
+            },
+            "description": "discard me"
+        });
+
+        sanitize_openai_schema(&mut schema);
+
+        assert_eq!(schema["$ref"], "#/$defs/Result");
+        assert!(schema.get("$defs").is_some());
+        assert_eq!(
+            schema["$defs"]["Result"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert!(schema.get("description").is_none());
+    }
+
     #[tokio::test]
     async fn rejects_unsupported_semantics_enforced() {
         let model = build_test_model(
@@ -4005,5 +4113,53 @@ mod tests {
             .evaluate_request_semantics(&request_with_semantics(false))
             .expect_err("tool_choice without tool definitions should fail in enforced mode");
         assert!(error.to_string().contains("tool_choice"));
+    }
+
+    #[tokio::test]
+    async fn rig_parity_enforced_allows_auto_tool_choice_without_tool_definitions() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let mut request = request_with_semantics(false);
+        request.tool_choice = Some(ToolChoice::Auto);
+        request.output_schema = None;
+
+        let decision = model
+            .evaluate_request_semantics(&request)
+            .expect("auto tool choice should not require tool definitions");
+        assert!(decision.apply_tool_choice);
+        assert!(!decision.apply_output_schema);
+    }
+
+    #[tokio::test]
+    async fn rig_parity_enforced_allows_none_tool_choice_without_tool_definitions() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let mut request = request_with_semantics(false);
+        request.tool_choice = Some(ToolChoice::None);
+        request.output_schema = None;
+
+        let decision = model
+            .evaluate_request_semantics(&request)
+            .expect("none tool choice should not require tool definitions");
+        assert!(decision.apply_tool_choice);
+        assert!(!decision.apply_output_schema);
     }
 }

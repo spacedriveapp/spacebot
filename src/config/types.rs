@@ -799,34 +799,27 @@ pub struct RigAlignmentConfig {
     pub tool_choice_provider_allowlist: Vec<String>,
 }
 
+const BUILTIN_READ_ONLY_WORKER_TOOLS: &[&str] = &[
+    "read_skill",
+    "spacebot_docs",
+    "memory_recall",
+    "channel_recall",
+    "web_search",
+    "worker_inspect",
+    "email_search",
+    "config_inspect",
+];
+
 pub fn is_builtin_read_only_worker_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "read_skill"
-            | "spacebot_docs"
-            | "memory_recall"
-            | "channel_recall"
-            | "web_search"
-            | "worker_inspect"
-            | "email_search"
-            | "config_inspect"
-    )
+    BUILTIN_READ_ONLY_WORKER_TOOLS.contains(&tool_name)
 }
 
 pub fn default_worker_read_only_tool_allowlist() -> Vec<String> {
-    [
-        "read_skill",
-        "spacebot_docs",
-        "memory_recall",
-        "channel_recall",
-        "web_search",
-        "worker_inspect",
-        "email_search",
-        "config_inspect",
-    ]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+    BUILTIN_READ_ONLY_WORKER_TOOLS
+        .iter()
+        .copied()
+        .map(str::to_string)
+        .collect()
 }
 
 impl Default for RigAlignmentConfig {

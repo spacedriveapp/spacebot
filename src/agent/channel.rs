@@ -267,11 +267,11 @@ where
         .await
     }
 
-    async fn on_text_delta(&self, text_delta: &str, _aggregated_text: &str) -> HookAction {
+    async fn on_text_delta(&self, text_delta: &str, aggregated_text: &str) -> HookAction {
         let action = <SpacebotHook as PromptHook<M>>::on_text_delta(
             &self.spacebot_hook,
             text_delta,
-            text_delta,
+            aggregated_text,
         )
         .await;
         if !matches!(action, HookAction::Continue) {
@@ -279,10 +279,10 @@ where
         }
 
         let should_forward = {
-            let mut state = self
-                .forwarding_state
-                .lock()
-                .expect("channel streaming forwarding state poisoned");
+            let mut state = self.forwarding_state.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("channel streaming forwarding state poisoned; recovering");
+                poisoned.into_inner()
+            });
             should_forward_stream_delta(&mut state, text_delta)
         };
 
@@ -353,13 +353,14 @@ where
     M::StreamingResponse: GetTokenUsage,
     P: rig::agent::PromptHook<M> + 'static,
 {
+    let fallback_history = history.clone();
     let mut stream = agent
         .stream_prompt(prompt)
         .with_hook(hook)
         .with_history(history)
         .await;
 
-    let mut final_history = Vec::new();
+    let mut final_history = fallback_history;
     while let Some(item) = stream.next().await {
         match item {
             Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {

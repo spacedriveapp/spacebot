@@ -2138,7 +2138,6 @@ async fn run(
                                         }
                                     }
                                 }
-                                else => break,
                             }
                         }
                     });

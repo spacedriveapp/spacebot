@@ -328,6 +328,7 @@ impl Messaging for TelegramAdapter {
                     .await
                     .get(&message.conversation_id)
                     .cloned();
+                let reply_to = self.extract_message_id(message).ok();
 
                 if let Some(stream) = active_stream {
                     let (first_chunk, remaining_chunks) = stream_finalization_chunks(&chunks);
@@ -372,7 +373,7 @@ impl Messaging for TelegramAdapter {
                             .write()
                             .await
                             .remove(&message.conversation_id);
-                        send_formatted(&self.bot, chat_id, &text, None).await?;
+                        send_formatted(&self.bot, chat_id, &text, reply_to).await?;
                     } else {
                         self.active_messages
                             .write()

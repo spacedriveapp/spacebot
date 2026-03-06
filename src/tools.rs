@@ -520,22 +520,22 @@ pub fn list_worker_tool_names(
     mcp_tools: &[McpToolAdapter],
 ) -> Vec<String> {
     let mut names = vec![
-        "shell".to_string(),
-        "file".to_string(),
-        "exec".to_string(),
-        "task_update".to_string(),
-        "set_status".to_string(),
-        "read_skill".to_string(),
+        <ShellTool as rig::tool::Tool>::NAME.to_string(),
+        <FileTool as rig::tool::Tool>::NAME.to_string(),
+        <ExecTool as rig::tool::Tool>::NAME.to_string(),
+        <TaskUpdateTool as rig::tool::Tool>::NAME.to_string(),
+        <SetStatusTool as rig::tool::Tool>::NAME.to_string(),
+        <ReadSkillTool as rig::tool::Tool>::NAME.to_string(),
     ];
 
     if secrets_enabled {
-        names.push("secret_set".to_string());
+        names.push(<SecretSetTool as rig::tool::Tool>::NAME.to_string());
     }
     if browser_enabled {
-        names.push("browser".to_string());
+        names.push(<BrowserTool as rig::tool::Tool>::NAME.to_string());
     }
     if brave_search_enabled {
-        names.push("web_search".to_string());
+        names.push(<WebSearchTool as rig::tool::Tool>::NAME.to_string());
     }
     for mcp_tool in mcp_tools {
         names.push(mcp_tool.name());

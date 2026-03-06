@@ -107,8 +107,9 @@ export function applyOutboundMessageDelta(
 	state: ChannelLiveState,
 	event: OutboundMessageDeltaEvent,
 ): ChannelLiveState {
-	const streamedContent = event.text_delta || event.aggregated_text;
-	if (!streamedContent) {
+	const deltaText = event.text_delta;
+	const aggregatedText = event.aggregated_text;
+	if (!deltaText && !aggregatedText) {
 		return state;
 	}
 
@@ -124,7 +125,9 @@ export function applyOutboundMessageDelta(
 			if (streamItem.type === "message") {
 				timeline[streamIndex] = {
 					...streamItem,
-					content: streamItem.content + streamedContent,
+					content: deltaText
+						? streamItem.content + deltaText
+						: aggregatedText,
 				};
 			}
 			return { ...state, timeline };
@@ -132,11 +135,12 @@ export function applyOutboundMessageDelta(
 	}
 
 	const messageId = `stream-${generateId()}`;
+	const initialContent = deltaText || aggregatedText;
 	return {
 		...state,
 		timeline: [
 			...state.timeline,
-			assistantMessageItem(messageId, event.agent_id, streamedContent),
+			assistantMessageItem(messageId, event.agent_id, initialContent),
 		],
 		streamingMessageId: messageId,
 	};

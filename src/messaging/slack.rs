@@ -64,9 +64,29 @@ struct ActiveStream {
 }
 
 const STREAM_EDIT_INTERVAL: Duration = Duration::from_secs(1);
+const STREAM_TEXT_BUFFER_LIMIT: usize = 12_000;
+
+fn initial_stream_last_edit() -> Instant {
+    Instant::now()
+        .checked_sub(STREAM_EDIT_INTERVAL)
+        .unwrap_or_else(Instant::now)
+}
 
 fn should_throttle_stream_edit(last_edit: Instant, now: Instant) -> bool {
     now.duration_since(last_edit) < STREAM_EDIT_INTERVAL
+}
+
+fn cap_stream_text_buffer(text: &mut String) -> bool {
+    if text.len() <= STREAM_TEXT_BUFFER_LIMIT {
+        return false;
+    }
+
+    let mut end = STREAM_TEXT_BUFFER_LIMIT;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
+    true
 }
 
 /// Slack adapter.
@@ -1171,7 +1191,7 @@ impl Messaging for SlackAdapter {
                     message.id.clone(),
                     ActiveStream {
                         ts: resp.ts.0,
-                        last_edit: Instant::now(),
+                        last_edit: initial_stream_last_edit(),
                         text: String::new(),
                     },
                 );
@@ -1183,13 +1203,13 @@ impl Messaging for SlackAdapter {
                     let mut active = self.active_messages.write().await;
                     if let Some(stream) = active.get_mut(&message.id) {
                         stream.text.push_str(&text);
+                        let truncated = cap_stream_text_buffer(&mut stream.text);
                         if should_throttle_stream_edit(stream.last_edit, now) {
                             return Ok(());
                         }
                         stream.last_edit = now;
-                        let display_text = if stream.text.len() > 12_000 {
-                            let end = stream.text.floor_char_boundary(11_997);
-                            format!("{}...", &stream.text[..end])
+                        let display_text = if truncated {
+                            format!("{}...", stream.text)
                         } else {
                             stream.text.clone()
                         };
@@ -1890,6 +1910,22 @@ mod tests {
         assert!(
             !should_throttle_stream_edit(last_edit, at_interval),
             "stream chunk edits should be allowed once the configured throttle interval elapses"
+        );
+        assert!(
+            !should_throttle_stream_edit(initial_stream_last_edit(), Instant::now()),
+            "the first streamed edit should not be throttled"
+        );
+    }
+
+    #[test]
+    fn stream_text_buffer_is_capped() {
+        let mut text = "a".repeat(STREAM_TEXT_BUFFER_LIMIT + 128);
+        let truncated = cap_stream_text_buffer(&mut text);
+        assert!(truncated, "oversized buffers should report truncation");
+        assert_eq!(
+            text.len(),
+            STREAM_TEXT_BUFFER_LIMIT,
+            "stream display buffers should stay bounded"
         );
     }
 }
