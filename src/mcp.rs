@@ -193,6 +193,9 @@ impl McpConnection {
                 *client_guard = Some(session);
                 drop(client_guard);
 
+                #[cfg(feature = "metrics")]
+                let tool_count = tools.len() as i64;
+
                 {
                     let mut cached_tools = self.tools.write().await;
                     *cached_tools = tools;
@@ -216,7 +219,6 @@ impl McpConnection {
                         .mcp_connection_duration_seconds
                         .with_label_values(&[&self.name])
                         .observe(elapsed);
-                    let tool_count = self.tools.read().await.len() as i64;
                     set_mcp_connection_state(&self.name, 1, 0, 0, 0, tool_count);
                 }
 

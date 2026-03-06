@@ -142,7 +142,8 @@ impl MemoryStore {
                 .start_timer()
         };
 
-        sqlx::query(
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let result = sqlx::query(
             r#"
             UPDATE memories
             SET content = ?, memory_type = ?, importance = ?, updated_at = ?,
@@ -166,7 +167,7 @@ impl MemoryStore {
         .with_context(|| format!("failed to update memory {}", memory.id))?;
 
         #[cfg(feature = "metrics")]
-        {
+        if result.rows_affected() > 0 {
             let agent_label = if self.agent_id.is_empty() {
                 "unknown"
             } else {
