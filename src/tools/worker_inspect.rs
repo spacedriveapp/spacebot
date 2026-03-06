@@ -132,6 +132,9 @@ impl Tool for WorkerInspectTool {
                                     }
                                 }
                             }
+                            worker_transcript::TranscriptStep::UserText { text } => {
+                                summary.push_str(&format!("**User:** {text}\n\n"));
+                            }
                             worker_transcript::TranscriptStep::ToolResult {
                                 name, text, ..
                             } => {

@@ -14,6 +14,7 @@ import {
 	type WorkerCompletedEvent,
 	type WorkerStartedEvent,
 	type WorkerStatusEvent,
+	type WorkerIdleEvent,
 	type ChannelInfo,
 } from "../api/client";
 
@@ -24,6 +25,17 @@ export interface ActiveWorker {
 	startedAt: number;
 	toolCalls: number;
 	currentTool: string | null;
+	/** Whether the worker is idle (waiting for follow-up input). */
+	isIdle: boolean;
+	/** Whether this worker accepts follow-up input via route. */
+	interactive: boolean;
+	/** Worker type: "builtin", "opencode", "task", etc. */
+	workerType: string;
+}
+
+/** Check whether a worker is an opencode worker (by type or task prefix). */
+export function isOpenCodeWorker(worker: { workerType?: string; task?: string }): boolean {
+	return worker.workerType === "opencode" || (worker.task?.startsWith("[opencode]") ?? false);
 }
 
 export interface ActiveBranch {
@@ -156,6 +168,9 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 							startedAt: new Date(w.started_at).getTime(),
 							toolCalls: w.tool_calls,
 							currentTool: existingWorker?.currentTool ?? null,
+							isIdle: w.status === "idle",
+							interactive: w.interactive,
+							workerType: existingWorker?.workerType ?? (w.task.startsWith("[opencode]") ? "opencode" : "builtin"),
 						};
 					}
 					const branches: Record<string, ActiveBranch> = {};
@@ -368,14 +383,17 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 					...existing,
 					workers: {
 						...existing.workers,
-						[event.worker_id]: {
-							id: event.worker_id,
-							task: event.task,
-							status: "starting",
-							startedAt: Date.now(),
-							toolCalls: 0,
-							currentTool: null,
-						},
+					[event.worker_id]: {
+						id: event.worker_id,
+						task: event.task,
+						status: "starting",
+						startedAt: Date.now(),
+						toolCalls: 0,
+						currentTool: null,
+						isIdle: false,
+						interactive: event.interactive ?? false,
+						workerType: event.worker_type ?? "builtin",
+					},
 					},
 				},
 			};
@@ -407,7 +425,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 						...state,
 						workers: {
 							...state.workers,
-							[event.worker_id]: { ...worker, status: event.status },
+							[event.worker_id]: { ...worker, status: event.status, isIdle: false },
 						},
 					},
 				};
@@ -429,7 +447,52 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 								...state,
 								workers: {
 									...state.workers,
-									[event.worker_id]: { ...worker, status: event.status },
+									[event.worker_id]: { ...worker, status: event.status, isIdle: false },
+								},
+							},
+						};
+					}
+				}
+				return prev;
+			});
+		}
+	}, [updateItem]);
+
+	const handleWorkerIdle = useCallback((data: unknown) => {
+		const event = data as WorkerIdleEvent;
+		if (event.channel_id) {
+			setLiveStates((prev) => {
+				const state = prev[event.channel_id!];
+				const worker = state?.workers[event.worker_id];
+				if (!worker) return prev;
+				return {
+					...prev,
+					[event.channel_id!]: {
+						...state,
+						workers: {
+							...state.workers,
+							[event.worker_id]: { ...worker, isIdle: true },
+						},
+					},
+				};
+			});
+			// Update timeline item status to idle
+			updateItem(event.channel_id, event.worker_id, (item) => {
+				if (item.type !== "worker_run") return item;
+				return { ...item, status: "idle" };
+			});
+		} else {
+			setLiveStates((prev) => {
+				for (const [channelId, state] of Object.entries(prev)) {
+					const worker = state.workers[event.worker_id];
+					if (worker) {
+						return {
+							...prev,
+							[channelId]: {
+								...state,
+								workers: {
+									...state.workers,
+									[event.worker_id]: { ...worker, isIdle: true },
 								},
 							},
 						};
@@ -746,6 +809,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		typing_state: handleTypingState,
 		worker_started: handleWorkerStarted,
 		worker_status: handleWorkerStatus,
+		worker_idle: handleWorkerIdle,
 		worker_completed: handleWorkerCompleted,
 		branch_started: handleBranchStarted,
 		branch_completed: handleBranchCompleted,

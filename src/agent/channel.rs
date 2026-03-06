@@ -1573,6 +1573,24 @@ impl Channel {
                     content: OneOrMany::one(rig::message::AssistantContent::text(record)),
                 });
             }
+
+            // Mark the completed items as relayed in the status block so their
+            // full result summaries stop appearing on subsequent turns. This
+            // prevents the LLM from re-summarising stale worker/branch results.
+            if replied
+                && let Some(ids) = message
+                    .metadata
+                    .get("retrigger_process_ids")
+                    .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+            {
+                let mut status = self.state.status_block.write().await;
+                status.mark_relayed(&ids);
+                tracing::debug!(
+                    channel_id = %self.id,
+                    count = ids.len(),
+                    "marked retrigger results as relayed in status block"
+                );
+            }
         }
 
         // Check context size and trigger compaction if needed
@@ -2222,6 +2240,7 @@ impl Channel {
                 channel_id,
                 task,
                 worker_type,
+                interactive,
                 ..
             } => {
                 run_logger.log_worker_started(
@@ -2230,12 +2249,17 @@ impl Channel {
                     task,
                     worker_type,
                     &self.deps.agent_id,
+                    *interactive,
+                    None,
                 );
             }
             ProcessEvent::WorkerStatus {
                 worker_id, status, ..
             } => {
                 run_logger.log_worker_status(*worker_id, status);
+            }
+            ProcessEvent::WorkerIdle { worker_id, .. } => {
+                run_logger.log_worker_idle(*worker_id);
             }
             ProcessEvent::WorkerComplete {
                 worker_id,
@@ -2244,15 +2268,22 @@ impl Channel {
                 success,
                 ..
             } => {
-                let mut workers = self.state.active_workers.write().await;
-                if workers.remove(worker_id).is_none() {
+                // Use worker_handles as the source of truth for active workers.
+                // (active_workers is never populated because Worker is consumed by .run())
+                if self
+                    .state
+                    .worker_handles
+                    .write()
+                    .await
+                    .remove(worker_id)
+                    .is_none()
+                {
                     return Ok(());
                 }
-                drop(workers);
 
                 run_logger.log_worker_completed(*worker_id, result, *success);
 
-                self.state.worker_handles.write().await.remove(worker_id);
+                self.state.active_workers.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
 
                 if *notify {
@@ -2268,6 +2299,32 @@ impl Channel {
                 }
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
+            }
+            ProcessEvent::OpenCodeSessionCreated {
+                worker_id,
+                session_id,
+                port,
+                ..
+            } => {
+                run_logger.log_opencode_metadata(*worker_id, session_id, *port);
+            }
+            ProcessEvent::WorkerInitialResult {
+                worker_id, result, ..
+            } => {
+                // Interactive worker completed a task (initial or follow-up)
+                // but stays alive for more input. Deliver the result to the
+                // channel without removing the worker from the active set.
+                self.pending_results.push(PendingResult {
+                    process_type: "worker",
+                    process_id: worker_id.to_string(),
+                    result: result.clone(),
+                    success: true,
+                });
+                should_retrigger = true;
+                tracing::info!(
+                    worker_id = %worker_id,
+                    "interactive worker result queued for retrigger"
+                );
             }
             _ => {}
         }
@@ -2419,10 +2476,22 @@ impl Channel {
             .collect::<Vec<_>>()
             .join("\n");
 
+        // Collect the process IDs so we can mark them as relayed in the
+        // status block after the retrigger turn completes successfully.
+        let retrigger_process_ids: Vec<String> = self
+            .pending_results
+            .iter()
+            .map(|r| r.process_id.clone())
+            .collect();
+
         let mut metadata = self.pending_retrigger_metadata.clone();
         metadata.insert(
             "retrigger_result_summary".to_string(),
             serde_json::Value::String(result_summary),
+        );
+        metadata.insert(
+            "retrigger_process_ids".to_string(),
+            serde_json::json!(retrigger_process_ids),
         );
 
         let synthetic = InboundMessage {
@@ -2618,5 +2687,50 @@ mod tests {
         };
 
         assert!(should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn worker_complete_event_matches_own_channel() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::WorkerComplete {
+            agent_id: Arc::from("agent"),
+            worker_id: uuid::Uuid::new_v4(),
+            channel_id: Some(channel_id.clone()),
+            result: "done".to_string(),
+            notify: true,
+            success: true,
+        };
+
+        assert!(should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn worker_complete_event_ignored_for_other_channel() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::WorkerComplete {
+            agent_id: Arc::from("agent"),
+            worker_id: uuid::Uuid::new_v4(),
+            channel_id: Some(Arc::from("channel-b")),
+            result: "done".to_string(),
+            notify: true,
+            success: true,
+        };
+
+        assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn worker_complete_event_ignored_when_no_channel() {
+        let channel_id: ChannelId = Arc::from("channel-a");
+        let event = ProcessEvent::WorkerComplete {
+            agent_id: Arc::from("agent"),
+            worker_id: uuid::Uuid::new_v4(),
+            channel_id: None,
+            result: "done".to_string(),
+            notify: true,
+            success: true,
+        };
+
+        assert!(!should_process_event_for_channel(&event, &channel_id));
     }
 }

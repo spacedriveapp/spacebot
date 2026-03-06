@@ -1,32 +1,42 @@
 # Tool Nudging
 
-Automatic retry mechanism that encourages workers to use tools when they respond with text-only instead of calling tools.
+Automatic retry mechanism that prevents workers from exiting with text-only responses before signaling a terminal outcome.
 
 ## Problem
 
-Workers sometimes respond with text like "I'll help you with that" without actually calling any tools. This is particularly common:
+Workers sometimes respond with text like "I'll help you with that" or "Let me create the email now..." without actually calling any tools. This is common:
 - At the start of a worker loop when the LLM is "thinking out loud"
 - When the task description is vague and the LLM wants clarification
 - With certain models that have a conversational tendency
+- **Mid-task**, after making a few tool calls (e.g. `read_skill`, `set_status`), the model returns narration instead of continuing with tools
 
-Without intervention, the worker wastes tokens on non-actionable responses and may never complete the task.
+Without intervention, the worker silently reaches `Done` state with no useful output. In Rig's agent loop, any text-only response (no tool calls) terminates the loop — the worker exits as if it completed successfully.
 
 ## Solution
 
-Tool nudging detects text-only responses early in the worker loop and automatically retries with a nudge prompt: "Please proceed and use the available tools."
+Workers must explicitly signal a terminal outcome via `set_status(kind: "outcome")` before they can exit with a text-only response. Until that signal is received, any text-only response triggers a nudge that sends the worker back to work.
 
 ### How It Works
 
 ```
 Worker loop starts
-  → First completion call
-  → If text-only response (no tool calls)
-    → Terminate with special "tool_nudge" reason
-    → Retry with nudge prompt
+  → LLM completion
+  → If response includes tool calls → continue normally
+  → If text-only response:
+    → Has outcome been signaled via set_status(kind: "outcome")? → allow exit
+    → No outcome signal? → Terminate with "tool_nudge" reason → retry with nudge prompt
     → Max 2 retries per prompt request
-  → If tool call present
-    → Continue normally
+    → If retries exhausted → worker fails (PromptCancelled)
 ```
+
+### Outcome Signaling
+
+The `set_status` tool has a `kind` field:
+
+- `kind: "progress"` (default) — intermediate status update, does not unlock exit
+- `kind: "outcome"` — terminal result signal, allows text-only exit
+
+Workers are instructed to call `set_status(kind: "outcome")` with a result summary before finishing. The hook marks `outcome_signaled` only after a successful `set_status` tool result is observed in `on_tool_result` (`success: true` and `kind: "outcome"`), so failed status calls do not unlock text-only exit.
 
 ### Policy Scoping
 
@@ -34,7 +44,7 @@ Tool nudging is scoped by process type:
 
 | Process Type | Default Policy | Reason |
 |--------------|----------------|--------|
-| Worker | Enabled | Workers must use tools to complete tasks |
+| Worker | Enabled | Workers must complete tasks before exiting |
 | Branch | Disabled | Branches are for thinking, not doing |
 | Channel | Disabled | Channels should be conversational |
 
@@ -47,23 +57,25 @@ let hook = SpacebotHook::new(...)
 
 ### Implementation Details
 
-**Detection** (`src/hooks/spacebot.rs:should_nudge_tool_usage`):
-- Only active on first 2 completion calls (`TOOL_NUDGE_MAX_RETRIES = 2`)
-- Checks if response contains any `AssistantContent::ToolCall`
-- Ignores empty text responses
-- Stops nudging after any tool call is seen
+**Outcome detection** (`src/hooks/spacebot.rs:on_tool_result`):
+- After a successful `set_status` tool execution with `kind: "outcome"`, `outcome_signaled` is set to `true`
+- The flag persists for the rest of the prompt request
 
-**Retry Flow** (`prompt_with_tool_nudge_retry`):
-1. Reset nudge state at start of prompt
-2. Track completion call count via atomic counter
-3. On text-only response: terminate with `TOOL_NUDGE_REASON`
-4. Catch termination in retry loop, prune history, retry with nudge prompt
-5. On success: prune the nudge prompt from history to keep context clean
+**Nudge decision** (`src/hooks/spacebot.rs:should_nudge_tool_usage`):
+- Returns `true` when: policy enabled, nudge active, no outcome signaled, response is text-only
+- Returns `false` when: outcome signaled, response has tool calls, policy disabled
 
-**History Hygiene**:
+**Retry flow** (`prompt_with_tool_nudge_retry`):
+1. Reset nudge state at start of prompt (clears `outcome_signaled`)
+2. On text-only response without outcome: terminate with `TOOL_NUDGE_REASON`
+3. Catch termination in retry loop, prune history, retry with nudge prompt
+4. On success: prune the nudge prompt from history to keep context clean
+5. After `TOOL_NUDGE_MAX_RETRIES` (2) exhausted: `PromptCancelled` propagates to worker → `WorkerState::Failed`
+
+**History hygiene**:
 - Synthetic nudge prompts are removed from history on both success and retry
 - Failed assistant turns are pruned but user prompts are preserved
-- Prevents accumulation of "Please proceed..." noise in context
+- Prevents accumulation of nudge noise in context
 
 ### Configuration
 
@@ -86,23 +98,19 @@ let follow_up_hook = hook
 The nudging behavior has comprehensive test coverage:
 
 - **Unit tests** (`src/hooks/spacebot.rs`):
-  - `nudges_only_on_first_two_text_only_completion_calls`
+  - `nudges_on_every_text_only_response_without_outcome` — nudge fires on every text-only response
+  - `nudges_after_tool_calls_without_outcome` — the exact bug case (read_skill + progress status + text exit)
+  - `outcome_signal_allows_text_only_completion` — outcome signal unlocks exit
+  - `progress_status_does_not_signal_outcome` — explicit progress kind doesn't unlock
+  - `default_status_kind_does_not_signal_outcome` — omitted kind doesn't unlock
   - `does_not_nudge_when_completion_contains_tool_call`
-  - `does_not_nudge_after_any_tool_call_has_started`
   - `process_scoped_policy_*` variants for Branch/Channel/Worker
   - `tool_nudge_retry_history_hygiene_*` for history pruning
 
 - **Integration tests** (`tests/tool_nudge.rs`):
-  - End-to-end nudge flow with mock model
-  - Verification that branches/channels don't nudge
-  - History accumulation prevention
-
-### Metrics
-
-When the `metrics` feature is enabled:
-- `tool_calls_total` - Count of tool calls (existing)
-- `tool_call_duration_seconds` - Duration of tool calls (existing)
-- Nudge retry count is logged but not yet a dedicated metric
+  - Public API surface tests (constants, policy enum, hook creation)
+  - Event emission verification
+  - Process-type scoping
 
 ### Future Considerations
 

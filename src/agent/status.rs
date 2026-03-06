@@ -33,6 +33,8 @@ pub struct WorkerStatus {
     pub started_at: DateTime<Utc>,
     pub notify_on_complete: bool,
     pub tool_calls: usize,
+    /// Whether this worker accepts follow-up input via route.
+    pub interactive: bool,
 }
 
 /// Recently completed work item.
@@ -43,6 +45,10 @@ pub struct CompletedItem {
     pub description: String,
     pub completed_at: DateTime<Utc>,
     pub result_summary: String,
+    /// Whether this item's result has been relayed to the user via retrigger.
+    /// Once relayed, the result summary is excluded from the status block to
+    /// prevent the LLM from re-summarising stale results.
+    pub relayed: bool,
 }
 
 /// Status of an active link conversation.
@@ -77,6 +83,11 @@ impl StatusBlock {
                     worker.status.clone_from(status);
                 }
             }
+            ProcessEvent::WorkerIdle { worker_id, .. } => {
+                if let Some(worker) = self.active_workers.iter_mut().find(|w| w.id == *worker_id) {
+                    worker.status = "idle".to_string();
+                }
+            }
             ProcessEvent::WorkerComplete {
                 worker_id,
                 result,
@@ -94,6 +105,7 @@ impl StatusBlock {
                             description: worker.task,
                             completed_at: Utc::now(),
                             result_summary: result.clone(),
+                            relayed: false,
                         });
                     }
                 }
@@ -120,18 +132,41 @@ impl StatusBlock {
                         description: branch.description,
                         completed_at: Utc::now(),
                         result_summary: conclusion.clone(),
+                        relayed: false,
                     });
-                }
-
-                // Keep only last 10 completed items
-                if self.completed_items.len() > 10 {
-                    self.completed_items.remove(0);
                 }
             }
             ProcessEvent::AgentMessageSent { to_agent_id, .. } => {
                 self.track_link_conversation(to_agent_id.as_ref());
             }
             _ => {}
+        }
+
+        // Prune completed items: drop relayed items older than 5 minutes,
+        // then cap at 10 to bound status block size.
+        self.prune_completed_items();
+    }
+
+    /// Mark completed items as relayed so the status block stops showing
+    /// their full result summaries. Called after a retrigger turn succeeds.
+    pub fn mark_relayed(&mut self, process_ids: &[String]) {
+        for item in &mut self.completed_items {
+            if process_ids.contains(&item.id) {
+                item.relayed = true;
+            }
+        }
+    }
+
+    /// Remove stale completed items: relayed items older than 5 minutes are
+    /// dropped entirely, then total count is capped at 10.
+    fn prune_completed_items(&mut self) {
+        let cutoff = Utc::now() - chrono::Duration::minutes(5);
+        self.completed_items
+            .retain(|item| !(item.relayed && item.completed_at < cutoff));
+
+        // Hard cap: keep the 10 most recent.
+        while self.completed_items.len() > 10 {
+            self.completed_items.remove(0);
         }
     }
 
@@ -145,7 +180,13 @@ impl StatusBlock {
     }
 
     /// Add a new active worker.
-    pub fn add_worker(&mut self, id: WorkerId, task: impl Into<String>, notify_on_complete: bool) {
+    pub fn add_worker(
+        &mut self,
+        id: WorkerId,
+        task: impl Into<String>,
+        notify_on_complete: bool,
+        interactive: bool,
+    ) {
         self.active_workers.push(WorkerStatus {
             id,
             task: task.into(),
@@ -153,6 +194,7 @@ impl StatusBlock {
             started_at: Utc::now(),
             notify_on_complete,
             tool_calls: 0,
+            interactive,
         });
     }
 
@@ -246,10 +288,19 @@ impl StatusBlock {
             output.push('\n');
         }
 
-        // Recently completed
-        if !self.completed_items.is_empty() {
+        // Recently completed — only show items not yet relayed to the user.
+        // Relayed items already appeared in conversation via the retrigger flow;
+        // keeping their full summaries here causes the LLM to re-summarise them.
+        let unrelayed: Vec<_> = self
+            .completed_items
+            .iter()
+            .rev()
+            .filter(|item| !item.relayed)
+            .take(5)
+            .collect();
+        if !unrelayed.is_empty() {
             output.push_str("## Recently Completed\n");
-            for item in self.completed_items.iter().rev().take(5) {
+            for item in &unrelayed {
                 let type_str = match item.item_type {
                     CompletedItemType::Branch => "branch",
                     CompletedItemType::Worker => "worker",

@@ -835,7 +835,7 @@ impl Default for CortexConfig {
     fn default() -> Self {
         Self {
             tick_interval_secs: 30,
-            worker_timeout_secs: 300,
+            worker_timeout_secs: 600,
             branch_timeout_secs: 60,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,

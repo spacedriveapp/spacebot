@@ -26,6 +26,10 @@ export const badgeStyles = cva(
           "border-transparent bg-violet-500/15 text-violet-500",
           "hover:bg-violet-500/25",
         ],
+        blue: [
+          "border-transparent bg-blue-500/15 text-blue-500",
+          "hover:bg-blue-500/25",
+        ],
         red: [
           "border-transparent bg-red-500/15 text-red-500",
           "hover:bg-red-500/25",

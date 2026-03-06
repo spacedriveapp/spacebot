@@ -4,13 +4,14 @@ A global admin chat panel that provides a direct interactive line to the cortex.
 
 ## Concept
 
-The cortex chat is not a branch of a channel — it's a persistent, agent-scoped conversation with the cortex in interactive mode. It has the full toolset (memory, shell, file, exec, browser, web search, spawn worker) and streams responses via SSE with text deltas and tool activity.
+The cortex chat is not a branch of a channel — it's a persistent, agent-scoped conversation with the cortex in interactive mode. It has the full toolset (memory, shell, file, exec, browser, web search, spawn worker) and uses SSE for response delivery and tool activity events.
 
 Key properties:
 - **One conversation per agent** — same thread regardless of which channel page you're viewing
 - **Channel context is ephemeral** — injected into the system prompt, not the chat history. Switching channels changes the context for the next message
 - **Persistent history** — stored in SQLite, survives refresh and navigation
-- **Full text streaming** — character-by-character response streaming via SSE
+- **Current behavior** — SSE emits tool activity and a final `done` message with full response text
+- **Target behavior** — character-by-character text delta streaming via SSE
 - **Full tool access** — everything except reply/react/skip (those are channel-only platform tools)
 
 ## Data Model
@@ -31,7 +32,7 @@ CREATE TABLE cortex_chat_messages (
 
 ## Phase 1: LLM Streaming Infrastructure
 
-`SpacebotModel::stream()` is currently stubbed. Streaming is required for the cortex chat UX and is reusable across the system (channel platform streaming, future features).
+`SpacebotModel::stream()` was stubbed when this design was drafted; the LLM streaming layer now exists. Remaining work is adopting stream-native Rig loops in cortex chat (`stream_prompt`) so SSE can emit text deltas instead of only final responses.
 
 ### 1a. Anthropic SSE Streaming
 
@@ -81,8 +82,8 @@ Core struct holding: agent deps, tool server, store.
 1. Load cortex chat history from DB
 2. If `channel_context_id` is provided, fetch the last 50 messages from that channel
 3. Render `cortex_chat.md.j2` with: identity context, memory bulletin, channel transcript (if any), worker capabilities
-4. Build Rig Agent with streaming: `agent.stream_prompt(user_text).with_history(&mut history).multi_turn(50)`
-5. Consume the stream, forwarding events as `CortexChatEvent` variants
+4. Current implementation: `agent.prompt(user_text).with_history(&mut history)` with SSE tool events + final response
+5. Target implementation: `agent.stream_prompt(user_text).with_history(...).multi_turn(50)` with text-delta forwarding
 6. Save both user message and assistant response to DB
 
 ### 2d. Tool Server Factory

@@ -380,7 +380,7 @@ Phase 6 — Hardening:
 
 These are validated patterns from research (see `docs/research/pattern-analysis.md`). Implement them when building the relevant module.
 
-**Tool nudging:** When an LLM responds with text instead of tool calls in the first 2 iterations, inject "Please proceed and use the available tools." Implement in `SpacebotHook.on_completion_response()`. Workers benefit most.
+**Tool nudging / outcome gate:** Workers cannot exit with a text-only response until they signal a terminal outcome via `set_status(kind: "outcome")`. If a worker returns text without an outcome signal, the hook fires `Terminate` and retries with a nudge prompt (up to 2 retries). After retries are exhausted the worker fails with `PromptCancelled`. See `docs/design-docs/tool-nudging.md`.
 
 **Fire-and-forget DB writes:** `tokio::spawn` for conversation history saves, memory writes, worker log persistence. User gets their response immediately.
 

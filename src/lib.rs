@@ -164,12 +164,21 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         task: String,
         worker_type: String,
+        interactive: bool,
     },
     WorkerStatus {
         agent_id: AgentId,
         worker_id: WorkerId,
         channel_id: Option<ChannelId>,
         status: String,
+    },
+    /// An interactive worker has entered the idle state (waiting for follow-up
+    /// input). Persisted to the DB so the frontend can show an "idle" badge
+    /// instead of "running". The worker remains in the active set.
+    WorkerIdle {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
     },
     WorkerComplete {
         agent_id: AgentId,
@@ -244,6 +253,30 @@ pub enum ProcessEvent {
         status: String,
         /// "created", "updated", or "deleted".
         action: String,
+    },
+    /// An OpenCode worker created a session, recording metadata for the web UI embed.
+    OpenCodeSessionCreated {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        session_id: String,
+        port: u16,
+    },
+    /// A finalized content part from an OpenCode worker session. Emitted on every
+    /// `message.part.updated` SSE event so the frontend can build a live transcript.
+    OpenCodePartUpdated {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        part: crate::opencode::types::OpenCodePart,
+    },
+    /// An interactive worker's initial task completed. The worker remains alive
+    /// for follow-ups, but the channel should retrigger to deliver this result.
+    /// Unlike `WorkerComplete`, the worker is NOT removed from the active set.
+    WorkerInitialResult {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        result: String,
     },
     TextDelta {
         agent_id: AgentId,

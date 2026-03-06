@@ -61,7 +61,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 
 ### Streaming
 
-Implement `SpacebotModel.stream()` with SSE parsing. The messaging adapters already handle `StreamStart`/`StreamChunk`/`StreamEnd` response types — this is purely the LLM layer.
+`SpacebotModel.stream()` is implemented with provider SSE parsing. Remaining work is wiring stream-native Rig loops (`stream_prompt`) into runtime paths that still use non-streaming `.prompt(...)` calls (for example, cortex chat and channel loops).
 
 ### Cortex Consolidation
 

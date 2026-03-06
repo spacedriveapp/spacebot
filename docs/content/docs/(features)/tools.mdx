@@ -39,7 +39,7 @@ Core tools include:
 
 Rig's `ToolServer` runs as a tokio task. You register tools on it, call `.run()` to get a `ToolServerHandle`, and pass that handle to agents. The handle is `Clone` — all clones point to the same server task.
 
-Spacebot uses four ToolServer configurations:
+Spacebot uses five ToolServer configurations:
 
 ### Channel ToolServer (per-channel)
 
@@ -94,10 +94,12 @@ Each worker gets its own isolated ToolServer, created at spawn time via `create_
 │   exec                                   │
 │   set_status  (agent_id, worker_id, ...) │
 │   browser     (if browser.enabled)       │
+│   web_search  (if configured)            │
+│   mcp_*       (registered at worker startup for MCP tools connected at that time) │
 └──────────────────────────────────────────┘
 ```
 
-`shell` and `exec` hold a shared `Sandbox` reference that wraps commands in OS-level containment (bubblewrap on Linux, sandbox-exec on macOS). `file` validates paths against the workspace boundary. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config.
+`shell` and `exec` hold a shared `Sandbox` reference that wraps commands in OS-level containment (bubblewrap on Linux, sandbox-exec on macOS). `file` validates paths against the workspace boundary. `set_status` is bound to a specific worker's ID so status updates route to the right place in the channel's status block. `browser` is conditionally registered based on the agent's `browser.enabled` config. MCP tools are fetched and registered once at worker startup for servers connected at that time.
 
 Workers don't get memory tools or channel tools. They can't talk to the user, can't recall memories, can't spawn branches. They execute their task and report status.
 
@@ -115,6 +117,24 @@ One per agent, minimal.
 
 The cortex writes consolidated memories. It doesn't need recall (it's the consolidator, not the recaller) or any channel/worker tools.
 
+### Cortex Chat ToolServer
+
+One per cortex-chat session context, full diagnostic/admin toolset.
+
+```
+┌──────────────────────────────────────────────┐
+│         Cortex Chat ToolServer              │
+├──────────────────────────────────────────────┤
+│   memory_save / memory_recall / memory_delete│
+│   channel_recall                            │
+│   task_create / task_list / task_update     │
+│   spacebot_docs / config_inspect            │
+│   shell / file / exec                       │
+│   browser     (if enabled)                  │
+│   web_search  (if configured)               │
+└──────────────────────────────────────────────┘
+```
+
 ## Factory Functions
 
 All in `src/tools.rs`:
@@ -130,11 +150,14 @@ remove_channel_tools(handle)
 // Per branch spawn — creates an isolated ToolServer with memory + channel recall tools
 create_branch_tool_server(memory_search, conversation_logger) -> ToolServerHandle
 
-// Per worker spawn — creates an isolated ToolServer (browser conditionally included)
+// Per worker spawn — creates an isolated ToolServer (browser/web_search/MCP conditionally included)
 create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
 
 // Agent startup — creates the cortex ToolServer
 create_cortex_tool_server(memory_search) -> ToolServerHandle
+
+// Cortex chat startup — creates an interactive admin ToolServer
+create_cortex_chat_tool_server(...) -> ToolServerHandle
 ```
 
 ## Tool Lifecycle
@@ -158,7 +181,7 @@ create_cortex_tool_server(memory_search) -> ToolServerHandle
 
 ### Per-process tools (created and destroyed with the process)
 
-Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
 
 ## Tool Design Patterns
 

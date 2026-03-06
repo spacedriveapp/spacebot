@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useWebChat } from "@/hooks/useWebChat";
-import type { ActiveWorker } from "@/hooks/useChannelLiveState";
+import { isOpenCodeWorker, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useLiveContext } from "@/hooks/useLiveContext";
 import { Markdown } from "@/components/Markdown";
 
@@ -11,32 +11,43 @@ interface WebChatPanelProps {
 function ActiveWorkersPanel({ workers }: { workers: ActiveWorker[] }) {
 	if (workers.length === 0) return null;
 
+	// Use neutral chrome when all workers are opencode, amber when all builtin, mixed stays amber
+	const allOpenCode = workers.every(isOpenCodeWorker);
+	const borderColor = allOpenCode ? "border-zinc-500/25 bg-zinc-500/5" : "border-amber-500/25 bg-amber-500/5";
+	const headerColor = allOpenCode ? "text-zinc-200" : "text-amber-200";
+	const dotColor = allOpenCode ? "bg-zinc-400" : "bg-amber-400";
+
 	return (
-		<div className="rounded-lg border border-amber-500/25 bg-amber-500/5 px-3 py-2">
-			<div className="mb-2 flex items-center gap-1.5 text-tiny text-amber-200">
-				<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+		<div className={`rounded-lg border px-3 py-2 ${borderColor}`}>
+			<div className={`mb-2 flex items-center gap-1.5 text-tiny ${headerColor}`}>
+				<div className={`h-1.5 w-1.5 animate-pulse rounded-full ${dotColor}`} />
 				<span>
 					{workers.length} active worker{workers.length !== 1 ? "s" : ""}
 				</span>
 			</div>
 			<div className="flex flex-col gap-1.5">
-				{workers.map((worker) => (
-					<div
-						key={worker.id}
-						className="flex min-w-0 items-center gap-2 rounded-md bg-amber-500/10 px-2.5 py-1.5 text-tiny"
-					>
-						<span className="font-medium text-amber-300">Worker</span>
-						<span className="min-w-0 flex-1 truncate text-ink-dull">
-							{worker.task}
-						</span>
-						<span className="shrink-0 text-ink-faint">{worker.status}</span>
-						{worker.currentTool && (
-							<span className="max-w-40 shrink-0 truncate text-amber-400/80">
-								{worker.currentTool}
+				{workers.map((worker) => {
+					const oc = isOpenCodeWorker(worker);
+					return (
+						<div
+							key={worker.id}
+							className={`flex min-w-0 items-center gap-2 rounded-md px-2.5 py-1.5 text-tiny ${
+								oc ? "bg-zinc-500/10" : "bg-amber-500/10"
+							}`}
+						>
+							<span className={`font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}>Worker</span>
+							<span className="min-w-0 flex-1 truncate text-ink-dull">
+								{worker.task}
 							</span>
-						)}
-					</div>
-				))}
+							<span className="shrink-0 text-ink-faint">{worker.status}</span>
+							{worker.currentTool && (
+								<span className={`max-w-40 shrink-0 truncate ${oc ? "text-zinc-400/80" : "text-amber-400/80"}`}>
+									{worker.currentTool}
+								</span>
+							)}
+						</div>
+					);
+				})}
 			</div>
 		</div>
 	);

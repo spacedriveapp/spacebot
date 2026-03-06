@@ -1,6 +1,6 @@
 import { createContext, useContext, useCallback, useRef, useState, useMemo, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type WorkerStatusEvent, type TranscriptStep } from "@/api/client";
+import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type WorkerStatusEvent, type TranscriptStep, type OpenCodePart, type OpenCodePartUpdatedEvent } from "@/api/client";
 import { generateId } from "@/lib/id";
 import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveWorker } from "@/hooks/useChannelLiveState";
@@ -21,6 +21,8 @@ interface LiveContextValue {
 	taskEventVersion: number;
 	/** Live transcript steps for running workers, keyed by worker_id. Built from SSE tool events. */
 	liveTranscripts: Record<string, TranscriptStep[]>;
+	/** Live OpenCode parts for running workers, keyed by worker_id. Parts are insertion-ordered Maps keyed by part ID. */
+	liveOpenCodeParts: Record<string, Map<string, OpenCodePart>>;
 }
 
 const LiveContext = createContext<LiveContextValue>({
@@ -34,6 +36,7 @@ const LiveContext = createContext<LiveContextValue>({
 	workerEventVersion: 0,
 	taskEventVersion: 0,
 	liveTranscripts: {},
+	liveOpenCodeParts: {},
 });
 
 export function useLiveContext() {
@@ -67,6 +70,10 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 	// Live transcript accumulator: builds TranscriptStep[] from SSE tool events
 	// for running workers. Cleared when worker completes.
 	const [liveTranscripts, setLiveTranscripts] = useState<Record<string, TranscriptStep[]>>({});
+
+	// Live OpenCode parts: per-worker insertion-ordered Map keyed by part ID.
+	// Updated via opencode_part_updated SSE events. Cleared when worker completes.
+	const [liveOpenCodeParts, setLiveOpenCodeParts] = useState<Record<string, Map<string, OpenCodePart>>>({});
 
 	// Derive flat active workers from channel live states
 	const pendingToolCallIdsRef = useRef<Record<string, Record<string, string[]>>>({});
@@ -133,6 +140,7 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		channelHandlers.worker_started(data);
 		const event = data as { worker_id: string };
 		setLiveTranscripts((prev) => ({ ...prev, [event.worker_id]: [] }));
+		setLiveOpenCodeParts((prev) => ({ ...prev, [event.worker_id]: new Map() }));
 		delete pendingToolCallIdsRef.current[event.worker_id];
 		bumpWorkerVersion();
 	}, [channelHandlers, bumpWorkerVersion]);
@@ -154,10 +162,21 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		bumpWorkerVersion();
 	}, [channelHandlers, bumpWorkerVersion]);
 
+	const wrappedWorkerIdle = useCallback((data: unknown) => {
+		channelHandlers.worker_idle(data);
+		bumpWorkerVersion();
+	}, [channelHandlers, bumpWorkerVersion]);
+
 	const wrappedWorkerCompleted = useCallback((data: unknown) => {
 		channelHandlers.worker_completed(data);
 		const event = data as { worker_id: string };
 		delete pendingToolCallIdsRef.current[event.worker_id];
+		// Clean up live OpenCode parts — persisted transcript takes over
+		setLiveOpenCodeParts((prev) => {
+			const next = { ...prev };
+			delete next[event.worker_id];
+			return next;
+		});
 		bumpWorkerVersion();
 	}, [channelHandlers, bumpWorkerVersion]);
 
@@ -218,20 +237,34 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		}
 	}, [channelHandlers, bumpWorkerVersion]);
 
+	// Handle OpenCode part updates — upsert parts into the per-worker ordered map
+	const handleOpenCodePartUpdated = useCallback((data: unknown) => {
+		const event = data as OpenCodePartUpdatedEvent;
+		setLiveOpenCodeParts((prev) => {
+			const existing = prev[event.worker_id] ?? new Map<string, OpenCodePart>();
+			const next = new Map(existing);
+			next.set(event.part.id, event.part);
+			return { ...prev, [event.worker_id]: next };
+		});
+		bumpWorkerVersion();
+	}, [bumpWorkerVersion]);
+
 	// Merge channel handlers with agent message + task handlers
 	const handlers = useMemo(
 		() => ({
 			...channelHandlers,
 			worker_started: wrappedWorkerStarted,
 			worker_status: wrappedWorkerStatus,
+			worker_idle: wrappedWorkerIdle,
 			worker_completed: wrappedWorkerCompleted,
 			tool_started: wrappedToolStarted,
 			tool_completed: wrappedToolCompleted,
+			opencode_part_updated: handleOpenCodePartUpdated,
 			agent_message_sent: handleAgentMessage,
 			agent_message_received: handleAgentMessage,
 			task_updated: bumpTaskVersion,
 		}),
-		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleAgentMessage, bumpTaskVersion],
+		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleAgentMessage, bumpTaskVersion],
 	);
 
 	const onReconnect = useCallback(() => {
@@ -253,7 +286,7 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 	const hasData = channels.length > 0 || channelsData !== undefined;
 
 	return (
-		<LiveContext.Provider value={{ liveStates, channels, connectionState, hasData, loadOlderMessages, activeLinks, activeWorkers, workerEventVersion, taskEventVersion, liveTranscripts }}>
+		<LiveContext.Provider value={{ liveStates, channels, connectionState, hasData, loadOlderMessages, activeLinks, activeWorkers, workerEventVersion, taskEventVersion, liveTranscripts, liveOpenCodeParts }}>
 			{children}
 		</LiveContext.Provider>
 	);

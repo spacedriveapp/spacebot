@@ -90,7 +90,7 @@ emergency_threshold = 0.95     # drop oldest 50%, no LLM
 # Cortex (system observer) settings.
 [defaults.cortex]
 tick_interval_secs = 30
-worker_timeout_secs = 300
+worker_timeout_secs = 600
 branch_timeout_secs = 60
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
@@ -504,7 +504,7 @@ Thresholds are fractions of `context_window`.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `tick_interval_secs` | integer | 30 | How often the cortex runtime loop runs maintenance ticks while continuously observing events |
-| `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
+| `worker_timeout_secs` | integer | 600 | Worker idle timeout before cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
 | `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
 | `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |

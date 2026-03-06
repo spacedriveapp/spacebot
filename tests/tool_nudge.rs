@@ -13,9 +13,10 @@ fn tool_nudge_reason_constant_is_valid() {
         spacebot::hooks::SpacebotHook::TOOL_NUDGE_REASON,
         "spacebot_tool_nudge_retry"
     );
-    assert_eq!(
-        spacebot::hooks::SpacebotHook::TOOL_NUDGE_PROMPT,
-        "Please proceed and use the available tools."
+    // Prompt should instruct the worker to continue and signal outcome.
+    assert!(
+        spacebot::hooks::SpacebotHook::TOOL_NUDGE_PROMPT.contains("set_status"),
+        "Nudge prompt should reference set_status for outcome signaling"
     );
     assert_eq!(spacebot::hooks::SpacebotHook::TOOL_NUDGE_MAX_RETRIES, 2);
 }

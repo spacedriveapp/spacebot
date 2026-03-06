@@ -47,11 +47,32 @@ impl SetStatusTool {
 #[error("Failed to set status: {0}")]
 pub struct SetStatusError(String);
 
+/// The kind of status update.
+///
+/// `progress` (default) reports intermediate progress. `outcome` signals that
+/// the worker has reached a terminal result — the task is done (or failed in a
+/// way the worker can describe). Workers **must** emit an `outcome` status
+/// before finishing; the system will nudge them back to work if they try to
+/// stop without one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum StatusKind {
+    /// Intermediate progress update (default).
+    #[default]
+    Progress,
+    /// Terminal outcome — the task is complete or has a definitive result.
+    Outcome,
+}
+
 /// Arguments for set status tool.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SetStatusArgs {
     /// The status message to report.
     pub status: String,
+    /// The kind of status update: "progress" (default) for intermediate
+    /// updates, "outcome" when the task has reached a terminal result.
+    #[serde(default)]
+    pub kind: StatusKind,
 }
 
 /// Output from set status tool.
@@ -63,6 +84,8 @@ pub struct SetStatusOutput {
     pub worker_id: WorkerId,
     /// The status that was set.
     pub status: String,
+    /// The kind of status that was set.
+    pub kind: StatusKind,
 }
 
 impl Tool for SetStatusTool {
@@ -81,7 +104,13 @@ impl Tool for SetStatusTool {
                 "properties": {
                     "status": {
                         "type": "string",
-                        "description": "A concise status message describing your current progress (1-2 sentences)"
+                        "description": "A concise status message describing your current progress or final result (1-2 sentences)"
+                    },
+                    "kind": {
+                        "type": "string",
+                        "enum": ["progress", "outcome"],
+                        "default": "progress",
+                        "description": "Use \"progress\" for intermediate updates. Use \"outcome\" when the task has reached a terminal result (success or failure) and you are ready to finish."
                     }
                 },
                 "required": ["status"]
@@ -119,6 +148,7 @@ impl Tool for SetStatusTool {
             success: true,
             worker_id: self.worker_id,
             status,
+            kind: args.kind,
         })
     }
 }

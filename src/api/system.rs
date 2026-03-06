@@ -88,6 +88,7 @@ pub(super) async fn events_sse(
                             ApiEvent::TypingState { .. } => "typing_state",
                             ApiEvent::WorkerStarted { .. } => "worker_started",
                             ApiEvent::WorkerStatusUpdate { .. } => "worker_status",
+                            ApiEvent::WorkerIdle { .. } => "worker_idle",
                             ApiEvent::WorkerCompleted { .. } => "worker_completed",
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
@@ -97,6 +98,7 @@ pub(super) async fn events_sse(
                             ApiEvent::AgentMessageSent { .. } => "agent_message_sent",
                             ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
                             ApiEvent::TaskUpdated { .. } => "task_updated",
+                            ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)
