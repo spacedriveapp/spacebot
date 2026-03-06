@@ -374,7 +374,7 @@ impl CompletionModel for SpacebotModel {
             let agent_label = self.agent_id.as_deref().unwrap_or("unknown");
             let tier_label = self.process_type.as_deref().unwrap_or("unknown");
             let worker_label = match (tier_label, self.worker_type.as_deref()) {
-                ("worker", Some(wt)) => wt,
+                ("worker", Some(worker_type)) => worker_type,
                 ("worker", None) => "unknown",
                 _ => "",
             };

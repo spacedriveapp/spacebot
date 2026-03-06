@@ -1024,6 +1024,7 @@ mod tests {
             Arc::<str>::from("agent"),
             Some(Arc::<str>::from("channel")),
             None,
+            "builtin",
             async {
                 Err::<String, crate::Error>(
                     crate::error::AgentError::Cancelled {
@@ -1069,6 +1070,7 @@ mod tests {
             Arc::<str>::from("agent"),
             Some(channel_id.clone()),
             None,
+            "builtin",
             async { Ok::<String, crate::Error>("result".to_string()) },
         );
 

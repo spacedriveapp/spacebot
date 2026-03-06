@@ -68,7 +68,7 @@ The `tier` label corresponds to the process type making the request: `channel`, 
 | `spacebot_mcp_tools_registered`                   | Gauge     | server_name            | Tools registered per MCP server     |
 | `spacebot_mcp_connection_attempts_total`          | Counter   | server_name, result    | MCP connection attempts             |
 | `spacebot_mcp_tool_calls_total`                   | Counter   | server_name, tool_name | MCP tool calls                      |
-| `spacebot_mcp_reconnects_total`                   | Counter   | server_name            | MCP reconnection attempts           |
+| `spacebot_mcp_reconnects_total`                   | Counter   | server_name            | Successful MCP reconnections        |
 | `spacebot_mcp_connection_duration_seconds`        | Histogram | server_name            | MCP connection establishment time   |
 | `spacebot_mcp_tool_call_duration_seconds`         | Histogram | server_name, tool_name | MCP tool call duration              |
 
