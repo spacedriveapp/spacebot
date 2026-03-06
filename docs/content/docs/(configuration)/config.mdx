@@ -81,6 +81,26 @@ coding = "anthropic/claude-sonnet-4-20250514"
 [defaults.routing.fallbacks]
 "anthropic/claude-sonnet-4-20250514" = ["anthropic/claude-haiku-4.5-20250514"]
 
+# Rig request-semantics and streaming/concurrency alignment controls.
+[defaults.rig_alignment]
+request_semantics_mode = "shadow"      # "off" | "shadow" | "enforced"
+channel_streaming = false              # stream channel model deltas through adapter placeholders
+cortex_chat_streaming = false          # stream cortex chat SSE `text_delta` events
+worker_read_only_tool_concurrency = 1  # standard workers still stay sequential unless the exposed surface is fully read-only
+worker_max_tool_concurrency = 4        # hard cap for per-request tool concurrency
+worker_read_only_tool_allowlist = [
+  "read_skill",
+  "spacebot_docs",
+  "memory_recall",
+  "channel_recall",
+  "web_search",
+  "worker_inspect",
+  "email_search",
+  "config_inspect"
+]
+output_schema_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
+tool_choice_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
+
 # Context compaction thresholds (fraction of context_window).
 [defaults.compaction]
 background_threshold = 0.80    # background summarization
@@ -249,6 +269,7 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | `max_concurrent_branches` | Yes | Next branch spawn checks new limit |
 | Browser config | Yes | Next worker spawn uses new config |
 | Warmup config | Yes | Next warmup pass uses new values |
+| Rig-alignment config | Yes | Next LLM request/worker turn reads new semantics, streaming, and tool-concurrency settings |
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
@@ -487,6 +508,138 @@ Map of model names to ordered fallback chains. Used when the primary model retur
 ```toml
 [defaults.routing.fallbacks]
 "anthropic/claude-sonnet-4-20250514" = ["anthropic/claude-haiku-4.5-20250514"]
+```
+
+### `[defaults.rig_alignment]`
+
+Controls how Spacebot forwards Rig request semantics (`tool_choice`, `output_schema`) to providers, and whether channel/cortex streaming plus read-only worker tool concurrency are enabled.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `request_semantics_mode` | string | `"shadow"` | `off`: never forward `tool_choice`/`output_schema`; `shadow`: apply only when supported; `enforced`: fail unsupported requests explicitly |
+| `channel_streaming` | bool | false | Enables channel `stream_prompt(...)` execution and adapter placeholder streaming |
+| `cortex_chat_streaming` | bool | false | Enables cortex-chat `stream_prompt(...)` and SSE `text_delta` events |
+| `worker_read_only_tool_concurrency` | integer | 1 | Requested per-request tool concurrency for workers (clamped to `worker_max_tool_concurrency`; standard workers still stay sequential unless their exposed surface is fully read-only) |
+| `worker_max_tool_concurrency` | integer | 4 | Hard upper bound for worker request-level tool concurrency |
+| `worker_read_only_tool_allowlist` | string[] | read-only defaults | Tools that are eligible for concurrent execution; any non-allowlisted exposed tool forces sequential execution |
+| `output_schema_provider_allowlist` | string[] | `["openai","openai-chatgpt","anthropic"]` | Provider IDs allowed to receive structured output schema fields |
+| `tool_choice_provider_allowlist` | string[] | `["openai","openai-chatgpt","anthropic"]` | Provider IDs allowed to receive tool-choice fields |
+
+`request_semantics_mode` behavior:
+
+- `off`: disables forwarding of both request semantics fields.
+- `shadow`: evaluates support per provider and request shape, applies only supported fields, and logs the decision.
+- `enforced`: same evaluation, but unsupported requested fields return an explicit provider error.
+
+Worker concurrency safety behavior:
+
+- Concurrency remains sequential unless **all** exposed worker tools for that request are allowlisted.
+- If the configured allowlist itself contains mutable tools, Spacebot warns and forces sequential execution.
+- The default worker surface still exposes mutating tools such as `shell`, `file`, `exec`, `task_update`, and `set_status`, so `worker_read_only_tool_concurrency > 1` only takes effect for specialized worker surfaces that expose solely allowlisted read-only tools.
+
+Rig-alignment observability:
+
+- `spacebot_rig_request_semantics_total{process,provider,field,decision}`
+- `spacebot_rig_stream_sessions_total{process,provider,mode}`
+- `spacebot_rig_time_to_first_delta_ms{process,provider}`
+- `spacebot_rig_tool_concurrency_total{worker_type,concurrency}`
+- `spacebot_rig_drift_detected_total{surface}`
+
+## Rig Alignment Rollout Runbook
+
+Use config-first rollout and rollback. Do not enable multiple new knobs at once.
+
+### Stage 1: Semantics Shadow Mode
+
+- Enable:
+  `request_semantics_mode = "shadow"`
+- Evidence:
+  `cargo test forwards_ -- --nocapture`
+  `cargo test rejects_unsupported_semantics_enforced -- --nocapture`
+  `rg "request semantic decision" logs debug.log -g '*.log'`
+- Rollback trigger:
+  supported providers start logging `decision=shadowed` for requests that should apply cleanly, or provider errors increase unexpectedly.
+- Rollback:
+  `request_semantics_mode = "off"`
+
+### Stage 2: Semantics Enforced In Staging
+
+- Enable:
+  `request_semantics_mode = "enforced"`
+- Evidence:
+  `cargo test rig_parity -- --nocapture`
+  `rg "request semantic decision|request semantics rejected" logs debug.log -g '*.log'`
+- Rollback trigger:
+  staging traffic hits explicit compatibility errors for expected production routes.
+- Rollback:
+  `request_semantics_mode = "shadow"`
+
+### Stage 3: Channel Streaming Canary
+
+- Enable:
+  `channel_streaming = true`
+- Evidence:
+  `cargo test channel_streaming_reply_terminal -- --nocapture`
+  `cargo test adapter_streaming_throttle -- --nocapture`
+  `rg "stream_mode|time_to_first_delta_ms|terminal_reason" logs debug.log -g '*.log'`
+- Rollback trigger:
+  missing final replies, placeholder cleanup failures, or adapter edit throttling regressions.
+- Rollback:
+  `channel_streaming = false`
+
+### Stage 4: Cortex Chat Streaming Canary
+
+- Enable:
+  `cortex_chat_streaming = true`
+- Evidence:
+  `cargo test cortex_chat_streaming_persists_final -- --nocapture`
+  `rg "stream_mode|time_to_first_delta_ms" logs debug.log -g '*.log'`
+- Rollback trigger:
+  partial SSE events stop arriving or final assistant responses stop persisting.
+- Rollback:
+  `cortex_chat_streaming = false`
+
+### Stage 5: Worker Concurrency Canary
+
+- Enable:
+  `worker_read_only_tool_concurrency = 2`
+  Keep `worker_max_tool_concurrency = 4` unless a smaller cap is required.
+- Evidence:
+  `cargo test worker_concurrency_allowlist -- --nocapture`
+  `cargo test worker_concurrency_reduces_wall_clock -- --nocapture`
+  `rg "worker tool concurrency resolved|forcing sequential execution" logs debug.log -g '*.log'`
+- Rollback trigger:
+  any mutable or mixed tool surface reaches concurrency > 1, or tool error rates regress during canary.
+- Rollback:
+  `worker_read_only_tool_concurrency = 1`
+
+## Rig Upgrade Checklist
+
+Run this parity suite on every Rig upgrade before merge:
+
+```bash
+cargo test forwards_ -- --nocapture
+cargo test rejects_unsupported_semantics_enforced -- --nocapture
+cargo test channel_streaming_reply_terminal -- --nocapture
+cargo test cortex_chat_streaming_persists_final -- --nocapture
+cargo test adapter_streaming_throttle -- --nocapture
+cargo test worker_concurrency_allowlist -- --nocapture
+cargo test worker_concurrency_reduces_wall_clock -- --nocapture
+cargo test rig_parity -- --nocapture
+just preflight
+just gate-pr
+```
+
+```toml
+[defaults.rig_alignment]
+request_semantics_mode = "enforced"
+channel_streaming = true
+cortex_chat_streaming = true
+worker_read_only_tool_concurrency = 3
+worker_max_tool_concurrency = 4
+worker_read_only_tool_allowlist = ["read_skill", "spacebot_docs", "web_search"]
+output_schema_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
+tool_choice_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
 ```
 
 ### `[defaults.compaction]`

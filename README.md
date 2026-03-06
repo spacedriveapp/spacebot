@@ -197,6 +197,57 @@ channel = "my-provider/my-model"
 
 Additional built-in providers include **Kilo Gateway**, **OpenCode Go**, **NVIDIA**, **MiniMax**, **Moonshot AI (Kimi)**, and **Z.AI Coding Plan** — configure with `kilo_key`, `opencode_go_key`, `nvidia_key`, `minimax_key`, `moonshot_key`, or `zai_coding_plan_key` in `[llm]`.
 
+### Rig Alignment Controls
+
+Spacebot includes a `defaults.rig_alignment` block for request-semantics forwarding, channel/cortex streaming, and read-only worker tool concurrency.
+
+- **Request semantics mode** — `off`, `shadow`, or `enforced` for `tool_choice` and `output_schema` forwarding.
+- **Provider allowlists** — defaults allow `openai`, `openai-chatgpt`, and `anthropic` for `tool_choice` and `output_schema`.
+- **Streaming toggles** — `channel_streaming` and `cortex_chat_streaming` are opt-in and disabled by default.
+- **Worker concurrency guardrails** — concurrency only applies when the exposed tool set is fully read-only and allowlisted; otherwise Spacebot forces sequential execution.
+
+```toml
+[defaults.rig_alignment]
+request_semantics_mode = "shadow"      # "off" | "shadow" | "enforced"
+channel_streaming = false
+cortex_chat_streaming = false
+worker_read_only_tool_concurrency = 1      # standard workers still stay sequential unless the exposed surface is fully read-only
+worker_max_tool_concurrency = 4
+worker_read_only_tool_allowlist = [
+  "read_skill",
+  "spacebot_docs",
+  "memory_recall",
+  "channel_recall",
+  "web_search",
+  "worker_inspect",
+  "email_search",
+  "config_inspect"
+]
+output_schema_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
+tool_choice_provider_allowlist = ["openai", "openai-chatgpt", "anthropic"]
+```
+
+In `enforced` mode, unsupported semantics fail closed; in `shadow` mode they are skipped with structured decision logs.
+
+The default worker surface still exposes mutating tools such as `shell`, `file`, `exec`, `task_update`, and `set_status`, so `worker_read_only_tool_concurrency > 1` only takes effect for specialized worker surfaces that expose solely allowlisted read-only tools.
+
+Rig-alignment observability is exposed through dedicated `spacebot_rig_*` Prometheus metrics documented in [METRICS.md](./METRICS.md), plus structured logs for request-semantic decisions, stream mode, first-delta latency, worker concurrency, and terminal delivery reason.
+
+For rollout, use the staged runbook in [`docs/content/docs/(configuration)/config.mdx`](./docs/content/docs/(configuration)/config.mdx): start with `request_semantics_mode = "shadow"`, then enforce in staging, then canary `channel_streaming`, `cortex_chat_streaming`, and worker concurrency one step at a time.
+
+When bumping Rig, rerun the rig-alignment parity suite before merging:
+
+```bash
+cargo test forwards_ -- --nocapture
+cargo test rejects_unsupported_semantics_enforced -- --nocapture
+cargo test channel_streaming_reply_terminal -- --nocapture
+cargo test cortex_chat_streaming_persists_final -- --nocapture
+cargo test adapter_streaming_throttle -- --nocapture
+cargo test worker_concurrency_allowlist -- --nocapture
+cargo test worker_concurrency_reduces_wall_clock -- --nocapture
+cargo test rig_parity -- --nocapture
+```
+
 ### Skills
 
 Extensible skill system integrated with [skills.sh](https://skills.sh):

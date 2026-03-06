@@ -265,6 +265,7 @@ impl<'de> Deserialize<'de> for TomlLlmConfig {
 #[derive(Deserialize, Default)]
 pub(super) struct TomlDefaultsConfig {
     pub(super) routing: Option<TomlRoutingConfig>,
+    pub(super) rig_alignment: Option<TomlRigAlignmentConfig>,
     pub(super) max_concurrent_branches: Option<usize>,
     pub(super) max_concurrent_workers: Option<usize>,
     pub(super) max_turns: Option<usize>,
@@ -304,6 +305,18 @@ pub(super) struct TomlRoutingConfig {
     #[serde(default)]
     pub(super) task_overrides: HashMap<String, String>,
     pub(super) fallbacks: Option<HashMap<String, Vec<String>>>,
+}
+
+#[derive(Deserialize, Clone)]
+pub(super) struct TomlRigAlignmentConfig {
+    pub(super) request_semantics_mode: Option<String>,
+    pub(super) channel_streaming: Option<bool>,
+    pub(super) cortex_chat_streaming: Option<bool>,
+    pub(super) worker_read_only_tool_concurrency: Option<usize>,
+    pub(super) worker_max_tool_concurrency: Option<usize>,
+    pub(super) worker_read_only_tool_allowlist: Option<Vec<String>>,
+    pub(super) output_schema_provider_allowlist: Option<Vec<String>>,
+    pub(super) tool_choice_provider_allowlist: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -435,6 +448,7 @@ pub(super) struct TomlAgentConfig {
     pub(super) warmup: Option<TomlWarmupConfig>,
     pub(super) browser: Option<TomlBrowserConfig>,
     pub(super) channel: Option<TomlChannelConfig>,
+    pub(super) rig_alignment: Option<TomlRigAlignmentConfig>,
     pub(super) mcp: Option<Vec<TomlMcpServerConfig>>,
     pub(super) brave_search_key: Option<String>,
     pub(super) cron_timezone: Option<String>,

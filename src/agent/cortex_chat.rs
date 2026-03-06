@@ -10,8 +10,13 @@ use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::{AgentDeps, ProcessId, ProcessType};
 
+use futures::StreamExt as _;
+use rig::agent::MultiTurnStreamItem;
 use rig::agent::{AgentBuilder, HookAction, PromptHook, ToolCallHookAction};
-use rig::completion::{AssistantContent, CompletionModel, CompletionResponse, Message, Prompt};
+use rig::completion::{
+    AssistantContent, CompletionModel, CompletionResponse, GetTokenUsage, Message, Prompt,
+};
+use rig::streaming::StreamingPrompt;
 use rig::tool::server::ToolServerHandle;
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -38,6 +43,8 @@ pub struct CortexChatMessage {
 pub enum CortexChatEvent {
     /// The cortex is processing (before LLM response).
     Thinking,
+    /// A partial text delta arrived from the model stream.
+    TextDelta { text_delta: String },
     /// A tool call started.
     ToolStarted { tool: String },
     /// A tool call completed.
@@ -79,6 +86,14 @@ impl CortexChatHook {
     async fn send(&self, event: CortexChatEvent) {
         let _ = self.event_tx.send(event).await;
     }
+
+    fn try_send(&self, event: CortexChatEvent) {
+        if let Err(error) = self.event_tx.try_send(event)
+            && matches!(error, tokio::sync::mpsc::error::TrySendError::Full(_))
+        {
+            tracing::debug!("dropping cortex chat streaming event because the SSE channel is full");
+        }
+    }
 }
 
 fn try_acquire_send_lock(
@@ -103,7 +118,89 @@ async fn persist_and_emit_cortex_chat_error(
     let _ = event_tx.send(CortexChatEvent::Error { message }).await;
 }
 
+async fn persist_and_emit_cortex_chat_done(
+    store: &CortexChatStore,
+    event_tx: &mpsc::Sender<CortexChatEvent>,
+    thread_id: &str,
+    channel_ref: Option<&str>,
+    response: String,
+) {
+    let _ = store
+        .save_message(thread_id, "assistant", &response, channel_ref)
+        .await;
+    let _ = event_tx
+        .send(CortexChatEvent::Done {
+            full_text: response,
+        })
+        .await;
+}
+
+fn streaming_error_to_prompt_error(
+    error: rig::agent::StreamingError,
+) -> rig::completion::PromptError {
+    match error {
+        rig::agent::StreamingError::Prompt(error) => *error,
+        rig::agent::StreamingError::Completion(error) => {
+            rig::completion::PromptError::CompletionError(error)
+        }
+        rig::agent::StreamingError::Tool(error) => rig::completion::PromptError::ToolError(error),
+    }
+}
+
+fn missing_stream_final_response_error() -> rig::completion::PromptError {
+    rig::completion::PromptError::CompletionError(rig::completion::CompletionError::ProviderError(
+        "stream ended without final response".to_string(),
+    ))
+}
+
+async fn prompt_once_streaming<M, P>(
+    agent: &rig::agent::Agent<M>,
+    hook: P,
+    history: Vec<Message>,
+    prompt: &str,
+) -> std::result::Result<String, rig::completion::PromptError>
+where
+    M: CompletionModel + 'static,
+    M::StreamingResponse: GetTokenUsage,
+    P: rig::agent::PromptHook<M> + 'static,
+{
+    let mut stream = agent
+        .stream_prompt(prompt)
+        .with_hook(hook)
+        .with_history(history)
+        .await;
+
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
+                return Ok(final_response.response().to_string());
+            }
+            Ok(_) => {}
+            Err(error) => return Err(streaming_error_to_prompt_error(error)),
+        }
+    }
+
+    Err(missing_stream_final_response_error())
+}
+
 impl<M: CompletionModel> PromptHook<M> for CortexChatHook {
+    async fn on_text_delta(&self, text_delta: &str, aggregated_text: &str) -> HookAction {
+        let action = <SpacebotHook as PromptHook<M>>::on_text_delta(
+            &self.spacebot_hook,
+            text_delta,
+            aggregated_text,
+        )
+        .await;
+        if !matches!(action, HookAction::Continue) {
+            return action;
+        }
+
+        self.try_send(CortexChatEvent::TextDelta {
+            text_delta: text_delta.to_string(),
+        });
+        HookAction::Continue
+    }
+
     async fn on_tool_call(
         &self,
         tool_name: &str,
@@ -326,6 +423,7 @@ impl CortexChatSession {
         let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(self.deps.agent_id.as_ref(), "cortex")
+            .with_rig_alignment((**self.deps.runtime_config.rig_alignment.load()).clone())
             .with_routing(routing.as_ref().clone());
 
         let agent = AgentBuilder::new(model)
@@ -357,29 +455,39 @@ impl CortexChatSession {
                 .branch_timeout_secs
                 .max(1),
         );
+        let streaming_enabled = self
+            .deps
+            .runtime_config
+            .rig_alignment
+            .load()
+            .cortex_chat_streaming;
 
         tokio::spawn(async move {
             let _send_guard = send_guard;
             let channel_ref = channel_context_id.as_deref();
-            let prompt_result = tokio::time::timeout(
-                prompt_timeout,
-                agent
-                    .prompt(&user_text)
-                    .with_hook(hook.clone())
-                    .with_history(&mut history),
-            )
+            let prompt_result = tokio::time::timeout(prompt_timeout, async move {
+                if streaming_enabled {
+                    prompt_once_streaming(&agent, hook.clone(), history, &user_text).await
+                } else {
+                    agent
+                        .prompt(&user_text)
+                        .with_hook(hook.clone())
+                        .with_history(&mut history)
+                        .await
+                }
+            })
             .await;
 
             match prompt_result {
                 Ok(Ok(response)) => {
-                    let _ = store
-                        .save_message(&thread_id, "assistant", &response, channel_ref)
-                        .await;
-                    let _ = event_tx
-                        .send(CortexChatEvent::Done {
-                            full_text: response,
-                        })
-                        .await;
+                    persist_and_emit_cortex_chat_done(
+                        &store,
+                        &event_tx,
+                        &thread_id,
+                        channel_ref,
+                        response,
+                    )
+                    .await;
                 }
                 Ok(Err(error)) => {
                     let error_text = format!("Cortex chat error: {error}");
@@ -514,7 +622,16 @@ impl CortexChatSession {
 
 #[cfg(test)]
 mod tests {
-    use super::{CortexChatSendError, try_acquire_send_lock};
+    use super::{
+        CortexChatEvent, CortexChatHook, CortexChatSendError, CortexChatStore,
+        missing_stream_final_response_error, persist_and_emit_cortex_chat_done,
+        try_acquire_send_lock,
+    };
+    use crate::hooks::SpacebotHook;
+    use crate::llm::SpacebotModel;
+    use crate::{ProcessId, ProcessType};
+    use rig::agent::{HookAction, PromptHook};
+    use sqlx::SqlitePool;
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -560,6 +677,145 @@ mod tests {
         assert!(
             second.is_ok(),
             "single-flight lock should be released after timeout path"
+        );
+    }
+
+    #[tokio::test]
+    async fn cortex_chat_streaming_persists_final() {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+        sqlx::query(
+            "CREATE TABLE cortex_chat_messages ( \
+                id TEXT PRIMARY KEY, \
+                thread_id TEXT NOT NULL, \
+                role TEXT NOT NULL, \
+                content TEXT NOT NULL, \
+                channel_context TEXT, \
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP \
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("cortex chat table should be created");
+
+        let store = CortexChatStore::new(pool);
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+        let (process_event_tx, _process_event_rx) = tokio::sync::broadcast::channel(8);
+
+        let spacebot_hook = SpacebotHook::new(
+            Arc::from("agent"),
+            ProcessId::Worker(uuid::Uuid::new_v4()),
+            ProcessType::Cortex,
+            None,
+            process_event_tx,
+        );
+        let hook = CortexChatHook::new(event_tx.clone(), spacebot_hook);
+
+        let hook_action = <CortexChatHook as PromptHook<SpacebotModel>>::on_text_delta(
+            &hook,
+            "partial ",
+            "partial response",
+        )
+        .await;
+        assert!(
+            matches!(hook_action, HookAction::Continue),
+            "streaming text deltas should continue"
+        );
+
+        let final_response = "final response".to_string();
+        persist_and_emit_cortex_chat_done(&store, &event_tx, "thread-1", None, final_response)
+            .await;
+
+        let first_event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("should receive first event")
+            .expect("first event should exist");
+        match first_event {
+            CortexChatEvent::TextDelta { text_delta } => {
+                assert_eq!(text_delta, "partial ");
+            }
+            other => panic!("expected TextDelta event, got {other:?}"),
+        }
+
+        let second_event = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .expect("should receive done event")
+            .expect("done event should exist");
+        match second_event {
+            CortexChatEvent::Done { full_text } => {
+                assert_eq!(full_text, "final response");
+            }
+            other => panic!("expected Done event, got {other:?}"),
+        }
+
+        let history = store
+            .load_history("thread-1", 10)
+            .await
+            .expect("history should load");
+        assert_eq!(
+            history.len(),
+            1,
+            "assistant final response should be persisted"
+        );
+        assert_eq!(history[0].role, "assistant");
+        assert_eq!(history[0].content, "final response");
+    }
+
+    #[tokio::test]
+    async fn text_delta_backpressure_does_not_timeout_prompt() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1);
+        event_tx
+            .send(CortexChatEvent::Thinking)
+            .await
+            .expect("prefill event channel");
+        let (process_event_tx, _process_event_rx) = tokio::sync::broadcast::channel(8);
+
+        let spacebot_hook = SpacebotHook::new(
+            Arc::from("agent"),
+            ProcessId::Worker(uuid::Uuid::new_v4()),
+            ProcessType::Cortex,
+            None,
+            process_event_tx,
+        );
+        let hook = CortexChatHook::new(event_tx, spacebot_hook);
+
+        let action = tokio::time::timeout(
+            Duration::from_millis(20),
+            <CortexChatHook as PromptHook<SpacebotModel>>::on_text_delta(
+                &hook,
+                "partial ",
+                "partial response",
+            ),
+        )
+        .await
+        .expect("text delta should not block on a full SSE channel");
+
+        assert!(matches!(action, HookAction::Continue));
+        let first_event = event_rx
+            .recv()
+            .await
+            .expect("prefilled event should remain");
+        assert!(matches!(first_event, CortexChatEvent::Thinking));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "full SSE channel should drop text deltas instead of backpressuring the prompt"
+        );
+    }
+
+    #[test]
+    fn missing_stream_final_response_is_an_error() {
+        let error = missing_stream_final_response_error();
+        assert!(matches!(
+            error,
+            rig::completion::PromptError::CompletionError(
+                rig::completion::CompletionError::ProviderError(_)
+            )
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("stream ended without final response")
         );
     }
 }

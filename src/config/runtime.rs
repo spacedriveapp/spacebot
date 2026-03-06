@@ -6,7 +6,8 @@ use arc_swap::ArcSwap;
 use super::{
     BrowserConfig, ChannelConfig, CoalesceConfig, CompactionConfig, Config, CortexConfig,
     DefaultsConfig, IngestionConfig, McpServerConfig, MemoryPersistenceConfig, OpenCodeConfig,
-    ResolvedAgentConfig, WarmupConfig, WarmupStatus, WorkReadiness, evaluate_work_readiness,
+    ResolvedAgentConfig, RigAlignmentConfig, WarmupConfig, WarmupStatus, WorkReadiness,
+    evaluate_work_readiness,
 };
 use crate::llm::routing::RoutingConfig;
 use crate::tools::browser::SharedBrowserHandle;
@@ -27,6 +28,7 @@ pub struct RuntimeConfig {
     pub coalesce: ArcSwap<CoalesceConfig>,
     pub ingestion: ArcSwap<IngestionConfig>,
     pub channel_config: ArcSwap<ChannelConfig>,
+    pub rig_alignment: ArcSwap<RigAlignmentConfig>,
     pub max_turns: ArcSwap<usize>,
     pub branch_max_turns: ArcSwap<usize>,
     pub context_window: ArcSwap<usize>,
@@ -103,6 +105,7 @@ impl RuntimeConfig {
             coalesce: ArcSwap::from_pointee(agent_config.coalesce),
             ingestion: ArcSwap::from_pointee(agent_config.ingestion),
             channel_config: ArcSwap::from_pointee(agent_config.channel),
+            rig_alignment: ArcSwap::from_pointee(agent_config.rig_alignment.clone()),
             max_turns: ArcSwap::from_pointee(agent_config.max_turns),
             branch_max_turns: ArcSwap::from_pointee(agent_config.branch_max_turns),
             context_window: ArcSwap::from_pointee(agent_config.context_window),
@@ -242,6 +245,8 @@ impl RuntimeConfig {
                 .unwrap_or(current.as_ref().listen_only_mode);
             Arc::new(next)
         });
+        self.rig_alignment
+            .store(Arc::new(resolved.rig_alignment.clone()));
         self.max_turns.store(Arc::new(resolved.max_turns));
         self.branch_max_turns
             .store(Arc::new(resolved.branch_max_turns));

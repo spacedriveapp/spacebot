@@ -41,10 +41,12 @@ pub struct TelegramAdapter {
 }
 
 /// Tracks an in-progress streaming message edit.
+#[derive(Clone)]
 struct ActiveStream {
     chat_id: ChatId,
     message_id: MessageId,
     last_edit: Instant,
+    text: String,
 }
 
 /// Telegram's per-message character limit.
@@ -55,6 +57,22 @@ const FORMATTED_SPLIT_LENGTH: usize = MAX_MESSAGE_LENGTH / 2;
 
 /// Minimum interval between streaming edits to avoid rate limits.
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+async fn with_removed_active_stream<T, F, Fut>(
+    active_messages: &RwLock<HashMap<String, ActiveStream>>,
+    conversation_id: &str,
+    cleanup: F,
+) -> Option<T>
+where
+    F: FnOnce(ActiveStream) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let stream = {
+        let mut active_messages = active_messages.write().await;
+        active_messages.remove(conversation_id)
+    }?;
+    Some(cleanup(stream).await)
+}
 
 impl TelegramAdapter {
     pub fn new(
@@ -303,7 +321,70 @@ impl Messaging for TelegramAdapter {
         match response {
             OutboundResponse::Text(text) => {
                 self.stop_typing(&message.conversation_id).await;
-                send_formatted(&self.bot, chat_id, &text, None).await?;
+                let chunks = split_message(&text, MAX_MESSAGE_LENGTH);
+                let active_stream = self
+                    .active_messages
+                    .read()
+                    .await
+                    .get(&message.conversation_id)
+                    .cloned();
+
+                if let Some(stream) = active_stream {
+                    let (first_chunk, remaining_chunks) = stream_finalization_chunks(&chunks);
+                    let html = markdown_to_telegram_html(first_chunk);
+                    let finalized: std::result::Result<(), RequestError> = if let Err(html_error) =
+                        self.bot
+                            .edit_message_text(stream.chat_id, stream.message_id, &html)
+                            .parse_mode(ParseMode::Html)
+                            .send()
+                            .await
+                    {
+                        tracing::debug!(
+                            %html_error,
+                            "HTML finalize edit failed, retrying as plain text"
+                        );
+                        self.bot
+                            .edit_message_text(stream.chat_id, stream.message_id, first_chunk)
+                            .send()
+                            .await
+                            .map(|_| ())
+                    } else {
+                        Ok(())
+                    };
+
+                    if let Err(error) = finalized {
+                        tracing::warn!(
+                            %error,
+                            "failed to finalize streaming message, falling back to normal send"
+                        );
+                        if let Err(delete_error) = self
+                            .bot
+                            .delete_message(stream.chat_id, stream.message_id)
+                            .send()
+                            .await
+                        {
+                            tracing::warn!(
+                                %delete_error,
+                                "failed to delete telegram stream placeholder after finalize fallback"
+                            );
+                        }
+                        self.active_messages
+                            .write()
+                            .await
+                            .remove(&message.conversation_id);
+                        send_formatted(&self.bot, chat_id, &text, None).await?;
+                    } else {
+                        self.active_messages
+                            .write()
+                            .await
+                            .remove(&message.conversation_id);
+                        for chunk in remaining_chunks {
+                            send_formatted(&self.bot, chat_id, chunk, None).await?;
+                        }
+                    }
+                } else {
+                    send_formatted(&self.bot, chat_id, &text, None).await?;
+                }
             }
             OutboundResponse::RichMessage { text, poll, .. } => {
                 self.stop_typing(&message.conversation_id).await;
@@ -427,10 +508,13 @@ impl Messaging for TelegramAdapter {
             }
             OutboundResponse::StreamStart => {
                 self.stop_typing(&message.conversation_id).await;
+                let reply_to = self.extract_message_id(message).ok();
 
-                let placeholder = self
-                    .bot
-                    .send_message(chat_id, "...")
+                let mut request = self.bot.send_message(chat_id, "...");
+                if let Some(reply_id) = reply_to {
+                    request = request.reply_parameters(ReplyParameters::new(reply_id));
+                }
+                let placeholder = request
                     .send()
                     .await
                     .context("failed to send stream placeholder")?;
@@ -441,49 +525,71 @@ impl Messaging for TelegramAdapter {
                         chat_id,
                         message_id: placeholder.id,
                         last_edit: Instant::now(),
+                        text: String::new(),
                     },
                 );
             }
             OutboundResponse::StreamChunk(text) => {
-                let mut active = self.active_messages.write().await;
-                if let Some(stream) = active.get_mut(&message.conversation_id) {
-                    if stream.last_edit.elapsed() < STREAM_EDIT_INTERVAL {
-                        return Ok(());
-                    }
-
-                    let display_text = if text.len() > MAX_MESSAGE_LENGTH {
-                        let end = text.floor_char_boundary(MAX_MESSAGE_LENGTH - 3);
-                        format!("{}...", &text[..end])
+                let now = Instant::now();
+                let update = {
+                    let mut active = self.active_messages.write().await;
+                    if let Some(stream) = active.get_mut(&message.conversation_id) {
+                        stream.text.push_str(&text);
+                        if should_throttle_stream_edit(stream.last_edit, now) {
+                            return Ok(());
+                        }
+                        stream.last_edit = now;
+                        let display_text = if stream.text.len() > MAX_MESSAGE_LENGTH {
+                            let end = stream.text.floor_char_boundary(MAX_MESSAGE_LENGTH - 3);
+                            format!("{}...", &stream.text[..end])
+                        } else {
+                            stream.text.clone()
+                        };
+                        Some((stream.chat_id, stream.message_id, display_text))
                     } else {
-                        text
-                    };
+                        None
+                    }
+                };
 
-                    let html = markdown_to_telegram_html(&display_text);
-                    if let Err(html_error) = self
+                let Some((stream_chat_id, stream_message_id, display_text)) = update else {
+                    return Ok(());
+                };
+
+                let html = markdown_to_telegram_html(&display_text);
+                if let Err(html_error) = self
+                    .bot
+                    .edit_message_text(stream_chat_id, stream_message_id, &html)
+                    .parse_mode(ParseMode::Html)
+                    .send()
+                    .await
+                {
+                    tracing::debug!(%html_error, "HTML edit failed, retrying as plain text");
+                    if let Err(error) = self
                         .bot
-                        .edit_message_text(stream.chat_id, stream.message_id, &html)
-                        .parse_mode(ParseMode::Html)
+                        .edit_message_text(stream_chat_id, stream_message_id, &display_text)
                         .send()
                         .await
                     {
-                        tracing::debug!(%html_error, "HTML edit failed, retrying as plain text");
-                        if let Err(error) = self
-                            .bot
-                            .edit_message_text(stream.chat_id, stream.message_id, &display_text)
-                            .send()
-                            .await
-                        {
-                            tracing::debug!(%error, "failed to edit streaming message");
-                        }
+                        tracing::debug!(%error, "failed to edit streaming message");
                     }
-                    stream.last_edit = Instant::now();
                 }
             }
             OutboundResponse::StreamEnd => {
-                self.active_messages
-                    .write()
-                    .await
-                    .remove(&message.conversation_id);
+                with_removed_active_stream(
+                    &self.active_messages,
+                    &message.conversation_id,
+                    |stream| async move {
+                        if let Err(error) = self
+                            .bot
+                            .delete_message(stream.chat_id, stream.message_id)
+                            .send()
+                            .await
+                        {
+                            tracing::warn!(%error, "failed to delete telegram stream placeholder");
+                        }
+                    },
+                )
+                .await;
             }
             OutboundResponse::Status(status) => {
                 self.send_status(message, status).await?;
@@ -986,6 +1092,16 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     chunks
 }
 
+fn should_throttle_stream_edit(last_edit: Instant, now: Instant) -> bool {
+    now.duration_since(last_edit) < STREAM_EDIT_INTERVAL
+}
+
+fn stream_finalization_chunks(chunks: &[String]) -> (&str, &[String]) {
+    let first_chunk = chunks.first().map(String::as_str).unwrap_or("\u{200B}");
+    let remaining_chunks = chunks.get(1..).unwrap_or(&[]);
+    (first_chunk, remaining_chunks)
+}
+
 /// Return true when Telegram rejected rich text entities and a plain-caption retry is safe.
 fn should_retry_plain_caption(error: &RequestError) -> bool {
     matches!(error, RequestError::Api(ApiError::CantParseEntities(_)))
@@ -1224,6 +1340,9 @@ async fn send_formatted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
 
     #[test]
     fn bold() {
@@ -1391,5 +1510,91 @@ mod tests {
 
         assert!(should_retry_plain_caption(&parse_error));
         assert!(!should_retry_plain_caption(&non_parse_error));
+    }
+
+    #[test]
+    fn adapter_streaming_throttle() {
+        let last_edit = Instant::now();
+        let before_interval = last_edit + STREAM_EDIT_INTERVAL - Duration::from_millis(1);
+        let at_interval = last_edit + STREAM_EDIT_INTERVAL;
+
+        assert!(
+            should_throttle_stream_edit(last_edit, before_interval),
+            "stream chunk edits should be skipped before the configured throttle interval"
+        );
+        assert!(
+            !should_throttle_stream_edit(last_edit, at_interval),
+            "stream chunk edits should be allowed once the throttle interval has elapsed"
+        );
+
+        let chunks = vec![
+            "first chunk".to_string(),
+            "second chunk".to_string(),
+            "third chunk".to_string(),
+        ];
+        let (finalized_chunk, trailing_chunks) = stream_finalization_chunks(&chunks);
+
+        assert_eq!(
+            finalized_chunk, "first chunk",
+            "finalization should update the stream placeholder with the first chunk"
+        );
+        assert_eq!(
+            trailing_chunks,
+            &["second chunk".to_string(), "third chunk".to_string()],
+            "finalization should emit only trailing chunks after placeholder update"
+        );
+    }
+
+    #[tokio::test]
+    async fn telegram_stream_end_releases_active_messages_lock_before_delete() {
+        let active_messages = Arc::new(RwLock::new(HashMap::from([(
+            "conversation-id".to_string(),
+            ActiveStream {
+                chat_id: ChatId(1),
+                message_id: MessageId(1),
+                last_edit: Instant::now(),
+                text: "partial".to_string(),
+            },
+        )])));
+        let (delete_started_tx, delete_started_rx) = oneshot::channel();
+        let (allow_delete_tx, allow_delete_rx) = oneshot::channel::<()>();
+
+        let cleanup_task = {
+            let active_messages = active_messages.clone();
+            tokio::spawn(async move {
+                with_removed_active_stream(
+                    active_messages.as_ref(),
+                    "conversation-id",
+                    |stream| async move {
+                        delete_started_tx.send(stream.message_id).ok();
+                        allow_delete_rx.await.ok();
+                    },
+                )
+                .await
+            })
+        };
+
+        delete_started_rx
+            .await
+            .expect("cleanup future should begin after the stream entry is removed");
+
+        let active_messages_guard = tokio::time::timeout(
+            Duration::from_millis(100),
+            active_messages.read(),
+        )
+        .await
+        .expect("stream cleanup should not hold the active_messages lock while delete is pending");
+        assert!(
+            !active_messages_guard.contains_key("conversation-id"),
+            "the stream entry should be removed before the delete future completes"
+        );
+        drop(active_messages_guard);
+
+        allow_delete_tx
+            .send(())
+            .expect("test should release the simulated delete");
+        cleanup_task
+            .await
+            .expect("cleanup task should complete cleanly");
     }
 }

@@ -224,6 +224,7 @@ async fn run_compaction(
     let model_name = routing.resolve(ProcessType::Compactor, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "compactor")
+        .with_rig_alignment((**deps.runtime_config.rig_alignment.load()).clone())
         .with_routing((**routing).clone());
 
     // Give the compaction worker memory_save so it can directly persist memories

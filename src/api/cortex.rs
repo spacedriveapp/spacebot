@@ -108,6 +108,7 @@ pub(super) async fn cortex_chat_messages(
 ///
 /// The stream emits:
 /// - `thinking` — cortex is processing
+/// - `text_delta` — partial text from the model stream
 /// - `tool_started` — a tool call began
 /// - `tool_completed` — a tool call finished (with result preview)
 /// - `done` — full response text
@@ -146,6 +147,7 @@ pub(super) async fn cortex_chat_send(
         while let Some(event) = event_rx.recv().await {
             let event_name = match &event {
                 CortexChatEvent::Thinking => "thinking",
+                CortexChatEvent::TextDelta { .. } => "text_delta",
                 CortexChatEvent::ToolStarted { .. } => "tool_started",
                 CortexChatEvent::ToolCompleted { .. } => "tool_completed",
                 CortexChatEvent::Done { .. } => "done",

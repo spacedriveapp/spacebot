@@ -2066,6 +2066,7 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
+        .with_rig_alignment((**deps.runtime_config.rig_alignment.load()).clone())
         .with_routing((**routing).clone());
 
     // No tools needed — the LLM just synthesizes the pre-gathered data.
@@ -2251,6 +2252,7 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
+        .with_rig_alignment((**deps.runtime_config.rig_alignment.load()).clone())
         .with_routing((**routing).clone());
 
     let agent = AgentBuilder::new(model)

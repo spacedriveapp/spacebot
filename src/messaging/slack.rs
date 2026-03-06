@@ -32,7 +32,7 @@ use slack_morphism::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 /// State shared with socket mode callbacks via `SlackClientEventsUserState`.
 struct SlackAdapterState {
@@ -56,6 +56,19 @@ struct SlackUserIdentity {
     username: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+struct ActiveStream {
+    ts: String,
+    last_edit: Instant,
+    text: String,
+}
+
+const STREAM_EDIT_INTERVAL: Duration = Duration::from_secs(1);
+
+fn should_throttle_stream_edit(last_edit: Instant, now: Instant) -> bool {
+    now.duration_since(last_edit) < STREAM_EDIT_INTERVAL
+}
+
 /// Slack adapter.
 pub struct SlackAdapter {
     runtime_key: String,
@@ -68,8 +81,8 @@ pub struct SlackAdapter {
     client: Arc<SlackHyperClient>,
     /// Pre-built API token wrapping `bot_token`. Created once alongside `client`.
     token: SlackApiToken,
-    /// Maps InboundMessage.id → Slack ts for streaming edits.
-    active_messages: Arc<RwLock<HashMap<String, String>>>,
+    /// Maps InboundMessage.id → Slack streaming placeholder state.
+    active_messages: Arc<RwLock<HashMap<String, ActiveStream>>>,
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
     /// Slash command routing: command string → agent_id.
     commands: Arc<HashMap<String, String>>,
@@ -922,17 +935,74 @@ impl Messaging for SlackAdapter {
         match response {
             OutboundResponse::Text(text) => {
                 let thread_ts = extract_thread_ts(message);
+                let chunks = split_message(&text, 12_000);
+                let active_stream = self.active_messages.read().await.get(&message.id).cloned();
 
-                for chunk in split_message(&text, 12_000) {
-                    let mut req = SlackApiChatPostMessageRequest::new(
+                if let Some(active_stream) = active_stream {
+                    let first_chunk = chunks
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "\u{200B}".to_string());
+                    let update = SlackApiChatUpdateRequest::new(
                         channel_id.clone(),
-                        markdown_content(chunk),
+                        markdown_content(first_chunk),
+                        SlackTs(active_stream.ts.clone()),
                     );
-                    req = req.opt_thread_ts(thread_ts.clone());
-                    session
-                        .chat_post_message(&req)
-                        .await
-                        .context("failed to send slack message")?;
+
+                    if let Err(error) = session.chat_update(&update).await {
+                        tracing::warn!(
+                            %error,
+                            "failed to finalize streaming message, falling back to normal send"
+                        );
+                        let delete = SlackApiChatDeleteRequest {
+                            channel: channel_id.clone(),
+                            ts: SlackTs(active_stream.ts.clone()),
+                            as_user: None,
+                        };
+                        if let Err(delete_error) = session.chat_delete(&delete).await {
+                            tracing::warn!(
+                                %delete_error,
+                                "failed to delete slack stream placeholder after finalize fallback"
+                            );
+                        }
+                        self.active_messages.write().await.remove(&message.id);
+                        for chunk in &chunks {
+                            let mut req = SlackApiChatPostMessageRequest::new(
+                                channel_id.clone(),
+                                markdown_content(chunk.clone()),
+                            );
+                            req = req.opt_thread_ts(thread_ts.clone());
+                            session
+                                .chat_post_message(&req)
+                                .await
+                                .context("failed to send slack message")?;
+                        }
+                    } else {
+                        self.active_messages.write().await.remove(&message.id);
+                        for chunk in chunks.iter().skip(1) {
+                            let mut req = SlackApiChatPostMessageRequest::new(
+                                channel_id.clone(),
+                                markdown_content(chunk.clone()),
+                            );
+                            req = req.opt_thread_ts(thread_ts.clone());
+                            session
+                                .chat_post_message(&req)
+                                .await
+                                .context("failed to send slack message")?;
+                        }
+                    }
+                } else {
+                    for chunk in chunks {
+                        let mut req = SlackApiChatPostMessageRequest::new(
+                            channel_id.clone(),
+                            markdown_content(chunk),
+                        );
+                        req = req.opt_thread_ts(thread_ts.clone());
+                        session
+                            .chat_post_message(&req)
+                            .await
+                            .context("failed to send slack message")?;
+                    }
                 }
             }
             OutboundResponse::ThreadReply {
@@ -1087,42 +1157,73 @@ impl Messaging for SlackAdapter {
             }
 
             OutboundResponse::StreamStart => {
+                let thread_ts = extract_thread_ts(message);
                 let req = SlackApiChatPostMessageRequest::new(
                     channel_id.clone(),
                     SlackMessageContent::new().with_text("\u{200B}".into()),
-                );
+                )
+                .opt_thread_ts(thread_ts);
                 let resp = session
                     .chat_post_message(&req)
                     .await
                     .context("failed to send stream placeholder")?;
-                self.active_messages
-                    .write()
-                    .await
-                    .insert(message.id.clone(), resp.ts.0);
+                self.active_messages.write().await.insert(
+                    message.id.clone(),
+                    ActiveStream {
+                        ts: resp.ts.0,
+                        last_edit: Instant::now(),
+                        text: String::new(),
+                    },
+                );
             }
 
             OutboundResponse::StreamChunk(text) => {
-                let active = self.active_messages.read().await;
-                if let Some(ts) = active.get(&message.id) {
-                    let display_text = if text.len() > 12_000 {
-                        let end = text.floor_char_boundary(11_997);
-                        format!("{}...", &text[..end])
+                let now = Instant::now();
+                let update = {
+                    let mut active = self.active_messages.write().await;
+                    if let Some(stream) = active.get_mut(&message.id) {
+                        stream.text.push_str(&text);
+                        if should_throttle_stream_edit(stream.last_edit, now) {
+                            return Ok(());
+                        }
+                        stream.last_edit = now;
+                        let display_text = if stream.text.len() > 12_000 {
+                            let end = stream.text.floor_char_boundary(11_997);
+                            format!("{}...", &stream.text[..end])
+                        } else {
+                            stream.text.clone()
+                        };
+                        Some((stream.ts.clone(), display_text))
                     } else {
-                        text
-                    };
+                        None
+                    }
+                };
+
+                if let Some((stream_ts, display_text)) = update {
                     let req = SlackApiChatUpdateRequest::new(
                         channel_id.clone(),
                         markdown_content(display_text),
-                        SlackTs(ts.clone()),
+                        SlackTs(stream_ts),
                     );
                     if let Err(error) = session.chat_update(&req).await {
                         tracing::warn!(%error, "failed to edit streaming message");
                     }
+                } else {
+                    return Ok(());
                 }
             }
 
             OutboundResponse::StreamEnd => {
-                self.active_messages.write().await.remove(&message.id);
+                if let Some(stream) = self.active_messages.write().await.remove(&message.id) {
+                    let req = SlackApiChatDeleteRequest {
+                        channel: channel_id.clone(),
+                        ts: SlackTs(stream.ts),
+                        as_user: None,
+                    };
+                    if let Err(error) = session.chat_delete(&req).await {
+                        tracing::warn!(%error, "failed to delete slack stream placeholder");
+                    }
+                }
             }
 
             OutboundResponse::Status(_) => {
@@ -1702,6 +1803,7 @@ fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIden
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn sanitize_reaction_name_unicode_emoji_with_shortcode() {
@@ -1773,5 +1875,21 @@ mod tests {
     fn sanitize_reaction_name_custom_with_colons() {
         let result = sanitize_reaction_name(":partyparrot:");
         assert_eq!(result, "partyparrot");
+    }
+
+    #[test]
+    fn adapter_streaming_throttle() {
+        let last_edit = Instant::now();
+        let before_interval = last_edit + STREAM_EDIT_INTERVAL - Duration::from_millis(1);
+        let at_interval = last_edit + STREAM_EDIT_INTERVAL;
+
+        assert!(
+            should_throttle_stream_edit(last_edit, before_interval),
+            "stream chunk edits should be skipped before the configured throttle interval"
+        );
+        assert!(
+            !should_throttle_stream_edit(last_edit, at_interval),
+            "stream chunk edits should be allowed once the configured throttle interval elapses"
+        );
     }
 }

@@ -469,6 +469,7 @@ async fn process_chunk(
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "branch")
+        .with_rig_alignment((**deps.runtime_config.rig_alignment.load()).clone())
         .with_routing((**routing).clone());
 
     let conversation_logger =

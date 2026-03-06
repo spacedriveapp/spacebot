@@ -608,6 +608,8 @@ pub enum OutboundResponse {
         post_at: i64,
     },
     StreamStart,
+    /// Incremental streamed text delta. Adapters that edit placeholders should
+    /// accumulate deltas locally and decide when to flush visible updates.
     StreamChunk(String),
     StreamEnd,
     Status(StatusUpdate),
