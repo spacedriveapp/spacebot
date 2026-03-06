@@ -509,6 +509,41 @@ pub fn create_worker_tool_server(
     server.run()
 }
 
+/// Compute the concrete worker tool names exposed for a request.
+///
+/// This is used to gate request-level tool concurrency to explicit allowlisted,
+/// read-only surfaces.
+pub fn list_worker_tool_names(
+    browser_enabled: bool,
+    brave_search_enabled: bool,
+    secrets_enabled: bool,
+    mcp_tools: &[McpToolAdapter],
+) -> Vec<String> {
+    let mut names = vec![
+        <ShellTool as rig::tool::Tool>::NAME.to_string(),
+        <FileTool as rig::tool::Tool>::NAME.to_string(),
+        <ExecTool as rig::tool::Tool>::NAME.to_string(),
+        <TaskUpdateTool as rig::tool::Tool>::NAME.to_string(),
+        <SetStatusTool as rig::tool::Tool>::NAME.to_string(),
+        <ReadSkillTool as rig::tool::Tool>::NAME.to_string(),
+    ];
+
+    if secrets_enabled {
+        names.push(<SecretSetTool as rig::tool::Tool>::NAME.to_string());
+    }
+    if browser_enabled {
+        names.push(<BrowserTool as rig::tool::Tool>::NAME.to_string());
+    }
+    if brave_search_enabled {
+        names.push(<WebSearchTool as rig::tool::Tool>::NAME.to_string());
+    }
+    for mcp_tool in mcp_tools {
+        names.push(mcp_tool.name());
+    }
+
+    names
+}
+
 /// Create a ToolServer for the cortex process.
 ///
 /// The cortex only needs memory_save for consolidation. Additional tools can be

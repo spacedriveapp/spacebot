@@ -32,6 +32,26 @@ pub struct Metrics {
     /// Total memory save (write) operations.
     pub memory_writes_total: IntCounter,
 
+    /// Rig request semantics decisions.
+    /// Labels: process, provider, field, decision.
+    pub rig_request_semantics_total: IntCounterVec,
+
+    /// Rig streaming sessions started.
+    /// Labels: process, provider, mode.
+    pub rig_stream_sessions_total: IntCounterVec,
+
+    /// Time to first streamed text delta in milliseconds.
+    /// Labels: process, provider.
+    pub rig_time_to_first_delta_ms: HistogramVec,
+
+    /// Worker request-level tool concurrency usage.
+    /// Labels: worker_type, concurrency.
+    pub rig_tool_concurrency_total: IntCounterVec,
+
+    /// Detected Rig bridge drift surfaces.
+    /// Labels: surface.
+    pub rig_drift_detected_total: IntCounterVec,
+
     // -- Histograms --
     /// LLM request duration in seconds.
     pub llm_request_duration_seconds: HistogramVec,
@@ -116,6 +136,55 @@ impl Metrics {
         let memory_writes_total = IntCounter::new(
             "spacebot_memory_writes_total",
             "Total memory save operations",
+        )
+        .expect("hardcoded metric descriptor");
+
+        let rig_request_semantics_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_rig_request_semantics_total",
+                "Rig request semantics decisions by field and outcome",
+            ),
+            &["process", "provider", "field", "decision"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let rig_stream_sessions_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_rig_stream_sessions_total",
+                "Rig streaming sessions started by process, provider, and mode",
+            ),
+            &["process", "provider", "mode"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let rig_time_to_first_delta_ms = HistogramVec::new(
+            HistogramOpts::new(
+                "spacebot_rig_time_to_first_delta_ms",
+                "Time to first streamed text delta in milliseconds",
+            )
+            .buckets(vec![
+                25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 1500.0, 2500.0, 3500.0, 5000.0, 10_000.0,
+                30_000.0,
+            ]),
+            &["process", "provider"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let rig_tool_concurrency_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_rig_tool_concurrency_total",
+                "Worker request-level tool concurrency usage",
+            ),
+            &["worker_type", "concurrency"],
+        )
+        .expect("hardcoded metric descriptor");
+
+        let rig_drift_detected_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_rig_drift_detected_total",
+                "Detected Rig bridge drift surfaces",
+            ),
+            &["surface"],
         )
         .expect("hardcoded metric descriptor");
 
@@ -246,6 +315,21 @@ impl Metrics {
             .register(Box::new(memory_writes_total.clone()))
             .expect("hardcoded metric");
         registry
+            .register(Box::new(rig_request_semantics_total.clone()))
+            .expect("hardcoded metric");
+        registry
+            .register(Box::new(rig_stream_sessions_total.clone()))
+            .expect("hardcoded metric");
+        registry
+            .register(Box::new(rig_time_to_first_delta_ms.clone()))
+            .expect("hardcoded metric");
+        registry
+            .register(Box::new(rig_tool_concurrency_total.clone()))
+            .expect("hardcoded metric");
+        registry
+            .register(Box::new(rig_drift_detected_total.clone()))
+            .expect("hardcoded metric");
+        registry
             .register(Box::new(llm_request_duration_seconds.clone()))
             .expect("hardcoded metric");
         registry
@@ -291,6 +375,11 @@ impl Metrics {
             tool_calls_total,
             memory_reads_total,
             memory_writes_total,
+            rig_request_semantics_total,
+            rig_stream_sessions_total,
+            rig_time_to_first_delta_ms,
+            rig_tool_concurrency_total,
+            rig_drift_detected_total,
             llm_request_duration_seconds,
             tool_call_duration_seconds,
             active_workers,

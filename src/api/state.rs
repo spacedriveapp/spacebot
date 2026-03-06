@@ -148,6 +148,11 @@ pub enum ApiEvent {
         text_delta: String,
         aggregated_text: String,
     },
+    /// Terminal signal for a streamed assistant message with no final text payload.
+    OutboundStreamEnd {
+        agent_id: String,
+        channel_id: String,
+    },
     /// A worker was started.
     WorkerStarted {
         agent_id: String,

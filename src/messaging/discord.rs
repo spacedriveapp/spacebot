@@ -17,7 +17,37 @@ use serenity::all::{
 };
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, mpsc};
+
+#[derive(Clone)]
+struct ActiveStream {
+    message_id: serenity::all::MessageId,
+    last_edit: Instant,
+    text: String,
+}
+
+const STREAM_EDIT_INTERVAL: Duration = Duration::from_secs(1);
+
+fn should_throttle_stream_edit(last_edit: Instant, now: Instant) -> bool {
+    now.duration_since(last_edit) < STREAM_EDIT_INTERVAL
+}
+
+async fn with_removed_active_stream<T, F, Fut>(
+    active_messages: &RwLock<HashMap<String, ActiveStream>>,
+    message_id: &str,
+    cleanup: F,
+) -> Option<T>
+where
+    F: FnOnce(ActiveStream) -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let stream = {
+        let mut active_messages = active_messages.write().await;
+        active_messages.remove(message_id)
+    }?;
+    Some(cleanup(stream).await)
+}
 
 /// Discord adapter state.
 pub struct DiscordAdapter {
@@ -26,8 +56,8 @@ pub struct DiscordAdapter {
     permissions: Arc<ArcSwap<DiscordPermissions>>,
     http: Arc<RwLock<Option<Arc<Http>>>>,
     bot_user_id: Arc<RwLock<Option<UserId>>>,
-    /// Maps InboundMessage.id to the Discord MessageId being edited during streaming.
-    active_messages: Arc<RwLock<HashMap<String, serenity::all::MessageId>>>,
+    /// Maps InboundMessage.id to the Discord streaming placeholder state.
+    active_messages: Arc<RwLock<HashMap<String, ActiveStream>>>,
     /// Typing handles per message. Typing stops when the handle is dropped.
     typing_tasks: Arc<RwLock<HashMap<String, serenity::http::Typing>>>,
     shard_manager: Arc<RwLock<Option<Arc<ShardManager>>>>,
@@ -149,18 +179,69 @@ impl Messaging for DiscordAdapter {
             OutboundResponse::Text(text) => {
                 self.stop_typing(message).await;
                 let reply_to = Self::extract_reply_message_id(message);
+                let chunks = split_message(&text, 2000);
+                let active_placeholder =
+                    self.active_messages.read().await.get(&message.id).cloned();
 
-                for (index, chunk) in split_message(&text, 2000).into_iter().enumerate() {
-                    let mut builder = CreateMessage::new().content(chunk);
-                    if index == 0
-                        && let Some(reply_message_id) = reply_to
-                    {
-                        builder = builder.reference_message((channel_id, reply_message_id));
-                    }
-                    channel_id
-                        .send_message(&*http, builder)
+                if let Some(message_id) = active_placeholder {
+                    let first_chunk = chunks
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(|| "\u{200B}".to_string());
+                    let builder = EditMessage::new().content(first_chunk);
+                    if let Err(error) = channel_id
+                        .edit_message(&*http, message_id.message_id, builder)
                         .await
-                        .context("failed to send discord message")?;
+                    {
+                        tracing::warn!(
+                            %error,
+                            "failed to finalize streaming message, falling back to normal send"
+                        );
+                        if let Err(delete_error) = channel_id
+                            .delete_message(&*http, message_id.message_id)
+                            .await
+                        {
+                            tracing::warn!(
+                                %delete_error,
+                                "failed to delete discord stream placeholder after finalize fallback"
+                            );
+                        }
+                        self.active_messages.write().await.remove(&message.id);
+                        for (index, chunk) in chunks.iter().enumerate() {
+                            let mut builder = CreateMessage::new().content(chunk.clone());
+                            if index == 0
+                                && let Some(reply_message_id) = reply_to
+                            {
+                                builder = builder.reference_message((channel_id, reply_message_id));
+                            }
+                            channel_id
+                                .send_message(&*http, builder)
+                                .await
+                                .context("failed to send discord message")?;
+                        }
+                    } else {
+                        self.active_messages.write().await.remove(&message.id);
+                        for chunk in chunks.iter().skip(1) {
+                            let builder = CreateMessage::new().content(chunk.clone());
+                            channel_id
+                                .send_message(&*http, builder)
+                                .await
+                                .context("failed to send discord message")?;
+                        }
+                    }
+                } else {
+                    for (index, chunk) in chunks.into_iter().enumerate() {
+                        let mut builder = CreateMessage::new().content(chunk);
+                        if index == 0
+                            && let Some(reply_message_id) = reply_to
+                        {
+                            builder = builder.reference_message((channel_id, reply_message_id));
+                        }
+                        channel_id
+                            .send_message(&*http, builder)
+                            .await
+                            .context("failed to send discord message")?;
+                    }
                 }
             }
             OutboundResponse::RichMessage {
@@ -334,26 +415,49 @@ impl Messaging for DiscordAdapter {
             }
             OutboundResponse::StreamStart => {
                 self.stop_typing(message).await;
+                let reply_to = Self::extract_reply_message_id(message);
 
+                let mut builder = CreateMessage::new().content("\u{200B}");
+                if let Some(reply_message_id) = reply_to {
+                    builder = builder.reference_message((channel_id, reply_message_id));
+                }
                 let placeholder = channel_id
-                    .say(&*http, "\u{200B}")
+                    .send_message(&*http, builder)
                     .await
                     .context("failed to send stream placeholder")?;
 
-                self.active_messages
-                    .write()
-                    .await
-                    .insert(message.id.clone(), placeholder.id);
+                self.active_messages.write().await.insert(
+                    message.id.clone(),
+                    ActiveStream {
+                        message_id: placeholder.id,
+                        last_edit: Instant::now(),
+                        text: String::new(),
+                    },
+                );
             }
             OutboundResponse::StreamChunk(text) => {
-                let active = self.active_messages.read().await;
-                if let Some(&message_id) = active.get(&message.id) {
-                    let display_text = if text.len() > 2000 {
-                        let end = text.floor_char_boundary(1997);
-                        format!("{}...", &text[..end])
+                let now = Instant::now();
+                let update = {
+                    let mut active = self.active_messages.write().await;
+                    if let Some(stream) = active.get_mut(&message.id) {
+                        stream.text.push_str(&text);
+                        if should_throttle_stream_edit(stream.last_edit, now) {
+                            return Ok(());
+                        }
+                        stream.last_edit = now;
+                        let display_text = if stream.text.len() > 2000 {
+                            let end = stream.text.floor_char_boundary(1997);
+                            format!("{}...", &stream.text[..end])
+                        } else {
+                            stream.text.clone()
+                        };
+                        Some((stream.message_id, display_text))
                     } else {
-                        text
-                    };
+                        None
+                    }
+                };
+
+                if let Some((message_id, display_text)) = update {
                     let builder = EditMessage::new().content(display_text);
                     if let Err(error) = channel_id.edit_message(&*http, message_id, builder).await {
                         tracing::warn!(%error, "failed to edit streaming message");
@@ -361,7 +465,18 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::StreamEnd => {
-                self.active_messages.write().await.remove(&message.id);
+                with_removed_active_stream(
+                    &self.active_messages,
+                    &message.id,
+                    |stream| async move {
+                        if let Err(error) =
+                            channel_id.delete_message(&*http, stream.message_id).await
+                        {
+                            tracing::warn!(%error, "failed to delete discord stream placeholder");
+                        }
+                    },
+                )
+                .await;
             }
             OutboundResponse::Status(status) => {
                 self.send_status(message, status).await?;
@@ -1179,6 +1294,8 @@ fn build_poll(
 mod tests {
     use super::*;
     use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
+    use std::sync::Arc;
+    use tokio::sync::oneshot;
 
     #[test]
     fn test_build_embed_limits() {
@@ -1235,5 +1352,73 @@ mod tests {
         // build_poll should limit answers to 10 and duration to 720
         let _ = build_poll(&poll);
         // Again, can't easily inspect CreatePoll fields, but we verify it runs.
+    }
+
+    #[test]
+    fn adapter_streaming_throttle() {
+        let last_edit = Instant::now();
+        let before_interval = last_edit + STREAM_EDIT_INTERVAL - Duration::from_millis(1);
+        let at_interval = last_edit + STREAM_EDIT_INTERVAL;
+
+        assert!(
+            should_throttle_stream_edit(last_edit, before_interval),
+            "stream chunk edits should be skipped before the configured throttle interval"
+        );
+        assert!(
+            !should_throttle_stream_edit(last_edit, at_interval),
+            "stream chunk edits should be allowed once the configured throttle interval elapses"
+        );
+    }
+
+    #[tokio::test]
+    async fn stream_end_releases_active_messages_lock_before_delete() {
+        let active_messages = Arc::new(RwLock::new(HashMap::from([(
+            "message-id".to_string(),
+            ActiveStream {
+                message_id: MessageId::new(1),
+                last_edit: Instant::now(),
+                text: "partial".to_string(),
+            },
+        )])));
+        let (delete_started_tx, delete_started_rx) = oneshot::channel();
+        let (allow_delete_tx, allow_delete_rx) = oneshot::channel::<()>();
+
+        let cleanup_task = {
+            let active_messages = active_messages.clone();
+            tokio::spawn(async move {
+                with_removed_active_stream(
+                    active_messages.as_ref(),
+                    "message-id",
+                    |stream| async move {
+                        delete_started_tx.send(stream.message_id).ok();
+                        allow_delete_rx.await.ok();
+                    },
+                )
+                .await
+            })
+        };
+
+        delete_started_rx
+            .await
+            .expect("cleanup future should begin after the stream entry is removed");
+
+        let active_messages_guard = tokio::time::timeout(
+            Duration::from_millis(100),
+            active_messages.read(),
+        )
+        .await
+        .expect("stream cleanup should not hold the active_messages lock while delete is pending");
+        assert!(
+            !active_messages_guard.contains_key("message-id"),
+            "the stream entry should be removed before the delete future completes"
+        );
+        drop(active_messages_guard);
+
+        allow_delete_tx
+            .send(())
+            .expect("test should release the simulated delete");
+        cleanup_task
+            .await
+            .expect("cleanup task should complete cleanly");
     }
 }

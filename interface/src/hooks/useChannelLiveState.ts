@@ -7,6 +7,7 @@ import {
 	type InboundMessageEvent,
 	type OutboundMessageDeltaEvent,
 	type OutboundMessageEvent,
+	type OutboundStreamEndEvent,
 	type TimelineItem,
 	type ToolCompletedEvent,
 	type ToolStartedEvent,
@@ -99,6 +100,65 @@ function assistantMessageItem(
 		sender_id: null,
 		content,
 		created_at: new Date().toISOString(),
+	};
+}
+
+export function applyOutboundMessageDelta(
+	state: ChannelLiveState,
+	event: OutboundMessageDeltaEvent,
+): ChannelLiveState {
+	const deltaText = event.text_delta;
+	const aggregatedText = event.aggregated_text;
+	if (!deltaText && !aggregatedText) {
+		return state;
+	}
+
+	const streamMessageId = state.streamingMessageId;
+	if (streamMessageId) {
+		const streamIndex = state.timeline.findIndex(
+			(item) => item.type === "message" && item.id === streamMessageId,
+		);
+
+		if (streamIndex >= 0) {
+			const timeline = [...state.timeline];
+			const streamItem = timeline[streamIndex];
+			if (streamItem.type === "message") {
+				timeline[streamIndex] = {
+					...streamItem,
+					content: deltaText
+						? streamItem.content + deltaText
+						: aggregatedText,
+				};
+			}
+			return { ...state, timeline };
+		}
+	}
+
+	const messageId = `stream-${generateId()}`;
+	const initialContent = deltaText || aggregatedText;
+	return {
+		...state,
+		timeline: [
+			...state.timeline,
+			assistantMessageItem(messageId, event.agent_id, initialContent),
+		],
+		streamingMessageId: messageId,
+	};
+}
+
+export function applyOutboundStreamEnd(state: ChannelLiveState): ChannelLiveState {
+	const streamMessageId = state.streamingMessageId;
+	if (!streamMessageId) {
+		return { ...state, isTyping: false };
+	}
+
+	return {
+		...state,
+		timeline: state.timeline.filter(
+			(item) => item.type !== "message" || item.id !== streamMessageId,
+		),
+		streamingMessageId: null,
+		isTyping: false,
 	};
 }
 
@@ -302,61 +362,22 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		const event = data as OutboundMessageDeltaEvent;
 		setLiveStates((prev) => {
 			const existing = getOrCreate(prev, event.channel_id);
-			const streamMessageId = existing.streamingMessageId;
-
-			if (streamMessageId) {
-				const streamIndex = existing.timeline.findIndex(
-					(item) => item.type === "message" && item.id === streamMessageId,
-				);
-
-				if (streamIndex >= 0) {
-					const timeline = [...existing.timeline];
-					const streamItem = timeline[streamIndex];
-					if (streamItem.type === "message") {
-						timeline[streamIndex] = {
-							...streamItem,
-							content: event.aggregated_text,
-						};
-					}
-					return {
-						...prev,
-						[event.channel_id]: { ...existing, timeline },
-					};
-				}
-
-				const messageId = `stream-${generateId()}`;
-				return {
-					...prev,
-					[event.channel_id]: {
-						...existing,
-						timeline: [
-							...existing.timeline,
-							assistantMessageItem(
-								messageId,
-								event.agent_id,
-								event.aggregated_text,
-							),
-						],
-						streamingMessageId: messageId,
-					},
-				};
-			}
-
-			const messageId = `stream-${generateId()}`;
 			return {
 				...prev,
 				[event.channel_id]: {
-					...existing,
-					timeline: [
-						...existing.timeline,
-						assistantMessageItem(
-							messageId,
-							event.agent_id,
-							event.aggregated_text,
-						),
-					],
-					streamingMessageId: messageId,
+					...applyOutboundMessageDelta(existing, event),
 				},
+			};
+		});
+	}, []);
+
+	const handleOutboundStreamEnd = useCallback((data: unknown) => {
+		const event = data as OutboundStreamEndEvent;
+		setLiveStates((prev) => {
+			const existing = getOrCreate(prev, event.channel_id);
+			return {
+				...prev,
+				[event.channel_id]: applyOutboundStreamEnd(existing),
 			};
 		});
 	}, []);
@@ -806,6 +827,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		inbound_message: handleInboundMessage,
 		outbound_message: handleOutboundMessage,
 		outbound_message_delta: handleOutboundMessageDelta,
+		outbound_stream_end: handleOutboundStreamEnd,
 		typing_state: handleTypingState,
 		worker_started: handleWorkerStarted,
 		worker_status: handleWorkerStatus,

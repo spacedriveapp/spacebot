@@ -1,6 +1,6 @@
 //! SpacebotModel: Custom CompletionModel implementation that routes through LlmManager.
 
-use crate::config::{ApiType, ProviderConfig};
+use crate::config::{ApiType, ProviderConfig, RigAlignmentConfig, RigSemanticsMode};
 use crate::llm::manager::LlmManager;
 use crate::llm::routing::{
     self, MAX_FALLBACK_ATTEMPTS, MAX_RETRIES_PER_MODEL, RETRY_BASE_DELAY_MS, RoutingConfig,
@@ -9,11 +9,13 @@ use crate::llm::routing::{
 use futures::StreamExt as _;
 use rig::completion::{self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage};
 use rig::message::{
-    AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
-    UserContent,
+    AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolChoice,
+    ToolFunction, UserContent,
 };
 use rig::one_or_many::OneOrMany;
-use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
+use rig::streaming::{
+    RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse, StreamingResult,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -39,6 +41,12 @@ impl GetTokenUsage for RawStreamingResponse {
     }
 }
 
+#[derive(Debug)]
+struct RequestSemanticDecision {
+    apply_tool_choice: bool,
+    apply_output_schema: bool,
+}
+
 /// Custom completion model that routes through LlmManager.
 ///
 /// Optionally holds a RoutingConfig for fallback behavior. When present,
@@ -52,6 +60,7 @@ pub struct SpacebotModel {
     routing: Option<RoutingConfig>,
     agent_id: Option<String>,
     process_type: Option<String>,
+    rig_alignment: Option<RigAlignmentConfig>,
 }
 
 impl SpacebotModel {
@@ -80,6 +89,170 @@ impl SpacebotModel {
         self.agent_id = Some(agent_id.into());
         self.process_type = Some(process_type.into());
         self
+    }
+
+    /// Attach Rig-alignment runtime config for request semantic behavior.
+    pub fn with_rig_alignment(mut self, rig_alignment: RigAlignmentConfig) -> Self {
+        self.rig_alignment = Some(rig_alignment);
+        self
+    }
+
+    fn rig_alignment(&self) -> RigAlignmentConfig {
+        self.rig_alignment.clone().unwrap_or_default()
+    }
+
+    fn process_label(&self) -> &str {
+        self.process_type.as_deref().unwrap_or("unknown")
+    }
+
+    fn record_request_semantic_decision(&self, field: &'static str, decision: &'static str) {
+        #[cfg(feature = "metrics")]
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .rig_request_semantics_total
+                .with_label_values(&[self.process_label(), &self.provider, field, decision])
+                .inc();
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = (field, decision);
+    }
+
+    fn record_drift_surface(&self, surface: &'static str) {
+        #[cfg(feature = "metrics")]
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .rig_drift_detected_total
+                .with_label_values(&[surface])
+                .inc();
+        }
+        #[cfg(not(feature = "metrics"))]
+        let _ = surface;
+    }
+
+    fn evaluate_request_semantics(
+        &self,
+        request: &CompletionRequest,
+    ) -> Result<RequestSemanticDecision, CompletionError> {
+        let rig_alignment = self.rig_alignment();
+        let mode = rig_alignment.request_semantics_mode;
+        let provider = self.provider.as_str();
+
+        let tool_choice_requested = request.tool_choice.is_some();
+        let tool_choice_requires_tool_definitions = matches!(
+            request.tool_choice,
+            Some(ToolChoice::Required) | Some(ToolChoice::Specific { .. })
+        );
+        let output_schema_requested = request.output_schema.is_some();
+
+        if matches!(mode, RigSemanticsMode::Off) {
+            if tool_choice_requested {
+                self.record_request_semantic_decision("tool_choice", "unsupported");
+                self.record_drift_surface("tool_choice");
+            }
+            if output_schema_requested {
+                self.record_request_semantic_decision("output_schema", "unsupported");
+                self.record_drift_surface("output_schema");
+            }
+            return Ok(RequestSemanticDecision {
+                apply_tool_choice: false,
+                apply_output_schema: false,
+            });
+        }
+
+        let tool_choice_supported = if !tool_choice_requested {
+            true
+        } else if tool_choice_requires_tool_definitions && request.tools.is_empty() {
+            tracing::warn!(
+                provider,
+                mode = ?mode,
+                field = "tool_choice",
+                "request semantics rejected: tool_choice requires at least one tool definition"
+            );
+            false
+        } else {
+            rig_alignment
+                .tool_choice_provider_allowlist
+                .iter()
+                .any(|allowed| allowed == provider)
+        };
+        let output_schema_supported = !output_schema_requested
+            || rig_alignment
+                .output_schema_provider_allowlist
+                .iter()
+                .any(|allowed| allowed == provider);
+
+        if tool_choice_requested {
+            let decision = if tool_choice_supported {
+                "applied"
+            } else if matches!(mode, RigSemanticsMode::Enforced) {
+                "rejected"
+            } else {
+                "shadowed"
+            };
+            self.record_request_semantic_decision("tool_choice", decision);
+            if decision != "applied" {
+                self.record_drift_surface("tool_choice");
+            }
+            tracing::info!(
+                agent_id = self.agent_id.as_deref().unwrap_or("unknown"),
+                process_type = self.process_label(),
+                provider,
+                model = %self.full_model_name,
+                request_semantics_mode = ?mode,
+                tool_choice_requested,
+                output_schema_requested,
+                applied = tool_choice_supported,
+                decision,
+                field = "tool_choice",
+                "request semantic decision"
+            );
+        }
+        if output_schema_requested {
+            let decision = if output_schema_supported {
+                "applied"
+            } else if matches!(mode, RigSemanticsMode::Enforced) {
+                "rejected"
+            } else {
+                "shadowed"
+            };
+            self.record_request_semantic_decision("output_schema", decision);
+            if decision != "applied" {
+                self.record_drift_surface("output_schema");
+            }
+            tracing::info!(
+                agent_id = self.agent_id.as_deref().unwrap_or("unknown"),
+                process_type = self.process_label(),
+                provider,
+                model = %self.full_model_name,
+                request_semantics_mode = ?mode,
+                tool_choice_requested,
+                output_schema_requested,
+                applied = output_schema_supported,
+                decision,
+                field = "output_schema",
+                "request semantic decision"
+            );
+        }
+
+        if matches!(mode, RigSemanticsMode::Enforced) {
+            if tool_choice_requested && !tool_choice_supported {
+                return Err(CompletionError::ProviderError(format!(
+                    "request semantics rejected: provider '{provider}' does not support tool_choice in enforced mode"
+                )));
+            }
+            if output_schema_requested && !output_schema_supported {
+                return Err(CompletionError::ProviderError(format!(
+                    "request semantics rejected: provider '{provider}' does not support output_schema in enforced mode"
+                )));
+            }
+        }
+
+        Ok(RequestSemanticDecision {
+            apply_tool_choice: tool_choice_requested && tool_choice_supported,
+            apply_output_schema: output_schema_requested && output_schema_supported,
+        })
     }
 
     async fn provider_config_for_current_model(&self) -> Result<ProviderConfig, CompletionError> {
@@ -184,7 +357,13 @@ impl SpacebotModel {
         let model = if model_name == self.full_model_name {
             self.clone()
         } else {
-            SpacebotModel::make(&self.llm_manager, model_name)
+            let mut model = SpacebotModel::make(&self.llm_manager, model_name);
+            if let Some(rig_alignment) = self.rig_alignment.clone() {
+                model = model.with_rig_alignment(rig_alignment);
+            }
+            model.agent_id = self.agent_id.clone();
+            model.process_type = self.process_type.clone();
+            model
         };
 
         let mut last_error = None;
@@ -258,6 +437,7 @@ impl CompletionModel for SpacebotModel {
             routing: None,
             agent_id: None,
             process_type: None,
+            rig_alignment: None,
         }
     }
 
@@ -453,8 +633,9 @@ impl CompletionModel for SpacebotModel {
         request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
         let provider_config = self.provider_config_for_current_model().await?;
+        let stream_mode = stream_mode_for_api_type(&provider_config.api_type);
 
-        match provider_config.api_type {
+        let stream = match provider_config.api_type {
             ApiType::OpenAiCompletions => self.stream_openai(request, &provider_config).await,
             ApiType::OpenAiChatCompletions => {
                 let endpoint = format!(
@@ -476,6 +657,7 @@ impl CompletionModel for SpacebotModel {
                     &endpoint,
                     Some(provider_config.api_key.clone()),
                     &headers,
+                    stream_mode,
                 )
                 .await
             }
@@ -493,18 +675,50 @@ impl CompletionModel for SpacebotModel {
                         ("HTTP-Referer", "https://github.com/spacedriveapp/spacebot"),
                         ("X-Title", "spacebot"),
                     ],
+                    stream_mode,
                 )
                 .await
             }
             ApiType::Gemini => {
-                self.stream_openai_compatible(request, "Google Gemini", &provider_config)
-                    .await
+                self.stream_openai_compatible(
+                    request,
+                    "Google Gemini",
+                    &provider_config,
+                    stream_mode,
+                )
+                .await
             }
             ApiType::Anthropic | ApiType::OpenAiResponses => {
                 let response = self.attempt_completion(request).await?;
-                Ok(stream_from_completion_response(response))
+                Ok(stream_from_completion_response(
+                    response,
+                    self.process_label().to_string(),
+                    self.provider.clone(),
+                    self.full_model_name.clone(),
+                    stream_mode,
+                ))
             }
+        }?;
+
+        tracing::info!(
+            agent_id = self.agent_id.as_deref().unwrap_or("unknown"),
+            process_type = self.process_label(),
+            provider = self.provider.as_str(),
+            model = %self.full_model_name,
+            streaming_enabled = true,
+            stream_mode,
+            "starting streaming completion"
+        );
+        #[cfg(feature = "metrics")]
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .rig_stream_sessions_total
+                .with_label_values(&[self.process_label(), &self.provider, stream_mode])
+                .inc();
         }
+
+        Ok(stream)
     }
 }
 
@@ -514,6 +728,7 @@ impl SpacebotModel {
         request: CompletionRequest,
         provider_config: &ProviderConfig,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let semantics = self.evaluate_request_semantics(&request)?;
         let api_key = provider_config.api_key.as_str();
 
         let effort = self
@@ -528,8 +743,12 @@ impl SpacebotModel {
             &self.model_name,
             &request,
             effort,
-            provider_config.use_bearer_auth,
-        );
+            crate::llm::anthropic::AnthropicRequestOptions {
+                force_bearer: provider_config.use_bearer_auth,
+                apply_tool_choice: semantics.apply_tool_choice,
+                apply_output_schema: semantics.apply_output_schema,
+            },
+        )?;
 
         let is_oauth =
             anthropic_request.auth_path == crate::llm::anthropic::AnthropicAuthPath::OAuthToken;
@@ -587,6 +806,7 @@ impl SpacebotModel {
         request: CompletionRequest,
         provider_config: &ProviderConfig,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let semantics = self.evaluate_request_semantics(&request)?;
         let api_key = provider_config.api_key.as_str();
         let provider_label = provider_config
             .name
@@ -637,6 +857,16 @@ impl SpacebotModel {
                 .collect();
             body["tools"] = serde_json::json!(tools);
         }
+        if semantics.apply_tool_choice
+            && let Some(tool_choice) = request.tool_choice.as_ref()
+        {
+            body["tool_choice"] = map_openai_tool_choice(tool_choice)?;
+        }
+        if semantics.apply_output_schema
+            && let Some(output_schema) = request.output_schema.as_ref()
+        {
+            body["response_format"] = map_openai_response_format(output_schema);
+        }
 
         let chat_completions_url = format!(
             "{}/v1/chat/completions",
@@ -677,6 +907,7 @@ impl SpacebotModel {
             },
             body,
             &provider_label,
+            "native",
         )
         .await
     }
@@ -686,6 +917,7 @@ impl SpacebotModel {
         request: CompletionRequest,
         provider_config: &ProviderConfig,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let semantics = self.evaluate_request_semantics(&request)?;
         let base_url = provider_config.base_url.trim_end_matches('/');
         let is_chatgpt_codex = self.provider == "openai-chatgpt";
         let responses_url = if is_chatgpt_codex {
@@ -744,6 +976,16 @@ impl SpacebotModel {
                 })
                 .collect();
             body["tools"] = serde_json::json!(tools);
+        }
+        if semantics.apply_tool_choice
+            && let Some(tool_choice) = request.tool_choice.as_ref()
+        {
+            body["tool_choice"] = map_openai_responses_tool_choice(tool_choice)?;
+        }
+        if semantics.apply_output_schema
+            && let Some(output_schema) = request.output_schema.as_ref()
+        {
+            body["text"] = map_openai_responses_text_config(output_schema);
         }
 
         let openai_account_id = if self.provider == "openai-chatgpt" {
@@ -817,7 +1059,12 @@ impl SpacebotModel {
         provider_config: &ProviderConfig,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let stream = self
-            .stream_openai_compatible(request, provider_display_name, provider_config)
+            .stream_openai_compatible(
+                request,
+                provider_display_name,
+                provider_config,
+                stream_mode_for_api_type(&provider_config.api_type),
+            )
             .await?;
         collect_streaming_completion_response(stream).await
     }
@@ -827,7 +1074,9 @@ impl SpacebotModel {
         request: CompletionRequest,
         provider_display_name: &str,
         provider_config: &ProviderConfig,
+        stream_mode: &'static str,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let semantics = self.evaluate_request_semantics(&request)?;
         let base_url = provider_config.base_url.trim_end_matches('/');
         let endpoint_path = match provider_config.api_type {
             ApiType::OpenAiCompletions | ApiType::OpenAiResponses => "/v1/chat/completions",
@@ -888,6 +1137,16 @@ impl SpacebotModel {
                 .collect();
             body["tools"] = serde_json::json!(tools);
         }
+        if semantics.apply_tool_choice
+            && let Some(tool_choice) = request.tool_choice.as_ref()
+        {
+            body["tool_choice"] = map_openai_tool_choice(tool_choice)?;
+        }
+        if semantics.apply_output_schema
+            && let Some(output_schema) = request.output_schema.as_ref()
+        {
+            body["response_format"] = map_openai_response_format(output_schema);
+        }
 
         let http_client = self.llm_manager.http_client().clone();
         let auth_header = format!("Bearer {api_key}");
@@ -901,6 +1160,7 @@ impl SpacebotModel {
             },
             body,
             provider_display_name,
+            stream_mode,
         )
         .await
     }
@@ -926,6 +1186,7 @@ impl SpacebotModel {
                 endpoint,
                 api_key,
                 extra_headers,
+                "native",
             )
             .await?;
         collect_streaming_completion_response(stream).await
@@ -938,7 +1199,9 @@ impl SpacebotModel {
         endpoint: &str,
         api_key: Option<String>,
         extra_headers: &[(&str, &str)],
+        stream_mode: &'static str,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let semantics = self.evaluate_request_semantics(&request)?;
         let mut messages = Vec::new();
 
         if let Some(preamble) = &request.preamble {
@@ -981,6 +1244,16 @@ impl SpacebotModel {
                 .collect();
             body["tools"] = serde_json::json!(tools);
         }
+        if semantics.apply_tool_choice
+            && let Some(tool_choice) = request.tool_choice.as_ref()
+        {
+            body["tool_choice"] = map_openai_tool_choice(tool_choice)?;
+        }
+        if semantics.apply_output_schema
+            && let Some(output_schema) = request.output_schema.as_ref()
+        {
+            body["response_format"] = map_openai_response_format(output_schema);
+        }
 
         let http_client = self.llm_manager.http_client().clone();
         let endpoint = endpoint.to_string();
@@ -1008,6 +1281,7 @@ impl SpacebotModel {
             },
             body,
             provider_display_name,
+            stream_mode,
         )
         .await
     }
@@ -1017,6 +1291,7 @@ impl SpacebotModel {
         mut build_request: F,
         request_body: serde_json::Value,
         provider_label: &str,
+        stream_mode: &'static str,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError>
     where
         F: FnMut(&serde_json::Value) -> reqwest::RequestBuilder,
@@ -1194,10 +1469,71 @@ impl SpacebotModel {
             }));
         };
 
-        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
+        Ok(StreamingCompletionResponse::stream(
+            instrument_stream_result(
+                Box::pin(stream),
+                self.process_label().to_string(),
+                self.provider.clone(),
+                self.full_model_name.clone(),
+                stream_mode,
+            ),
+        ))
     }
 }
 // --- Helpers ---
+
+fn stream_mode_for_api_type(api_type: &ApiType) -> &'static str {
+    match api_type {
+        ApiType::Anthropic | ApiType::OpenAiResponses => "synthetic",
+        ApiType::OpenAiCompletions
+        | ApiType::OpenAiChatCompletions
+        | ApiType::KiloGateway
+        | ApiType::Gemini => "native",
+    }
+}
+
+fn instrument_stream_result(
+    mut inner: StreamingResult<RawStreamingResponse>,
+    process_type: String,
+    provider: String,
+    model: String,
+    stream_mode: &'static str,
+) -> StreamingResult<RawStreamingResponse> {
+    let stream = async_stream::stream! {
+        let started_at = std::time::Instant::now();
+        let mut first_text_delta_observed = false;
+
+        while let Some(item) = inner.next().await {
+            if !first_text_delta_observed
+                && let Ok(RawStreamingChoice::Message(text)) = &item
+                && !text.is_empty()
+            {
+                first_text_delta_observed = true;
+                let elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0;
+                tracing::info!(
+                    process_type = process_type.as_str(),
+                    provider = provider.as_str(),
+                    model = model.as_str(),
+                    stream_mode,
+                    time_to_first_delta_ms = elapsed_ms,
+                    "stream produced first text delta"
+                );
+                #[cfg(feature = "metrics")]
+                {
+                    let metrics = crate::telemetry::Metrics::global();
+                    metrics
+                        .rig_time_to_first_delta_ms
+                        .with_label_values(&[process_type.as_str(), provider.as_str()])
+                        .observe(elapsed_ms);
+                }
+            }
+
+            yield item;
+        }
+    };
+
+    Box::pin(stream)
+}
 
 /// Reverse-map Claude Code canonical tool names back to the original names
 /// from the request's tool definitions.
@@ -1528,6 +1864,190 @@ fn truncate_body(body: &str) -> &str {
     }
 }
 
+fn schema_name(output_schema: &schemars::Schema) -> String {
+    const FALLBACK_SCHEMA_NAME: &str = "response_schema";
+    const MAX_SCHEMA_NAME_LEN: usize = 64;
+
+    let title = output_schema
+        .as_object()
+        .and_then(|schema_object| schema_object.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(FALLBACK_SCHEMA_NAME)
+        .trim();
+
+    let mut normalized = String::with_capacity(title.len().min(MAX_SCHEMA_NAME_LEN));
+    for character in title.chars() {
+        if normalized.len() >= MAX_SCHEMA_NAME_LEN {
+            break;
+        }
+
+        if character.is_ascii_alphanumeric() || character == '_' || character == '-' {
+            normalized.push(character);
+        } else if !normalized.ends_with('_') {
+            normalized.push('_');
+        }
+    }
+
+    let normalized = normalized.trim_matches('_');
+    if normalized.is_empty() {
+        FALLBACK_SCHEMA_NAME.to_string()
+    } else {
+        normalized.to_string()
+    }
+}
+
+fn sanitize_openai_schema(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    if let Value::Object(object) = schema {
+        if object.contains_key("$ref") {
+            if let Some(defs) = object.get_mut("$defs")
+                && let Value::Object(defs_object) = defs
+            {
+                for schema in defs_object.values_mut() {
+                    sanitize_openai_schema(schema);
+                }
+            }
+            object.retain(|key, _| key == "$ref" || key == "$defs");
+            return;
+        }
+
+        let is_object_schema = object.get("type") == Some(&Value::String("object".to_string()))
+            || object.contains_key("properties");
+
+        if is_object_schema && !object.contains_key("additionalProperties") {
+            object.insert("additionalProperties".to_string(), Value::Bool(false));
+        }
+
+        if let Some(defs) = object.get_mut("$defs")
+            && let Value::Object(defs_object) = defs
+        {
+            for schema in defs_object.values_mut() {
+                sanitize_openai_schema(schema);
+            }
+        }
+
+        if let Some(properties) = object.get_mut("properties")
+            && let Value::Object(property_map) = properties
+        {
+            for schema in property_map.values_mut() {
+                sanitize_openai_schema(schema);
+            }
+        }
+
+        if let Some(items) = object.get_mut("items") {
+            sanitize_openai_schema(items);
+        }
+
+        if let Some(one_of) = object.remove("oneOf") {
+            match object.get_mut("anyOf") {
+                Some(Value::Array(existing)) => {
+                    if let Value::Array(mut incoming) = one_of {
+                        existing.append(&mut incoming);
+                    }
+                }
+                _ => {
+                    object.insert("anyOf".to_string(), one_of);
+                }
+            }
+        }
+
+        for key in ["anyOf", "oneOf", "allOf"] {
+            if let Some(variants) = object.get_mut(key)
+                && let Value::Array(variant_array) = variants
+            {
+                for variant in variant_array {
+                    sanitize_openai_schema(variant);
+                }
+            }
+        }
+    }
+}
+
+fn sanitized_openai_schema_value(output_schema: &schemars::Schema) -> serde_json::Value {
+    let mut schema = output_schema.clone().to_value();
+    sanitize_openai_schema(&mut schema);
+    schema
+}
+
+fn map_openai_response_format(output_schema: &schemars::Schema) -> serde_json::Value {
+    serde_json::json!({
+        "type": "json_schema",
+        "json_schema": {
+            "name": schema_name(output_schema),
+            "strict": true,
+            "schema": sanitized_openai_schema_value(output_schema),
+        }
+    })
+}
+
+fn map_openai_responses_text_config(output_schema: &schemars::Schema) -> serde_json::Value {
+    serde_json::json!({
+        "format": {
+            "type": "json_schema",
+            "name": schema_name(output_schema),
+            "strict": true,
+            "schema": sanitized_openai_schema_value(output_schema),
+        }
+    })
+}
+
+fn map_openai_tool_choice(tool_choice: &ToolChoice) -> Result<serde_json::Value, CompletionError> {
+    let mapped = match tool_choice {
+        ToolChoice::Auto => serde_json::json!("auto"),
+        ToolChoice::None => serde_json::json!("none"),
+        ToolChoice::Required => serde_json::json!("required"),
+        ToolChoice::Specific { function_names } => {
+            let Some(function_name) = function_names.first() else {
+                return Err(CompletionError::ProviderError(
+                    "tool_choice specific requires at least one function name".to_string(),
+                ));
+            };
+            if function_names.len() > 1 {
+                return Err(CompletionError::ProviderError(
+                    "OpenAI-compatible tool_choice supports exactly one specific function name"
+                        .to_string(),
+                ));
+            }
+            serde_json::json!({
+                "type": "function",
+                "function": {
+                    "name": function_name,
+                }
+            })
+        }
+    };
+    Ok(mapped)
+}
+
+fn map_openai_responses_tool_choice(
+    tool_choice: &ToolChoice,
+) -> Result<serde_json::Value, CompletionError> {
+    let mapped = match tool_choice {
+        ToolChoice::Auto => serde_json::json!("auto"),
+        ToolChoice::None => serde_json::json!("none"),
+        ToolChoice::Required => serde_json::json!("required"),
+        ToolChoice::Specific { function_names } => {
+            let Some(function_name) = function_names.first() else {
+                return Err(CompletionError::ProviderError(
+                    "tool_choice specific requires at least one function name".to_string(),
+                ));
+            };
+            if function_names.len() > 1 {
+                return Err(CompletionError::ProviderError(
+                    "Responses API tool_choice supports exactly one specific function name"
+                        .to_string(),
+                ));
+            }
+            serde_json::json!({
+                "type": "function",
+                "name": function_name,
+            })
+        }
+    };
+    Ok(mapped)
+}
+
 fn with_streaming_enabled(request_body: &serde_json::Value) -> serde_json::Value {
     let mut body = request_body.clone();
     body["stream"] = serde_json::json!(true);
@@ -1564,6 +2084,10 @@ impl Default for OpenAiStreamingToolCall {
 
 fn stream_from_completion_response(
     response: completion::CompletionResponse<RawResponse>,
+    process_type: String,
+    provider: String,
+    model: String,
+    stream_mode: &'static str,
 ) -> StreamingCompletionResponse<RawStreamingResponse> {
     let usage = response.usage;
     let message_id = response.message_id;
@@ -1616,7 +2140,13 @@ fn stream_from_completion_response(
         }));
     };
 
-    StreamingCompletionResponse::stream(Box::pin(stream))
+    StreamingCompletionResponse::stream(instrument_stream_result(
+        Box::pin(stream),
+        process_type,
+        provider,
+        model,
+        stream_mode,
+    ))
 }
 
 async fn collect_streaming_completion_response(
@@ -2722,8 +3252,104 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::LlmConfig;
+    use crate::llm::manager::LlmManager;
     use rig::message::Message;
-    use std::collections::BTreeMap;
+    use schemars::JsonSchema;
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::Arc;
+
+    #[allow(dead_code)]
+    #[derive(Debug, serde::Deserialize, JsonSchema)]
+    struct TestStructuredResponse {
+        answer: String,
+    }
+
+    #[allow(dead_code)]
+    #[derive(Debug, serde::Deserialize, JsonSchema)]
+    struct TestStructuredResponseWithOptionalField {
+        answer: String,
+        optional_note: Option<String>,
+    }
+
+    fn build_test_llm_config(provider: &str, credential: &str) -> LlmConfig {
+        let mut providers = HashMap::new();
+        if let Some(provider_config) = crate::config::default_provider_config(provider, credential)
+        {
+            providers.insert(provider.to_string(), provider_config);
+        }
+
+        LlmConfig {
+            anthropic_key: (provider == "anthropic").then(|| credential.to_string()),
+            openai_key: (provider == "openai").then(|| credential.to_string()),
+            openrouter_key: (provider == "openrouter").then(|| credential.to_string()),
+            kilo_key: (provider == "kilo").then(|| credential.to_string()),
+            zhipu_key: (provider == "zhipu").then(|| credential.to_string()),
+            groq_key: (provider == "groq").then(|| credential.to_string()),
+            together_key: (provider == "together").then(|| credential.to_string()),
+            fireworks_key: (provider == "fireworks").then(|| credential.to_string()),
+            deepseek_key: (provider == "deepseek").then(|| credential.to_string()),
+            xai_key: (provider == "xai").then(|| credential.to_string()),
+            mistral_key: (provider == "mistral").then(|| credential.to_string()),
+            gemini_key: (provider == "gemini").then(|| credential.to_string()),
+            ollama_key: None,
+            ollama_base_url: (provider == "ollama").then(|| credential.to_string()),
+            opencode_zen_key: (provider == "opencode-zen").then(|| credential.to_string()),
+            opencode_go_key: (provider == "opencode-go").then(|| credential.to_string()),
+            nvidia_key: (provider == "nvidia").then(|| credential.to_string()),
+            minimax_key: (provider == "minimax").then(|| credential.to_string()),
+            minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
+            moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
+            zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
+            providers,
+        }
+    }
+
+    fn structured_schema() -> schemars::Schema {
+        schemars::schema_for!(TestStructuredResponse)
+    }
+
+    fn structured_schema_with_optional_field() -> schemars::Schema {
+        schemars::schema_for!(TestStructuredResponseWithOptionalField)
+    }
+
+    async fn build_test_model(provider: &str, rig_alignment: RigAlignmentConfig) -> SpacebotModel {
+        let llm_manager = Arc::new(
+            LlmManager::new(build_test_llm_config(provider, "test-key"))
+                .await
+                .expect("llm manager"),
+        );
+        SpacebotModel::make(&llm_manager, format!("{provider}/test-model"))
+            .with_rig_alignment(rig_alignment)
+    }
+
+    fn request_with_semantics(include_tools: bool) -> CompletionRequest {
+        CompletionRequest {
+            model: None,
+            preamble: None,
+            chat_history: OneOrMany::one(Message::from("hello")),
+            documents: Vec::new(),
+            tools: if include_tools {
+                vec![rig::completion::ToolDefinition {
+                    name: "worker_inspect".to_string(),
+                    description: "inspect worker state".to_string(),
+                    parameters: serde_json::json!({
+                        "type": "object",
+                        "properties": {},
+                    }),
+                }]
+            } else {
+                Vec::new()
+            },
+            temperature: None,
+            max_tokens: None,
+            tool_choice: Some(ToolChoice::Specific {
+                function_names: vec!["worker_inspect".to_string()],
+            }),
+            additional_params: None,
+            output_schema: Some(structured_schema()),
+        }
+    }
 
     #[test]
     fn reverse_map_restores_original_tool_names() {
@@ -3284,5 +3910,256 @@ mod tests {
         let msg = format_api_error(status, &body);
         assert!(msg.contains("Google"));
         assert!(msg.contains("invalid schema"));
+    }
+
+    #[test]
+    fn forwards_tool_choice_openai_chat_specific() {
+        let mapped = map_openai_tool_choice(&ToolChoice::Specific {
+            function_names: vec!["worker_inspect".to_string()],
+        })
+        .expect("specific tool choice should serialize");
+
+        assert_eq!(mapped["type"], "function");
+        assert_eq!(mapped["function"]["name"], "worker_inspect");
+    }
+
+    #[test]
+    fn forwards_output_schema_openai_responses() {
+        let mapped = map_openai_responses_text_config(&structured_schema());
+
+        assert_eq!(mapped["format"]["type"], "json_schema");
+        assert_eq!(mapped["format"]["name"], "TestStructuredResponse");
+        assert_eq!(
+            mapped["format"]["schema"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            mapped["format"]["schema"]["required"],
+            serde_json::json!(["answer"])
+        );
+    }
+
+    #[test]
+    fn openai_schema_sanitizer_preserves_optional_fields() {
+        let mapped = map_openai_responses_text_config(&structured_schema_with_optional_field());
+
+        assert_eq!(
+            mapped["format"]["schema"]["required"],
+            serde_json::json!(["answer"])
+        );
+    }
+
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[schemars(
+        title = "Test Structured Response (Invalid Chars!) + Extra Long Name Segment 1234567890"
+    )]
+    struct InvalidNamedStructuredResponse {
+        answer: String,
+    }
+
+    fn invalid_named_schema() -> schemars::Schema {
+        schemars::schema_for!(InvalidNamedStructuredResponse)
+    }
+
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    #[schemars(title = "!!! ### ???")]
+    struct EmptyNormalizedSchemaNameResponse {
+        answer: String,
+    }
+
+    fn empty_normalized_name_schema() -> schemars::Schema {
+        schemars::schema_for!(EmptyNormalizedSchemaNameResponse)
+    }
+
+    #[test]
+    fn schema_name_normalizes_to_provider_safe_and_truncates() {
+        let mapped = map_openai_response_format(&invalid_named_schema());
+        let name = mapped["json_schema"]["name"]
+            .as_str()
+            .expect("schema name should be serialized");
+
+        assert!(name.len() <= 64);
+        assert!(
+            name.chars()
+                .all(|character| character.is_ascii_alphanumeric()
+                    || character == '_'
+                    || character == '-')
+        );
+    }
+
+    #[test]
+    fn schema_name_falls_back_when_title_normalizes_empty() {
+        let mapped = map_openai_response_format(&empty_normalized_name_schema());
+        assert_eq!(mapped["json_schema"]["name"], "response_schema");
+    }
+
+    #[test]
+    fn sanitize_openai_schema_keeps_defs_with_refs() {
+        let mut schema = serde_json::json!({
+            "$ref": "#/$defs/Result",
+            "$defs": {
+                "Result": {
+                    "type": "object",
+                    "properties": {
+                        "answer": { "type": "string" }
+                    }
+                }
+            },
+            "description": "discard me"
+        });
+
+        sanitize_openai_schema(&mut schema);
+
+        assert_eq!(schema["$ref"], "#/$defs/Result");
+        assert!(schema.get("$defs").is_some());
+        assert_eq!(
+            schema["$defs"]["Result"]["additionalProperties"],
+            serde_json::json!(false)
+        );
+        assert!(schema.get("description").is_none());
+    }
+
+    #[tokio::test]
+    async fn rejects_unsupported_semantics_enforced() {
+        let model = build_test_model(
+            "gemini",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+        let mut request = request_with_semantics(false);
+        request.tool_choice = None;
+
+        let error = model
+            .evaluate_request_semantics(&request)
+            .expect_err("unsupported provider should fail in enforced mode");
+        assert!(error.to_string().contains("output_schema"));
+    }
+
+    #[tokio::test]
+    async fn rig_parity_off_mode_suppresses_requested_semantics() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Off,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let decision = model
+            .evaluate_request_semantics(&request_with_semantics(true))
+            .expect("off mode should not error");
+
+        assert!(!decision.apply_tool_choice);
+        assert!(!decision.apply_output_schema);
+    }
+
+    #[tokio::test]
+    async fn rig_parity_shadow_mode_applies_supported_provider_and_shadows_unsupported_one() {
+        let supported_model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Shadow,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+        let supported = supported_model
+            .evaluate_request_semantics(&request_with_semantics(true))
+            .expect("supported provider should not error in shadow mode");
+        assert!(supported.apply_tool_choice);
+        assert!(supported.apply_output_schema);
+
+        let unsupported_model = build_test_model(
+            "gemini",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Shadow,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+        let unsupported = unsupported_model
+            .evaluate_request_semantics(&request_with_semantics(true))
+            .expect("shadow mode should downgrade unsupported semantics");
+        assert!(!unsupported.apply_tool_choice);
+        assert!(!unsupported.apply_output_schema);
+    }
+
+    #[tokio::test]
+    async fn rig_parity_enforced_rejects_tool_choice_without_tool_definitions() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let error = model
+            .evaluate_request_semantics(&request_with_semantics(false))
+            .expect_err("tool_choice without tool definitions should fail in enforced mode");
+        assert!(error.to_string().contains("tool_choice"));
+    }
+
+    #[tokio::test]
+    async fn rig_parity_enforced_allows_auto_tool_choice_without_tool_definitions() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let mut request = request_with_semantics(false);
+        request.tool_choice = Some(ToolChoice::Auto);
+        request.output_schema = None;
+
+        let decision = model
+            .evaluate_request_semantics(&request)
+            .expect("auto tool choice should not require tool definitions");
+        assert!(decision.apply_tool_choice);
+        assert!(!decision.apply_output_schema);
+    }
+
+    #[tokio::test]
+    async fn rig_parity_enforced_allows_none_tool_choice_without_tool_definitions() {
+        let model = build_test_model(
+            "openai",
+            RigAlignmentConfig {
+                request_semantics_mode: RigSemanticsMode::Enforced,
+                tool_choice_provider_allowlist: vec!["openai".to_string()],
+                output_schema_provider_allowlist: vec!["openai".to_string()],
+                ..RigAlignmentConfig::default()
+            },
+        )
+        .await;
+
+        let mut request = request_with_semantics(false);
+        request.tool_choice = Some(ToolChoice::None);
+        request.output_schema = None;
+
+        let decision = model
+            .evaluate_request_semantics(&request)
+            .expect("none tool choice should not require tool definitions");
+        assert!(decision.apply_tool_choice);
+        assert!(!decision.apply_output_schema);
     }
 }

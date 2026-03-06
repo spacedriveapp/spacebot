@@ -1,7 +1,7 @@
 //! Worker: Independent task execution process.
 
 use crate::agent::compactor::estimate_history_tokens;
-use crate::config::BrowserConfig;
+use crate::config::{BrowserConfig, RigAlignmentConfig};
 use crate::error::Result;
 use crate::hooks::{SpacebotHook, ToolNudgePolicy};
 use crate::llm::SpacebotModel;
@@ -9,10 +9,13 @@ use crate::llm::routing::is_context_overflow_error;
 use crate::{AgentDeps, ChannelId, ProcessId, ProcessType, WorkerId};
 use rig::agent::AgentBuilder;
 use rig::completion::CompletionModel;
+use std::collections::HashSet;
 use std::fmt::Write as _;
 use std::path::PathBuf;
 use tokio::sync::{mpsc, watch};
 use uuid::Uuid;
+
+static WORKER_CONCURRENCY_SURFACE_WARNING: std::sync::Once = std::sync::Once::new();
 
 /// How many turns per segment before we check context and potentially compact.
 const TURNS_PER_SEGMENT: usize = 25;
@@ -251,6 +254,31 @@ impl Worker {
         tracing::info!(worker_id = %self.id, task = %self.task, "worker starting");
 
         let mcp_tools = self.deps.mcp_manager.get_tools().await;
+        let worker_tool_names = crate::tools::list_worker_tool_names(
+            self.browser_config.enabled,
+            self.brave_search_key.is_some(),
+            self.deps.runtime_config.secrets.load().as_ref().is_some(),
+            &mcp_tools,
+        );
+        let tool_concurrency = resolve_worker_tool_concurrency(
+            self.deps.runtime_config.rig_alignment.load().as_ref(),
+            &worker_tool_names,
+        );
+        tracing::info!(
+            worker_id = %self.id,
+            worker_type = "builtin",
+            tool_concurrency,
+            "worker tool concurrency resolved"
+        );
+        #[cfg(feature = "metrics")]
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            let concurrency_label = tool_concurrency.to_string();
+            metrics
+                .rig_tool_concurrency_total
+                .with_label_values(&["builtin", &concurrency_label])
+                .inc();
+        }
 
         // Create per-worker ToolServer with task tools
         let worker_tool_server = crate::tools::create_worker_tool_server(
@@ -272,6 +300,7 @@ impl Worker {
         let model_name = routing.resolve(ProcessType::Worker, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")
+            .with_rig_alignment((**self.deps.runtime_config.rig_alignment.load()).clone())
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -313,7 +342,12 @@ impl Worker {
 
                 match self
                     .hook
-                    .prompt_with_tool_nudge_retry(&agent, &mut history, &prompt)
+                    .prompt_with_tool_nudge_retry_with_concurrency(
+                        &agent,
+                        &mut history,
+                        &prompt,
+                        tool_concurrency,
+                    )
                     .await
                 {
                     Ok(response) => {
@@ -424,7 +458,12 @@ impl Worker {
 
                 let follow_up_result: std::result::Result<String, String> = loop {
                     match follow_up_hook
-                        .prompt_once(&agent, &mut history, &follow_up_prompt)
+                        .prompt_once_with_tool_concurrency(
+                            &agent,
+                            &mut history,
+                            &follow_up_prompt,
+                            tool_concurrency,
+                        )
                         .await
                     {
                         Ok(response) => break Ok(response),
@@ -878,5 +917,355 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
         "No significant actions recorded in compacted history.".into()
     } else {
         recap
+    }
+}
+
+fn resolve_worker_tool_concurrency(
+    rig_alignment: &RigAlignmentConfig,
+    worker_tool_names: &[String],
+) -> usize {
+    let max_tool_concurrency = rig_alignment.worker_max_tool_concurrency.max(1);
+    let configured = rig_alignment
+        .worker_read_only_tool_concurrency
+        .max(1)
+        .min(max_tool_concurrency);
+
+    if configured <= 1 {
+        return 1;
+    }
+
+    let allowlist: HashSet<&str> = rig_alignment
+        .worker_read_only_tool_allowlist
+        .iter()
+        .map(String::as_str)
+        .collect();
+    let unsafe_allowlist_entries: Vec<&str> = rig_alignment
+        .worker_read_only_tool_allowlist
+        .iter()
+        .map(String::as_str)
+        .filter(|tool_name| !is_read_only_worker_tool(tool_name))
+        .collect();
+
+    if !unsafe_allowlist_entries.is_empty() {
+        tracing::warn!(
+            ?unsafe_allowlist_entries,
+            "worker read-only concurrency allowlist contains mutable tools; forcing sequential execution"
+        );
+        return 1;
+    }
+
+    let non_allowlisted_tools: Vec<&str> = worker_tool_names
+        .iter()
+        .map(String::as_str)
+        .filter(|tool_name| !allowlist.contains(tool_name))
+        .collect();
+    if !non_allowlisted_tools.is_empty() {
+        WORKER_CONCURRENCY_SURFACE_WARNING.call_once(|| {
+            tracing::warn!(
+                configured,
+                ?non_allowlisted_tools,
+                "worker read-only concurrency only applies to fully allowlisted read-only tool surfaces; forcing sequential execution"
+            );
+        });
+        return 1;
+    }
+
+    configured
+}
+
+fn is_read_only_worker_tool(tool_name: &str) -> bool {
+    crate::config::is_builtin_read_only_worker_tool(tool_name)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RigAlignmentConfig, resolve_worker_tool_concurrency};
+    use crate::hooks::SpacebotHook;
+    use crate::{ProcessId, ProcessType};
+    use rig::OneOrMany;
+    use rig::agent::AgentBuilder;
+    use rig::completion::{
+        CompletionError, CompletionModel, CompletionRequest, CompletionResponse, ToolDefinition,
+        Usage,
+    };
+    use rig::message::{AssistantContent, Message, UserContent};
+    use rig::streaming::StreamingCompletionResponse;
+    use rig::tool::Tool;
+    use rig::tool::server::ToolServer;
+    use schemars::JsonSchema;
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn worker_concurrency_allowlist_rejects_default_worker_surface() {
+        let tool_names = vec![
+            "shell".to_string(),
+            "file".to_string(),
+            "exec".to_string(),
+            "task_update".to_string(),
+            "set_status".to_string(),
+            "read_skill".to_string(),
+            "web_search".to_string(),
+        ];
+
+        assert_eq!(
+            resolve_worker_tool_concurrency(&RigAlignmentConfig::default(), &tool_names),
+            1
+        );
+    }
+
+    #[test]
+    fn worker_concurrency_allowlist_accepts_read_only_surface() {
+        let rig_alignment = RigAlignmentConfig {
+            worker_read_only_tool_concurrency: 3,
+            ..RigAlignmentConfig::default()
+        };
+        let tool_names = vec!["read_skill".to_string(), "web_search".to_string()];
+
+        assert_eq!(
+            resolve_worker_tool_concurrency(&rig_alignment, &tool_names),
+            3
+        );
+    }
+
+    #[test]
+    fn worker_concurrency_allowlist_rejects_unknown_tool_names() {
+        let mut rig_alignment = RigAlignmentConfig {
+            worker_read_only_tool_concurrency: 3,
+            ..RigAlignmentConfig::default()
+        };
+        rig_alignment
+            .worker_read_only_tool_allowlist
+            .push("custom_mutating_tool".to_string());
+        let tool_names = vec!["custom_mutating_tool".to_string()];
+
+        assert_eq!(
+            resolve_worker_tool_concurrency(&rig_alignment, &tool_names),
+            1
+        );
+    }
+
+    #[derive(Debug, Deserialize, JsonSchema)]
+    struct TimedProbeArgs {
+        delay_ms: u64,
+        label: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct TimedProbeOutput {
+        label: String,
+    }
+
+    #[derive(Debug, thiserror::Error)]
+    #[error("timed probe failed: {0}")]
+    struct TimedProbeError(String);
+
+    #[derive(Clone)]
+    struct TimedProbeTool {
+        active_calls: Arc<AtomicUsize>,
+        max_active_calls: Arc<AtomicUsize>,
+    }
+
+    impl TimedProbeTool {
+        fn new(active_calls: Arc<AtomicUsize>, max_active_calls: Arc<AtomicUsize>) -> Self {
+            Self {
+                active_calls,
+                max_active_calls,
+            }
+        }
+    }
+
+    impl Tool for TimedProbeTool {
+        const NAME: &'static str = "timed_probe";
+
+        type Error = TimedProbeError;
+        type Args = TimedProbeArgs;
+        type Output = TimedProbeOutput;
+
+        async fn definition(&self, _prompt: String) -> ToolDefinition {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Sleep for a fixed duration and report probe completion".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "delay_ms": {
+                            "type": "integer",
+                            "minimum": 1
+                        },
+                        "label": {
+                            "type": "string"
+                        }
+                    },
+                    "required": ["delay_ms", "label"]
+                }),
+            }
+        }
+
+        async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+            let active = self.active_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active_calls.fetch_max(active, Ordering::SeqCst);
+            tokio::time::sleep(Duration::from_millis(args.delay_ms)).await;
+            self.active_calls.fetch_sub(1, Ordering::SeqCst);
+
+            Ok(TimedProbeOutput { label: args.label })
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct PromptToolConcurrencyModel;
+
+    impl PromptToolConcurrencyModel {
+        fn tool_result_count(request: &CompletionRequest) -> usize {
+            request
+                .chat_history
+                .iter()
+                .filter_map(|message| match message {
+                    Message::User { content } => Some(
+                        content
+                            .iter()
+                            .filter(|item| matches!(item, UserContent::ToolResult(_)))
+                            .count(),
+                    ),
+                    _ => None,
+                })
+                .sum()
+        }
+
+        fn completion_response(choice: OneOrMany<AssistantContent>) -> CompletionResponse<()> {
+            CompletionResponse {
+                choice,
+                message_id: None,
+                usage: Usage::default(),
+                raw_response: (),
+            }
+        }
+    }
+
+    impl CompletionModel for PromptToolConcurrencyModel {
+        type Response = ();
+        type StreamingResponse = ();
+        type Client = ();
+
+        fn make(_client: &Self::Client, _model: impl Into<String>) -> Self {
+            Self
+        }
+
+        async fn completion(
+            &self,
+            request: CompletionRequest,
+        ) -> Result<CompletionResponse<Self::Response>, CompletionError> {
+            match Self::tool_result_count(&request) {
+                0 => Ok(Self::completion_response(
+                    OneOrMany::many(vec![
+                        AssistantContent::tool_call(
+                            "probe_call_1",
+                            TimedProbeTool::NAME,
+                            serde_json::json!({
+                                "delay_ms": 150,
+                                "label": "probe-1",
+                            }),
+                        ),
+                        AssistantContent::tool_call(
+                            "probe_call_2",
+                            TimedProbeTool::NAME,
+                            serde_json::json!({
+                                "delay_ms": 150,
+                                "label": "probe-2",
+                            }),
+                        ),
+                    ])
+                    .expect("tool call batch should be non-empty"),
+                )),
+                2 => Ok(Self::completion_response(OneOrMany::one(
+                    AssistantContent::text("done"),
+                ))),
+                observed => Err(CompletionError::ProviderError(format!(
+                    "expected two tool results before final response, observed {observed}"
+                ))),
+            }
+        }
+
+        async fn stream(
+            &self,
+            _request: CompletionRequest,
+        ) -> Result<StreamingCompletionResponse<Self::StreamingResponse>, CompletionError> {
+            Err(CompletionError::ProviderError(
+                "streaming not implemented for PromptToolConcurrencyModel".to_string(),
+            ))
+        }
+    }
+
+    async fn measure_prompt_tool_concurrency(concurrency: usize) -> (Duration, usize) {
+        let active_calls = Arc::new(AtomicUsize::new(0));
+        let max_active_calls = Arc::new(AtomicUsize::new(0));
+        let tool_server = ToolServer::new()
+            .tool(TimedProbeTool::new(
+                active_calls.clone(),
+                max_active_calls.clone(),
+            ))
+            .run();
+        let agent = AgentBuilder::new(PromptToolConcurrencyModel)
+            .default_max_turns(4)
+            .tool_server_handle(tool_server)
+            .build();
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            Arc::<str>::from("agent"),
+            ProcessId::Worker(uuid::Uuid::new_v4()),
+            ProcessType::Worker,
+            None,
+            event_tx,
+        );
+        let mut history = Vec::new();
+        let start = Instant::now();
+        let result = hook
+            .prompt_once_with_tool_concurrency(&agent, &mut history, "run the probes", concurrency)
+            .await
+            .expect("prompt should complete after tool calls");
+
+        assert_eq!(result, "done");
+        (start.elapsed(), max_active_calls.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn worker_concurrency_reduces_wall_clock() {
+        let rig_alignment = RigAlignmentConfig {
+            worker_read_only_tool_concurrency: 2,
+            worker_max_tool_concurrency: 2,
+            ..RigAlignmentConfig::default()
+        };
+
+        let allowlisted_tools = vec!["read_skill".to_string(), "web_search".to_string()];
+        let mixed_surface_tools = vec!["read_skill".to_string(), "shell".to_string()];
+
+        let parallel_concurrency =
+            resolve_worker_tool_concurrency(&rig_alignment, &allowlisted_tools);
+        let sequential_concurrency =
+            resolve_worker_tool_concurrency(&rig_alignment, &mixed_surface_tools);
+
+        assert_eq!(parallel_concurrency, 2);
+        assert_eq!(sequential_concurrency, 1);
+
+        let deterministic_margin = Duration::from_millis(70);
+        let (sequential_elapsed, sequential_max_active) =
+            measure_prompt_tool_concurrency(sequential_concurrency).await;
+        let (parallel_elapsed, parallel_max_active) =
+            measure_prompt_tool_concurrency(parallel_concurrency).await;
+
+        assert!(
+            parallel_elapsed + deterministic_margin < sequential_elapsed,
+            "expected allowlisted concurrency to reduce wall clock (sequential={sequential_elapsed:?}, parallel={parallel_elapsed:?}, margin={deterministic_margin:?})"
+        );
+        assert_eq!(
+            sequential_max_active, 1,
+            "sequential prompt path should never overlap tool execution"
+        );
+        assert_eq!(
+            parallel_max_active, 2,
+            "parallel prompt path should overlap both tool calls"
+        );
     }
 }

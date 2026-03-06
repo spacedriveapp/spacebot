@@ -92,6 +92,7 @@ impl Branch {
         let model_name = routing.resolve(ProcessType::Branch, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "branch")
+            .with_rig_alignment((**self.deps.runtime_config.rig_alignment.load()).clone())
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)

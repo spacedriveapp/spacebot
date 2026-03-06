@@ -48,6 +48,12 @@ export interface OutboundMessageDeltaEvent {
 	aggregated_text: string;
 }
 
+export interface OutboundStreamEndEvent {
+	type: "outbound_stream_end";
+	agent_id: string;
+	channel_id: string;
+}
+
 export interface TypingStateEvent {
 	type: "typing_state";
 	agent_id: string;
@@ -150,6 +156,7 @@ export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
 	| OutboundMessageDeltaEvent
+	| OutboundStreamEndEvent
 	| TypingStateEvent
 	| WorkerStartedEvent
 	| WorkerStatusEvent
@@ -535,6 +542,9 @@ export interface CortexChatMessagesResponse {
 
 export type CortexChatSSEEvent =
 	| { type: "thinking" }
+	| { type: "text_delta"; text_delta: string }
+	| { type: "tool_started"; tool: string }
+	| { type: "tool_completed"; tool: string; result_preview: string }
 	| { type: "done"; full_text: string }
 	| { type: "error"; message: string };
 

@@ -5,7 +5,8 @@ use super::cache;
 use super::tools;
 
 use reqwest::RequestBuilder;
-use rig::completion::CompletionRequest;
+use rig::completion::{CompletionError, CompletionRequest};
+use rig::message::ToolChoice;
 
 const CLAUDE_CODE_SYSTEM_PREAMBLE: &str =
     "You are Claude Code, Anthropic's official CLI for Claude.";
@@ -17,6 +18,13 @@ pub struct AnthropicRequest {
     pub auth_path: AnthropicAuthPath,
     /// Original tool (name, description) pairs for reverse-mapping response tool calls.
     pub original_tools: Vec<(String, String)>,
+}
+
+/// Request-time behavior toggles for Anthropic request assembly.
+pub struct AnthropicRequestOptions {
+    pub force_bearer: bool,
+    pub apply_tool_choice: bool,
+    pub apply_output_schema: bool,
 }
 
 /// Adaptive thinking is only available on 4.6-generation models.
@@ -58,8 +66,13 @@ pub fn build_anthropic_request(
     model_name: &str,
     request: &CompletionRequest,
     thinking_effort: &str,
-    force_bearer: bool,
-) -> AnthropicRequest {
+    options: AnthropicRequestOptions,
+) -> Result<AnthropicRequest, CompletionError> {
+    let AnthropicRequestOptions {
+        force_bearer,
+        apply_tool_choice,
+        apply_output_schema,
+    } = options;
     let is_oauth = auth::detect_auth_path(api_key, force_bearer) == AnthropicAuthPath::OAuthToken;
     let adaptive_thinking = supports_adaptive_thinking(model_name);
     let retention = cache::resolve_cache_retention(None);
@@ -77,6 +90,19 @@ pub fn build_anthropic_request(
     body["messages"] = serde_json::json!(messages);
 
     let original_tools = build_tools(&mut body, request, is_oauth, &cache_control);
+    if apply_tool_choice && let Some(tool_choice) = request.tool_choice.as_ref() {
+        body["tool_choice"] = map_anthropic_tool_choice(tool_choice)?;
+    }
+    if apply_output_schema && let Some(output_schema) = request.output_schema.as_ref() {
+        let mut schema = output_schema.clone().to_value();
+        sanitize_anthropic_schema(&mut schema);
+        body["output_config"] = serde_json::json!({
+            "format": {
+                "type": "json_schema",
+                "schema": schema,
+            }
+        });
+    }
 
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -94,7 +120,11 @@ pub fn build_anthropic_request(
                 }
             }
         };
-        body["output_config"] = serde_json::json!({ "effort": effort });
+        if body["output_config"].is_object() {
+            body["output_config"]["effort"] = serde_json::json!(effort);
+        } else {
+            body["output_config"] = serde_json::json!({ "effort": effort });
+        }
     }
 
     let builder = http_client
@@ -105,11 +135,11 @@ pub fn build_anthropic_request(
     let (builder, auth_path) = auth::apply_auth_headers(builder, api_key, false, force_bearer);
     let builder = builder.json(&body);
 
-    AnthropicRequest {
+    Ok(AnthropicRequest {
         builder,
         auth_path,
         original_tools,
-    }
+    })
 }
 
 fn build_system_prompt(
@@ -144,6 +174,66 @@ fn build_system_prompt(
 
     if !system_blocks.is_empty() {
         body["system"] = serde_json::json!(system_blocks);
+    }
+}
+
+fn map_anthropic_tool_choice(
+    tool_choice: &ToolChoice,
+) -> Result<serde_json::Value, CompletionError> {
+    let mapped = match tool_choice {
+        ToolChoice::Auto => serde_json::json!({ "type": "auto" }),
+        ToolChoice::None => serde_json::json!({ "type": "none" }),
+        ToolChoice::Required => serde_json::json!({ "type": "any" }),
+        ToolChoice::Specific { function_names } => {
+            let Some(function_name) = function_names.first() else {
+                return Err(CompletionError::ProviderError(
+                    "tool_choice specific requires at least one function name".to_string(),
+                ));
+            };
+            if function_names.len() > 1 {
+                return Err(CompletionError::ProviderError(
+                    "Anthropic only supports one specific tool name".to_string(),
+                ));
+            }
+            serde_json::json!({
+                "type": "tool",
+                "name": function_name,
+            })
+        }
+    };
+    Ok(mapped)
+}
+
+fn sanitize_anthropic_schema(schema: &mut serde_json::Value) {
+    use serde_json::Value;
+
+    if let Value::Object(object) = schema {
+        let is_object_schema = object.get("type") == Some(&Value::String("object".to_string()))
+            || object.contains_key("properties");
+
+        if is_object_schema && !object.contains_key("additionalProperties") {
+            object.insert("additionalProperties".to_string(), Value::Bool(false));
+        }
+
+        for key in ["$defs", "properties"] {
+            if let Some(Value::Object(property_map)) = object.get_mut(key) {
+                for property in property_map.values_mut() {
+                    sanitize_anthropic_schema(property);
+                }
+            }
+        }
+
+        if let Some(items) = object.get_mut("items") {
+            sanitize_anthropic_schema(items);
+        }
+
+        for key in ["anyOf", "allOf", "oneOf"] {
+            if let Some(Value::Array(variants)) = object.get_mut(key) {
+                for variant in variants {
+                    sanitize_anthropic_schema(variant);
+                }
+            }
+        }
     }
 }
 
@@ -201,6 +291,7 @@ fn build_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use schemars::JsonSchema;
 
     #[test]
     fn adaptive_thinking_detected_for_4_6_models() {
@@ -217,5 +308,20 @@ mod tests {
         assert!(!supports_adaptive_thinking("claude-sonnet-4-5"));
         assert!(!supports_adaptive_thinking("claude-opus-4-0"));
         assert!(!supports_adaptive_thinking("gpt-4o"));
+    }
+
+    #[allow(dead_code)]
+    #[derive(JsonSchema)]
+    struct AnthropicOptionalSchema {
+        answer: String,
+        optional_note: Option<String>,
+    }
+
+    #[test]
+    fn anthropic_schema_sanitizer_preserves_optional_fields() {
+        let mut schema = schemars::schema_for!(AnthropicOptionalSchema).to_value();
+        sanitize_anthropic_schema(&mut schema);
+
+        assert_eq!(schema["required"], serde_json::json!(["answer"]));
     }
 }

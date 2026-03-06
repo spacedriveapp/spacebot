@@ -22,14 +22,17 @@ use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
     ProcessType, WorkerId,
 };
-use rig::agent::AgentBuilder;
-use rig::completion::CompletionModel;
+use futures::StreamExt as _;
+use rig::agent::MultiTurnStreamItem;
+use rig::agent::{AgentBuilder, HookAction, PromptHook, ToolCallHookAction};
+use rig::completion::{CompletionModel, GetTokenUsage, PromptError};
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
+use rig::streaming::StreamingPrompt;
 use rig::tool::server::ToolServer;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
 
@@ -72,6 +75,306 @@ fn should_flush_coalesce_buffer_for_event(event: &ProcessEvent) -> bool {
             | ProcessEvent::WorkerStatus { .. }
             | ProcessEvent::WorkerComplete { .. }
     )
+}
+
+fn streaming_error_to_prompt_result(
+    error: rig::agent::StreamingError,
+    fallback_history: Vec<rig::message::Message>,
+) -> (
+    std::result::Result<String, PromptError>,
+    Vec<rig::message::Message>,
+) {
+    match error {
+        rig::agent::StreamingError::Prompt(error) => {
+            let history = match error.as_ref() {
+                PromptError::MaxTurnsError { chat_history, .. }
+                | PromptError::PromptCancelled { chat_history, .. } => (**chat_history).clone(),
+                _ => fallback_history,
+            };
+            (Err(*error), history)
+        }
+        rig::agent::StreamingError::Completion(error) => {
+            (Err(PromptError::CompletionError(error)), fallback_history)
+        }
+        rig::agent::StreamingError::Tool(error) => {
+            (Err(PromptError::ToolError(error)), fallback_history)
+        }
+    }
+}
+
+fn missing_stream_final_response_error() -> PromptError {
+    PromptError::CompletionError(rig::completion::CompletionError::ProviderError(
+        "stream ended without final response".to_string(),
+    ))
+}
+
+const STREAM_BLOCK_PREFIX_BYTES: usize = 64;
+const STREAM_LEAK_TAIL_BYTES: usize = 256;
+
+fn push_prefix_bytes(buffer: &mut String, text: &str, max_bytes: usize) {
+    if buffer.len() >= max_bytes || text.is_empty() {
+        return;
+    }
+
+    let remaining = max_bytes - buffer.len();
+    if text.len() <= remaining {
+        buffer.push_str(text);
+        return;
+    }
+
+    let mut end = remaining;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    buffer.push_str(&text[..end]);
+}
+
+fn trim_to_last_bytes(buffer: &mut String, max_bytes: usize) {
+    if buffer.len() <= max_bytes {
+        return;
+    }
+
+    let mut start = buffer.len() - max_bytes;
+    while start < buffer.len() && !buffer.is_char_boundary(start) {
+        start += 1;
+    }
+    buffer.drain(..start);
+}
+
+#[derive(Default)]
+struct StreamForwardingState {
+    leading_text: String,
+    leak_tail: String,
+    blocked: bool,
+}
+
+impl StreamForwardingState {
+    fn should_forward_delta(&mut self, text_delta: &str) -> bool {
+        if text_delta.is_empty() || self.blocked {
+            return false;
+        }
+
+        push_prefix_bytes(
+            &mut self.leading_text,
+            text_delta,
+            STREAM_BLOCK_PREFIX_BYTES,
+        );
+        if crate::tools::should_block_user_visible_text(&self.leading_text) {
+            self.blocked = true;
+            return false;
+        }
+
+        self.leak_tail.push_str(text_delta);
+        trim_to_last_bytes(&mut self.leak_tail, STREAM_LEAK_TAIL_BYTES);
+
+        if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&self.leak_tail) {
+            tracing::warn!(
+                leak_prefix = %&leak[..leak.len().min(8)],
+                "blocked streamed output matching secret pattern"
+            );
+            self.blocked = true;
+            return false;
+        }
+
+        true
+    }
+}
+
+fn should_forward_stream_delta(state: &mut StreamForwardingState, text_delta: &str) -> bool {
+    if text_delta.is_empty() {
+        return false;
+    }
+
+    state.should_forward_delta(text_delta)
+}
+
+#[derive(Clone)]
+struct ChannelStreamingHook {
+    spacebot_hook: SpacebotHook,
+    response_tx: mpsc::Sender<OutboundResponse>,
+    forwarding_state: Arc<Mutex<StreamForwardingState>>,
+}
+
+impl ChannelStreamingHook {
+    fn new(spacebot_hook: SpacebotHook, response_tx: mpsc::Sender<OutboundResponse>) -> Self {
+        Self {
+            spacebot_hook,
+            response_tx,
+            forwarding_state: Arc::new(Mutex::new(StreamForwardingState::default())),
+        }
+    }
+}
+
+impl<M> PromptHook<M> for ChannelStreamingHook
+where
+    M: CompletionModel,
+{
+    async fn on_completion_call(
+        &self,
+        prompt: &rig::message::Message,
+        history: &[rig::message::Message],
+    ) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_completion_call(&self.spacebot_hook, prompt, history)
+            .await
+    }
+
+    async fn on_completion_response(
+        &self,
+        prompt: &rig::message::Message,
+        response: &rig::completion::CompletionResponse<M::Response>,
+    ) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_completion_response(
+            &self.spacebot_hook,
+            prompt,
+            response,
+        )
+        .await
+    }
+
+    async fn on_tool_call(
+        &self,
+        tool_name: &str,
+        tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
+    ) -> ToolCallHookAction {
+        <SpacebotHook as PromptHook<M>>::on_tool_call(
+            &self.spacebot_hook,
+            tool_name,
+            tool_call_id,
+            internal_call_id,
+            args,
+        )
+        .await
+    }
+
+    async fn on_tool_result(
+        &self,
+        tool_name: &str,
+        tool_call_id: Option<String>,
+        internal_call_id: &str,
+        args: &str,
+        result: &str,
+    ) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_tool_result(
+            &self.spacebot_hook,
+            tool_name,
+            tool_call_id,
+            internal_call_id,
+            args,
+            result,
+        )
+        .await
+    }
+
+    async fn on_text_delta(&self, text_delta: &str, aggregated_text: &str) -> HookAction {
+        let action = <SpacebotHook as PromptHook<M>>::on_text_delta(
+            &self.spacebot_hook,
+            text_delta,
+            aggregated_text,
+        )
+        .await;
+        if !matches!(action, HookAction::Continue) {
+            return action;
+        }
+
+        let should_forward = {
+            let mut state = self.forwarding_state.lock().unwrap_or_else(|poisoned| {
+                tracing::warn!("channel streaming forwarding state poisoned; recovering");
+                poisoned.into_inner()
+            });
+            should_forward_stream_delta(&mut state, text_delta)
+        };
+
+        if should_forward {
+            match self
+                .response_tx
+                .try_send(OutboundResponse::StreamChunk(text_delta.to_string()))
+            {
+                Ok(()) => {}
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    tracing::debug!(
+                        "dropping streamed text delta because outbound response channel is full"
+                    );
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                    tracing::debug!(
+                        "dropping streamed text delta because outbound response channel is closed"
+                    );
+                }
+            }
+        }
+
+        HookAction::Continue
+    }
+
+    async fn on_tool_call_delta(
+        &self,
+        tool_call_id: &str,
+        internal_call_id: &str,
+        tool_name: Option<&str>,
+        tool_call_delta: &str,
+    ) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_tool_call_delta(
+            &self.spacebot_hook,
+            tool_call_id,
+            internal_call_id,
+            tool_name,
+            tool_call_delta,
+        )
+        .await
+    }
+
+    async fn on_stream_completion_response_finish(
+        &self,
+        prompt: &rig::message::Message,
+        response: &<M as CompletionModel>::StreamingResponse,
+    ) -> HookAction {
+        <SpacebotHook as PromptHook<M>>::on_stream_completion_response_finish(
+            &self.spacebot_hook,
+            prompt,
+            response,
+        )
+        .await
+    }
+}
+
+async fn prompt_once_streaming<M, P>(
+    agent: &rig::agent::Agent<M>,
+    hook: P,
+    history: Vec<rig::message::Message>,
+    prompt: &str,
+) -> (
+    std::result::Result<String, PromptError>,
+    Vec<rig::message::Message>,
+)
+where
+    M: CompletionModel + 'static,
+    M::StreamingResponse: GetTokenUsage,
+    P: rig::agent::PromptHook<M> + 'static,
+{
+    let fallback_history = history.clone();
+    let mut stream = agent
+        .stream_prompt(prompt)
+        .with_hook(hook)
+        .with_history(history)
+        .await;
+
+    let mut final_history = fallback_history;
+    while let Some(item) = stream.next().await {
+        match item {
+            Ok(MultiTurnStreamItem::FinalResponse(final_response)) => {
+                if let Some(history) = final_response.history() {
+                    final_history = history.to_vec();
+                }
+                return (Ok(final_response.response().to_string()), final_history);
+            }
+            Ok(_) => {}
+            Err(error) => return streaming_error_to_prompt_result(error, final_history),
+        }
+    }
+
+    (Err(missing_stream_final_response_error()), final_history)
 }
 
 /// Shared state that channel tools need to act on the channel.
@@ -1805,6 +2108,7 @@ impl Channel {
 
         let rc = &self.deps.runtime_config;
         let routing = rc.routing.load();
+        let rig_alignment = rc.rig_alignment.load();
         let max_turns = if is_retrigger {
             RETRIGGER_MAX_TURNS
         } else {
@@ -1813,6 +2117,7 @@ impl Channel {
         let model_name = routing.resolve(ProcessType::Channel, None);
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
+            .with_rig_alignment((**rig_alignment).clone())
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -1868,7 +2173,15 @@ impl Channel {
         };
         let history_len_before = history.len();
 
-        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+        let streaming_enabled = rig_alignment.channel_streaming;
+        let (mut result, mut history) = if streaming_enabled {
+            let streaming_hook =
+                ChannelStreamingHook::new(self.hook.clone(), self.response_tx.clone());
+            prompt_once_streaming(&agent, streaming_hook, history, user_text).await
+        } else {
+            let result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+            (result, history)
+        };
 
         // If the LLM responded with text that looks like tool call syntax, it failed
         // to use the tool calling API. Inject a correction and retry a couple
@@ -1891,10 +2204,19 @@ impl Channel {
 
             let prompt_engine = self.deps.runtime_config.prompts.load();
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
-            result = self
-                .hook
-                .prompt_once(&agent, &mut history, &correction)
-                .await;
+            if streaming_enabled {
+                let streaming_hook =
+                    ChannelStreamingHook::new(self.hook.clone(), self.response_tx.clone());
+                let (next_result, next_history) =
+                    prompt_once_streaming(&agent, streaming_hook, history, &correction).await;
+                result = next_result;
+                history = next_history;
+            } else {
+                result = self
+                    .hook
+                    .prompt_once(&agent, &mut history, &correction)
+                    .await;
+            }
         }
 
         let retrigger_reply_preserved = {
@@ -2589,9 +2911,19 @@ impl Channel {
 
 #[cfg(test)]
 mod tests {
-    use super::{recv_channel_event, should_process_event_for_channel};
+    use super::{
+        ChannelStreamingHook, StreamForwardingState, missing_stream_final_response_error,
+        recv_channel_event, should_forward_stream_delta, should_process_event_for_channel,
+        streaming_error_to_prompt_result,
+    };
+    use crate::hooks::SpacebotHook;
+    use crate::llm::SpacebotModel;
     use crate::memory::MemoryType;
-    use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
+    use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, ProcessType};
+    use rig::agent::{HookAction, PromptHook};
+    use rig::completion::PromptError;
+    use rig::message::{Message, UserContent};
+    use rig::one_or_many::OneOrMany;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -2687,6 +3019,124 @@ mod tests {
         };
 
         assert!(should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn channel_streaming_reply_terminal() {
+        let fallback_history = vec![Message::User {
+            content: OneOrMany::one(UserContent::text("fallback-history")),
+        }];
+        let terminal_history = vec![
+            Message::User {
+                content: OneOrMany::one(UserContent::text("real-user-prompt")),
+            },
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(rig::message::AssistantContent::tool_call(
+                    "call_1",
+                    "reply",
+                    serde_json::json!({ "content": "terminal reply" }),
+                )),
+            },
+        ];
+
+        let streaming_error =
+            rig::agent::StreamingError::Prompt(Box::new(PromptError::PromptCancelled {
+                chat_history: Box::new(terminal_history.clone()),
+                reason: "reply delivered".to_string(),
+            }));
+
+        let (result, history) = streaming_error_to_prompt_result(streaming_error, fallback_history);
+
+        assert!(
+            matches!(
+                result,
+                Err(PromptError::PromptCancelled { reason, .. }) if reason == "reply delivered"
+            ),
+            "streaming terminal reply should stay terminal and preserve PromptCancelled semantics"
+        );
+        assert_eq!(
+            history, terminal_history,
+            "streaming terminal reply should use terminal chat history, not fallback history"
+        );
+    }
+
+    #[test]
+    fn missing_stream_final_response_is_an_error() {
+        let error = missing_stream_final_response_error();
+        assert!(matches!(
+            error,
+            rig::completion::PromptError::CompletionError(
+                rig::completion::CompletionError::ProviderError(_)
+            )
+        ));
+        assert!(
+            error
+                .to_string()
+                .contains("stream ended without final response")
+        );
+    }
+
+    #[test]
+    fn streamed_deltas_block_secrets_and_structured_tool_syntax() {
+        let mut structured = StreamForwardingState::default();
+        assert!(!should_forward_stream_delta(
+            &mut structured,
+            "{\"content\":\"hello\"}"
+        ));
+
+        let mut leak = StreamForwardingState::default();
+        assert!(should_forward_stream_delta(
+            &mut leak,
+            "token sk-ant-abc1234567890"
+        ));
+        assert!(!should_forward_stream_delta(&mut leak, "1234567890"));
+
+        let mut normal = StreamForwardingState::default();
+        assert!(should_forward_stream_delta(
+            &mut normal,
+            "normal assistant "
+        ));
+        assert!(should_forward_stream_delta(&mut normal, "reply"));
+    }
+
+    #[tokio::test]
+    async fn channel_streaming_hook_drops_when_response_channel_is_full() {
+        let (response_tx, mut response_rx) = tokio::sync::mpsc::channel(1);
+        response_tx
+            .send(crate::OutboundResponse::Text("already queued".to_string()))
+            .await
+            .expect("prefill response queue");
+
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = ChannelStreamingHook::new(
+            SpacebotHook::new(
+                Arc::<str>::from("agent"),
+                ProcessId::Channel(Arc::<str>::from("channel")),
+                ProcessType::Channel,
+                Some(Arc::<str>::from("channel")),
+                event_tx,
+            ),
+            response_tx,
+        );
+
+        let action = <ChannelStreamingHook as PromptHook<SpacebotModel>>::on_text_delta(
+            &hook,
+            "partial",
+            "partial response",
+        )
+        .await;
+        assert!(matches!(action, HookAction::Continue));
+
+        let queued = response_rx
+            .recv()
+            .await
+            .expect("prefilled message should remain");
+        assert!(matches!(queued, crate::OutboundResponse::Text(_)));
+        assert!(
+            response_rx.try_recv().is_err(),
+            "streaming hook should drop deltas instead of blocking when the outbound queue is full"
+        );
     }
 
     #[test]

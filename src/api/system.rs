@@ -85,6 +85,7 @@ pub(super) async fn events_sse(
                             ApiEvent::InboundMessage { .. } => "inbound_message",
                             ApiEvent::OutboundMessage { .. } => "outbound_message",
                             ApiEvent::OutboundMessageDelta { .. } => "outbound_message_delta",
+                            ApiEvent::OutboundStreamEnd { .. } => "outbound_stream_end",
                             ApiEvent::TypingState { .. } => "typing_state",
                             ApiEvent::WorkerStarted { .. } => "worker_started",
                             ApiEvent::WorkerStatusUpdate { .. } => "worker_status",

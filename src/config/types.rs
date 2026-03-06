@@ -499,6 +499,7 @@ impl SystemSecrets for LlmConfig {
 #[derive(Clone)]
 pub struct DefaultsConfig {
     pub routing: RoutingConfig,
+    pub rig_alignment: RigAlignmentConfig,
     pub max_concurrent_branches: usize,
     pub max_concurrent_workers: usize,
     pub max_turns: usize,
@@ -530,6 +531,7 @@ impl std::fmt::Debug for DefaultsConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DefaultsConfig")
             .field("routing", &self.routing)
+            .field("rig_alignment", &self.rig_alignment)
             .field("max_concurrent_branches", &self.max_concurrent_branches)
             .field("max_concurrent_workers", &self.max_concurrent_workers)
             .field("max_turns", &self.max_turns)
@@ -775,6 +777,74 @@ pub struct ChannelConfig {
     pub listen_only_mode: bool,
 }
 
+/// Rollout mode for request-semantics parity behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RigSemanticsMode {
+    Off,
+    Shadow,
+    Enforced,
+}
+
+/// Runtime configuration for Rig-alignment behavior.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RigAlignmentConfig {
+    pub request_semantics_mode: RigSemanticsMode,
+    pub channel_streaming: bool,
+    pub cortex_chat_streaming: bool,
+    pub worker_read_only_tool_concurrency: usize,
+    pub worker_max_tool_concurrency: usize,
+    pub worker_read_only_tool_allowlist: Vec<String>,
+    pub output_schema_provider_allowlist: Vec<String>,
+    pub tool_choice_provider_allowlist: Vec<String>,
+}
+
+const BUILTIN_READ_ONLY_WORKER_TOOLS: &[&str] = &[
+    "read_skill",
+    "spacebot_docs",
+    "memory_recall",
+    "channel_recall",
+    "web_search",
+    "worker_inspect",
+    "email_search",
+    "config_inspect",
+];
+
+pub fn is_builtin_read_only_worker_tool(tool_name: &str) -> bool {
+    BUILTIN_READ_ONLY_WORKER_TOOLS.contains(&tool_name)
+}
+
+pub fn default_worker_read_only_tool_allowlist() -> Vec<String> {
+    BUILTIN_READ_ONLY_WORKER_TOOLS
+        .iter()
+        .copied()
+        .map(str::to_string)
+        .collect()
+}
+
+impl Default for RigAlignmentConfig {
+    fn default() -> Self {
+        Self {
+            request_semantics_mode: RigSemanticsMode::Shadow,
+            channel_streaming: false,
+            cortex_chat_streaming: false,
+            worker_read_only_tool_concurrency: 1,
+            worker_max_tool_concurrency: 4,
+            worker_read_only_tool_allowlist: default_worker_read_only_tool_allowlist(),
+            output_schema_provider_allowlist: vec![
+                "openai".to_string(),
+                "openai-chatgpt".to_string(),
+                "anthropic".to_string(),
+            ],
+            tool_choice_provider_allowlist: vec![
+                "openai".to_string(),
+                "openai-chatgpt".to_string(),
+                "anthropic".to_string(),
+            ],
+        }
+    }
+}
+
 /// OpenCode subprocess worker configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeConfig {
@@ -1003,6 +1073,7 @@ pub struct AgentConfig {
     pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
     pub channel: Option<ChannelConfig>,
+    pub rig_alignment: Option<RigAlignmentConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
@@ -1059,6 +1130,7 @@ pub struct ResolvedAgentConfig {
     pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
     pub channel: ChannelConfig,
+    pub rig_alignment: RigAlignmentConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
@@ -1074,6 +1146,7 @@ impl Default for DefaultsConfig {
     fn default() -> Self {
         Self {
             routing: RoutingConfig::default(),
+            rig_alignment: RigAlignmentConfig::default(),
             max_concurrent_branches: 5,
             max_concurrent_workers: 5,
             max_turns: 5,
@@ -1151,6 +1224,10 @@ impl AgentConfig {
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
             channel: self.channel.unwrap_or(defaults.channel),
+            rig_alignment: self
+                .rig_alignment
+                .clone()
+                .unwrap_or_else(|| defaults.rig_alignment.clone()),
             mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key

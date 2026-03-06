@@ -14,10 +14,10 @@ use super::{
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
     LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    MetricsConfig, OpenCodeConfig, ProviderConfig, RigAlignmentConfig, RigSemanticsMode,
+    SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig,
+    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -123,6 +123,59 @@ fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
             );
             None
         }
+    }
+}
+
+fn parse_rig_semantics_mode(value: Option<&str>, default: RigSemanticsMode) -> RigSemanticsMode {
+    match value.map(str::trim).filter(|value| !value.is_empty()) {
+        Some("off") => RigSemanticsMode::Off,
+        Some("shadow") => RigSemanticsMode::Shadow,
+        Some("enforced") => RigSemanticsMode::Enforced,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "unknown rig_alignment.request_semantics_mode, expected one of: off, shadow, enforced"
+            );
+            default
+        }
+        None => default,
+    }
+}
+
+fn resolve_rig_alignment(
+    overrides: Option<TomlRigAlignmentConfig>,
+    defaults: RigAlignmentConfig,
+) -> RigAlignmentConfig {
+    let Some(overrides) = overrides else {
+        return defaults;
+    };
+
+    RigAlignmentConfig {
+        request_semantics_mode: parse_rig_semantics_mode(
+            overrides.request_semantics_mode.as_deref(),
+            defaults.request_semantics_mode,
+        ),
+        channel_streaming: overrides
+            .channel_streaming
+            .unwrap_or(defaults.channel_streaming),
+        cortex_chat_streaming: overrides
+            .cortex_chat_streaming
+            .unwrap_or(defaults.cortex_chat_streaming),
+        worker_read_only_tool_concurrency: overrides
+            .worker_read_only_tool_concurrency
+            .unwrap_or(defaults.worker_read_only_tool_concurrency),
+        worker_max_tool_concurrency: overrides
+            .worker_max_tool_concurrency
+            .unwrap_or(defaults.worker_max_tool_concurrency),
+        worker_read_only_tool_allowlist: overrides
+            .worker_read_only_tool_allowlist
+            .unwrap_or(defaults.worker_read_only_tool_allowlist),
+        output_schema_provider_allowlist: overrides
+            .output_schema_provider_allowlist
+            .unwrap_or(defaults.output_schema_provider_allowlist),
+        tool_choice_provider_allowlist: overrides
+            .tool_choice_provider_allowlist
+            .unwrap_or(defaults.tool_choice_provider_allowlist),
     }
 }
 
@@ -793,6 +846,7 @@ impl Config {
             warmup: None,
             browser: None,
             channel: None,
+            rig_alignment: None,
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
@@ -1316,6 +1370,10 @@ impl Config {
         };
         let defaults = DefaultsConfig {
             routing: resolve_routing(toml.defaults.routing, &base_routing),
+            rig_alignment: resolve_rig_alignment(
+                toml.defaults.rig_alignment,
+                base_defaults.rig_alignment.clone(),
+            ),
             max_concurrent_branches: toml
                 .defaults
                 .max_concurrent_branches
@@ -1609,6 +1667,9 @@ impl Config {
                             .listen_only_mode
                             .map(|listen_only_mode| ChannelConfig { listen_only_mode })
                     }),
+                    rig_alignment: a.rig_alignment.map(|rig_alignment| {
+                        resolve_rig_alignment(Some(rig_alignment), defaults.rig_alignment.clone())
+                    }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(
                             mcp_servers
@@ -1648,6 +1709,7 @@ impl Config {
                 warmup: None,
                 browser: None,
                 channel: None,
+                rig_alignment: None,
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,

@@ -116,6 +116,22 @@ impl SpacebotHook {
     where
         M: CompletionModel,
     {
+        self.prompt_with_tool_nudge_retry_with_concurrency(agent, history, prompt, 1)
+            .await
+    }
+
+    /// Prompt an agent with bounded hook-driven tool nudge retries and request-level
+    /// tool concurrency.
+    pub async fn prompt_with_tool_nudge_retry_with_concurrency<M>(
+        &self,
+        agent: &rig::agent::Agent<M>,
+        history: &mut Vec<Message>,
+        prompt: &str,
+        tool_concurrency: usize,
+    ) -> std::result::Result<String, PromptError>
+    where
+        M: CompletionModel,
+    {
         self.reset_tool_nudge_state();
         self.set_tool_nudge_request_active(true);
 
@@ -125,11 +141,20 @@ impl SpacebotHook {
 
         loop {
             let history_len_before_attempt = history.len();
-            let result = agent
-                .prompt(current_prompt.as_ref())
-                .with_history(history)
-                .with_hook(self.clone())
-                .await;
+            let result = if tool_concurrency > 1 {
+                agent
+                    .prompt(current_prompt.as_ref())
+                    .with_history(history)
+                    .with_hook(self.clone())
+                    .with_tool_concurrency(tool_concurrency)
+                    .await
+            } else {
+                agent
+                    .prompt(current_prompt.as_ref())
+                    .with_history(history)
+                    .with_hook(self.clone())
+                    .await
+            };
 
             match &result {
                 Err(PromptError::PromptCancelled { reason, .. })
@@ -228,13 +253,37 @@ impl SpacebotHook {
     where
         M: CompletionModel,
     {
+        self.prompt_once_with_tool_concurrency(agent, history, prompt, 1)
+            .await
+    }
+
+    /// Prompt once with a per-request tool concurrency setting.
+    pub async fn prompt_once_with_tool_concurrency<M>(
+        &self,
+        agent: &rig::agent::Agent<M>,
+        history: &mut Vec<Message>,
+        prompt: &str,
+        tool_concurrency: usize,
+    ) -> std::result::Result<String, PromptError>
+    where
+        M: CompletionModel,
+    {
         self.reset_tool_nudge_state();
         self.set_tool_nudge_request_active(false);
-        agent
-            .prompt(prompt)
-            .with_history(history)
-            .with_hook(self.clone())
-            .await
+        if tool_concurrency > 1 {
+            agent
+                .prompt(prompt)
+                .with_history(history)
+                .with_hook(self.clone())
+                .with_tool_concurrency(tool_concurrency)
+                .await
+        } else {
+            agent
+                .prompt(prompt)
+                .with_history(history)
+                .with_hook(self.clone())
+                .await
+        }
     }
 
     /// Send a status update event.
@@ -465,12 +514,14 @@ where
         if self.process_type == ProcessType::Channel
             && let Some(channel_id) = self.channel_id.clone()
         {
+            let scrubbed_text_delta = crate::secrets::scrub::scrub_leaks(text_delta);
+            let scrubbed_aggregated_text = crate::secrets::scrub::scrub_leaks(aggregated_text);
             let event = ProcessEvent::TextDelta {
                 agent_id: self.agent_id.clone(),
                 process_id: self.process_id.clone(),
                 channel_id: Some(channel_id),
-                text_delta: text_delta.to_string(),
-                aggregated_text: aggregated_text.to_string(),
+                text_delta: scrubbed_text_delta,
+                aggregated_text: scrubbed_aggregated_text,
             };
             self.event_tx.send(event).ok();
         }
@@ -503,7 +554,8 @@ where
         }
 
         // Send event without blocking. Truncate args to keep broadcast payloads bounded.
-        let capped_args = crate::tools::truncate_output(args, 2_000);
+        let scrubbed_args = crate::secrets::scrub::scrub_leaks(args);
+        let capped_args = crate::tools::truncate_output(&scrubbed_args, 2_000);
         let event = ProcessEvent::ToolStarted {
             agent_id: self.agent_id.clone(),
             process_id: self.process_id.clone(),
@@ -1121,7 +1173,8 @@ mod tests {
         );
 
         let action =
-            <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(&hook, "hi", "hi").await;
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(&hook, "hi", "partial hi")
+                .await;
         assert!(matches!(action, HookAction::Continue));
 
         let event = event_rx.recv().await.expect("text delta event");
@@ -1131,7 +1184,65 @@ mod tests {
                 ref text_delta,
                 ref aggregated_text,
                 ..
-            } if text_delta == "hi" && aggregated_text == "hi"
+            } if text_delta == "hi" && aggregated_text == "partial hi"
+        ));
+    }
+
+    #[tokio::test]
+    async fn channel_text_delta_scrubs_secret_patterns() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Channel(std::sync::Arc::<str>::from("channel")),
+            ProcessType::Channel,
+            Some(std::sync::Arc::<str>::from("channel")),
+            event_tx,
+        );
+
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(
+            &hook,
+            "sk-ant-api03-abc1234567890123456789012345678901234567",
+            "token sk-ant-api03-abc1234567890123456789012345678901234567",
+        )
+        .await;
+        assert!(matches!(action, HookAction::Continue));
+
+        let event = event_rx.recv().await.expect("text delta event");
+        assert!(matches!(
+            event,
+            ProcessEvent::TextDelta {
+                ref text_delta,
+                ref aggregated_text,
+                ..
+            } if !text_delta.contains("sk-ant-") && !aggregated_text.contains("sk-ant-")
+        ));
+    }
+
+    #[tokio::test]
+    async fn tool_started_event_scrubs_secret_patterns() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Worker(uuid::Uuid::new_v4()),
+            ProcessType::Worker,
+            None,
+            event_tx,
+        );
+
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "shell",
+            None,
+            "internal-call",
+            r#"{"command":"export API_KEY=sk-ant-api03-abc1234567890123456789012345678901234567"}"#,
+        )
+        .await;
+        assert!(matches!(action, rig::agent::ToolCallHookAction::Continue));
+
+        let event = event_rx.recv().await.expect("tool started event");
+        assert!(matches!(
+            event,
+            ProcessEvent::ToolStarted { ref args, .. } if !args.contains("sk-ant-")
         ));
     }
 }

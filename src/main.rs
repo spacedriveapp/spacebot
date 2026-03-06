@@ -1882,7 +1882,7 @@ async fn run(
                     let (response_tx, mut response_rx) = mpsc::channel::<spacebot::OutboundResponse>(32);
 
                     // Subscribe to the agent's event bus
-                    let event_rx = agent.deps.event_tx.subscribe();
+                    let channel_event_rx = agent.deps.event_tx.subscribe();
 
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
@@ -1890,7 +1890,7 @@ async fn run(
                         channel_id,
                         agent.deps.clone(),
                         response_tx,
-                        event_rx,
+                        channel_event_rx,
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                     );
@@ -1977,68 +1977,165 @@ async fn run(
                     let sse_agent_id = agent_id.to_string();
                     let sse_channel_id = conversation_id.clone();
                     let outbound_handle = tokio::spawn(async move {
-                        while let Some(response) = response_rx.recv().await {
-                            // Forward relevant events to SSE clients
-                            match &response {
-                                spacebot::OutboundResponse::Text(text) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::RichMessage { text, .. } => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::ThreadReply { text, .. } => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::OutboundMessage {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        text: text.clone(),
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::Status(spacebot::StatusUpdate::Thinking) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::TypingState {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        is_typing: true,
-                                    }).ok();
-                                }
-                                spacebot::OutboundResponse::Status(spacebot::StatusUpdate::StopTyping) => {
-                                    api_event_tx.send(spacebot::api::ApiEvent::TypingState {
-                                        agent_id: sse_agent_id.clone(),
-                                        channel_id: sse_channel_id.clone(),
-                                        is_typing: false,
-                                    }).ok();
-                                }
-                                _ => {}
-                            }
+                        let mut stream_active = false;
+                        let mut stream_message: Option<spacebot::InboundMessage> = None;
+                        let mut last_stream_text = String::new();
 
-                            let current_message = outbound_message.read().await.clone();
-
-                            match response {
-                                spacebot::OutboundResponse::Status(status) => {
-                                    if let Err(error) = messaging_for_outbound
-                                        .send_status(&current_message, status)
-                                        .await
-                                    {
-                                        tracing::warn!(%error, "failed to send status update");
+                        loop {
+                            tokio::select! {
+                                response = response_rx.recv() => {
+                                    let Some(response) = response else {
+                                        if let Some(cleanup) = pending_stream_cleanup_response(
+                                            stream_active,
+                                            &last_stream_text,
+                                        ) {
+                                            if let Some(api_event) = api_event_for_stream_cleanup(
+                                                &sse_agent_id,
+                                                &sse_channel_id,
+                                                &cleanup,
+                                            ) {
+                                                api_event_tx.send(api_event).ok();
+                                            }
+                                            let current_message = match stream_message.as_ref() {
+                                                Some(message) => message.clone(),
+                                                None => outbound_message.read().await.clone(),
+                                            };
+                                            if let Err(error) = messaging_for_outbound
+                                                .respond(&current_message, cleanup)
+                                                .await
+                                            {
+                                                tracing::warn!(%error, "failed to clean up streamed response after outbound channel closed");
+                                            }
+                                        }
+                                        last_stream_text.clear();
+                                        break;
+                                    };
+                                    if let Some(api_event) = api_event_for_outbound_response(
+                                        &sse_agent_id,
+                                        &sse_channel_id,
+                                        &response,
+                                    ) {
+                                        api_event_tx.send(api_event).ok();
                                     }
-                                }
-                                response => {
-                                    tracing::info!(
-                                        conversation_id = %outbound_conversation_id,
-                                        "routing outbound response to messaging adapter"
-                                    );
-                                    if let Err(error) = messaging_for_outbound
-                                        .respond(&current_message, response)
-                                        .await
-                                    {
-                                        tracing::error!(%error, "failed to send outbound response");
+
+                                    match response {
+                                        spacebot::OutboundResponse::Status(status) => {
+                                            if matches!(status, spacebot::StatusUpdate::StopTyping) {
+                                                if let Some(cleanup) = pending_stream_cleanup_response(
+                                                    stream_active,
+                                                    &last_stream_text,
+                                                ) {
+                                                    if let Some(api_event) = api_event_for_stream_cleanup(
+                                                        &sse_agent_id,
+                                                        &sse_channel_id,
+                                                        &cleanup,
+                                                    ) {
+                                                        api_event_tx.send(api_event).ok();
+                                                    }
+                                                    let current_message = match stream_message.as_ref() {
+                                                        Some(message) => message.clone(),
+                                                        None => outbound_message.read().await.clone(),
+                                                    };
+                                                    if let Err(error) = messaging_for_outbound
+                                                        .respond(&current_message, cleanup)
+                                                        .await
+                                                    {
+                                                        tracing::warn!(%error, "failed to finalize streamed response from buffered text");
+                                                    }
+                                                }
+                                                stream_active = false;
+                                                stream_message = None;
+                                                last_stream_text.clear();
+                                            }
+
+                                            let current_message = outbound_message.read().await.clone();
+                                            if let Err(error) = messaging_for_outbound
+                                                .send_status(&current_message, status)
+                                                .await
+                                            {
+                                                tracing::warn!(%error, "failed to send status update");
+                                            }
+                                        }
+                                        response @ (
+                                            spacebot::OutboundResponse::Text(_)
+                                            | spacebot::OutboundResponse::RichMessage { .. }
+                                            | spacebot::OutboundResponse::ThreadReply { .. }
+                                        ) => {
+                                            tracing::info!(
+                                                conversation_id = %outbound_conversation_id,
+                                                terminal_reason = outbound_terminal_reason(&response),
+                                                "routing outbound response to messaging adapter"
+                                            );
+                                            let current_message = match stream_message.as_ref() {
+                                                Some(message) if stream_active => message.clone(),
+                                                _ => outbound_message.read().await.clone(),
+                                            };
+                                            if stream_active
+                                                && should_end_stream_before_terminal_response(&response)
+                                                && let Err(error) = messaging_for_outbound
+                                                    .respond(&current_message, spacebot::OutboundResponse::StreamEnd)
+                                                    .await
+                                            {
+                                                tracing::warn!(%error, "failed to clear streamed placeholder before terminal response");
+                                            }
+                                            if let Err(error) = messaging_for_outbound
+                                                .respond(&current_message, response)
+                                                .await
+                                            {
+                                                tracing::error!(%error, "failed to send outbound response");
+                                            }
+                                            stream_active = false;
+                                            stream_message = None;
+                                            last_stream_text.clear();
+                                        }
+                                        spacebot::OutboundResponse::StreamChunk(text) => {
+                                            if text.is_empty() {
+                                                continue;
+                                            }
+
+                                            last_stream_text.push_str(&text);
+                                            let current_message = match stream_message.as_ref() {
+                                                Some(message) => message.clone(),
+                                                None => {
+                                                    let message = outbound_message.read().await.clone();
+                                                    stream_message = Some(message.clone());
+                                                    message
+                                                }
+                                            };
+                                            if !stream_active {
+                                                if let Err(error) = messaging_for_outbound
+                                                    .respond(&current_message, spacebot::OutboundResponse::StreamStart)
+                                                .await
+                                                {
+                                                    tracing::warn!(%error, "failed to start streamed response");
+                                                    continue;
+                                                }
+                                                stream_active = true;
+                                            }
+
+                                            if let Err(error) = messaging_for_outbound
+                                                .respond(
+                                                    &current_message,
+                                                    spacebot::OutboundResponse::StreamChunk(text),
+                                                )
+                                                .await
+                                            {
+                                                tracing::warn!(%error, "failed to send streamed response chunk");
+                                            }
+                                        }
+                                        response => {
+                                            tracing::info!(
+                                                conversation_id = %outbound_conversation_id,
+                                                "routing outbound response to messaging adapter"
+                                            );
+                                            let current_message = outbound_message.read().await.clone();
+                                            if let Err(error) = messaging_for_outbound
+                                                .respond(&current_message, response)
+                                                .await
+                                            {
+                                                tracing::error!(%error, "failed to send outbound response");
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3149,9 +3246,115 @@ async fn initialize_agents(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingStreamAction {
+    None,
+    FinalizeText,
+    EndStream,
+}
+
+fn pending_stream_action(stream_active: bool, last_stream_text: &str) -> PendingStreamAction {
+    if !last_stream_text.trim().is_empty() {
+        PendingStreamAction::FinalizeText
+    } else if stream_active {
+        PendingStreamAction::EndStream
+    } else {
+        PendingStreamAction::None
+    }
+}
+
+fn pending_stream_cleanup_response(
+    stream_active: bool,
+    last_stream_text: &str,
+) -> Option<spacebot::OutboundResponse> {
+    match pending_stream_action(stream_active, last_stream_text) {
+        PendingStreamAction::FinalizeText => Some(spacebot::OutboundResponse::Text(
+            last_stream_text.to_string(),
+        )),
+        PendingStreamAction::EndStream => Some(spacebot::OutboundResponse::StreamEnd),
+        PendingStreamAction::None => None,
+    }
+}
+
+fn api_event_for_outbound_response(
+    agent_id: &str,
+    channel_id: &str,
+    response: &spacebot::OutboundResponse,
+) -> Option<spacebot::api::ApiEvent> {
+    match response {
+        spacebot::OutboundResponse::Text(text)
+        | spacebot::OutboundResponse::RichMessage { text, .. }
+        | spacebot::OutboundResponse::ThreadReply { text, .. } => {
+            Some(spacebot::api::ApiEvent::OutboundMessage {
+                agent_id: agent_id.to_string(),
+                channel_id: channel_id.to_string(),
+                text: text.clone(),
+            })
+        }
+        spacebot::OutboundResponse::Status(spacebot::StatusUpdate::Thinking) => {
+            Some(spacebot::api::ApiEvent::TypingState {
+                agent_id: agent_id.to_string(),
+                channel_id: channel_id.to_string(),
+                is_typing: true,
+            })
+        }
+        spacebot::OutboundResponse::Status(spacebot::StatusUpdate::StopTyping) => {
+            Some(spacebot::api::ApiEvent::TypingState {
+                agent_id: agent_id.to_string(),
+                channel_id: channel_id.to_string(),
+                is_typing: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+fn api_event_for_stream_cleanup(
+    agent_id: &str,
+    channel_id: &str,
+    cleanup: &spacebot::OutboundResponse,
+) -> Option<spacebot::api::ApiEvent> {
+    match cleanup {
+        spacebot::OutboundResponse::StreamEnd => Some(spacebot::api::ApiEvent::OutboundStreamEnd {
+            agent_id: agent_id.to_string(),
+            channel_id: channel_id.to_string(),
+        }),
+        _ => api_event_for_outbound_response(agent_id, channel_id, cleanup),
+    }
+}
+
+fn should_end_stream_before_terminal_response(response: &spacebot::OutboundResponse) -> bool {
+    matches!(
+        response,
+        spacebot::OutboundResponse::RichMessage { .. }
+            | spacebot::OutboundResponse::ThreadReply { .. }
+    )
+}
+
+fn outbound_terminal_reason(response: &spacebot::OutboundResponse) -> &'static str {
+    match response {
+        spacebot::OutboundResponse::Text(_) => "text",
+        spacebot::OutboundResponse::File { .. } => "file",
+        spacebot::OutboundResponse::Reaction(_) => "reaction",
+        spacebot::OutboundResponse::RemoveReaction(_) => "remove_reaction",
+        spacebot::OutboundResponse::Ephemeral { .. } => "ephemeral",
+        spacebot::OutboundResponse::RichMessage { .. } => "rich_message",
+        spacebot::OutboundResponse::ScheduledMessage { .. } => "scheduled_message",
+        spacebot::OutboundResponse::ThreadReply { .. } => "thread_reply",
+        spacebot::OutboundResponse::Status(_) => "status",
+        spacebot::OutboundResponse::StreamStart => "stream_start",
+        spacebot::OutboundResponse::StreamChunk(_) => "stream_chunk",
+        spacebot::OutboundResponse::StreamEnd => "stream_end",
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::wait_for_startup_warmup_tasks;
+    use super::{
+        PendingStreamAction, api_event_for_stream_cleanup, outbound_terminal_reason,
+        pending_stream_action, pending_stream_cleanup_response,
+        should_end_stream_before_terminal_response, wait_for_startup_warmup_tasks,
+    };
     use std::future::pending;
     use std::sync::Arc;
     use std::time::Duration;
@@ -3212,6 +3415,109 @@ mod tests {
         assert!(
             started.elapsed() < Duration::from_millis(80),
             "startup warmup timeout should return without waiting for non-cooperative task"
+        );
+    }
+
+    #[test]
+    fn pending_stream_action_prefers_final_text_even_without_active_stream() {
+        assert_eq!(
+            pending_stream_action(false, "final text from failed stream start"),
+            PendingStreamAction::FinalizeText
+        );
+        assert_eq!(
+            pending_stream_action(true, "   "),
+            PendingStreamAction::EndStream
+        );
+        assert_eq!(
+            pending_stream_action(false, "   "),
+            PendingStreamAction::None
+        );
+    }
+
+    #[test]
+    fn pending_stream_cleanup_response_prefers_buffered_text_on_shutdown() {
+        assert!(matches!(
+            pending_stream_cleanup_response(false, "buffered final text"),
+            Some(spacebot::OutboundResponse::Text(text)) if text == "buffered final text"
+        ));
+        assert!(matches!(
+            pending_stream_cleanup_response(true, "   "),
+            Some(spacebot::OutboundResponse::StreamEnd)
+        ));
+        assert!(pending_stream_cleanup_response(false, "   ").is_none());
+    }
+
+    #[test]
+    fn stream_cleanup_api_event_uses_terminal_contract() {
+        assert!(matches!(
+            api_event_for_stream_cleanup(
+                "agent-1",
+                "channel-1",
+                &spacebot::OutboundResponse::Text("done".to_string()),
+            ),
+            Some(spacebot::api::ApiEvent::OutboundMessage {
+                agent_id,
+                channel_id,
+                text,
+            }) if agent_id == "agent-1" && channel_id == "channel-1" && text == "done"
+        ));
+        assert!(matches!(
+            api_event_for_stream_cleanup(
+                "agent-1",
+                "channel-1",
+                &spacebot::OutboundResponse::StreamEnd,
+            ),
+            Some(spacebot::api::ApiEvent::OutboundStreamEnd {
+                agent_id,
+                channel_id,
+            }) if agent_id == "agent-1" && channel_id == "channel-1"
+        ));
+    }
+
+    #[test]
+    fn terminal_non_text_responses_require_stream_cleanup() {
+        assert!(!should_end_stream_before_terminal_response(
+            &spacebot::OutboundResponse::Text("done".to_string()),
+        ));
+        assert!(should_end_stream_before_terminal_response(
+            &spacebot::OutboundResponse::ThreadReply {
+                thread_name: "status".to_string(),
+                text: "done".to_string(),
+            },
+        ));
+        assert!(should_end_stream_before_terminal_response(
+            &spacebot::OutboundResponse::RichMessage {
+                text: "done".to_string(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            },
+        ));
+    }
+
+    #[test]
+    fn outbound_terminal_reason_matches_terminal_variants() {
+        assert_eq!(
+            outbound_terminal_reason(&spacebot::OutboundResponse::Text("done".to_string())),
+            "text"
+        );
+        assert_eq!(
+            outbound_terminal_reason(&spacebot::OutboundResponse::ThreadReply {
+                thread_name: "status".to_string(),
+                text: "done".to_string(),
+            }),
+            "thread_reply"
+        );
+        assert_eq!(
+            outbound_terminal_reason(&spacebot::OutboundResponse::RichMessage {
+                text: "done".to_string(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            }),
+            "rich_message"
         );
     }
 }
