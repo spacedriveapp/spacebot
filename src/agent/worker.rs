@@ -345,10 +345,10 @@ impl Worker {
                     .prompt_with_tool_nudge_retry_with_concurrency(
                         &agent,
                         &mut history,
-                    &prompt,
-                    tool_concurrency,
-                )
-                .await
+                        &prompt,
+                        tool_concurrency,
+                    )
+                    .await
                 {
                     Ok(response) => {
                         break response;
