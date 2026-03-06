@@ -2370,6 +2370,12 @@ impl Channel {
                 }
             }
             Err(error) => {
+                // Send error to user so they know something went wrong
+                let error_msg = format!("I encountered an error: {}", error);
+                let _ = self
+                    .response_tx
+                    .send(OutboundResponse::Text(error_msg))
+                    .await;
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
