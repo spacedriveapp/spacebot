@@ -12,7 +12,7 @@ use teloxide::payloads::setters::*;
 use teloxide::requests::{Request, Requester};
 use teloxide::types::{
     ChatAction, ChatId, FileId, InputFile, InputPollOption, MediaKind, MessageId, MessageKind,
-    ParseMode, ReactionType, ReplyParameters, UpdateKind, UserId,
+    ParseMode, ReactionType, ReplyParameters, ThreadId, UpdateKind, UserId,
 };
 use teloxide::{ApiError, Bot, RequestError};
 
@@ -44,6 +44,8 @@ pub struct TelegramAdapter {
 struct ActiveStream {
     chat_id: ChatId,
     message_id: MessageId,
+    /// Forum topic thread ID, if the stream started inside a topic.
+    thread_id: Option<ThreadId>,
     last_edit: Instant,
 }
 
@@ -91,9 +93,19 @@ impl TelegramAdapter {
             .metadata
             .get("telegram_message_id")
             .and_then(|v| v.as_i64())
-            .map(|v| v as i32)
+            .and_then(|v| i32::try_from(v).ok())
             .context("missing telegram_message_id in metadata")?;
         Ok(MessageId(id))
+    }
+
+    /// Extract the forum topic thread ID from inbound message metadata, if present.
+    fn extract_thread_id(&self, message: &InboundMessage) -> Option<ThreadId> {
+        let id = message
+            .metadata
+            .get("telegram_thread_id")
+            .and_then(|v| v.as_i64())
+            .and_then(|v| i32::try_from(v).ok())?;
+        Some(ThreadId(MessageId(id)))
     }
 
     async fn stop_typing(&self, conversation_id: &str) {
@@ -247,7 +259,14 @@ impl Messaging for TelegramAdapter {
                             }
 
                             let content = build_content(&bot, message, &text).await;
-                            let base_conversation_id = format!("telegram:{chat_id}");
+                            // Include forum topic thread ID in the conversation key so each
+                            // topic gets its own isolated conversation history.
+                            let base_conversation_id = match message.thread_id {
+                                Some(ThreadId(MessageId(tid))) if message.is_topic_message => {
+                                    format!("telegram:{chat_id}:{tid}")
+                                }
+                                _ => format!("telegram:{chat_id}"),
+                            };
                             let conversation_id = apply_runtime_adapter_to_conversation_id(
                                 &runtime_key,
                                 base_conversation_id,
@@ -299,18 +318,20 @@ impl Messaging for TelegramAdapter {
         response: OutboundResponse,
     ) -> crate::Result<()> {
         let chat_id = self.extract_chat_id(message)?;
+        // Forum topic thread ID — used to route replies into the correct topic.
+        let thread_id = self.extract_thread_id(message);
 
         match response {
             OutboundResponse::Text(text) => {
                 self.stop_typing(&message.conversation_id).await;
-                send_formatted(&self.bot, chat_id, &text, None).await?;
+                send_formatted(&self.bot, chat_id, &text, None, thread_id).await?;
             }
             OutboundResponse::RichMessage { text, poll, .. } => {
                 self.stop_typing(&message.conversation_id).await;
-                send_formatted(&self.bot, chat_id, &text, None).await?;
+                send_formatted(&self.bot, chat_id, &text, None, thread_id).await?;
 
                 if let Some(poll_data) = poll {
-                    send_poll(&self.bot, chat_id, &poll_data).await?;
+                    send_poll(&self.bot, chat_id, &poll_data, thread_id).await?;
                 }
             }
             OutboundResponse::ThreadReply {
@@ -321,7 +342,7 @@ impl Messaging for TelegramAdapter {
 
                 // Telegram doesn't have named threads. Reply to the source message instead.
                 let reply_to = self.extract_message_id(message).ok();
-                send_formatted(&self.bot, chat_id, &text, reply_to).await?;
+                send_formatted(&self.bot, chat_id, &text, reply_to, thread_id).await?;
             }
             OutboundResponse::File {
                 filename,
@@ -337,14 +358,20 @@ impl Messaging for TelegramAdapter {
                     let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
                     let sent = if let Some(ref caption_text) = caption {
                         let html_caption = markdown_to_telegram_html(caption_text);
-                        self.bot
+                        let mut request = self.bot
                             .send_audio(chat_id, input_file)
                             .caption(&html_caption)
-                            .parse_mode(ParseMode::Html)
-                            .send()
-                            .await
+                            .parse_mode(ParseMode::Html);
+                        if let Some(tid) = thread_id {
+                            request = request.message_thread_id(tid);
+                        }
+                        request.send().await
                     } else {
-                        self.bot.send_audio(chat_id, input_file).send().await
+                        let mut request = self.bot.send_audio(chat_id, input_file);
+                        if let Some(tid) = thread_id {
+                            request = request.message_thread_id(tid);
+                        }
+                        request.send().await
                     };
 
                     if let Err(error) = sent {
@@ -357,6 +384,9 @@ impl Messaging for TelegramAdapter {
                             let mut request = self.bot.send_audio(chat_id, fallback_file);
                             if let Some(caption_text) = caption {
                                 request = request.caption(caption_text);
+                            }
+                            if let Some(tid) = thread_id {
+                                request = request.message_thread_id(tid);
                             }
                             request
                                 .send()
@@ -371,14 +401,20 @@ impl Messaging for TelegramAdapter {
                     let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
                     let sent = if let Some(ref caption_text) = caption {
                         let html_caption = markdown_to_telegram_html(caption_text);
-                        self.bot
+                        let mut request = self.bot
                             .send_document(chat_id, input_file)
                             .caption(&html_caption)
-                            .parse_mode(ParseMode::Html)
-                            .send()
-                            .await
+                            .parse_mode(ParseMode::Html);
+                        if let Some(tid) = thread_id {
+                            request = request.message_thread_id(tid);
+                        }
+                        request.send().await
                     } else {
-                        self.bot.send_document(chat_id, input_file).send().await
+                        let mut request = self.bot.send_document(chat_id, input_file);
+                        if let Some(tid) = thread_id {
+                            request = request.message_thread_id(tid);
+                        }
+                        request.send().await
                     };
 
                     if let Err(error) = sent {
@@ -391,6 +427,9 @@ impl Messaging for TelegramAdapter {
                             let mut request = self.bot.send_document(chat_id, fallback_file);
                             if let Some(caption_text) = caption {
                                 request = request.caption(caption_text);
+                            }
+                            if let Some(tid) = thread_id {
+                                request = request.message_thread_id(tid);
                             }
                             request
                                 .send()
@@ -428,9 +467,11 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::StreamStart => {
                 self.stop_typing(&message.conversation_id).await;
 
-                let placeholder = self
-                    .bot
-                    .send_message(chat_id, "...")
+                let mut request = self.bot.send_message(chat_id, "...");
+                if let Some(tid) = thread_id {
+                    request = request.message_thread_id(tid);
+                }
+                let placeholder = request
                     .send()
                     .await
                     .context("failed to send stream placeholder")?;
@@ -440,6 +481,7 @@ impl Messaging for TelegramAdapter {
                     ActiveStream {
                         chat_id,
                         message_id: placeholder.id,
+                        thread_id,
                         last_edit: Instant::now(),
                     },
                 );
@@ -492,11 +534,11 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::RemoveReaction(_) => {} // no-op
             OutboundResponse::Ephemeral { text, .. } => {
                 // Telegram has no ephemeral messages — send as regular text
-                send_formatted(&self.bot, chat_id, &text, None).await?;
+                send_formatted(&self.bot, chat_id, &text, None, thread_id).await?;
             }
             OutboundResponse::ScheduledMessage { text, .. } => {
                 // Telegram has no scheduled messages — send immediately
-                send_formatted(&self.bot, chat_id, &text, None).await?;
+                send_formatted(&self.bot, chat_id, &text, None, thread_id).await?;
             }
         }
 
@@ -511,18 +553,20 @@ impl Messaging for TelegramAdapter {
         match status {
             StatusUpdate::Thinking => {
                 let chat_id = self.extract_chat_id(message)?;
+                let thread_id = self.extract_thread_id(message);
                 let bot = self.bot.clone();
                 let conversation_id = message.conversation_id.clone();
 
                 // Telegram typing indicators expire after 5 seconds.
                 // Send one immediately, then repeat every 4 seconds.
+                // Include thread ID so the indicator appears in the correct forum topic.
                 let handle = tokio::spawn(async move {
                     loop {
-                        if let Err(error) = bot
-                            .send_chat_action(chat_id, ChatAction::Typing)
-                            .send()
-                            .await
-                        {
+                        let mut request = bot.send_chat_action(chat_id, ChatAction::Typing);
+                        if let Some(tid) = thread_id {
+                            request = request.message_thread_id(tid);
+                        }
+                        if let Err(error) = request.send().await {
                             tracing::debug!(%error, "failed to send typing indicator");
                             break;
                         }
@@ -551,12 +595,12 @@ impl Messaging for TelegramAdapter {
         );
 
         if let OutboundResponse::Text(text) = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
+            send_formatted(&self.bot, chat_id, &text, None, None).await?;
         } else if let OutboundResponse::RichMessage { text, poll, .. } = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
+            send_formatted(&self.bot, chat_id, &text, None, None).await?;
 
             if let Some(poll_data) = poll {
-                send_poll(&self.bot, chat_id, &poll_data).await?;
+                send_poll(&self.bot, chat_id, &poll_data, None).await?;
             }
         }
 
@@ -801,6 +845,16 @@ fn build_metadata(
         serde_json::Value::String(message.id.0.to_string()),
     );
 
+    // Store forum topic thread ID so it can be used when sending replies.
+    if message.is_topic_message {
+        if let Some(ThreadId(MessageId(tid))) = message.thread_id {
+            metadata.insert(
+                "telegram_thread_id".into(),
+                serde_json::Value::Number(tid.into()),
+            );
+        }
+    }
+
     let chat_type = if message.chat.is_private() {
         "private"
     } else if message.chat.is_group() {
@@ -906,7 +960,12 @@ fn build_display_name(user: &teloxide::types::User) -> String {
 /// max 100 chars. `open_period` only supports 5–600 seconds so we only set it
 /// when `duration_hours` converts to ≤600s; otherwise the poll stays open
 /// indefinitely (until manually stopped via the Telegram client).
-async fn send_poll(bot: &Bot, chat_id: ChatId, poll: &crate::Poll) -> anyhow::Result<()> {
+async fn send_poll(
+    bot: &Bot,
+    chat_id: ChatId,
+    poll: &crate::Poll,
+    thread_id: Option<ThreadId>,
+) -> anyhow::Result<()> {
     let question = if poll.question.len() > 300 {
         format!(
             "{}…",
@@ -948,6 +1007,10 @@ async fn send_poll(bot: &Bot, chat_id: ChatId, poll: &crate::Poll) -> anyhow::Re
 
     if poll.allow_multiselect {
         request = request.allows_multiple_answers(true);
+    }
+
+    if let Some(tid) = thread_id {
+        request = request.message_thread_id(tid);
     }
 
     request
@@ -1167,10 +1230,14 @@ async fn send_plain_text(
     chat_id: ChatId,
     text: &str,
     reply_to: Option<MessageId>,
+    thread_id: Option<ThreadId>,
 ) -> anyhow::Result<()> {
     let mut request = bot.send_message(chat_id, text);
     if let Some(reply_id) = reply_to {
         request = request.reply_parameters(ReplyParameters::new(reply_id));
+    }
+    if let Some(tid) = thread_id {
+        request = request.message_thread_id(tid);
     }
     request
         .send()
@@ -1186,6 +1253,7 @@ async fn send_formatted(
     chat_id: ChatId,
     text: &str,
     reply_to: Option<MessageId>,
+    thread_id: Option<ThreadId>,
 ) -> anyhow::Result<()> {
     let mut pending_chunks: VecDeque<String> =
         VecDeque::from(split_message(text, MAX_MESSAGE_LENGTH));
@@ -1202,7 +1270,7 @@ async fn send_formatted(
             }
 
             let plain_chunk = strip_html_tags(&html_chunk);
-            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to, thread_id).await?;
             continue;
         }
 
@@ -1212,10 +1280,13 @@ async fn send_formatted(
         if let Some(reply_id) = reply_to {
             request = request.reply_parameters(ReplyParameters::new(reply_id));
         }
+        if let Some(tid) = thread_id {
+            request = request.message_thread_id(tid);
+        }
         if let Err(error) = request.send().await {
             tracing::debug!(%error, "HTML send failed, retrying as plain text");
             let plain_chunk = strip_html_tags(&html_chunk);
-            send_plain_text(bot, chat_id, &plain_chunk, reply_to).await?;
+            send_plain_text(bot, chat_id, &plain_chunk, reply_to, thread_id).await?;
         }
     }
     Ok(())
