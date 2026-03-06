@@ -821,6 +821,7 @@ pub async fn resume_idle_worker_into_state(
                 state.deps.agent_id.clone(),
                 Some(state.channel_id.clone()),
                 oc_secrets_store,
+                "opencode",
                 async move {
                     let result = worker.run().await.map_err(SpacebotError::from)?;
                     // Persist final transcript.
@@ -943,6 +944,7 @@ pub async fn resume_idle_worker_into_state(
                 state.deps.agent_id.clone(),
                 Some(state.channel_id.clone()),
                 secrets_store,
+                "builtin",
                 worker.run().instrument(worker_span),
             );
 
