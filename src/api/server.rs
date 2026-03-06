@@ -344,6 +344,8 @@ fn normalize_api_path(path: &str) -> String {
             let parent = parts.get(i - 1).copied().unwrap_or("");
             match parent {
                 "secrets" | "groups" | "humans" | "links" => normalized.push("{name}"),
+                "servers" | "providers" => normalized.push("{name}"),
+                "opencode" => normalized.push("{port}"),
                 "agents"
                     if !matches!(
                         *part,
@@ -365,7 +367,16 @@ fn normalize_api_path(path: &str) -> String {
                 {
                     normalized.push("{id}")
                 }
-                _ => normalized.push(part),
+                _ => {
+                    // Collapse any remaining segments after an opencode
+                    // port placeholder to avoid high-cardinality proxy
+                    // paths like /api/opencode/{port}/v1/chat/completions.
+                    if normalized.contains(&"{port}") {
+                        normalized.push("{proxy_path}");
+                        break;
+                    }
+                    normalized.push(part);
+                }
             }
         } else {
             normalized.push(part);

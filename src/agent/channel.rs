@@ -358,6 +358,26 @@ pub struct Channel {
     control_handle: ChannelControlHandle,
 }
 
+/// RAII guard that records `message_handling_duration_seconds` when dropped,
+/// ensuring the metric is observed on every exit path (including early returns
+/// and `?` error propagation).
+#[cfg(feature = "metrics")]
+struct MessageDurationGuard {
+    agent_id: String,
+    channel_type: String,
+    start: std::time::Instant,
+}
+
+#[cfg(feature = "metrics")]
+impl Drop for MessageDurationGuard {
+    fn drop(&mut self) {
+        crate::telemetry::Metrics::global()
+            .message_handling_duration_seconds
+            .with_label_values(&[&self.agent_id, &self.channel_type])
+            .observe(self.start.elapsed().as_secs_f64());
+    }
+}
+
 impl Channel {
     /// Create a new channel.
     ///
@@ -714,19 +734,38 @@ impl Channel {
     }
 
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
-        if let Err(error) = self
+        match self
             .response_tx
             .send(OutboundResponse::Text(text.clone()))
             .await
         {
-            tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
-            return;
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+                self.state.conversation_logger.log_bot_message_with_name(
+                    &self.state.channel_id,
+                    &text,
+                    Some(self.agent_display_name()),
+                );
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
+            }
         }
-        self.state.conversation_logger.log_bot_message_with_name(
-            &self.state.channel_id,
-            &text,
-            Some(self.agent_display_name()),
-        );
     }
 
     async fn try_handle_builtin_ops_commands(
@@ -1081,14 +1120,18 @@ impl Channel {
         );
 
         #[cfg(feature = "metrics")]
-        let metrics_turn_start = std::time::Instant::now();
-        #[cfg(feature = "metrics")]
         let metrics_channel_type = messages
             .iter()
             .find(|m| m.source != "system")
             .map(|m| m.source.clone())
             .or_else(|| self.current_adapter().map(str::to_string))
             .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(feature = "metrics")]
+        let _duration_guard = MessageDurationGuard {
+            agent_id: self.deps.agent_id.to_string(),
+            channel_type: metrics_channel_type.clone(),
+            start: std::time::Instant::now(),
+        };
 
         // Increment messages_received_total for each non-system message in the batch
         #[cfg(feature = "metrics")]
@@ -1284,12 +1327,6 @@ impl Channel {
         self.message_count += message_count;
         self.check_memory_persistence().await;
 
-        #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .message_handling_duration_seconds
-            .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
-            .observe(metrics_turn_start.elapsed().as_secs_f64());
-
         Ok(())
     }
 
@@ -1373,12 +1410,17 @@ impl Channel {
         );
 
         #[cfg(feature = "metrics")]
-        let metrics_turn_start = std::time::Instant::now();
-        #[cfg(feature = "metrics")]
-        let metrics_channel_type = if message.source != "system" {
-            message.source.clone()
-        } else {
-            self.current_adapter().unwrap_or("unknown").to_string()
+        let _duration_guard = {
+            let channel_type = if message.source != "system" {
+                message.source.clone()
+            } else {
+                self.current_adapter().unwrap_or("unknown").to_string()
+            };
+            MessageDurationGuard {
+                agent_id: self.deps.agent_id.to_string(),
+                channel_type,
+                start: std::time::Instant::now(),
+            }
         };
 
         // Increment messages_received_total for non-system messages
@@ -1650,12 +1692,6 @@ impl Channel {
             self.message_count += 1;
             self.check_memory_persistence().await;
         }
-
-        #[cfg(feature = "metrics")]
-        crate::telemetry::Metrics::global()
-            .message_handling_duration_seconds
-            .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
-            .observe(metrics_turn_start.elapsed().as_secs_f64());
 
         Ok(())
     }

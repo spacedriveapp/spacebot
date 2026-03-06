@@ -334,7 +334,7 @@ All metrics are prefixed with `spacebot_`. The registry uses a private `promethe
 | Field | Value |
 |-------|-------|
 | Type | `IntCounterVec` |
-| Labels | `method`, `handler`, `status` |
+| Labels | `method`, `path`, `status` |
 | Instrumented in | `src/api/server.rs` — middleware layer |
 | Description | Total HTTP requests to the API server. |
 
@@ -343,7 +343,7 @@ All metrics are prefixed with `spacebot_`. The registry uses a private `promethe
 | Field | Value |
 |-------|-------|
 | Type | `HistogramVec` |
-| Labels | `method`, `handler` |
+| Labels | `method`, `path` |
 | Buckets | 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 5 |
 | Instrumented in | `src/api/server.rs` — middleware layer |
 | Description | HTTP request duration in seconds. |
@@ -393,7 +393,7 @@ All metrics are prefixed with `spacebot_`. The registry uses a private `promethe
 
 ## Total Cardinality
 
-Assumptions: 1–5 agents, 5–15 models, ~20 tools, 5 tiers, 2–3 worker types, 3–5 MCP servers, 5 channel types, ~20 API handlers.
+Assumptions: 1–5 agents, 5–15 models, ~20 tools, 5 tiers, 2–3 worker types, 3–5 MCP servers, 5 channel types, ~20 API paths.
 
 | Metric | Series estimate |
 |--------|-----------------|

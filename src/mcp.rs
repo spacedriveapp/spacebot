@@ -89,6 +89,7 @@ pub struct McpConnection {
 fn set_mcp_connection_state(
     server_name: &str,
     connected: i64,
+    connecting: i64,
     disconnected: i64,
     failed: i64,
     tools_registered: i64,
@@ -98,6 +99,10 @@ fn set_mcp_connection_state(
         .mcp_connections
         .with_label_values(&[server_name, "connected"])
         .set(connected);
+    metrics
+        .mcp_connections
+        .with_label_values(&[server_name, "connecting"])
+        .set(connecting);
     metrics
         .mcp_connections
         .with_label_values(&[server_name, "disconnected"])
@@ -145,6 +150,9 @@ impl McpConnection {
             *state = McpConnectionState::Connecting;
         }
 
+        #[cfg(feature = "metrics")]
+        set_mcp_connection_state(&self.name, 0, 1, 0, 0, 0);
+
         let session_result = self.connect_session().await;
         let mut client_guard = self.client.lock().await;
 
@@ -176,7 +184,7 @@ impl McpConnection {
                                 .mcp_connection_attempts_total
                                 .with_label_values(&[&self.name, "failure"])
                                 .inc();
-                            set_mcp_connection_state(&self.name, 0, 0, 1, 0);
+                            set_mcp_connection_state(&self.name, 0, 0, 0, 1, 0);
                         }
 
                         return Err(anyhow!(error_message));
@@ -191,8 +199,10 @@ impl McpConnection {
                 }
                 self.tool_list_changed.store(false, Ordering::SeqCst);
 
-                let mut state = self.state.write().await;
-                *state = McpConnectionState::Connected;
+                {
+                    let mut state = self.state.write().await;
+                    *state = McpConnectionState::Connected;
+                }
 
                 #[cfg(feature = "metrics")]
                 {
@@ -207,7 +217,7 @@ impl McpConnection {
                         .with_label_values(&[&self.name])
                         .observe(elapsed);
                     let tool_count = self.tools.read().await.len() as i64;
-                    set_mcp_connection_state(&self.name, 1, 0, 0, tool_count);
+                    set_mcp_connection_state(&self.name, 1, 0, 0, 0, tool_count);
                 }
 
                 Ok(())
@@ -231,7 +241,7 @@ impl McpConnection {
                         .mcp_connection_attempts_total
                         .with_label_values(&[&self.name, "failure"])
                         .inc();
-                    set_mcp_connection_state(&self.name, 0, 0, 1, 0);
+                    set_mcp_connection_state(&self.name, 0, 0, 0, 1, 0);
                 }
 
                 Err(anyhow!(error_message))
@@ -310,7 +320,7 @@ impl McpConnection {
         *state = McpConnectionState::Disconnected;
 
         #[cfg(feature = "metrics")]
-        set_mcp_connection_state(&self.name, 0, 1, 0, 0);
+        set_mcp_connection_state(&self.name, 0, 0, 1, 0, 0);
     }
 
     pub async fn list_tools(&self) -> Vec<rmcp::model::Tool> {
