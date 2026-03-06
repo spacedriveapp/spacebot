@@ -3,7 +3,6 @@
 use super::channel_dispatch::{
     WorkerCompletionError, map_worker_completion_result, reserve_worker_slot_local,
 };
-use super::{EventRecvDisposition, classify_event_recv_error};
 
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
@@ -122,14 +121,18 @@ impl HarnessState {
             }
             HarnessFault::EventLagged => {
                 self.lagged_event_kept_running &= matches!(
-                    classify_event_recv_error(&tokio::sync::broadcast::error::RecvError::Lagged(1)),
-                    EventRecvDisposition::Continue { .. }
+                    crate::classify_broadcast_recv_result::<()>(Err(
+                        tokio::sync::broadcast::error::RecvError::Lagged(1),
+                    )),
+                    crate::BroadcastRecvResult::Lagged(_)
                 );
             }
             HarnessFault::EventClosed => {
                 self.closed_event_causes_stop &= matches!(
-                    classify_event_recv_error(&tokio::sync::broadcast::error::RecvError::Closed),
-                    EventRecvDisposition::Stop
+                    crate::classify_broadcast_recv_result::<()>(Err(
+                        tokio::sync::broadcast::error::RecvError::Closed,
+                    )),
+                    crate::BroadcastRecvResult::Closed
                 );
             }
             HarnessFault::CortexStart => {

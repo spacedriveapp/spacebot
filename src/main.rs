@@ -1554,6 +1554,293 @@ async fn run(
     // Active conversation channels: conversation_id -> ActiveChannel
     let mut active_channels: HashMap<String, ActiveChannel> = HashMap::new();
 
+    // Resume idle interactive workers that survived the restart.
+    // For each idle worker, pre-create the channel if needed and spawn
+    // the resumed worker into its state so follow-ups route correctly.
+    if agents_initialized {
+        for (agent_id, agent) in agents.iter() {
+            let run_logger = spacebot::conversation::ProcessRunLogger::new(agent.db.sqlite.clone());
+            let idle_workers = match run_logger
+                .get_idle_interactive_workers(&agent.config.id)
+                .await
+            {
+                Ok(workers) => workers,
+                Err(error) => {
+                    tracing::warn!(agent_id = %agent_id, %error, "failed to query idle workers");
+                    continue;
+                }
+            };
+            if idle_workers.is_empty() {
+                continue;
+            }
+            tracing::info!(
+                agent_id = %agent_id,
+                idle_count = idle_workers.len(),
+                "found idle interactive workers to resume"
+            );
+
+            // Group idle workers by channel_id
+            let mut by_channel: HashMap<
+                String,
+                Vec<&spacebot::conversation::history::IdleWorkerRow>,
+            > = HashMap::new();
+            for worker in &idle_workers {
+                if let Some(channel_id) = &worker.channel_id {
+                    by_channel
+                        .entry(channel_id.clone())
+                        .or_default()
+                        .push(worker);
+                } else {
+                    // Workers without a channel_id can't be resumed (no follow-up
+                    // routing). Leave them as idle — the transcript is preserved
+                    // for inspection in the UI.
+                    tracing::warn!(
+                        worker_id = %worker.id,
+                        "idle worker has no channel_id, cannot resume (leaving as idle)"
+                    );
+                }
+            }
+
+            for (conversation_id, workers) in by_channel {
+                // Ensure the channel exists. If it's already in active_channels
+                // (unlikely at startup), use its state. Otherwise, pre-create it.
+                if !active_channels.contains_key(&conversation_id) {
+                    // First pass: retire any workers whose sessions can't be
+                    // reconnected. Only create the channel if at least one
+                    // worker has a chance of resuming.
+                    let mut resumable: Vec<&spacebot::conversation::history::IdleWorkerRow> =
+                        Vec::new();
+                    for idle_worker in &workers {
+                        if idle_worker.worker_type == "opencode"
+                            && idle_worker.opencode_session_id.is_none()
+                        {
+                            // OpenCode workers without session metadata can never
+                            // resume — the server died with kill_on_drop.
+                            if let Err(error) = run_logger.retire_idle_worker(&idle_worker.id).await
+                            {
+                                tracing::warn!(
+                                    worker_id = %idle_worker.id,
+                                    %error,
+                                    "failed to retire idle worker"
+                                );
+                            }
+                            tracing::info!(
+                                worker_id = %idle_worker.id,
+                                channel_id = %conversation_id,
+                                "retired idle opencode worker (no session metadata)"
+                            );
+                        } else {
+                            resumable.push(idle_worker);
+                        }
+                    }
+                    if resumable.is_empty() {
+                        continue;
+                    }
+
+                    let (response_tx, mut response_rx) =
+                        mpsc::channel::<spacebot::OutboundResponse>(32);
+                    let event_rx = agent.deps.event_tx.subscribe();
+                    let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
+
+                    let (channel, channel_tx) = spacebot::agent::channel::Channel::new(
+                        channel_id,
+                        agent.deps.clone(),
+                        response_tx,
+                        event_rx,
+                        agent.config.screenshot_dir(),
+                        agent.config.logs_dir(),
+                    );
+                    agent
+                        .deps
+                        .process_control_registry
+                        .register_channel(channel.id.clone(), channel.control_handle().downgrade())
+                        .await;
+                    api_state
+                        .register_channel_status(
+                            conversation_id.clone(),
+                            channel.state.status_block.clone(),
+                        )
+                        .await;
+                    api_state
+                        .register_channel_state(conversation_id.clone(), channel.state.clone())
+                        .await;
+
+                    // Resume workers into the channel state before spawning the event loop.
+                    let mut any_resumed = false;
+                    for idle_worker in &resumable {
+                        match spacebot::agent::channel_dispatch::resume_idle_worker_into_state(
+                            &channel.state,
+                            idle_worker,
+                        )
+                        .await
+                        {
+                            Ok(worker_id) => {
+                                any_resumed = true;
+                                tracing::info!(
+                                    worker_id = %worker_id,
+                                    channel_id = %conversation_id,
+                                    "resumed idle worker"
+                                );
+                            }
+                            Err(reason) => {
+                                // Resume failed at runtime (e.g. OpenCode disabled,
+                                // transcript corrupt). Retire the worker.
+                                if let Err(error) =
+                                    run_logger.retire_idle_worker(&idle_worker.id).await
+                                {
+                                    tracing::warn!(
+                                        worker_id = %idle_worker.id,
+                                        %error,
+                                        "failed to retire idle worker"
+                                    );
+                                }
+                                tracing::info!(
+                                    worker_id = %idle_worker.id,
+                                    channel_id = %conversation_id,
+                                    %reason,
+                                    "retired idle worker (session expired)"
+                                );
+                            }
+                        }
+                    }
+
+                    // Spawn the channel event loop.
+                    let cleanup_channel_id = conversation_id.clone();
+                    let process_control_registry = agent.deps.process_control_registry.clone();
+                    let api_state_for_cleanup = api_state.clone();
+                    tokio::spawn(async move {
+                        if let Err(error) = channel.run().await {
+                            tracing::error!(%error, "channel event loop failed");
+                        }
+                        let scoped_channel_id: spacebot::ChannelId =
+                            Arc::from(cleanup_channel_id.as_str());
+                        process_control_registry
+                            .unregister_channel(&scoped_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_status(&cleanup_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_state(&cleanup_channel_id)
+                            .await;
+                    });
+
+                    // Outbound response routing for this pre-created channel.
+                    // Since there's no inbound message yet, we create a placeholder.
+                    let latest_message =
+                        Arc::new(tokio::sync::RwLock::new(spacebot::InboundMessage {
+                            id: uuid::Uuid::new_v4().to_string(),
+                            source: "internal".to_string(),
+                            adapter: None,
+                            conversation_id: conversation_id.clone(),
+                            content: spacebot::MessageContent::Text(String::new()),
+                            sender_id: String::new(),
+                            formatted_author: None,
+                            metadata: std::collections::HashMap::new(),
+                            agent_id: Some(agent_id.clone()),
+                            timestamp: chrono::Utc::now(),
+                        }));
+                    let outbound_message = latest_message.clone();
+                    let messaging_for_outbound = messaging_manager.clone();
+                    let api_event_tx = api_state.event_tx.clone();
+                    let sse_agent_id = agent_id.to_string();
+                    let sse_channel_id = conversation_id.clone();
+                    let outbound_handle = tokio::spawn(async move {
+                        while let Some(response) = response_rx.recv().await {
+                            match &response {
+                                spacebot::OutboundResponse::Text(text) => {
+                                    api_event_tx
+                                        .send(spacebot::api::ApiEvent::OutboundMessage {
+                                            agent_id: sse_agent_id.clone(),
+                                            channel_id: sse_channel_id.clone(),
+                                            text: text.clone(),
+                                        })
+                                        .ok();
+                                }
+                                spacebot::OutboundResponse::RichMessage { text, .. } => {
+                                    api_event_tx
+                                        .send(spacebot::api::ApiEvent::OutboundMessage {
+                                            agent_id: sse_agent_id.clone(),
+                                            channel_id: sse_channel_id.clone(),
+                                            text: text.clone(),
+                                        })
+                                        .ok();
+                                }
+                                spacebot::OutboundResponse::ThreadReply { text, .. } => {
+                                    api_event_tx
+                                        .send(spacebot::api::ApiEvent::OutboundMessage {
+                                            agent_id: sse_agent_id.clone(),
+                                            channel_id: sse_channel_id.clone(),
+                                            text: text.clone(),
+                                        })
+                                        .ok();
+                                }
+                                spacebot::OutboundResponse::Status(
+                                    spacebot::StatusUpdate::Thinking,
+                                ) => {
+                                    api_event_tx
+                                        .send(spacebot::api::ApiEvent::TypingState {
+                                            agent_id: sse_agent_id.clone(),
+                                            channel_id: sse_channel_id.clone(),
+                                            is_typing: true,
+                                        })
+                                        .ok();
+                                }
+                                spacebot::OutboundResponse::Status(
+                                    spacebot::StatusUpdate::StopTyping,
+                                ) => {
+                                    api_event_tx
+                                        .send(spacebot::api::ApiEvent::TypingState {
+                                            agent_id: sse_agent_id.clone(),
+                                            channel_id: sse_channel_id.clone(),
+                                            is_typing: false,
+                                        })
+                                        .ok();
+                                }
+                                _ => {}
+                            }
+                            let current_message = outbound_message.read().await.clone();
+                            match response {
+                                spacebot::OutboundResponse::Status(status) => {
+                                    if let Err(error) = messaging_for_outbound
+                                        .send_status(&current_message, status)
+                                        .await
+                                    {
+                                        tracing::warn!(%error, "failed to send status update");
+                                    }
+                                }
+                                response => {
+                                    if let Err(error) = messaging_for_outbound
+                                        .respond(&current_message, response)
+                                        .await
+                                    {
+                                        tracing::error!(%error, "failed to send outbound response");
+                                    }
+                                }
+                            }
+                        }
+                    });
+
+                    active_channels.insert(
+                        conversation_id.clone(),
+                        ActiveChannel {
+                            message_tx: channel_tx,
+                            latest_message,
+                            _outbound_handle: outbound_handle,
+                        },
+                    );
+
+                    tracing::info!(
+                        conversation_id = %conversation_id,
+                        agent_id = %agent_id,
+                        any_resumed,
+                        "pre-created channel for idle worker resumption"
+                    );
+                }
+            }
+        }
+    }
+
     // Main event loop: route inbound messages to agent channels
     loop {
         // Poll the inbound stream if it exists, otherwise yield a never-resolving future
@@ -1607,6 +1894,11 @@ async fn run(
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
                     );
+                    agent
+                        .deps
+                        .process_control_registry
+                        .register_channel(channel.id.clone(), channel.control_handle().downgrade())
+                        .await;
 
                     // Register the channel's status block with the API for snapshot queries
                     api_state.register_channel_status(
@@ -1654,10 +1946,25 @@ async fn run(
                     }
 
                     // Spawn the channel's event loop
+                    let cleanup_channel_id = conversation_id.clone();
+                    let process_control_registry = agent.deps.process_control_registry.clone();
+                    let api_state_for_cleanup = api_state.clone();
                     tokio::spawn(async move {
                         if let Err(error) = channel.run().await {
                             tracing::error!(%error, "channel event loop failed");
                         }
+
+                        let scoped_channel_id: spacebot::ChannelId =
+                            Arc::from(cleanup_channel_id.as_str());
+                        process_control_registry
+                            .unregister_channel(&scoped_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_status(&cleanup_channel_id)
+                            .await;
+                        api_state_for_cleanup
+                            .unregister_channel_state(&cleanup_channel_id)
+                            .await;
                     });
 
                     // Spawn outbound response routing: reads from response_rx,
@@ -2128,8 +2435,8 @@ async fn initialize_agents(
             embedding_model.clone(),
         ));
 
-        // Per-agent event bus (broadcast for fan-out to multiple channels)
-        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(256);
+        // Per-agent control and memory event buses (broadcast fan-out).
+        let (event_tx, memory_event_tx) = spacebot::create_process_event_buses();
 
         let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
         let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
@@ -2162,7 +2469,12 @@ async fn initialize_agents(
         ));
 
         // Set the settings store in RuntimeConfig and apply config-driven defaults
-        runtime_config.set_settings(settings_store.clone());
+        let explicit_listen_only = config
+            .agents
+            .iter()
+            .find(|agent| agent.id == agent_config.id)
+            .and_then(|agent| agent.channel.map(|channel| channel.listen_only_mode));
+        runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
         if let Err(error) = settings_store.set_worker_log_mode(config.defaults.worker_log_mode) {
             tracing::warn!(%error, agent = %agent_config.id, "failed to set worker_log_mode from config");
         }
@@ -2204,12 +2516,16 @@ async fn initialize_agents(
             cron_tool: None,
             runtime_config,
             event_tx,
+            memory_event_tx,
             sqlite_pool: db.sqlite.clone(),
             messaging_manager: None,
             sandbox,
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
             task_store_registry: task_store_registry.clone(),
+            process_control_registry: Arc::new(
+                spacebot::agent::process_control::ProcessControlRegistry::new(),
+            ),
             injection_tx: injection_tx.clone(),
         };
 
@@ -2767,7 +3083,7 @@ async fn initialize_agents(
         }
     }
 
-    // Start cortex warmup, bulletin loops, and association loops for each agent
+    // Start cortex warmup, runtime, and association loops for each agent
     for (agent_id, agent) in agents.iter() {
         let cortex_logger = spacebot::agent::cortex::CortexLogger::new(agent.db.sqlite.clone());
         let warmup_handle =
@@ -2775,10 +3091,10 @@ async fn initialize_agents(
         cortex_handles.push(warmup_handle);
         tracing::info!(agent_id = %agent_id, "warmup loop started");
 
-        let bulletin_handle =
-            spacebot::agent::cortex::spawn_bulletin_loop(agent.deps.clone(), cortex_logger.clone());
-        cortex_handles.push(bulletin_handle);
-        tracing::info!(agent_id = %agent_id, "cortex bulletin loop started");
+        let cortex_handle =
+            spacebot::agent::cortex::spawn_cortex_loop(agent.deps.clone(), cortex_logger.clone());
+        cortex_handles.push(cortex_handle);
+        tracing::info!(agent_id = %agent_id, "cortex loop started");
 
         let association_handle =
             spacebot::agent::cortex::spawn_association_loop(agent.deps.clone(), cortex_logger);
@@ -2807,6 +3123,7 @@ async fn initialize_agents(
                 agent.deps.agent_id.clone(),
                 agent.deps.task_store.clone(),
                 agent.deps.memory_search.clone(),
+                agent.deps.memory_event_tx.clone(),
                 conversation_logger,
                 channel_store,
                 run_logger,

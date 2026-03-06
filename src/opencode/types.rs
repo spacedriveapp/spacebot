@@ -534,3 +534,137 @@ impl OpenCodeEnvConfig {
         }
     }
 }
+
+// -- OpenCode part types for real-time transcript mirroring --
+
+/// A finalized content part from an OpenCode session, sent to the frontend
+/// via SSE for live transcript rendering. Each part has a stable `id` that
+/// the frontend uses to upsert into an ordered map.
+///
+/// This is a typed Rust subset of OpenCode's Part — only the variants the
+/// frontend cares about are included.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum OpenCodePart {
+    /// Assistant text output.
+    Text { id: String, text: String },
+    /// A tool call with its current execution state.
+    Tool {
+        id: String,
+        tool: String,
+        #[serde(flatten)]
+        state: OpenCodeToolState,
+    },
+    /// Marks the beginning of an agentic step (sub-agent delegation).
+    StepStart { id: String },
+    /// Marks the end of an agentic step.
+    StepFinish {
+        id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+}
+
+impl OpenCodePart {
+    /// Get the stable part ID.
+    pub fn id(&self) -> &str {
+        match self {
+            OpenCodePart::Text { id, .. }
+            | OpenCodePart::Tool { id, .. }
+            | OpenCodePart::StepStart { id }
+            | OpenCodePart::StepFinish { id, .. } => id,
+        }
+    }
+}
+
+/// Tool execution state for the frontend. Flattened into the Tool variant.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum OpenCodeToolState {
+    Pending,
+    Running {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+    },
+    Completed {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        input: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        output: Option<String>,
+    },
+    Error {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+    },
+}
+
+/// Convert an internal SSE `Part` into an `OpenCodePart` for the frontend.
+/// Returns `None` for part types we don't mirror (reasoning, file, snapshot, etc.).
+pub fn part_to_opencode_part(part: &Part) -> Option<OpenCodePart> {
+    match part {
+        Part::Text { id, text, .. } => Some(OpenCodePart::Text {
+            id: id.clone(),
+            text: text.clone(),
+        }),
+        Part::Tool {
+            id,
+            tool,
+            state: tool_state,
+            ..
+        } => {
+            let tool_name = tool.as_deref().unwrap_or("unknown").to_string();
+            let oc_state = match tool_state {
+                Some(ToolState::Pending { .. }) => OpenCodeToolState::Pending,
+                Some(ToolState::Running { title, input, .. }) => OpenCodeToolState::Running {
+                    title: title.clone(),
+                    input: input.as_ref().map(|v| {
+                        let s = v.to_string();
+                        if s.len() > 2_000 {
+                            crate::tools::truncate_output(&s, 2_000)
+                        } else {
+                            s
+                        }
+                    }),
+                },
+                Some(ToolState::Completed {
+                    title,
+                    input,
+                    output,
+                    ..
+                }) => OpenCodeToolState::Completed {
+                    title: title.clone(),
+                    input: input.as_ref().map(|v| {
+                        let s = v.to_string();
+                        if s.len() > 2_000 {
+                            crate::tools::truncate_output(&s, 2_000)
+                        } else {
+                            s
+                        }
+                    }),
+                    output: output.as_ref().map(|o| {
+                        crate::tools::truncate_output(o, crate::tools::MAX_TOOL_OUTPUT_BYTES)
+                    }),
+                },
+                Some(ToolState::Error { error, .. }) => OpenCodeToolState::Error {
+                    error: error.clone(),
+                },
+                None => OpenCodeToolState::Pending,
+            };
+            Some(OpenCodePart::Tool {
+                id: id.clone(),
+                tool: tool_name,
+                state: oc_state,
+            })
+        }
+        Part::StepStart { id, .. } => Some(OpenCodePart::StepStart { id: id.clone() }),
+        Part::StepFinish { id, reason, .. } => Some(OpenCodePart::StepFinish {
+            id: id.clone(),
+            reason: reason.clone(),
+        }),
+        Part::Other => None,
+    }
+}

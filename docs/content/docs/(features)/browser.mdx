@@ -42,8 +42,8 @@ Single `browser` tool with an `action` discriminator. All actions share one argu
 
 | Action | Required Args | Description |
 |--------|--------------|-------------|
-| `launch` | -- | Start Chrome. Must be called first. |
-| `close` | -- | Shut down Chrome and clean up all state. |
+| `launch` | -- | Start Chrome (or reconnect to a persistent browser). Must be called first. |
+| `close` | -- | Shut down, close tabs, or detach depending on `close_policy`. |
 
 ### Navigation
 
@@ -130,6 +130,8 @@ Browser config lives in `config.toml` under `[defaults.browser]` (or per-agent o
 enabled = true            # include browser tool in worker ToolServers
 headless = true           # run Chrome without a visible window
 evaluate_enabled = false  # allow JavaScript evaluation via the tool
+persist_session = false   # keep browser alive across worker lifetimes
+close_policy = "close_browser"  # what happens on close
 executable_path = ""      # custom Chrome binary path (auto-detected if empty)
 screenshot_dir = ""       # override screenshot storage location
 ```
@@ -143,34 +145,68 @@ id = "web-scraper"
 [agents.browser]
 evaluate_enabled = true   # this agent's workers can run JS
 headless = false          # show the browser window for debugging
+persist_session = true    # keep tabs and logins between worker runs
+close_policy = "detach"   # workers disconnect without closing tabs
 ```
 
 When `enabled = false`, the browser tool is not registered on worker ToolServers. Workers for that agent won't see it in their available tools.
 
+### Close Policy
+
+Controls what happens when a worker calls `close`:
+
+| Policy | Behavior |
+|--------|----------|
+| `close_browser` | Kill Chrome and reset all state. Default. |
+| `close_tabs` | Close all tracked tabs but keep Chrome running. |
+| `detach` | Disconnect without touching tabs or the browser process. |
+
+`close_policy` is most useful with `persist_session = true`. With `detach`, workers leave the browser exactly as they found it.
+
+## Persistent Sessions
+
+By default, each worker launches its own Chrome process. When the worker finishes, the browser dies and all session state (cookies, tabs, logins) is lost.
+
+With `persist_session = true`, all workers for an agent share a single browser instance via a `SharedBrowserHandle` held in `RuntimeConfig`. The browser and its tabs survive across worker lifetimes.
+
+When a new worker calls `launch` on a persistent browser that's already running, it reconnects to the existing process, discovers all open tabs, and can continue where the previous worker left off. Combined with `close_policy = "detach"`, workers leave the browser untouched when they finish.
+
+This is useful for:
+
+- **Login persistence** -- log in once, reuse the session across multiple worker runs.
+- **Watching the agent work** -- set `headless = false` to see a visible Chrome window that stays open.
+- **Multi-step workflows** -- a worker can leave tabs open for a follow-up worker to pick up.
+
+```toml
+[defaults.browser]
+headless = false          # visible Chrome window
+persist_session = true    # keep alive across workers
+close_policy = "detach"   # workers just disconnect
+```
+
+Changing `persist_session` requires an agent restart.
+
 ## Architecture
 
 ```
-Worker (Rig Agent)
-  │
-  ├── shell, file, exec, set_status   (standard worker tools)
-  │
-  └── browser                          (BrowserTool)
-        │
-        ├── Arc<Mutex<BrowserState>>   (shared across tool invocations)
-        │     ├── Browser              (chromiumoxide handle)
-        │     ├── pages: HashMap       (target_id → Page)
-        │     ├── active_target        (current tab)
-        │     └── element_refs         (snapshot ref → ElementRef)
-        │
-        └── Config
-              ├── headless
-              ├── evaluate_enabled
-              └── screenshot_dir
+# Default mode (persist_session = false):
+Worker A → BrowserTool { own BrowserState }  → own Chrome process
+Worker B → BrowserTool { own BrowserState }  → own Chrome process
+
+# Persistent mode (persist_session = true):
+RuntimeConfig → SharedBrowserHandle (Arc<Mutex<BrowserState>>)
+Worker A → BrowserTool { shared state } ──┐
+Worker B → BrowserTool { shared state } ──┤→ single Chrome process
+Worker C → BrowserTool { shared state } ──┘
 ```
 
-Each worker gets its own `BrowserTool` instance with its own `BrowserState`. The state is behind `Arc<Mutex<>>` because the Rig tool trait requires `Clone`. The Chrome process (and its CDP WebSocket handler task) live for the lifetime of the worker.
+In both modes, `BrowserState` holds:
+- `Browser` -- chromiumoxide handle
+- `pages: HashMap` -- target_id to Page
+- `active_target` -- current tab
+- `element_refs` -- snapshot ref to ElementRef
 
-The CDP handler runs as a background tokio task that polls the WebSocket stream. It's spawned during `launch` and dropped when the browser closes or the worker completes.
+The state is behind `Arc<Mutex<>>` because the Rig tool trait requires `Clone`. The CDP handler runs as a background tokio task that polls the WebSocket stream, spawned during `launch`.
 
 ## Implementation
 
@@ -192,5 +228,5 @@ Element resolution: refs map to CSS selectors built from `[role='...']` and `[ar
 - **No file upload/download** -- chromiumoxide doesn't expose file chooser interception. Use `shell` + `curl` for downloads.
 - **No network interception** -- request blocking and response modification aren't exposed through the tool, though chromiumoxide supports it via raw CDP commands.
 - **No cookie/storage management** -- not exposed as tool actions. Could be added if needed.
-- **Single browser per worker** -- each worker gets one Chrome process. No connection pooling across workers.
+- **Single browser per worker by default** -- with `persist_session = false` (default), each worker gets its own Chrome process. With `persist_session = true`, all workers for an agent share one browser and reconnect to existing tabs on `launch`.
 - **Selector fragility** -- the `[role][aria-label]` selector strategy works for well-structured pages but can fail on pages with missing ARIA attributes. The `content` action + `evaluate` (when enabled) serve as fallbacks.

@@ -12,8 +12,8 @@ use crate::opencode::types::*;
 
 use anyhow::{Context as _, bail};
 use reqwest::Client;
-use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -541,6 +541,9 @@ impl Drop for OpenCodeServer {
 /// No file persistence needed -- just health-check the expected port.
 pub struct OpenCodeServerPool {
     servers: Mutex<HashMap<PathBuf, Arc<Mutex<OpenCodeServer>>>>,
+    /// Directories that currently have an active OpenCode worker running.
+    /// Prevents spawning a second worker targeting the same directory.
+    active_directories: Mutex<HashSet<PathBuf>>,
     opencode_path: String,
     permissions: OpenCodePermissions,
     max_servers: usize,
@@ -555,6 +558,7 @@ impl OpenCodeServerPool {
     ) -> Self {
         Self {
             servers: Mutex::new(HashMap::new()),
+            active_directories: Mutex::new(HashSet::new()),
             opencode_path: opencode_path.into(),
             permissions,
             max_servers,
@@ -636,6 +640,57 @@ impl OpenCodeServerPool {
     /// Number of active servers.
     pub async fn server_count(&self) -> usize {
         self.servers.lock().await.len()
+    }
+
+    /// Reserve a directory for an active OpenCode worker.
+    ///
+    /// Returns an error if another worker is already running in this directory.
+    /// The caller must call [`release_directory`] when the worker finishes.
+    pub async fn claim_directory(&self, directory: &Path) -> anyhow::Result<()> {
+        let canonical = directory
+            .canonicalize()
+            .with_context(|| format!("directory '{}' does not exist", directory.display()))?;
+
+        let mut active = self.active_directories.lock().await;
+        if !active.insert(canonical.clone()) {
+            bail!(
+                "An OpenCode worker is already active in directory '{}'",
+                canonical.display()
+            );
+        }
+        tracing::debug!(
+            directory = %canonical.display(),
+            "claimed directory for OpenCode worker"
+        );
+        Ok(())
+    }
+
+    /// Release a directory previously claimed by [`claim_directory`].
+    pub async fn release_directory(&self, directory: &Path) {
+        let canonical = match directory.canonicalize() {
+            Ok(path) => path,
+            Err(error) => {
+                tracing::warn!(
+                    directory = %directory.display(),
+                    %error,
+                    "could not canonicalize directory during release, using raw path"
+                );
+                directory.to_path_buf()
+            }
+        };
+
+        let mut active = self.active_directories.lock().await;
+        if !active.remove(&canonical) {
+            tracing::warn!(
+                directory = %canonical.display(),
+                "released directory that was not claimed"
+            );
+        } else {
+            tracing::debug!(
+                directory = %canonical.display(),
+                "released directory for OpenCode worker"
+            );
+        }
     }
 }
 

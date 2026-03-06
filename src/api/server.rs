@@ -3,7 +3,8 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, providers, secrets, settings, skills, system, tasks, tools, webchat, workers,
+    models, opencode_proxy, providers, secrets, settings, skills, system, tasks, tools, webchat,
+    workers,
 };
 
 use axum::Json;
@@ -13,7 +14,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
 use rust_embed::Embed;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
@@ -91,6 +92,12 @@ pub async fn start_http_server(
         .route("/channels/status", get(channels::channel_status))
         .route("/agents/workers", get(workers::list_workers))
         .route("/agents/workers/detail", get(workers::worker_detail))
+        .route(
+            "/opencode/{port}/{*path}",
+            any(opencode_proxy::opencode_proxy),
+        )
+        .route("/opencode/{port}", any(opencode_proxy::opencode_proxy))
+        .route("/opencode/{port}/", any(opencode_proxy::opencode_proxy))
         .route("/agents/memories", get(memories::list_memories))
         .route("/agents/memories/search", get(memories::search_memories))
         .route("/agents/memories/graph", get(memories::memory_graph))

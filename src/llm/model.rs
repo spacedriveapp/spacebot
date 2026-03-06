@@ -6,15 +6,19 @@ use crate::llm::routing::{
     self, MAX_FALLBACK_ATTEMPTS, MAX_RETRIES_PER_MODEL, RETRY_BASE_DELAY_MS, RoutingConfig,
 };
 
+use futures::StreamExt as _;
 use rig::completion::{self, CompletionError, CompletionModel, CompletionRequest, GetTokenUsage};
 use rig::message::{
     AssistantContent, DocumentSourceKind, Image, Message, MimeType, Text, ToolCall, ToolFunction,
     UserContent,
 };
 use rig::one_or_many::OneOrMany;
-use rig::streaming::StreamingCompletionResponse;
+use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::sync::Arc;
+
+const STREAM_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// Raw provider response. Wraps the JSON so Rig can carry it through.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -22,16 +26,16 @@ pub struct RawResponse {
     pub body: serde_json::Value,
 }
 
-/// Streaming response placeholder. Streaming will be implemented per-provider
-/// when we wire up SSE parsing.
+/// Streaming response wrapper for token usage and raw provider payload.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RawStreamingResponse {
     pub body: serde_json::Value,
+    pub usage: Option<completion::Usage>,
 }
 
 impl GetTokenUsage for RawStreamingResponse {
     fn token_usage(&self) -> Option<completion::Usage> {
-        None
+        self.usage
     }
 }
 
@@ -78,38 +82,42 @@ impl SpacebotModel {
         self
     }
 
-    /// Direct call to the provider (no fallback logic).
-    async fn attempt_completion(
-        &self,
-        request: CompletionRequest,
-    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+    async fn provider_config_for_current_model(&self) -> Result<ProviderConfig, CompletionError> {
         let provider_id = self
             .full_model_name
             .split_once('/')
             .map(|(provider, _)| provider)
             .unwrap_or("anthropic");
 
-        let provider_config = match provider_id {
+        match provider_id {
             "anthropic" => self
                 .llm_manager
                 .get_anthropic_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|error| CompletionError::ProviderError(error.to_string())),
             "openai" => self
                 .llm_manager
                 .get_openai_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|error| CompletionError::ProviderError(error.to_string())),
             "openai-chatgpt" => self
                 .llm_manager
                 .get_openai_chatgpt_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|error| CompletionError::ProviderError(error.to_string())),
             _ => self
                 .llm_manager
                 .get_provider(provider_id)
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
-        };
+                .map_err(|error| CompletionError::ProviderError(error.to_string())),
+        }
+    }
+
+    /// Direct call to the provider (no fallback logic).
+    async fn attempt_completion(
+        &self,
+        request: CompletionRequest,
+    ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let provider_config = self.provider_config_for_current_model().await?;
 
         match provider_config.api_type {
             ApiType::Anthropic => self.call_anthropic(request, &provider_config).await,
@@ -442,11 +450,61 @@ impl CompletionModel for SpacebotModel {
 
     async fn stream(
         &self,
-        _request: CompletionRequest,
+        request: CompletionRequest,
     ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
-        Err(CompletionError::ProviderError(
-            "streaming not yet implemented".into(),
-        ))
+        let provider_config = self.provider_config_for_current_model().await?;
+
+        match provider_config.api_type {
+            ApiType::OpenAiCompletions => self.stream_openai(request, &provider_config).await,
+            ApiType::OpenAiChatCompletions => {
+                let endpoint = format!(
+                    "{}/chat/completions",
+                    provider_config.base_url.trim_end_matches('/')
+                );
+                let display_name = provider_config
+                    .name
+                    .as_deref()
+                    .unwrap_or("OpenAI-compatible provider");
+                let headers: Vec<(&str, &str)> = provider_config
+                    .extra_headers
+                    .iter()
+                    .map(|(key, value)| (key.as_str(), value.as_str()))
+                    .collect();
+                self.stream_openai_compatible_with_optional_auth(
+                    request,
+                    display_name,
+                    &endpoint,
+                    Some(provider_config.api_key.clone()),
+                    &headers,
+                )
+                .await
+            }
+            ApiType::KiloGateway => {
+                let endpoint = format!(
+                    "{}/chat/completions",
+                    provider_config.base_url.trim_end_matches('/')
+                );
+                self.stream_openai_compatible_with_optional_auth(
+                    request,
+                    "Kilo Gateway",
+                    &endpoint,
+                    Some(provider_config.api_key.clone()),
+                    &[
+                        ("HTTP-Referer", "https://github.com/spacedriveapp/spacebot"),
+                        ("X-Title", "spacebot"),
+                    ],
+                )
+                .await
+            }
+            ApiType::Gemini => {
+                self.stream_openai_compatible(request, "Google Gemini", &provider_config)
+                    .await
+            }
+            ApiType::Anthropic | ApiType::OpenAiResponses => {
+                let response = self.attempt_completion(request).await?;
+                Ok(stream_from_completion_response(response))
+            }
+        }
     }
 }
 
@@ -520,6 +578,15 @@ impl SpacebotModel {
         request: CompletionRequest,
         provider_config: &ProviderConfig,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let stream = self.stream_openai(request, provider_config).await?;
+        collect_streaming_completion_response(stream).await
+    }
+
+    async fn stream_openai(
+        &self,
+        request: CompletionRequest,
+        provider_config: &ProviderConfig,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
         let api_key = provider_config.api_key.as_str();
         let provider_label = provider_config
             .name
@@ -581,54 +648,37 @@ impl SpacebotModel {
             None
         };
 
-        let mut request_builder = self
-            .llm_manager
-            .http_client()
-            .post(&chat_completions_url)
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json");
-        if let Some(account_id) = openai_account_id {
-            request_builder = request_builder.header("chatgpt-account-id", account_id);
-        }
+        let http_client = self.llm_manager.http_client().clone();
+        let auth_header = format!("Bearer {api_key}");
+        let extra_headers = provider_config.extra_headers.clone();
+        let is_kimi_endpoint = chat_completions_url.contains("kimi.com")
+            || chat_completions_url.contains("moonshot.ai");
 
-        // Kimi endpoints require a specific user-agent header.
-        if chat_completions_url.contains("kimi.com") || chat_completions_url.contains("moonshot.ai")
-        {
-            request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
-        }
+        self.stream_openai_chat_request(
+            move |request_body| {
+                let mut request_builder = http_client
+                    .post(&chat_completions_url)
+                    .header("authorization", auth_header.clone())
+                    .header("content-type", "application/json");
 
-        // Apply provider-specific extra headers (e.g. OpenRouter app attribution).
-        for (key, value) in &provider_config.extra_headers {
-            request_builder = request_builder.header(key.as_str(), value.as_str());
-        }
+                if let Some(account_id) = openai_account_id.as_deref() {
+                    request_builder = request_builder.header("chatgpt-account-id", account_id);
+                }
 
-        let response = request_builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+                if is_kimi_endpoint {
+                    request_builder = request_builder.header("user-agent", "KimiCLI/1.3");
+                }
 
-        let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
-        })?;
+                for (key, value) in &extra_headers {
+                    request_builder = request_builder.header(key, value);
+                }
 
-        let response_body: serde_json::Value =
-            serde_json::from_str(&response_text).map_err(|e| {
-                CompletionError::ProviderError(format!(
-                    "{provider_label} response ({status}) is not valid JSON: {e}\nBody: {}",
-                    truncate_body(&response_text)
-                ))
-            })?;
-
-        if !status.is_success() {
-            return Err(CompletionError::ProviderError(format!(
-                "{provider_label} API error ({})",
-                format_api_error(status, &response_body)
-            )));
-        }
-
-        parse_openai_response(response_body, &provider_label)
+                request_builder.json(request_body)
+            },
+            body,
+            &provider_label,
+        )
+        .await
     }
 
     async fn call_openai_responses(
@@ -766,6 +816,18 @@ impl SpacebotModel {
         provider_display_name: &str,
         provider_config: &ProviderConfig,
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let stream = self
+            .stream_openai_compatible(request, provider_display_name, provider_config)
+            .await?;
+        collect_streaming_completion_response(stream).await
+    }
+
+    async fn stream_openai_compatible(
+        &self,
+        request: CompletionRequest,
+        provider_display_name: &str,
+        provider_config: &ProviderConfig,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
         let base_url = provider_config.base_url.trim_end_matches('/');
         let endpoint_path = match provider_config.api_type {
             ApiType::OpenAiCompletions | ApiType::OpenAiResponses => "/v1/chat/completions",
@@ -827,38 +889,20 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let response = self
-            .llm_manager
-            .http_client()
-            .post(&endpoint)
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
-
-        let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
-        })?;
-
-        let response_body: serde_json::Value =
-            serde_json::from_str(&response_text).map_err(|e| {
-                CompletionError::ProviderError(format!(
-                    "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}",
-                    truncate_body(&response_text)
-                ))
-            })?;
-
-        if !status.is_success() {
-            return Err(CompletionError::ProviderError(format!(
-                "{provider_display_name} API error ({})",
-                format_api_error(status, &response_body)
-            )));
-        }
-
-        parse_openai_response(response_body, provider_display_name)
+        let http_client = self.llm_manager.http_client().clone();
+        let auth_header = format!("Bearer {api_key}");
+        self.stream_openai_chat_request(
+            move |request_body| {
+                http_client
+                    .post(&endpoint)
+                    .header("authorization", auth_header.clone())
+                    .header("content-type", "application/json")
+                    .json(request_body)
+            },
+            body,
+            provider_display_name,
+        )
+        .await
     }
 
     /// Remap model name for providers that require a different format in API calls.
@@ -875,6 +919,26 @@ impl SpacebotModel {
         api_key: Option<String>,
         extra_headers: &[(&str, &str)],
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+        let stream = self
+            .stream_openai_compatible_with_optional_auth(
+                request,
+                provider_display_name,
+                endpoint,
+                api_key,
+                extra_headers,
+            )
+            .await?;
+        collect_streaming_completion_response(stream).await
+    }
+
+    async fn stream_openai_compatible_with_optional_auth(
+        &self,
+        request: CompletionRequest,
+        provider_display_name: &str,
+        endpoint: &str,
+        api_key: Option<String>,
+        extra_headers: &[(&str, &str)],
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
         let mut messages = Vec::new();
 
         if let Some(preamble) = &request.preamble {
@@ -918,44 +982,219 @@ impl SpacebotModel {
             body["tools"] = serde_json::json!(tools);
         }
 
-        let mut request_builder = self.llm_manager.http_client().post(endpoint);
+        let http_client = self.llm_manager.http_client().clone();
+        let endpoint = endpoint.to_string();
+        let auth_header = api_key.map(|key| format!("Bearer {key}"));
+        let extra_headers: Vec<(String, String)> = extra_headers
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+            .collect();
 
-        for (header_name, header_value) in extra_headers {
-            request_builder = request_builder.header(*header_name, *header_value);
-        }
+        self.stream_openai_chat_request(
+            move |request_body| {
+                let mut request_builder = http_client.post(&endpoint);
 
-        if let Some(api_key) = api_key {
-            request_builder = request_builder.header("authorization", format!("Bearer {api_key}"));
-        }
+                for (header_name, header_value) in &extra_headers {
+                    request_builder = request_builder.header(header_name, header_value);
+                }
 
-        let response = request_builder
-            .header("content-type", "application/json")
-            .json(&body)
+                if let Some(auth_header) = auth_header.as_deref() {
+                    request_builder = request_builder.header("authorization", auth_header);
+                }
+
+                request_builder
+                    .header("content-type", "application/json")
+                    .json(request_body)
+            },
+            body,
+            provider_display_name,
+        )
+        .await
+    }
+
+    async fn stream_openai_chat_request<F>(
+        &self,
+        mut build_request: F,
+        request_body: serde_json::Value,
+        provider_label: &str,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError>
+    where
+        F: FnMut(&serde_json::Value) -> reqwest::RequestBuilder,
+    {
+        let stream_request_body = with_streaming_enabled(&request_body);
+        let response = build_request(&stream_request_body)
+            .header("accept-encoding", "identity")
+            .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|error| CompletionError::ProviderError(error.to_string()))?;
 
         let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
-        })?;
-
-        let response_body: serde_json::Value =
-            serde_json::from_str(&response_text).map_err(|e| {
-                CompletionError::ProviderError(format!(
-                    "{provider_display_name} response ({status}) is not valid JSON: {e}\nBody: {}",
-                    truncate_body(&response_text)
-                ))
-            })?;
-
         if !status.is_success() {
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("failed to read error response body: {error}"));
+
             return Err(CompletionError::ProviderError(format!(
-                "{provider_display_name} API error ({})",
-                format_api_error(status, &response_body)
+                "{provider_label} API error ({})",
+                format_api_error_from_response_text(status, &response_text)
             )));
         }
 
-        parse_openai_response(response_body, provider_display_name)
+        let provider_label = provider_label.to_string();
+        let stream = async_stream::stream! {
+            let mut stream = response.bytes_stream();
+            let mut block_buffer = String::new();
+            let mut raw_text = String::new();
+            let mut sse_text = String::new();
+            let mut saw_data_event = false;
+            let mut pending_tool_calls: BTreeMap<usize, OpenAiStreamingToolCall> = BTreeMap::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        yield Err(CompletionError::ProviderError(format!(
+                            "{provider_label} stream read failed: {error}"
+                        )));
+                        return;
+                    }
+                };
+
+                let chunk_text = String::from_utf8_lossy(&chunk).to_string();
+                if !saw_data_event {
+                    raw_text.push_str(&chunk_text);
+                }
+                block_buffer.push_str(&chunk_text);
+
+                while let Some(block) = extract_sse_block(&mut block_buffer) {
+                    sse_text.push_str(&block);
+                    sse_text.push_str("\n\n");
+
+                    let Some(data) = extract_sse_data_payload(&block) else {
+                        continue;
+                    };
+                    let data = data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+
+                    saw_data_event = true;
+
+                    let event_body = match serde_json::from_str::<serde_json::Value>(data) {
+                        Ok(body) => body,
+                        Err(error) => {
+                            tracing::trace!(%error, payload = %data, "failed to parse OpenAI SSE chunk");
+                            continue;
+                        }
+                    };
+
+                    match process_openai_chat_stream_event(&event_body, &mut pending_tool_calls) {
+                        Ok(events) => {
+                            for event in events {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if !block_buffer.trim().is_empty()
+                && let Some(data) = extract_sse_data_payload(&block_buffer)
+            {
+                let data = data.trim();
+                if !data.is_empty() && data != "[DONE]" {
+                    saw_data_event = true;
+                    if let Ok(event_body) = serde_json::from_str::<serde_json::Value>(data) {
+                        match process_openai_chat_stream_event(&event_body, &mut pending_tool_calls) {
+                            Ok(events) => {
+                                for event in events {
+                                    yield Ok(event);
+                                }
+                            }
+                            Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            match flush_openai_streaming_tool_calls(&mut pending_tool_calls) {
+                Ok(events) => {
+                    for event in events {
+                        yield Ok(event);
+                    }
+                }
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            }
+
+            if saw_data_event {
+                let response_body = match parse_openai_chat_sse_response(&sse_text, &provider_label) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+
+                let parsed_response = match parse_openai_response(response_body.clone(), &provider_label) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+
+                yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+                    body: response_body,
+                    usage: Some(parsed_response.usage),
+                }));
+                return;
+            }
+
+            let response_body = match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                Ok(body) => body,
+                Err(error) => {
+                    yield Err(CompletionError::ProviderError(format!(
+                        "{provider_label} response is neither SSE nor JSON: {error}. Body: {}",
+                        truncate_body(&raw_text)
+                    )));
+                    return;
+                }
+            };
+
+            let parsed_response = match parse_openai_response(response_body.clone(), &provider_label) {
+                Ok(response) => response,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+
+            for event in completion_choice_to_streaming_choices(&parsed_response.choice) {
+                yield Ok(event);
+            }
+            if let Some(message_id) = parsed_response.message_id {
+                yield Ok(RawStreamingChoice::MessageId(message_id));
+            }
+
+            yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+                body: response_body,
+                usage: Some(parsed_response.usage),
+            }));
+        };
+
+        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
     }
 }
 // --- Helpers ---
@@ -1287,6 +1526,704 @@ fn truncate_body(body: &str) -> &str {
     } else {
         &body[..limit]
     }
+}
+
+fn with_streaming_enabled(request_body: &serde_json::Value) -> serde_json::Value {
+    let mut body = request_body.clone();
+    body["stream"] = serde_json::json!(true);
+    body
+}
+
+fn format_api_error_from_response_text(status: reqwest::StatusCode, response_text: &str) -> String {
+    if let Ok(body) = serde_json::from_str::<serde_json::Value>(response_text) {
+        format_api_error(status, &body)
+    } else if let Some(message) = parse_openai_error_message(response_text) {
+        format!("{status}: {message}")
+    } else {
+        format!("{status}: {}", truncate_body(response_text))
+    }
+}
+
+struct OpenAiStreamingToolCall {
+    id: String,
+    internal_call_id: String,
+    name: String,
+    arguments: String,
+}
+
+impl Default for OpenAiStreamingToolCall {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            internal_call_id: uuid::Uuid::new_v4().to_string(),
+            name: String::new(),
+            arguments: String::new(),
+        }
+    }
+}
+
+fn stream_from_completion_response(
+    response: completion::CompletionResponse<RawResponse>,
+) -> StreamingCompletionResponse<RawStreamingResponse> {
+    let usage = response.usage;
+    let message_id = response.message_id;
+    let raw_body = response.raw_response.body;
+    let choice_items: Vec<AssistantContent> = response.choice.into_iter().collect();
+
+    let stream = async_stream::stream! {
+        if let Some(message_id) = message_id {
+            yield Ok(RawStreamingChoice::MessageId(message_id));
+        }
+
+        for content in choice_items {
+            match content {
+                AssistantContent::Text(text) => {
+                    if !text.text.is_empty() {
+                        yield Ok(RawStreamingChoice::Message(text.text));
+                    }
+                }
+                AssistantContent::ToolCall(tool_call) => {
+                    yield Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                        id: tool_call.id.clone(),
+                        internal_call_id: if tool_call.id.is_empty() {
+                            uuid::Uuid::new_v4().to_string()
+                        } else {
+                            tool_call.id
+                        },
+                        call_id: tool_call.call_id,
+                        name: tool_call.function.name,
+                        arguments: tool_call.function.arguments,
+                        signature: tool_call.signature,
+                        additional_params: tool_call.additional_params,
+                    }));
+                }
+                AssistantContent::Reasoning(reasoning) => {
+                    let reasoning_id = reasoning.id.clone();
+                    for content in reasoning.content {
+                        yield Ok(RawStreamingChoice::Reasoning {
+                            id: reasoning_id.clone(),
+                            content,
+                        });
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+            body: raw_body,
+            usage: Some(usage),
+        }));
+    };
+
+    StreamingCompletionResponse::stream(Box::pin(stream))
+}
+
+async fn collect_streaming_completion_response(
+    mut stream: StreamingCompletionResponse<RawStreamingResponse>,
+) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
+    while let Some(chunk) = stream.next().await {
+        chunk?;
+    }
+
+    let raw_response = stream.response.unwrap_or(RawStreamingResponse {
+        body: serde_json::json!({}),
+        usage: None,
+    });
+
+    Ok(completion::CompletionResponse {
+        choice: stream.choice,
+        usage: raw_response.usage.unwrap_or_default(),
+        raw_response: RawResponse {
+            body: raw_response.body,
+        },
+        message_id: stream.message_id,
+    })
+}
+
+fn completion_choice_to_streaming_choices(
+    choice: &OneOrMany<AssistantContent>,
+) -> Vec<RawStreamingChoice<RawStreamingResponse>> {
+    let mut events = Vec::new();
+
+    for content in choice.iter() {
+        match content {
+            AssistantContent::Text(text) => {
+                if !text.text.is_empty() {
+                    events.push(RawStreamingChoice::Message(text.text.clone()));
+                }
+            }
+            AssistantContent::ToolCall(tool_call) => {
+                events.push(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                    id: tool_call.id.clone(),
+                    internal_call_id: if tool_call.id.is_empty() {
+                        uuid::Uuid::new_v4().to_string()
+                    } else {
+                        tool_call.id.clone()
+                    },
+                    call_id: tool_call.call_id.clone(),
+                    name: tool_call.function.name.clone(),
+                    arguments: tool_call.function.arguments.clone(),
+                    signature: tool_call.signature.clone(),
+                    additional_params: tool_call.additional_params.clone(),
+                }));
+            }
+            AssistantContent::Reasoning(reasoning) => {
+                for content in &reasoning.content {
+                    events.push(RawStreamingChoice::Reasoning {
+                        id: reasoning.id.clone(),
+                        content: content.clone(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    events
+}
+
+fn extract_sse_block(buffer: &mut String) -> Option<String> {
+    let (block_end, separator_len) = if let Some(index) = buffer.find("\n\n") {
+        (index, 2)
+    } else if let Some(index) = buffer.find("\r\n\r\n") {
+        (index, 4)
+    } else {
+        return None;
+    };
+
+    let block = buffer[..block_end].to_string();
+    *buffer = buffer[block_end + separator_len..].to_string();
+    Some(block)
+}
+
+fn extract_sse_data_payload(block: &str) -> Option<String> {
+    let mut data_lines = Vec::new();
+
+    for line in block.lines() {
+        if let Some(data) = line.strip_prefix("data: ") {
+            data_lines.push(data);
+        } else if let Some(data) = line.strip_prefix("data:") {
+            data_lines.push(data.trim_start());
+        }
+    }
+
+    if data_lines.is_empty() {
+        None
+    } else {
+        Some(data_lines.join("\n"))
+    }
+}
+
+fn escape_control_characters_in_json_strings(input: &str) -> String {
+    let mut escaped = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut escape_next = false;
+
+    for character in input.chars() {
+        if in_string {
+            if escape_next {
+                escaped.push(character);
+                escape_next = false;
+                continue;
+            }
+
+            match character {
+                '\\' => {
+                    escaped.push(character);
+                    escape_next = true;
+                }
+                '"' => {
+                    escaped.push(character);
+                    in_string = false;
+                }
+                '\u{0008}' => escaped.push_str("\\b"),
+                '\t' => escaped.push_str("\\t"),
+                '\n' => escaped.push_str("\\n"),
+                '\u{000c}' => escaped.push_str("\\f"),
+                '\r' => escaped.push_str("\\r"),
+                '\u{0000}'..='\u{001f}' => {
+                    let codepoint = character as u32;
+                    escaped.push_str(&format!("\\u{codepoint:04x}"));
+                }
+                _ => escaped.push(character),
+            }
+            continue;
+        }
+
+        if character == '"' {
+            in_string = true;
+        }
+        escaped.push(character);
+    }
+
+    escaped
+}
+
+fn parse_streamed_tool_arguments(
+    tool_name: &str,
+    raw_arguments: &str,
+) -> Result<serde_json::Value, CompletionError> {
+    if raw_arguments.trim().is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+
+    let direct_parse_error = match serde_json::from_str::<serde_json::Value>(raw_arguments) {
+        Ok(arguments) => return Ok(arguments),
+        Err(error) => error,
+    };
+
+    let sanitized_arguments = escape_control_characters_in_json_strings(raw_arguments);
+    if sanitized_arguments != raw_arguments {
+        match serde_json::from_str::<serde_json::Value>(&sanitized_arguments) {
+            Ok(arguments) => {
+                tracing::warn!(
+                    tool_name,
+                    "normalized control characters in streamed tool arguments"
+                );
+                return Ok(arguments);
+            }
+            Err(sanitized_parse_error) => {
+                return Err(CompletionError::ProviderError(format!(
+                    "invalid streamed tool arguments for '{tool_name}': {direct_parse_error}; after sanitization: {sanitized_parse_error}"
+                )));
+            }
+        }
+    }
+
+    Err(CompletionError::ProviderError(format!(
+        "invalid streamed tool arguments for '{tool_name}': {direct_parse_error}"
+    )))
+}
+
+fn flush_openai_streaming_tool_calls(
+    pending_tool_calls: &mut BTreeMap<usize, OpenAiStreamingToolCall>,
+) -> Result<Vec<RawStreamingChoice<RawStreamingResponse>>, CompletionError> {
+    let mut flushed = Vec::new();
+
+    for (index, tool_call) in std::mem::take(pending_tool_calls) {
+        if tool_call.name.trim().is_empty() {
+            continue;
+        }
+
+        let id = if tool_call.id.is_empty() {
+            format!("tool_call_{index}")
+        } else {
+            tool_call.id
+        };
+
+        let arguments = parse_streamed_tool_arguments(&tool_call.name, &tool_call.arguments)?;
+
+        flushed.push(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+            id,
+            internal_call_id: tool_call.internal_call_id,
+            call_id: None,
+            name: tool_call.name,
+            arguments,
+            signature: None,
+            additional_params: None,
+        }));
+    }
+
+    Ok(flushed)
+}
+
+fn process_openai_chat_stream_event(
+    event_body: &serde_json::Value,
+    pending_tool_calls: &mut BTreeMap<usize, OpenAiStreamingToolCall>,
+) -> Result<Vec<RawStreamingChoice<RawStreamingResponse>>, CompletionError> {
+    if let Some(error_body) = event_body.get("error") {
+        let message = error_body["message"].as_str().unwrap_or("unknown error");
+        return Err(CompletionError::ProviderError(format!(
+            "OpenAI-compatible streaming error: {message}"
+        )));
+    }
+
+    let mut events = Vec::new();
+    let Some(choices) = event_body
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return Ok(events);
+    };
+
+    for choice in choices {
+        if let Some(delta) = choice.get("delta") {
+            if let Some(content) = delta.get("content") {
+                let mut text_parts = Vec::new();
+                collect_openai_text_content(content, &mut text_parts);
+                for text in text_parts {
+                    events.push(RawStreamingChoice::Message(text));
+                }
+            }
+
+            if let Some(reasoning) = delta.get("reasoning") {
+                let mut reasoning_parts = Vec::new();
+                collect_openai_text_content(reasoning, &mut reasoning_parts);
+                for reasoning in reasoning_parts {
+                    events.push(RawStreamingChoice::ReasoningDelta {
+                        id: None,
+                        reasoning,
+                    });
+                }
+            }
+
+            if let Some(reasoning_content) = delta.get("reasoning_content") {
+                let mut reasoning_parts = Vec::new();
+                collect_openai_text_content(reasoning_content, &mut reasoning_parts);
+                for reasoning in reasoning_parts {
+                    events.push(RawStreamingChoice::ReasoningDelta {
+                        id: None,
+                        reasoning,
+                    });
+                }
+            }
+
+            if let Some(delta_tool_calls) = delta
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+            {
+                for tool_call in delta_tool_calls {
+                    let index = tool_call
+                        .get("index")
+                        .and_then(serde_json::Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let entry = pending_tool_calls.entry(index).or_default();
+
+                    if let Some(id) = tool_call.get("id").and_then(serde_json::Value::as_str)
+                        && !id.is_empty()
+                    {
+                        entry.id = id.to_string();
+                    }
+
+                    let function = tool_call
+                        .get("function")
+                        .unwrap_or(&serde_json::Value::Null);
+                    if let Some(name) = function.get("name").and_then(serde_json::Value::as_str)
+                        && !name.is_empty()
+                    {
+                        entry.name = name.to_string();
+                        events.push(RawStreamingChoice::ToolCallDelta {
+                            id: entry.id.clone(),
+                            internal_call_id: entry.internal_call_id.clone(),
+                            content: rig::streaming::ToolCallDeltaContent::Name(name.to_string()),
+                        });
+                    }
+
+                    if let Some(arguments_chunk) = function
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                        && !arguments_chunk.is_empty()
+                    {
+                        entry.arguments.push_str(arguments_chunk);
+                        events.push(RawStreamingChoice::ToolCallDelta {
+                            id: entry.id.clone(),
+                            internal_call_id: entry.internal_call_id.clone(),
+                            content: rig::streaming::ToolCallDeltaContent::Delta(
+                                arguments_chunk.to_string(),
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        if let Some(message) = choice.get("message") {
+            if let Some(content) = message.get("content") {
+                let mut text_parts = Vec::new();
+                collect_openai_text_content(content, &mut text_parts);
+                for text in text_parts {
+                    events.push(RawStreamingChoice::Message(text));
+                }
+            }
+
+            if let Some(message_tool_calls) = message
+                .get("tool_calls")
+                .and_then(serde_json::Value::as_array)
+            {
+                for (index, tool_call) in message_tool_calls.iter().enumerate() {
+                    let pending_tool_call = pending_tool_calls.remove(&index);
+                    let fallback_id = pending_tool_call
+                        .as_ref()
+                        .and_then(|pending| {
+                            if pending.id.is_empty() {
+                                None
+                            } else {
+                                Some(pending.id.clone())
+                            }
+                        })
+                        .unwrap_or_else(|| format!("tool_call_{index}"));
+                    if let Some(tool_call) = parse_openai_tool_call(tool_call, fallback_id) {
+                        let internal_call_id = pending_tool_call
+                            .as_ref()
+                            .map(|pending| pending.internal_call_id.clone())
+                            .unwrap_or_else(|| {
+                                if tool_call.id.is_empty() {
+                                    uuid::Uuid::new_v4().to_string()
+                                } else {
+                                    tool_call.id.clone()
+                                }
+                            });
+
+                        events.push(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                            id: tool_call.id.clone(),
+                            internal_call_id,
+                            call_id: tool_call.call_id,
+                            name: tool_call.function.name,
+                            arguments: tool_call.function.arguments,
+                            signature: tool_call.signature,
+                            additional_params: tool_call.additional_params,
+                        }));
+                    }
+                }
+            }
+        }
+
+        if let Some(finish_reason) = choice
+            .get("finish_reason")
+            .and_then(serde_json::Value::as_str)
+            && matches!(finish_reason, "tool_calls" | "function_call")
+        {
+            events.extend(flush_openai_streaming_tool_calls(pending_tool_calls)?);
+        }
+    }
+
+    Ok(events)
+}
+
+fn parse_openai_chat_sse_response(
+    response_text: &str,
+    provider_label: &str,
+) -> Result<serde_json::Value, CompletionError> {
+    let mut text_parts = Vec::new();
+    let mut reasoning_parts = Vec::new();
+    let mut tool_calls: BTreeMap<usize, OpenAiStreamingToolCall> = BTreeMap::new();
+    let mut usage = None;
+    let mut finish_reason = None;
+    let mut saw_data_event = false;
+
+    let mut process_payload = |payload: &str| -> Result<(), CompletionError> {
+        let data = payload.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(());
+        }
+
+        saw_data_event = true;
+
+        let Ok(event_body) = serde_json::from_str::<serde_json::Value>(data) else {
+            return Ok(());
+        };
+
+        if let Some(error_body) = event_body.get("error") {
+            let message = error_body["message"].as_str().unwrap_or("unknown error");
+            return Err(CompletionError::ProviderError(format!(
+                "{provider_label} streaming error: {message}"
+            )));
+        }
+
+        if let Some(chunk_usage) = event_body.get("usage")
+            && !chunk_usage.is_null()
+        {
+            usage = Some(chunk_usage.clone());
+        }
+
+        let Some(choices) = event_body
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return Ok(());
+        };
+
+        for choice in choices {
+            if finish_reason.is_none()
+                && let Some(reason) = choice
+                    .get("finish_reason")
+                    .and_then(serde_json::Value::as_str)
+                && !reason.is_empty()
+            {
+                finish_reason = Some(reason.to_string());
+            }
+
+            if let Some(delta) = choice.get("delta") {
+                if let Some(content) = delta.get("content") {
+                    collect_openai_text_content(content, &mut text_parts);
+                }
+                if let Some(reasoning) = delta.get("reasoning") {
+                    collect_openai_text_content(reasoning, &mut reasoning_parts);
+                }
+                if let Some(reasoning_content) = delta.get("reasoning_content") {
+                    collect_openai_text_content(reasoning_content, &mut reasoning_parts);
+                }
+
+                if let Some(delta_tool_calls) = delta
+                    .get("tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for tool_call in delta_tool_calls {
+                        let index = tool_call
+                            .get("index")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0) as usize;
+                        let entry = tool_calls.entry(index).or_default();
+
+                        if let Some(id) = tool_call.get("id").and_then(serde_json::Value::as_str)
+                            && !id.is_empty()
+                        {
+                            entry.id = id.to_string();
+                        }
+
+                        let function = tool_call
+                            .get("function")
+                            .unwrap_or(&serde_json::Value::Null);
+                        if let Some(name) = function.get("name").and_then(serde_json::Value::as_str)
+                            && !name.is_empty()
+                        {
+                            entry.name = name.to_string();
+                        }
+
+                        if let Some(arguments_chunk) = function
+                            .get("arguments")
+                            .and_then(serde_json::Value::as_str)
+                            && !arguments_chunk.is_empty()
+                        {
+                            entry.arguments.push_str(arguments_chunk);
+                        }
+                    }
+                }
+            }
+
+            if let Some(message) = choice.get("message") {
+                if let Some(content) = message.get("content") {
+                    collect_openai_text_content(content, &mut text_parts);
+                }
+                if let Some(reasoning) = message.get("reasoning") {
+                    collect_openai_text_content(reasoning, &mut reasoning_parts);
+                }
+                if let Some(reasoning_content) = message.get("reasoning_content") {
+                    collect_openai_text_content(reasoning_content, &mut reasoning_parts);
+                }
+
+                if let Some(message_tool_calls) = message
+                    .get("tool_calls")
+                    .and_then(serde_json::Value::as_array)
+                {
+                    for (index, tool_call) in message_tool_calls.iter().enumerate() {
+                        let entry = tool_calls.entry(index).or_default();
+
+                        if let Some(id) = tool_call.get("id").and_then(serde_json::Value::as_str)
+                            && !id.is_empty()
+                        {
+                            entry.id = id.to_string();
+                        }
+
+                        let function = tool_call
+                            .get("function")
+                            .unwrap_or(&serde_json::Value::Null);
+                        if let Some(name) = function.get("name").and_then(serde_json::Value::as_str)
+                            && !name.is_empty()
+                        {
+                            entry.name = name.to_string();
+                        }
+
+                        if let Some(arguments) = function.get("arguments") {
+                            if let Some(arguments_str) = arguments.as_str() {
+                                entry.arguments = arguments_str.to_string();
+                            } else {
+                                entry.arguments = arguments.to_string();
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    };
+
+    let mut block_buffer = response_text.to_string();
+    while let Some(block) = extract_sse_block(&mut block_buffer) {
+        if let Some(payload) = extract_sse_data_payload(&block) {
+            process_payload(&payload)?;
+        }
+    }
+    if !block_buffer.trim().is_empty()
+        && let Some(payload) = extract_sse_data_payload(&block_buffer)
+    {
+        process_payload(&payload)?;
+    }
+
+    if !saw_data_event {
+        return Err(CompletionError::ProviderError(format!(
+            "{provider_label} streaming response missing SSE data events. Body: {}",
+            truncate_body(response_text)
+        )));
+    }
+
+    let mut message = serde_json::json!({
+        "content": if text_parts.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(text_parts.join(""))
+        }
+    });
+
+    if !reasoning_parts.is_empty() {
+        message["reasoning"] = serde_json::Value::String(reasoning_parts.join(""));
+    }
+
+    let mut tool_call_values = Vec::new();
+    for (index, tool_call) in tool_calls {
+        if tool_call.name.trim().is_empty() {
+            continue;
+        }
+
+        let id = if tool_call.id.is_empty() {
+            format!("tool_call_{index}")
+        } else {
+            tool_call.id
+        };
+        let arguments =
+            parse_openai_tool_arguments(&serde_json::Value::String(tool_call.arguments));
+
+        tool_call_values.push(serde_json::json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": tool_call.name,
+                "arguments": arguments,
+            }
+        }));
+    }
+
+    if !tool_call_values.is_empty() {
+        message["tool_calls"] = serde_json::Value::Array(tool_call_values);
+    }
+
+    if message.get("tool_calls").is_none()
+        && message["content"].is_null()
+        && reasoning_parts.is_empty()
+    {
+        return Err(CompletionError::ProviderError(format!(
+            "{provider_label} streaming response did not contain message content or tool calls. Body: {}",
+            truncate_body(response_text)
+        )));
+    }
+
+    let finish_reason = finish_reason.unwrap_or_else(|| {
+        if message.get("tool_calls").is_some() {
+            "tool_calls".to_string()
+        } else {
+            "stop".to_string()
+        }
+    });
+
+    Ok(serde_json::json!({
+        "choices": [{
+            "message": message,
+            "finish_reason": finish_reason,
+        }],
+        "usage": usage.unwrap_or_else(|| serde_json::json!({})),
+    }))
 }
 
 // --- Response parsing ---
@@ -1786,6 +2723,7 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
 mod tests {
     use super::*;
     use rig::message::Message;
+    use std::collections::BTreeMap;
 
     #[test]
     fn reverse_map_restores_original_tool_names() {
@@ -2034,6 +2972,262 @@ mod tests {
         let error = parse_openai_response(body, "OpenRouter").expect_err("should fail");
         assert!(error.to_string().contains("empty response from OpenRouter"));
         assert!(error.to_string().contains("finish_reason: stop"));
+    }
+
+    #[test]
+    fn parse_openai_chat_sse_response_reconstructs_tool_calls() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Found \"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"content\":\"files\",\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"function\":{\"name\":\"file\",\"arguments\":\"{\\\"operation\\\":\\\"list\\\"\"}}]},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\",\\\"path\\\":\\\".\\\"}\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":12,\"completion_tokens\":8}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let parsed = parse_openai_chat_sse_response(sse, "OpenRouter").expect("valid SSE");
+
+        assert_eq!(parsed["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(parsed["choices"][0]["message"]["content"], "Found files");
+        assert_eq!(
+            parsed["choices"][0]["message"]["tool_calls"][0]["function"]["name"],
+            "file"
+        );
+        assert_eq!(
+            parsed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]["operation"],
+            "list"
+        );
+        assert_eq!(
+            parsed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]["path"],
+            "."
+        );
+        assert_eq!(parsed["usage"]["prompt_tokens"], 12);
+    }
+
+    #[test]
+    fn parse_openai_chat_sse_response_requires_data_lines() {
+        let error = parse_openai_chat_sse_response("{\"choices\":[]}", "OpenRouter")
+            .expect_err("should fail");
+        assert!(error.to_string().contains("missing SSE data events"));
+    }
+
+    #[test]
+    fn process_openai_chat_stream_event_flushes_tool_calls() {
+        let first_event = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "file",
+                            "arguments": "{\"operation\":\"list\""
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+
+        let second_event = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": ",\"path\":\".\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let mut pending = BTreeMap::new();
+
+        let first_events = process_openai_chat_stream_event(&first_event, &mut pending)
+            .expect("first event should parse");
+        assert!(
+            first_events.iter().any(|event| {
+                matches!(
+                    event,
+                    RawStreamingChoice::ToolCallDelta {
+                        content: rig::streaming::ToolCallDeltaContent::Name(name),
+                        ..
+                    } if name == "file"
+                )
+            }),
+            "missing tool-call name delta"
+        );
+        assert_eq!(pending.len(), 1);
+
+        let second_events = process_openai_chat_stream_event(&second_event, &mut pending)
+            .expect("second event should parse");
+        assert!(pending.is_empty(), "pending tool calls should be flushed");
+
+        let tool_calls: Vec<_> = second_events
+            .into_iter()
+            .filter_map(|event| match event {
+                RawStreamingChoice::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "file");
+        assert_eq!(tool_calls[0].arguments["operation"], "list");
+        assert_eq!(tool_calls[0].arguments["path"], ".");
+    }
+
+    #[test]
+    fn process_openai_chat_stream_event_does_not_duplicate_message_tool_calls() {
+        let delta_event = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call_1",
+                        "function": {
+                            "name": "file",
+                            "arguments": "{\"operation\":\"list\",\"path\":\".\"}"
+                        }
+                    }]
+                },
+                "finish_reason": null
+            }]
+        });
+
+        let message_event = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "function": {
+                            "name": "file",
+                            "arguments": "{\"operation\":\"list\",\"path\":\".\"}"
+                        }
+                    }]
+                },
+                "finish_reason": "tool_calls"
+            }]
+        });
+
+        let mut pending = BTreeMap::new();
+        let delta_events = process_openai_chat_stream_event(&delta_event, &mut pending)
+            .expect("delta event should parse");
+        let delta_internal_call_id = delta_events
+            .iter()
+            .find_map(|event| match event {
+                RawStreamingChoice::ToolCallDelta {
+                    internal_call_id, ..
+                } => Some(internal_call_id.clone()),
+                _ => None,
+            })
+            .expect("missing tool-call delta internal id");
+        assert_eq!(pending.len(), 1);
+
+        let events = process_openai_chat_stream_event(&message_event, &mut pending)
+            .expect("message event should parse");
+        let tool_calls: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                RawStreamingChoice::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1, "tool call should not be duplicated");
+        assert_eq!(tool_calls[0].id, "call_1");
+        assert_eq!(tool_calls[0].name, "file");
+        assert_eq!(tool_calls[0].internal_call_id, delta_internal_call_id);
+    }
+
+    #[test]
+    fn flush_openai_streaming_tool_calls_errors_on_invalid_arguments() {
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            0,
+            OpenAiStreamingToolCall {
+                id: "call_1".to_string(),
+                internal_call_id: "internal_1".to_string(),
+                name: "file".to_string(),
+                arguments: "{\"operation\":\"list\"".to_string(),
+            },
+        );
+
+        let error = flush_openai_streaming_tool_calls(&mut pending)
+            .expect_err("invalid JSON arguments should error");
+        assert!(
+            error
+                .to_string()
+                .contains("invalid streamed tool arguments for 'file'"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn flush_openai_streaming_tool_calls_sanitizes_control_chars_in_string_arguments() {
+        let mut pending = BTreeMap::new();
+        pending.insert(
+            0,
+            OpenAiStreamingToolCall {
+                id: "call_1".to_string(),
+                internal_call_id: "internal_1".to_string(),
+                name: "file".to_string(),
+                arguments: "{\"operation\":\"write\",\"content\":\"line1\nline2\"}".to_string(),
+            },
+        );
+
+        let events = flush_openai_streaming_tool_calls(&mut pending)
+            .expect("control-char recovery should parse");
+        let tool_calls: Vec<_> = events
+            .into_iter()
+            .filter_map(|event| match event {
+                RawStreamingChoice::ToolCall(tool_call) => Some(tool_call),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, "file");
+        assert_eq!(tool_calls[0].arguments["operation"], "write");
+        assert_eq!(tool_calls[0].arguments["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn parse_openai_chat_sse_response_merges_multiline_data_blocks() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"Hello\"},\n",
+            "data: \"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":2,\"completion_tokens\":1}}\n\n",
+            "data: [DONE]\n\n"
+        );
+
+        let parsed = parse_openai_chat_sse_response(sse, "OpenRouter").expect("valid SSE");
+        assert_eq!(parsed["choices"][0]["message"]["content"], "Hello");
+        assert_eq!(parsed["usage"]["prompt_tokens"], 2);
+    }
+
+    #[test]
+    fn extract_sse_data_payload_merges_data_lines() {
+        let block = "event: message\nid: abc123\ndata: {\"a\":1}\ndata:{\"b\":2}";
+        let payload = extract_sse_data_payload(block).expect("should parse data lines");
+        assert_eq!(payload, "{\"a\":1}\n{\"b\":2}");
+    }
+
+    #[test]
+    fn raw_streaming_response_reports_usage() {
+        let usage = completion::Usage {
+            input_tokens: 7,
+            output_tokens: 3,
+            total_tokens: 10,
+            cached_input_tokens: 2,
+        };
+
+        let response = RawStreamingResponse {
+            body: serde_json::json!({"ok": true}),
+            usage: Some(usage),
+        };
+
+        assert_eq!(response.token_usage(), Some(usage));
     }
 
     #[test]

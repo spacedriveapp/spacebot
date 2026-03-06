@@ -11,6 +11,9 @@ const SETTINGS_TABLE: TableDefinition<&str, &str> = TableDefinition::new("settin
 
 /// Default key for worker log mode setting.
 pub const WORKER_LOG_MODE_KEY: &str = "worker_log_mode";
+/// Key for channel listen-only mode setting.
+pub const CHANNEL_LISTEN_ONLY_MODE_KEY: &str = "channel_listen_only_mode";
+const CHANNEL_LISTEN_ONLY_MODE_PREFIX: &str = "channel_listen_only_mode:";
 
 /// How worker execution logs are stored.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -54,6 +57,9 @@ pub struct SettingsStore {
 }
 
 impl SettingsStore {
+    fn channel_listen_only_mode_key(channel_id: &str) -> String {
+        format!("{CHANNEL_LISTEN_ONLY_MODE_PREFIX}{channel_id}")
+    }
     /// Create a new settings store at the given path.
     /// The database will be created if it doesn't exist.
     pub fn new(path: &Path) -> Result<Self> {
@@ -159,6 +165,57 @@ impl SettingsStore {
     /// Set the worker log mode setting.
     pub fn set_worker_log_mode(&self, mode: WorkerLogMode) -> Result<()> {
         self.set_raw(WORKER_LOG_MODE_KEY, &mode.to_string())
+    }
+
+    /// Get the channel listen-only mode, if explicitly persisted.
+    pub fn channel_listen_only_mode(&self) -> Result<Option<bool>> {
+        match self.get_raw(CHANNEL_LISTEN_ONLY_MODE_KEY) {
+            Ok(raw) => raw.parse::<bool>().map(Some).map_err(|error| {
+                SettingsError::ReadFailed {
+                    key: CHANNEL_LISTEN_ONLY_MODE_KEY.to_string(),
+                    details: format!("invalid boolean value '{raw}': {error}"),
+                }
+                .into()
+            }),
+            Err(crate::error::Error::Settings(settings_error)) => match *settings_error {
+                SettingsError::NotFound { .. } => Ok(None),
+                other => Err(other.into()),
+            },
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Persist channel listen-only mode.
+    pub fn set_channel_listen_only_mode(&self, enabled: bool) -> Result<()> {
+        self.set_raw(
+            CHANNEL_LISTEN_ONLY_MODE_KEY,
+            if enabled { "true" } else { "false" },
+        )
+    }
+
+    /// Get the listen-only mode for a specific channel, if explicitly persisted.
+    pub fn channel_listen_only_mode_for(&self, channel_id: &str) -> Result<Option<bool>> {
+        let key = Self::channel_listen_only_mode_key(channel_id);
+        match self.get_raw(&key) {
+            Ok(raw) => raw.parse::<bool>().map(Some).map_err(|error| {
+                SettingsError::ReadFailed {
+                    key: key.clone(),
+                    details: format!("invalid boolean value '{raw}': {error}"),
+                }
+                .into()
+            }),
+            Err(crate::error::Error::Settings(settings_error)) => match *settings_error {
+                SettingsError::NotFound { .. } => Ok(None),
+                other => Err(other.into()),
+            },
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Persist listen-only mode for a specific channel.
+    pub fn set_channel_listen_only_mode_for(&self, channel_id: &str, enabled: bool) -> Result<()> {
+        let key = Self::channel_listen_only_mode_key(channel_id);
+        self.set_raw(&key, if enabled { "true" } else { "false" })
     }
 }
 

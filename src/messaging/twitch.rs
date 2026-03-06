@@ -289,8 +289,37 @@ impl Messaging for TwitchAdapter {
                             serde_json::Value::String(privmsg.sender.login.clone()),
                         );
                         metadata.insert(
+                            "twitch_bot_login".into(),
+                            serde_json::Value::String(bot_username.clone()),
+                        );
+                        metadata.insert(
                             "sender_display_name".into(),
                             serde_json::Value::String(privmsg.sender.name.clone()),
+                        );
+                        let message_lower = privmsg.message_text.to_lowercase();
+                        let mention = format!("@{bot_username}");
+                        let is_login_char = |character: char| {
+                            character.is_ascii_lowercase()
+                                || character.is_ascii_digit()
+                                || character == '_'
+                        };
+                        let mentions_bot = message_lower.match_indices(&mention).any(|(start, _)| {
+                            let before = message_lower[..start].chars().next_back();
+                            let after = message_lower[start + mention.len()..].chars().next();
+                            let before_ok = before.map(|character| !is_login_char(character)).unwrap_or(true);
+                            let after_ok = after.map(|character| !is_login_char(character)).unwrap_or(true);
+                            before_ok && after_ok
+                        });
+                        let replies_to_bot = privmsg
+                            .source
+                            .tags
+                            .0
+                            .get("reply-parent-user-login")
+                            .and_then(|value| value.as_ref())
+                            .is_some_and(|login| login.eq_ignore_ascii_case(&bot_username));
+                        metadata.insert(
+                            "twitch_mentions_or_replies_to_bot".into(),
+                            serde_json::Value::Bool(mentions_bot || replies_to_bot),
                         );
 
                         let formatted_author = format!(

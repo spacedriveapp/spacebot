@@ -104,7 +104,7 @@ impl Tool for SpawnWorkerTool {
             "interactive": {
                 "type": "boolean",
                 "default": false,
-                "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns."
+                "description": "If true, the worker stays alive and accepts follow-up messages via route_to_worker. If false (default), the worker runs once and returns. OpenCode workers are always interactive regardless of this flag."
             },
             "suggested_skills": {
                 "type": "array",
@@ -152,7 +152,8 @@ impl Tool for SpawnWorkerTool {
                 SpawnWorkerError("directory is required for opencode workers".into())
             })?;
 
-            spawn_opencode_worker_from_state(&self.state, &args.task, directory, args.interactive)
+            // OpenCode workers are always interactive — ignore args.interactive.
+            spawn_opencode_worker_from_state(&self.state, &args.task, directory, true)
                 .await
                 .map_err(|e| SpawnWorkerError(format!("{e}")))?
         } else {
@@ -171,7 +172,9 @@ impl Tool for SpawnWorkerTool {
         };
 
         let worker_type_label = if is_opencode { "OpenCode" } else { "builtin" };
-        let message = if args.interactive {
+        // OpenCode workers are always interactive regardless of args.interactive.
+        let effectively_interactive = args.interactive || is_opencode;
+        let message = if effectively_interactive {
             format!(
                 "Interactive {worker_type_label} worker {worker_id} spawned for: {}. Route follow-ups with route_to_worker.",
                 args.task
@@ -198,7 +201,7 @@ impl Tool for SpawnWorkerTool {
         Ok(SpawnWorkerOutput {
             worker_id,
             spawned: true,
-            interactive: args.interactive,
+            interactive: effectively_interactive,
             message: format!("{message}{readiness_note}"),
         })
     }

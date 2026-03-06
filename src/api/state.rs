@@ -141,6 +141,13 @@ pub enum ApiEvent {
         channel_id: String,
         is_typing: bool,
     },
+    /// Streaming text delta for an outbound assistant message.
+    OutboundMessageDelta {
+        agent_id: String,
+        channel_id: String,
+        text_delta: String,
+        aggregated_text: String,
+    },
     /// A worker was started.
     WorkerStarted {
         agent_id: String,
@@ -148,6 +155,7 @@ pub enum ApiEvent {
         worker_id: String,
         task: String,
         worker_type: String,
+        interactive: bool,
     },
     /// A worker's status changed.
     WorkerStatusUpdate {
@@ -155,6 +163,12 @@ pub enum ApiEvent {
         channel_id: Option<String>,
         worker_id: String,
         status: String,
+    },
+    /// A worker entered the idle state (waiting for follow-up input).
+    WorkerIdle {
+        agent_id: String,
+        channel_id: Option<String>,
+        worker_id: String,
     },
     /// A worker completed.
     WorkerCompleted {
@@ -219,6 +233,12 @@ pub enum ApiEvent {
         status: String,
         /// "created", "updated", or "deleted".
         action: String,
+    },
+    /// A finalized content part from an OpenCode worker session.
+    OpenCodePartUpdated {
+        agent_id: String,
+        worker_id: String,
+        part: crate::opencode::types::OpenCodePart,
     },
 }
 
@@ -320,6 +340,7 @@ impl ApiState {
                                 channel_id,
                                 task,
                                 worker_type,
+                                interactive,
                                 ..
                             } => {
                                 api_tx
@@ -329,6 +350,7 @@ impl ApiState {
                                         worker_id: worker_id.to_string(),
                                         task: task.clone(),
                                         worker_type: worker_type.clone(),
+                                        interactive: *interactive,
                                     })
                                     .ok();
                             }
@@ -359,6 +381,19 @@ impl ApiState {
                                         channel_id: channel_id.as_deref().map(|s| s.to_string()),
                                         worker_id: worker_id.to_string(),
                                         status: status.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::WorkerIdle {
+                                worker_id,
+                                channel_id,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::WorkerIdle {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.as_deref().map(|s| s.to_string()),
+                                        worker_id: worker_id.to_string(),
                                     })
                                     .ok();
                             }
@@ -479,17 +514,50 @@ impl ApiState {
                                     })
                                     .ok();
                             }
+                            ProcessEvent::TextDelta {
+                                channel_id: Some(channel_id),
+                                text_delta,
+                                aggregated_text,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::OutboundMessageDelta {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        text_delta: text_delta.clone(),
+                                        aggregated_text: aggregated_text.clone(),
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::OpenCodePartUpdated {
+                                worker_id, part, ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::OpenCodePartUpdated {
+                                        agent_id: agent_id.clone(),
+                                        worker_id: worker_id.to_string(),
+                                        part: part.clone(),
+                                    })
+                                    .ok();
+                            }
                             _ => {}
                         }
                     }
                     Err(error) => {
-                        if let crate::agent::EventRecvDisposition::Continue { lagged_count } =
-                            crate::agent::classify_event_recv_error(&error)
-                        {
-                            let count = lagged_count.unwrap_or(0);
-                            tracing::debug!(agent_id = %agent_id, count, "API event forwarder lagged, skipped events");
-                        } else {
-                            break;
+                        match crate::classify_broadcast_recv_result::<crate::ProcessEvent>(Err(
+                            error,
+                        )) {
+                            crate::BroadcastRecvResult::Lagged(count) => {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    count,
+                                    "API event forwarder lagged, skipped events"
+                                );
+                            }
+                            crate::BroadcastRecvResult::Closed => break,
+                            crate::BroadcastRecvResult::Event(_) => unreachable!(
+                                "classifying an Err recv result should never produce Event"
+                            ),
                         }
                     }
                 }

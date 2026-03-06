@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, type CortexChatMessage } from "@/api/client";
+import { generateId } from "@/lib/id";
 
 export interface ToolActivity {
 	tool: string;
@@ -44,7 +45,7 @@ async function consumeSSE(
 }
 
 function generateThreadId(): string {
-	return crypto.randomUUID();
+	return generateId();
 }
 
 export function useCortexChat(agentId: string, channelId?: string) {

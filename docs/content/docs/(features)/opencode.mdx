@@ -176,3 +176,39 @@ webfetch = "allow"
 ```
 
 The OpenCode server is a child process managed by Spacebot. It persists across worker invocations for the same directory. Multiple workers targeting the same directory share the same server (different sessions).
+
+## Embedded Web UI
+
+When you view an OpenCode worker in the Workers tab, Spacebot can show the full interactive OpenCode interface inline — the same editor, terminal, and conversation view you'd get from OpenCode's standalone app.
+
+The embedded UI uses a Shadow DOM for CSS isolation and a memory router to avoid conflicts with Spacebot's own routing. All API and SSE traffic is proxied through Spacebot's reverse proxy at `/api/opencode/{port}/`, keeping everything same-origin.
+
+### Building the embed
+
+The embed bundle is not included in the repository. Build it with:
+
+```bash
+# Requires Node 22+ and bun
+./scripts/build-opencode-embed.sh
+# or: just build-opencode-embed
+```
+
+This clones OpenCode at a pinned upstream commit, copies the embed entry points from `interface/opencode-embed-src/`, builds with Vite, and outputs to `interface/public/opencode-embed/`. The output is ~46MB (mostly shiki grammar chunks for syntax highlighting) and is gitignored.
+
+If you use [fnm](https://github.com/Schniz/fnm) for Node version management:
+
+```bash
+eval "$(fnm env)" && fnm use v24.14.0 && ./scripts/build-opencode-embed.sh
+```
+
+### Without the embed
+
+Everything works without building the embed. OpenCode workers still run normally — the Workers tab falls back to the transcript view, which shows tool calls, status updates, and results. The only difference is you don't get the live interactive OpenCode UI.
+
+### Updating the pinned commit
+
+The OpenCode commit is pinned in `scripts/build-opencode-embed.sh` as `OPENCODE_COMMIT`. To update:
+
+1. Change the commit hash in the script
+2. Re-run `./scripts/build-opencode-embed.sh`
+3. Test the embedded UI in the Workers tab

@@ -12,24 +12,16 @@ pub mod cortex_chat;
 pub mod ingestion;
 #[cfg(test)]
 mod invariant_harness;
+pub mod process_control;
 pub mod status;
 pub mod worker;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum EventRecvDisposition {
-    Continue { lagged_count: Option<u64> },
-    Stop,
-}
-
-pub(crate) fn classify_event_recv_error(
-    error: &tokio::sync::broadcast::error::RecvError,
-) -> EventRecvDisposition {
-    match error {
-        tokio::sync::broadcast::error::RecvError::Lagged(count) => EventRecvDisposition::Continue {
-            lagged_count: Some(*count),
-        },
-        tokio::sync::broadcast::error::RecvError::Closed => EventRecvDisposition::Stop,
-    }
+pub(crate) fn panic_payload_to_string(panic_payload: &(dyn std::any::Any + Send)) -> String {
+    panic_payload
+        .downcast_ref::<&str>()
+        .map(|message| (*message).to_string())
+        .or_else(|| panic_payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "unknown panic payload".to_string())
 }
 
 pub(crate) fn extract_last_assistant_text(history: &[rig::message::Message]) -> Option<String> {

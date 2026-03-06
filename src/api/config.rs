@@ -1,4 +1,5 @@
 use super::state::ApiState;
+use crate::config::ClosePolicy;
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -39,6 +40,8 @@ pub(super) struct CortexSection {
     tick_interval_secs: u64,
     worker_timeout_secs: u64,
     branch_timeout_secs: u64,
+    detached_worker_timeout_retry_limit: u8,
+    supervisor_kill_budget_per_tick: usize,
     circuit_breaker_threshold: u8,
     bulletin_interval_secs: u64,
     bulletin_max_words: usize,
@@ -73,6 +76,13 @@ pub(super) struct BrowserSection {
     enabled: bool,
     headless: bool,
     evaluate_enabled: bool,
+    persist_session: bool,
+    close_policy: String,
+}
+
+#[derive(Serialize, Debug)]
+pub(super) struct ChannelSection {
+    listen_only_mode: bool,
 }
 
 #[derive(Serialize, Debug)]
@@ -98,6 +108,7 @@ pub(super) struct AgentConfigResponse {
     coalesce: CoalesceSection,
     memory_persistence: MemoryPersistenceSection,
     browser: BrowserSection,
+    channel: ChannelSection,
     sandbox: SandboxSection,
     discord: DiscordSection,
 }
@@ -126,6 +137,8 @@ pub(super) struct AgentConfigUpdateRequest {
     memory_persistence: Option<MemoryPersistenceUpdate>,
     #[serde(default)]
     browser: Option<BrowserUpdate>,
+    #[serde(default)]
+    channel: Option<ChannelUpdate>,
     #[serde(default)]
     sandbox: Option<SandboxUpdate>,
     #[serde(default)]
@@ -165,6 +178,8 @@ pub(super) struct CortexUpdate {
     tick_interval_secs: Option<u64>,
     worker_timeout_secs: Option<u64>,
     branch_timeout_secs: Option<u64>,
+    detached_worker_timeout_retry_limit: Option<u8>,
+    supervisor_kill_budget_per_tick: Option<usize>,
     circuit_breaker_threshold: Option<u8>,
     bulletin_interval_secs: Option<u64>,
     bulletin_max_words: Option<usize>,
@@ -199,6 +214,13 @@ pub(super) struct BrowserUpdate {
     enabled: Option<bool>,
     headless: Option<bool>,
     evaluate_enabled: Option<bool>,
+    persist_session: Option<bool>,
+    close_policy: Option<ClosePolicy>,
+}
+
+#[derive(Deserialize, Debug)]
+pub(super) struct ChannelUpdate {
+    listen_only_mode: Option<bool>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -231,6 +253,7 @@ pub(super) async fn get_agent_config(
     let coalesce = rc.coalesce.load();
     let memory_persistence = rc.memory_persistence.load();
     let browser = rc.browser_config.load();
+    let channel = rc.channel_config.load();
     let sandbox = rc.sandbox.load();
 
     let response = AgentConfigResponse {
@@ -260,6 +283,8 @@ pub(super) async fn get_agent_config(
             tick_interval_secs: cortex.tick_interval_secs,
             worker_timeout_secs: cortex.worker_timeout_secs,
             branch_timeout_secs: cortex.branch_timeout_secs,
+            detached_worker_timeout_retry_limit: cortex.detached_worker_timeout_retry_limit,
+            supervisor_kill_budget_per_tick: cortex.supervisor_kill_budget_per_tick,
             circuit_breaker_threshold: cortex.circuit_breaker_threshold,
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
@@ -286,6 +311,11 @@ pub(super) async fn get_agent_config(
             enabled: browser.enabled,
             headless: browser.headless,
             evaluate_enabled: browser.evaluate_enabled,
+            persist_session: browser.persist_session,
+            close_policy: browser.close_policy.as_str().to_string(),
+        },
+        channel: ChannelSection {
+            listen_only_mode: channel.listen_only_mode,
         },
         sandbox: SandboxSection {
             mode: match sandbox.mode {
@@ -371,6 +401,9 @@ pub(super) async fn update_agent_config(
     }
     if let Some(browser) = &request.browser {
         update_browser_table(&mut doc, agent_idx, browser)?;
+    }
+    if let Some(channel) = &request.channel {
+        update_channel_table(&mut doc, agent_idx, channel)?;
     }
     if let Some(sandbox) = &request.sandbox {
         update_sandbox_table(&mut doc, agent_idx, sandbox)?;
@@ -576,6 +609,13 @@ fn update_cortex_table(
     if let Some(v) = cortex.branch_timeout_secs {
         table["branch_timeout_secs"] = toml_edit::value(v as i64);
     }
+    if let Some(v) = cortex.detached_worker_timeout_retry_limit {
+        table["detached_worker_timeout_retry_limit"] = toml_edit::value(v as i64);
+    }
+    if let Some(v) = cortex.supervisor_kill_budget_per_tick {
+        table["supervisor_kill_budget_per_tick"] =
+            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+    }
     if let Some(v) = cortex.circuit_breaker_threshold {
         table["circuit_breaker_threshold"] = toml_edit::value(v as i64);
     }
@@ -671,6 +711,25 @@ fn update_browser_table(
     }
     if let Some(v) = browser.evaluate_enabled {
         table["evaluate_enabled"] = toml_edit::value(v);
+    }
+    if let Some(v) = browser.persist_session {
+        table["persist_session"] = toml_edit::value(v);
+    }
+    if let Some(v) = browser.close_policy {
+        table["close_policy"] = toml_edit::value(v.as_str());
+    }
+    Ok(())
+}
+
+fn update_channel_table(
+    doc: &mut toml_edit::DocumentMut,
+    agent_idx: usize,
+    channel: &ChannelUpdate,
+) -> Result<(), StatusCode> {
+    let agent = get_agent_table_mut(doc, agent_idx)?;
+    let table = get_or_create_subtable(agent, "channel")?;
+    if let Some(v) = channel.listen_only_mode {
+        table["listen_only_mode"] = toml_edit::value(v);
     }
     Ok(())
 }
@@ -820,5 +879,83 @@ id = "main"
 
         let result = update_warmup_table(&mut doc, agent_idx, &update);
         assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+    }
+
+    #[test]
+    fn test_update_channel_table_writes_listen_only_mode() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+
+        let enable_update = ChannelUpdate {
+            listen_only_mode: Some(true),
+        };
+        update_channel_table(&mut doc, agent_idx, &enable_update)
+            .expect("failed to update channel table with true");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let channel = agent
+            .get("channel")
+            .and_then(|item| item.as_table())
+            .expect("missing channel table");
+        assert_eq!(channel["listen_only_mode"].as_bool(), Some(true));
+
+        let disable_update = ChannelUpdate {
+            listen_only_mode: Some(false),
+        };
+        update_channel_table(&mut doc, agent_idx, &disable_update)
+            .expect("failed to update channel table with false");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let channel = agent
+            .get("channel")
+            .and_then(|item| item.as_table())
+            .expect("missing channel table");
+        assert_eq!(channel["listen_only_mode"].as_bool(), Some(false));
+    }
+
+    #[test]
+    fn test_update_cortex_table_rejects_large_usize_value() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = CortexUpdate {
+            tick_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: Some(usize::MAX),
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+        };
+
+        let result = update_cortex_table(&mut doc, agent_idx, &update);
+        if (usize::MAX as u128) > (i64::MAX as u128) {
+            assert_eq!(result, Err(StatusCode::BAD_REQUEST));
+        } else {
+            assert!(result.is_ok());
+        }
     }
 }

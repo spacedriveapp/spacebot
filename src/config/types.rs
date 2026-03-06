@@ -511,6 +511,7 @@ pub struct DefaultsConfig {
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
+    pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
@@ -541,6 +542,7 @@ impl std::fmt::Debug for DefaultsConfig {
             .field("cortex", &self.cortex)
             .field("warmup", &self.warmup)
             .field("browser", &self.browser)
+            .field("channel", &self.channel)
             .field("mcp", &self.mcp)
             .field(
                 "brave_search_key",
@@ -698,6 +700,35 @@ impl Default for IngestionConfig {
     }
 }
 
+/// What happens when a worker explicitly calls "close" on the browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClosePolicy {
+    /// Kill the browser process and reset all state (current default behavior).
+    #[default]
+    CloseBrowser,
+    /// Close all tabs but leave the browser process running.
+    CloseTabs,
+    /// Disconnect from the browser without touching tabs or the process.
+    Detach,
+}
+
+impl ClosePolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::CloseBrowser => "close_browser",
+            Self::CloseTabs => "close_tabs",
+            Self::Detach => "detach",
+        }
+    }
+}
+
+impl std::fmt::Display for ClosePolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Browser automation configuration for workers.
 #[derive(Debug, Clone)]
 pub struct BrowserConfig {
@@ -711,6 +742,12 @@ pub struct BrowserConfig {
     pub executable_path: Option<String>,
     /// Directory for storing screenshots and other browser artifacts.
     pub screenshot_dir: Option<PathBuf>,
+    /// Keep the browser alive across worker lifetimes. When true, all workers
+    /// for this agent share a single browser connection and tabs survive between
+    /// worker runs. Cookies, localStorage, and login sessions persist.
+    pub persist_session: bool,
+    /// Controls what happens when a worker calls "close" or finishes.
+    pub close_policy: ClosePolicy,
     /// Directory for caching a fetcher-downloaded Chromium binary.
     /// Populated from `{instance_dir}/chrome_cache` during config resolution.
     pub chrome_cache_dir: PathBuf,
@@ -724,9 +761,18 @@ impl Default for BrowserConfig {
             evaluate_enabled: false,
             executable_path: None,
             screenshot_dir: None,
+            persist_session: false,
+            close_policy: ClosePolicy::default(),
             chrome_cache_dir: PathBuf::from("chrome_cache"),
         }
     }
+}
+
+/// Channel behavior configuration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ChannelConfig {
+    /// When true, unsolicited chat messages are ignored unless command/mention/reply.
+    pub listen_only_mode: bool,
 }
 
 /// OpenCode subprocess worker configuration.
@@ -766,6 +812,8 @@ pub struct CortexConfig {
     pub tick_interval_secs: u64,
     pub worker_timeout_secs: u64,
     pub branch_timeout_secs: u64,
+    pub detached_worker_timeout_retry_limit: u8,
+    pub supervisor_kill_budget_per_tick: usize,
     pub circuit_breaker_threshold: u8,
     /// Interval in seconds between memory bulletin refreshes.
     pub bulletin_interval_secs: u64,
@@ -787,8 +835,10 @@ impl Default for CortexConfig {
     fn default() -> Self {
         Self {
             tick_interval_secs: 30,
-            worker_timeout_secs: 300,
+            worker_timeout_secs: 600,
             branch_timeout_secs: 60,
+            detached_worker_timeout_retry_limit: 2,
+            supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,
@@ -952,6 +1002,7 @@ pub struct AgentConfig {
     pub cortex: Option<CortexConfig>,
     pub warmup: Option<WarmupConfig>,
     pub browser: Option<BrowserConfig>,
+    pub channel: Option<ChannelConfig>,
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
@@ -1007,6 +1058,7 @@ pub struct ResolvedAgentConfig {
     pub cortex: CortexConfig,
     pub warmup: WarmupConfig,
     pub browser: BrowserConfig,
+    pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
     pub cron_timezone: Option<String>,
@@ -1034,6 +1086,7 @@ impl Default for DefaultsConfig {
             cortex: CortexConfig::default(),
             warmup: WarmupConfig::default(),
             browser: BrowserConfig::default(),
+            channel: ChannelConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
             cron_timezone: None,
@@ -1097,6 +1150,7 @@ impl AgentConfig {
                 .browser
                 .clone()
                 .unwrap_or_else(|| defaults.browser.clone()),
+            channel: self.channel.unwrap_or(defaults.channel),
             mcp: resolve_mcp_configs(&defaults.mcp, self.mcp.as_deref()),
             brave_search_key: self
                 .brave_search_key

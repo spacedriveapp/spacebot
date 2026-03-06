@@ -113,6 +113,11 @@ body {
 	}
 }
 
+// Hide React Query devtools toggle button (still accessible by clicking the area)
+.tsqd-open-btn-container {
+	opacity: 0 !important;
+}
+
 // Override React Flow's default group node styles
 .react-flow__node-group {
 	background-color: transparent !important;

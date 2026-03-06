@@ -10,8 +10,9 @@ import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
+import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
 
-type SectionId = "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file";
+type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file";
 
 const SECTIONS = [
 	{
@@ -61,6 +62,12 @@ const SECTIONS = [
 		label: "Updates",
 		group: "system" as const,
 		description: "Release checks and update controls",
+	},
+	{
+		id: "appearance" as const,
+		label: "Appearance",
+		group: "general" as const,
+		description: "Theme and display settings",
 	},
 	{
 		id: "config-file" as const,
@@ -580,7 +587,9 @@ export function Settings() {
 					</h1>
 				</header>
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-					{activeSection === "providers" ? (
+					{activeSection === "appearance" ? (
+						<AppearanceSection />
+					) : activeSection === "providers" ? (
 						<div className="mx-auto max-w-2xl px-6 py-6">
 							{/* Section header */}
 							<div className="mb-6">
@@ -786,6 +795,68 @@ export function Settings() {
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+		</div>
+	);
+}
+
+function AppearanceSection() {
+	const { theme, setTheme } = useTheme();
+
+	return (
+		<div className="mx-auto max-w-2xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">Theme</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Choose a theme for the dashboard interface.
+				</p>
+			</div>
+
+			<div className="grid grid-cols-2 gap-3">
+				{THEMES.map((t) => (
+					<button
+						key={t.id}
+						onClick={() => setTheme(t.id)}
+						className={`group relative flex flex-col items-start rounded-lg border p-4 text-left transition-colors ${
+							theme === t.id
+								? "border-accent bg-accent/10"
+								: "border-app-line bg-app-box hover:border-app-line/80 hover:bg-app-hover"
+						}`}
+					>
+						<div className="flex w-full items-center justify-between">
+							<span className="text-sm font-medium text-ink">{t.name}</span>
+							{theme === t.id && (
+								<span className="h-2 w-2 rounded-full bg-accent" />
+							)}
+						</div>
+						<p className="mt-1 text-sm text-ink-dull">{t.description}</p>
+						<ThemePreview themeId={t.id} />
+					</button>
+				))}
+			</div>
+		</div>
+	);
+}
+
+function ThemePreview({ themeId }: { themeId: ThemeId }) {
+	const colors = {
+		default: { bg: "#0d0d0f", sidebar: "#0a0a0b", accent: "#a855f7" },
+		vanilla: { bg: "#ffffff", sidebar: "#f5f5f6", accent: "#3b82f6" },
+		midnight: { bg: "#14162b", sidebar: "#0c0e1a", accent: "#3b82f6" },
+		noir: { bg: "#080808", sidebar: "#000000", accent: "#3b82f6" },
+	};
+	const c = colors[themeId];
+
+	return (
+		<div
+			className="mt-3 flex h-12 w-full overflow-hidden rounded border border-app-line/50"
+			style={{ backgroundColor: c.bg }}
+		>
+			<div className="w-8 border-r" style={{ backgroundColor: c.sidebar, borderColor: c.accent + "30" }} />
+			<div className="flex flex-1 flex-col gap-1 p-1.5">
+				<div className="h-1.5 w-12 rounded-sm" style={{ backgroundColor: c.accent }} />
+				<div className="h-1 w-16 rounded-sm opacity-30" style={{ backgroundColor: c.accent }} />
+				<div className="h-1 w-10 rounded-sm opacity-20" style={{ backgroundColor: c.accent }} />
+			</div>
 		</div>
 	);
 }

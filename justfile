@@ -32,3 +32,9 @@ gate-pr-ci: preflight-ci
 
 gate-pr-ci-fast: preflight-ci
     ./scripts/gate-pr.sh --ci --fast
+
+# Build the OpenCode embed bundle from a pinned upstream commit.
+# Clones opencode, copies embed entry points, builds with Vite,
+# and outputs to interface/public/opencode-embed/.
+build-opencode-embed:
+    ./scripts/build-opencode-embed.sh

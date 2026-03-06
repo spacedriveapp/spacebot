@@ -14,6 +14,7 @@ use mailparse::{DispositionType, MailAddr, MailHeaderMap};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::net::ToSocketAddrs;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 use tokio::sync::{RwLock, mpsc, watch};
@@ -21,7 +22,60 @@ use tokio::task::JoinHandle;
 
 const EMAIL_MAX_RETRY_BACKOFF_SECS: u64 = 300;
 
-type ImapSession = imap::Session<native_tls::TlsStream<std::net::TcpStream>>;
+/// Wraps both TLS and plaintext IMAP sessions behind a common interface.
+///
+/// Proton Bridge (and similar local bridges) expose IMAP/SMTP over plain TCP
+/// on localhost. The `imap` crate's `Session<T>` is generic, so we need this
+/// enum to support both paths at runtime.
+enum ImapSession {
+    Tls(imap::Session<native_tls::TlsStream<std::net::TcpStream>>),
+    Plain(imap::Session<std::net::TcpStream>),
+}
+
+impl ImapSession {
+    fn select(&mut self, folder: &str) -> imap::error::Result<imap::types::Mailbox> {
+        match self {
+            Self::Tls(session) => session.select(folder),
+            Self::Plain(session) => session.select(folder),
+        }
+    }
+
+    fn uid_fetch(
+        &mut self,
+        uid_set: impl AsRef<str>,
+        query: &str,
+    ) -> imap::error::Result<imap::types::ZeroCopy<Vec<imap::types::Fetch>>> {
+        match self {
+            Self::Tls(session) => session.uid_fetch(uid_set, query),
+            Self::Plain(session) => session.uid_fetch(uid_set, query),
+        }
+    }
+
+    fn uid_store(
+        &mut self,
+        uid_set: impl AsRef<str>,
+        query: impl AsRef<str>,
+    ) -> imap::error::Result<imap::types::ZeroCopy<Vec<imap::types::Fetch>>> {
+        match self {
+            Self::Tls(session) => session.uid_store(uid_set, query),
+            Self::Plain(session) => session.uid_store(uid_set, query),
+        }
+    }
+
+    fn uid_search(&mut self, query: impl AsRef<str>) -> imap::error::Result<HashSet<u32>> {
+        match self {
+            Self::Tls(session) => session.uid_search(query),
+            Self::Plain(session) => session.uid_search(query),
+        }
+    }
+
+    fn logout(&mut self) -> imap::error::Result<()> {
+        match self {
+            Self::Tls(session) => session.logout(),
+            Self::Plain(session) => session.logout(),
+        }
+    }
+}
 
 #[derive(Clone)]
 struct EmailPollConfig {
@@ -626,8 +680,18 @@ fn build_smtp_transport(config: &EmailConfig) -> crate::Result<AsyncSmtpTranspor
         AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&config.smtp_host)
             .with_context(|| format!("invalid SMTP host '{}'", config.smtp_host))?
     } else {
-        AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
-            .with_context(|| format!("invalid SMTP host '{}'", config.smtp_host))?
+        if !is_local_mail_host(&config.smtp_host) {
+            return Err(anyhow::anyhow!(
+                "refusing plaintext SMTP for non-local host '{}'; enable STARTTLS or use a localhost bridge",
+                config.smtp_host
+            )
+            .into());
+        }
+
+        // Plain TCP (no TLS) — used by local bridges like Proton Bridge.
+        // `builder_dangerous` allows unencrypted SMTP, which is safe for
+        // localhost connections where the bridge itself encrypts upstream.
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
     };
 
     Ok(builder
@@ -704,12 +768,13 @@ fn poll_inbox_once(config: &EmailPollConfig) -> anyhow::Result<Vec<InboundMessag
 }
 
 fn open_imap_session(config: &EmailPollConfig) -> anyhow::Result<ImapSession> {
-    let tls = native_tls::TlsConnector::builder()
-        .build()
-        .context("failed to build TLS connector for IMAP")?;
+    if config.imap_use_tls {
+        // Implicit TLS (typically port 993)
+        let tls = native_tls::TlsConnector::builder()
+            .build()
+            .context("failed to build TLS connector for IMAP")?;
 
-    let client = if config.imap_use_tls {
-        imap::connect(
+        let client = imap::connect(
             (config.imap_host.as_str(), config.imap_port),
             config.imap_host.as_str(),
             &tls,
@@ -719,27 +784,94 @@ fn open_imap_session(config: &EmailPollConfig) -> anyhow::Result<ImapSession> {
                 "failed to connect to IMAP server '{}:{}'",
                 config.imap_host, config.imap_port
             )
-        })?
+        })?;
+
+        let session = client
+            .login(config.imap_username.as_str(), config.imap_password.as_str())
+            .map_err(|error| anyhow::anyhow!(error.0))
+            .context("failed to authenticate to IMAP server")?;
+
+        Ok(ImapSession::Tls(session))
     } else {
-        imap::connect_starttls(
-            (config.imap_host.as_str(), config.imap_port),
-            config.imap_host.as_str(),
-            &tls,
-        )
-        .with_context(|| {
-            format!(
-                "failed to connect to IMAP server '{}:{}' with STARTTLS",
-                config.imap_host, config.imap_port
+        if !is_local_mail_host(&config.imap_host) {
+            return Err(anyhow::anyhow!(
+                "refusing plaintext IMAP for non-local host '{}'; enable TLS or use a localhost bridge",
+                config.imap_host
+            ));
+        }
+
+        // Plain TCP (no TLS) — used by local bridges like Proton Bridge.
+        // Iterate all resolved addresses so dual-stack localhost (IPv4 + IPv6) works
+        // even when the bridge only listens on one address family.
+        let addresses: Vec<std::net::SocketAddr> = (config.imap_host.as_str(), config.imap_port)
+            .to_socket_addrs()
+            .with_context(|| {
+                format!(
+                    "failed to resolve IMAP server '{}:{}'",
+                    config.imap_host, config.imap_port
+                )
+            })?
+            .collect();
+        if addresses.is_empty() {
+            return Err(anyhow::anyhow!(
+                "no IMAP socket addresses resolved for '{}:{}'",
+                config.imap_host,
+                config.imap_port
+            ));
+        }
+
+        let mut last_error = None;
+        let mut tcp = None;
+        for address in &addresses {
+            match std::net::TcpStream::connect_timeout(address, Duration::from_secs(10)) {
+                Ok(stream) => {
+                    tcp = Some(stream);
+                    break;
+                }
+                Err(error) => {
+                    last_error = Some((*address, error));
+                }
+            }
+        }
+        let tcp = tcp.ok_or_else(|| {
+            let (address, error) = last_error.expect("addresses is non-empty");
+            anyhow::anyhow!(
+                "failed to connect to IMAP server '{}:{}' (last tried {address}: {error})",
+                config.imap_host,
+                config.imap_port,
             )
-        })?
-    };
+        })?;
+        tcp.set_read_timeout(Some(Duration::from_secs(30)))
+            .context("failed to set IMAP read timeout")?;
+        tcp.set_write_timeout(Some(Duration::from_secs(30)))
+            .context("failed to set IMAP write timeout")?;
 
-    let session = client
-        .login(config.imap_username.as_str(), config.imap_password.as_str())
-        .map_err(|error| anyhow::anyhow!(error.0))
-        .context("failed to authenticate to IMAP server")?;
+        let client = imap::Client::new(tcp);
 
-    Ok(session)
+        let session = client
+            .login(config.imap_username.as_str(), config.imap_password.as_str())
+            .map_err(|error| anyhow::anyhow!(error.0))
+            .context("failed to authenticate to IMAP server")?;
+
+        Ok(ImapSession::Plain(session))
+    }
+}
+
+fn is_local_mail_host(host: &str) -> bool {
+    let normalized_host = host
+        .trim()
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .trim_end_matches('.');
+
+    if normalized_host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+
+    normalized_host
+        .parse::<std::net::IpAddr>()
+        .map(|address| address.is_loopback())
+        .unwrap_or(false)
 }
 
 fn parse_inbound_email(
@@ -1623,7 +1755,7 @@ struct EmailReplyContext {
 mod tests {
     use super::{
         EmailSearchHit, EmailSearchQuery, build_imap_search_criterion, derive_thread_key,
-        extract_message_ids, normalize_email_target, normalize_reply_subject,
+        extract_message_ids, is_local_mail_host, normalize_email_target, normalize_reply_subject,
         normalize_search_folders, parse_primary_mailbox, sort_and_limit_search_hits,
     };
 
@@ -1663,6 +1795,23 @@ mod tests {
             normalize_reply_subject("Existing thread"),
             "Re: Existing thread"
         );
+    }
+
+    #[test]
+    fn is_local_mail_host_accepts_loopback_hosts() {
+        assert!(is_local_mail_host("localhost"));
+        assert!(is_local_mail_host("LOCALHOST"));
+        assert!(is_local_mail_host("localhost."));
+        assert!(is_local_mail_host(" 127.0.0.1 "));
+        assert!(is_local_mail_host("::1"));
+        assert!(is_local_mail_host("[::1]"));
+    }
+
+    #[test]
+    fn is_local_mail_host_rejects_non_loopback_hosts() {
+        assert!(!is_local_mail_host("mail.example.com"));
+        assert!(!is_local_mail_host("192.168.1.10"));
+        assert!(!is_local_mail_host("8.8.8.8"));
     }
 
     #[test]

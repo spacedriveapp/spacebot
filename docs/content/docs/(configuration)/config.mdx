@@ -90,7 +90,7 @@ emergency_threshold = 0.95     # drop oldest 50%, no LLM
 # Cortex (system observer) settings.
 [defaults.cortex]
 tick_interval_secs = 30
-worker_timeout_secs = 300
+worker_timeout_secs = 600
 branch_timeout_secs = 60
 circuit_breaker_threshold = 3  # consecutive failures before auto-disable
 
@@ -106,8 +106,10 @@ startup_delay_secs = 5
 enabled = true
 headless = true
 evaluate_enabled = false
-executable_path = "/path/to/chrome"     # optional, auto-detected
-screenshot_dir = "/path/to/screenshots" # optional, defaults to data_dir/screenshots
+persist_session = false                  # keep browser alive across worker lifetimes
+close_policy = "close_browser"           # "close_browser", "close_tabs", or "detach"
+executable_path = "/path/to/chrome"      # optional, auto-detected
+screenshot_dir = "/path/to/screenshots"  # optional, defaults to data_dir/screenshots
 
 # --- Agents ---
 # At least one agent is required. First agent or the one with default = true
@@ -501,9 +503,11 @@ Thresholds are fractions of `context_window`.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `tick_interval_secs` | integer | 30 | How often the cortex checks system state |
-| `worker_timeout_secs` | integer | 300 | Worker timeout before cancellation |
+| `tick_interval_secs` | integer | 30 | How often the cortex runtime loop runs maintenance ticks while continuously observing events |
+| `worker_timeout_secs` | integer | 600 | Worker idle timeout before cancellation |
 | `branch_timeout_secs` | integer | 60 | Branch timeout before cancellation |
+| `detached_worker_timeout_retry_limit` | integer | 2 | Retry limit before quarantining detached workers to backlog |
+| `supervisor_kill_budget_per_tick` | integer | 8 | Max number of overdue processes supervisor may cancel per health tick |
 | `circuit_breaker_threshold` | integer | 3 | Consecutive failures before auto-disable |
 
 ### `[defaults.warmup]`
@@ -515,7 +519,7 @@ Thresholds are fractions of `context_window`.
 | `refresh_secs` | integer | 900 | Seconds between background warmup passes |
 | `startup_delay_secs` | integer | 5 | Delay before first warmup pass after boot |
 
-When warmup is enabled, it is the primary bulletin refresh path. The cortex bulletin loop remains as a fallback generator when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+When warmup is enabled, it is the primary bulletin refresh path. The cortex runtime loop still performs fallback bulletin/profile refresh when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
 
 Dispatch readiness is derived from warmup runtime state:
 
@@ -532,6 +536,8 @@ When branch/worker/cron dispatch happens before readiness is satisfied, Spacebot
 | `enabled` | bool | true | Whether workers have browser tools |
 | `headless` | bool | true | Run Chrome headless |
 | `evaluate_enabled` | bool | false | Allow JavaScript evaluation |
+| `persist_session` | bool | false | Keep browser alive across worker lifetimes. Tabs, cookies, and logins survive between tasks. Requires agent restart to take effect. |
+| `close_policy` | string | `"close_browser"` | What happens on close: `"close_browser"` (kill Chrome), `"close_tabs"` (close tabs, keep browser), `"detach"` (disconnect, leave everything) |
 | `executable_path` | string | None | Custom Chrome/Chromium path |
 | `screenshot_dir` | string | None | Directory for screenshots |
 

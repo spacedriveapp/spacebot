@@ -16,28 +16,48 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://bun.sh/install | bash
 ENV PATH="/root/.bun/bin:${PATH}"
 
+# Node 22+ is required for the OpenCode embed Vite build.
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /build
 
 # 1. Fetch and cache Rust dependencies.
 #    cargo fetch needs a valid target, so we create stubs that get replaced later.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/ vendor/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
     && cargo build --release \
     && rm -rf src
 
-# 2. Build the frontend.
+# 2. Install frontend dependencies.
 COPY interface/package.json interface/
 RUN cd interface && bun install
+
+# 3. Build the OpenCode embed bundle (live coding UI in Workers tab).
+#    Must run before the frontend build so the embed assets in
+#    interface/public/opencode-embed/ are included in the Vite output.
+COPY scripts/build-opencode-embed.sh scripts/
+COPY interface/opencode-embed-src/ interface/opencode-embed-src/
+RUN ./scripts/build-opencode-embed.sh
+
+# 4. Build the frontend (includes OpenCode embed assets from step 3).
 COPY interface/ interface/
 RUN cd interface && bun run build
 
-# 3. Copy source and compile the real binary.
-#    build.rs runs the frontend build (already done above, node_modules present).
+# 5. Copy source and compile the real binary.
+#    build.rs is skipped (SPACEBOT_SKIP_FRONTEND_BUILD=1) since the
+#    frontend is already built above with the OpenCode embed included.
 #    prompts/ is needed for include_str! in src/prompts/text.rs.
 #    migrations/ is needed for sqlx::migrate! in src/db.rs.
+#    docs/ is needed for rust-embed in src/self_awareness.rs.
+#    AGENTS.md, README.md, CHANGELOG.md are needed for include_str! in src/self_awareness.rs.
 COPY build.rs ./
 COPY prompts/ prompts/
 COPY migrations/ migrations/
+COPY docs/ docs/
+COPY AGENTS.md README.md CHANGELOG.md ./
 COPY src/ src/
 RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \

@@ -55,6 +55,7 @@ Conditionally added:
 |------|-----------|
 | `browser` | When `browser.enabled = true` in agent config |
 | `web_search` | When a Brave Search API key is configured |
+| `mcp_*` | One tool per connected MCP server tool, fetched at worker start |
 
 Workers don't get memory tools, channel tools, or branch tools. They can't talk to the user, recall memories, or spawn other processes. They execute their task and report status.
 

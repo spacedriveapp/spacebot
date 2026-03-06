@@ -9,10 +9,25 @@ interface/node_modules/
 interface/dist/
 
 # Not needed for the build
-docs/
 tests/
 scripts/
+
+# Exclude docs except what's needed for self_awareness.rs embeds
+docs/node_modules/
+docs/.next/
+docs/out/
+docs/app/
+docs/components/
+docs/lib/
+docs/design-docs/
+docs/*.json
+docs/*.ts
+docs/*.tsx
+docs/*.mjs
+docs/*.yaml
+docs/*.lock
+docs/.gitignore
+docs/.node-version
 fly.toml
-AGENTS.md
 RUST_STYLE_GUIDE.md
 LICENSE

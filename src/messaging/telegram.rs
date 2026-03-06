@@ -874,6 +874,17 @@ fn build_metadata(
         }
         if let Some(from) = &reply.from {
             metadata.insert("reply_to_author".into(), build_display_name(from).into());
+            metadata.insert(
+                "reply_to_user_id".into(),
+                serde_json::Value::Number(from.id.0.into()),
+            );
+            metadata.insert(
+                "reply_to_is_bot".into(),
+                serde_json::Value::Bool(from.is_bot),
+            );
+            if let Some(username) = &from.username {
+                metadata.insert("reply_to_username".into(), username.clone().into());
+            }
         }
     }
 

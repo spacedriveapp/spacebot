@@ -1,58 +1,64 @@
 # Cortex Implementation Plan
 
-The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Today, only the bulletin works. Everything else is dead code or stubs.
+The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Phase 1 plumbing and Phase 2 health supervision are now live; maintenance and consolidation phases remain.
 
 This doc covers the path from "bulletin generator" to "full system supervisor."
 
 ## What Exists Today
 
 **Running:**
-- `spawn_bulletin_loop()` — generates the memory bulletin on startup, refreshes hourly via LLM synthesis of pre-gathered memory data. Fully functional.
+- `spawn_cortex_loop()` — instantiates `Cortex`, subscribes to both control and memory event buses, runs a `tokio::select!` loop for event observation and periodic ticks, and refreshes bulletin/profile on interval.
+- `spawn_bulletin_loop()` — compatibility alias to `spawn_cortex_loop()`.
+- `spawn_warmup_loop()` — asynchronous warmup that keeps bulletin/embedding readiness fresh.
 
-**Defined but never instantiated:**
-- `Cortex` struct — has `observe()` (converts 3 of 12 event types into signals with hardcoded dummy values) and `run_consolidation()` (logs and returns `Ok(())`).
-- `Signal` enum — 6 variants, none ever constructed at runtime.
+**Defined and instantiated:**
+- `Cortex` struct — observes all `ProcessEvent` variants, builds a rolling signal buffer, and runs on configurable tick cadence.
+- `Signal` enum — aligned to current `ProcessEvent` surface (worker/branch/tool/memory/compaction/task/link events).
 - `CortexHook` — all methods return `Continue` with trace logging.
 
 **Implemented but never called:**
 - `memory/maintenance.rs` — `apply_decay()` and `prune_memories()` work. `merge_similar_memories()` is a stub returning `Ok(0)`.
 
-**Wired through config but never read:**
-- `CortexConfig` fields: `tick_interval_secs` (30), `worker_timeout_secs` (300), `branch_timeout_secs` (60), `circuit_breaker_threshold` (3). All resolve through `env > DB > default` and support hot-reload.
+**Wired through config:**
+- `tick_interval_secs` and `bulletin_interval_secs` are read by the running cortex loop and hot-reload during runtime.
+- Phase 2 knobs are active and hot-reloaded: `worker_timeout_secs`, `branch_timeout_secs`, `detached_worker_timeout_retry_limit`, `supervisor_kill_budget_per_tick`, and `circuit_breaker_threshold`.
 
 **Referenced in prompts but don't exist:**
 - `memory_consolidate` tool
 - `system_monitor` tool
 
-**Event bus:**
-- 12 `ProcessEvent` variants on a `broadcast::Sender<ProcessEvent>` per agent.
-- `MemorySaved` and `CompactionTriggered` variants are defined but never emitted by any code.
+**Event buses:**
+- Two per-agent `broadcast::Sender<ProcessEvent>` streams:
+  - `event_tx` for control/lifecycle events (channel, branch, worker, compactor, task/link events)
+  - `memory_event_tx` for `MemorySaved` telemetry emitted by `memory_save`
+- `CompactionTriggered` is emitted by the compactor on `event_tx` when thresholds are reached.
 
-## Phase 1: The Tick Loop
+## Phase 1: The Tick Loop (Implemented)
 
 Get the cortex running as a persistent process that observes the event bus and ticks on an interval. Purely programmatic — no LLM.
 
-### Wire missing event emission
+### Wire missing event emission (done)
 
 - Emit `MemorySaved` from `memory_save` tool after successful save
 - Emit `CompactionTriggered` from the compactor when thresholds are hit
 
-### Instantiate the cortex
+### Instantiate the cortex (done)
 
-- Call `Cortex::new()` in `main.rs` alongside `spawn_bulletin_loop()`
-- Subscribe to the event bus via `deps.event_tx.subscribe()`
+- Call `Cortex::new()` from `spawn_cortex_loop()` during agent startup
+- Subscribe to both buses via `deps.event_tx.subscribe()` and `deps.memory_event_tx.subscribe()`
 - Run a `tokio::select!` loop:
-  - Receive events → feed through `observe()`
+  - Receive control events → feed through `observe()`
+  - Receive memory events (`MemorySaved`) → feed through `observe()`
   - Tick on `cortex_config.tick_interval_secs`
 - Move bulletin generation into the cortex's tick loop (currently a standalone free function)
 
-### Fix `observe()` to extract real values
+### Fix `observe()` to extract real values (done)
 
 - Map all 12 `ProcessEvent` variants, not just 3
 - Pull real `memory_type`, `importance`, content summaries from events
 - Enrich `MemorySaved` event variant with `memory_type` and `importance` fields so the cortex gets useful data without querying the store
 
-### Rework `Signal` enum
+### Rework `Signal` enum (done)
 
 - Align variants with what `ProcessEvent` actually provides
 - Add `WorkerStarted`, `BranchStarted`, `WorkerStatus`
@@ -60,42 +66,63 @@ Get the cortex running as a persistent process that observes the event bus and t
 
 **End state:** The cortex is running, consuming all events, building a signal buffer, and ticking. It sees everything but doesn't act on anything yet.
 
-## Phase 2: System Health
+## Phase 2: System Health (Implemented)
 
-The supervisor role. Still no LLM — state tracking and threshold checks.
+The supervisor role is now active and still fully programmatic (no LLM loop for health decisions).
 
-### Track active processes
+### Control plane
 
-Maintain state maps in the cortex:
+- `ProcessControlRegistry` provides cancellation routing for:
+  - live channel workers/branches through weak `ChannelControlHandle`s
+  - detached ready-task workers through registered `DetachedWorkerControl` entries
+- Channel cancel convergence now uses reason-aware methods that emit terminal synthetic events:
+  - worker cancel emits one `WorkerComplete` payload (`result`, `notify`, `success`)
+  - branch cancel removes branch status, logs terminal run, emits one synthetic `BranchResult`
 
+### Detached worker single-winner lifecycle
+
+Detached ready-task workers use a lifecycle state machine:
+
+```text
+0 active -> 1 completing -> 3 terminal
+0 active -> 2 killing    -> 3 terminal
 ```
-HashMap<WorkerId, WorkerTracker>  — start time, last status time, channel_id, error count
-HashMap<BranchId, BranchTracker>  — start time, channel_id
-```
 
-Populated from `WorkerStarted`, `WorkerStatus`, `WorkerComplete`, `BranchStarted`, `BranchResult` events. Cleaned up on completion events.
+- Completion path must win `CAS(0 -> 1)` before terminal side-effects.
+- Supervisor kill path must win `CAS(0 -> 2)` (or observe prior `2`) before timeout side-effects.
+- Losing path performs no terminal writes/events.
 
-### Worker supervision (each tick)
+### Timeout retry and quarantine policy
 
-- Detect workers with no status update in `worker_timeout_secs`
-- Kill hanging workers via cancellation token (needs a direct cancellation path — the current `CancelTool` works through `ChannelState`, which the cortex doesn't have)
-- Clean up completed workers that haven't been acknowledged
-- Log worker lifecycle stats
+On detached timeout kill, a single task update writes both status and metadata:
 
-### Branch supervision (each tick)
+- `supervisor_timeout_count` increments each timeout.
+- `supervisor_timeout_exhausted` flips to `true` once the retry limit is exceeded.
+- If count is `<= detached_worker_timeout_retry_limit`: task returns to `ready` and clears `worker_id`.
+- If count is `> detached_worker_timeout_retry_limit`: task moves to `backlog` and clears `worker_id`.
 
-- Detect branches running longer than `branch_timeout_secs`
-- Kill stale branches via cancellation token
-- Track branch latency (rolling average) for system health visibility
+### Lag-aware health tick
 
-### Circuit breaker
+Per tick, cortex maintains runtime maps for workers, branches, branch latency, and breaker state.
 
-- Track consecutive failures by component key (tool name, provider name, operation type)
-- After `circuit_breaker_threshold` consecutive failures, flag the component and log a warning
-- Reset counter on success
-- How flags affect behavior is an open question (see below)
+- If control receiver lag occurred since the prior tick, kill enforcement is skipped for that tick only.
+- `health_check` logs include `kill_skipped_due_to_lag=true` when skipped.
+- Lag flag is cleared at tick end so enforcement resumes next interval.
 
-**End state:** The cortex actively monitors process health and cleans up stuck/stale processes.
+### Kill budget and ordering
+
+- Overdue workers/branches are selected in deterministic oldest-first order.
+- Cancellation attempts are capped by `supervisor_kill_budget_per_tick` each tick.
+- Remaining overdue items roll to subsequent ticks.
+
+### Observe-only circuit breaker
+
+- Worker failures increment `worker_type:<type>` counters.
+- Tool failures increment only on structured JSON results with boolean `success=false` or `ok=false`.
+- No text heuristics are used in Phase 2.
+- Threshold crossing emits `circuit_breaker_tripped` with `action_taken="observe_only"`.
+- Success resets the counter/tripped flag for that key.
+- Breaker state is in-memory only in Phase 2 and resets on process restart.
 
 ## Phase 3: Memory Maintenance
 

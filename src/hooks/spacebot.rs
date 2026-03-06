@@ -36,13 +36,18 @@ pub struct SpacebotHook {
     event_tx: broadcast::Sender<ProcessEvent>,
     tool_nudge_policy: ToolNudgePolicy,
     completion_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
-    saw_tool_call: std::sync::Arc<std::sync::atomic::AtomicBool>,
     nudge_request_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Set to `true` when the worker calls `set_status` with `kind: "outcome"`.
+    /// Once signaled, the nudge system allows text-only responses to pass
+    /// through as legitimate completions.
+    outcome_signaled: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl SpacebotHook {
     /// Prompt used to nudge tool-first behavior.
-    pub const TOOL_NUDGE_PROMPT: &str = "Please proceed and use the available tools.";
+    pub const TOOL_NUDGE_PROMPT: &str = "You have not completed the task yet. Continue working using the available tools. \
+         When you have reached a final result, call set_status with kind \"outcome\" \
+         before finishing.";
     /// PromptCancelled reason used internally for tool nudge retries.
     pub const TOOL_NUDGE_REASON: &str = "spacebot_tool_nudge_retry";
     /// Maximum nudge retries per prompt request.
@@ -64,8 +69,8 @@ impl SpacebotHook {
             event_tx,
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
             completion_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            saw_tool_call: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nudge_request_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            outcome_signaled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
     }
 
@@ -80,11 +85,11 @@ impl SpacebotHook {
         self.tool_nudge_policy
     }
 
-    /// Reset per-prompt tool nudging state.
+    /// Reset per-prompt state (tool nudging and outcome tracking).
     pub fn reset_tool_nudge_state(&self) {
         self.completion_calls
             .store(0, std::sync::atomic::Ordering::Relaxed);
-        self.saw_tool_call
+        self.outcome_signaled
             .store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
@@ -141,7 +146,7 @@ impl SpacebotHook {
                         process_id = %self.process_id,
                         process_type = %self.process_type,
                         attempt = nudge_attempts,
-                        "response lacked tool calls early in the loop, nudging tool usage"
+                        "text-only response without outcome signal, nudging tool usage"
                     );
                     current_prompt = std::borrow::Cow::Borrowed(Self::TOOL_NUDGE_PROMPT);
                     using_tool_nudge_prompt = true;
@@ -242,6 +247,18 @@ impl SpacebotHook {
         self.event_tx.send(event).ok();
     }
 
+    /// Send a worker idle event. Only valid for worker processes.
+    pub fn send_worker_idle(&self) {
+        if let ProcessId::Worker(worker_id) = &self.process_id {
+            let event = ProcessEvent::WorkerIdle {
+                agent_id: self.agent_id.clone(),
+                worker_id: *worker_id,
+                channel_id: self.channel_id.clone(),
+            };
+            self.event_tx.send(event).ok();
+        }
+    }
+
     /// Scan content for potential secret leaks, including encoded forms.
     ///
     /// Delegates to the shared implementation in `secrets::scrub`.
@@ -250,18 +267,54 @@ impl SpacebotHook {
     }
 
     /// Apply shared safety checks for tool output before any downstream handling.
+    ///
+    /// For channels, a detected secret terminates the agent immediately to prevent
+    /// exfiltration via the `reply` tool. For workers and branches, secrets are
+    /// logged but execution continues — these processes cannot communicate with
+    /// users directly, and their egress paths (worker results, branch conclusions,
+    /// status updates) apply scrubbing before content reaches the channel.
     pub(crate) fn guard_tool_result(&self, tool_name: &str, result: &str) -> HookAction {
         if let Some(leak) = self.scan_for_leaks(result) {
-            tracing::error!(
-                process_id = %self.process_id,
-                tool_name = %tool_name,
-                leak_prefix = %&leak[..leak.len().min(8)],
-                "secret leak detected in tool output, terminating agent"
-            );
-            return HookAction::Terminate {
-                reason: "Tool output contained a secret. Agent terminated to prevent exfiltration."
-                    .into(),
-            };
+            match self.process_type {
+                ProcessType::Worker | ProcessType::Branch => {
+                    // Workers and branches cannot communicate with users directly.
+                    // Their egress paths (worker results, branch conclusions,
+                    // status updates) scrub secrets before content reaches the
+                    // channel. Log and continue rather than killing the process.
+                    //
+                    // Avoid logging any fragment of the matched secret. Only log
+                    // the encoding kind (plaintext/url/base64/hex) and length.
+                    let kind = if leak.starts_with("url-encoded:") {
+                        "url-encoded"
+                    } else if leak.starts_with("base64-encoded:") {
+                        "base64-encoded"
+                    } else if leak.starts_with("hex-encoded:") {
+                        "hex-encoded"
+                    } else {
+                        "plaintext"
+                    };
+                    tracing::warn!(
+                        process_id = %self.process_id,
+                        tool_name = %tool_name,
+                        leak_kind = kind,
+                        leak_len = leak.len(),
+                        "secret detected in tool output (non-channel process, continuing)"
+                    );
+                }
+                ProcessType::Channel | ProcessType::Compactor | ProcessType::Cortex => {
+                    tracing::error!(
+                        process_id = %self.process_id,
+                        tool_name = %tool_name,
+                        leak_prefix = %&leak[..leak.len().min(8)],
+                        "secret leak detected in tool output, terminating agent"
+                    );
+                    return HookAction::Terminate {
+                        reason:
+                            "Tool output contained a secret. Agent terminated to prevent exfiltration."
+                                .into(),
+                    };
+                }
+            }
         }
 
         HookAction::Continue
@@ -311,6 +364,13 @@ impl SpacebotHook {
         self.event_tx.send(event).ok();
     }
 
+    /// Decide whether a text-only response should be rejected and nudged back
+    /// into tool usage.
+    ///
+    /// Workers are not allowed to exit with a text-only response unless they
+    /// have first signaled a terminal outcome via `set_status(kind: "outcome")`.
+    /// This prevents workers from silently completing with narration instead of
+    /// actually doing the work.
     fn should_nudge_tool_usage<M>(&self, response: &CompletionResponse<M::Response>) -> bool
     where
         M: CompletionModel,
@@ -325,15 +385,10 @@ impl SpacebotHook {
             return false;
         }
 
-        let completion_calls = self
-            .completion_calls
-            .load(std::sync::atomic::Ordering::Relaxed);
-        if completion_calls == 0 || completion_calls > Self::TOOL_NUDGE_MAX_RETRIES {
-            return false;
-        }
-
+        // If the worker already signaled a terminal outcome, allow text-only
+        // responses — the worker is legitimately finishing up.
         if self
-            .saw_tool_call
+            .outcome_signaled
             .load(std::sync::atomic::Ordering::Relaxed)
         {
             return false;
@@ -347,6 +402,7 @@ impl SpacebotHook {
             return false;
         }
 
+        // Text-only response without a prior outcome signal — nudge.
         response.choice.iter().any(|content| {
             if let rig::message::AssistantContent::Text(text) = content {
                 !text.text.trim().is_empty()
@@ -405,6 +461,23 @@ where
         HookAction::Continue
     }
 
+    async fn on_text_delta(&self, text_delta: &str, aggregated_text: &str) -> HookAction {
+        if self.process_type == ProcessType::Channel
+            && let Some(channel_id) = self.channel_id.clone()
+        {
+            let event = ProcessEvent::TextDelta {
+                agent_id: self.agent_id.clone(),
+                process_id: self.process_id.clone(),
+                channel_id: Some(channel_id),
+                text_delta: text_delta.to_string(),
+                aggregated_text: aggregated_text.to_string(),
+            };
+            self.event_tx.send(event).ok();
+        }
+
+        HookAction::Continue
+    }
+
     async fn on_tool_call(
         &self,
         tool_name: &str,
@@ -412,9 +485,6 @@ where
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
-        self.saw_tool_call
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
         // Leak blocking is enforced at channel egress (`reply`). Worker and
         // branch tool calls may legitimately handle secrets internally.
         if self.process_type == ProcessType::Channel
@@ -471,9 +541,10 @@ where
             return guard_action;
         }
 
-        // Only enforce hard-stop leak blocking on channel egress (`reply`).
-        // Worker and branch tool outputs are internal and should not terminate
-        // long-running jobs.
+        // Belt-and-suspenders check specifically for `reply` tool results on
+        // channels. `guard_tool_result` already terminates channels on any tool
+        // leak, but this catches any edge case where the reply content itself
+        // has a different leak than the raw tool output.
         if self.process_type == ProcessType::Channel
             && tool_name == "reply"
             && let Some(leak) = self.scan_for_leaks(result)
@@ -491,8 +562,17 @@ where
         }
 
         // Cap the result stored in the broadcast event to avoid blowing up
-        // event subscribers with multi-MB tool results.
-        self.emit_tool_completed_event(tool_name, result);
+        // event subscribers with multi-MB tool results. For worker/branch
+        // processes, scrub leak patterns from the event payload so secrets
+        // don't reach the SSE dashboard.
+        if matches!(self.process_type, ProcessType::Worker | ProcessType::Branch) {
+            let scrubbed = crate::secrets::scrub::scrub_leaks(result);
+            let capped =
+                crate::tools::truncate_output(&scrubbed, crate::tools::MAX_TOOL_OUTPUT_BYTES);
+            self.emit_tool_completed_event_from_capped(tool_name, capped);
+        } else {
+            self.emit_tool_completed_event(tool_name, result);
+        }
 
         tracing::debug!(
             process_id = %self.process_id,
@@ -502,6 +582,20 @@ where
         );
 
         self.record_tool_result_metrics(tool_name, internal_call_id);
+
+        // Detect terminal outcome signal from successful set_status results.
+        // We check the *result* (not the args) so the flag is only set after the
+        // tool actually executed successfully. A failed set_status call won't
+        // parse as a valid output with `success: true`.
+        if self.tool_nudge_policy.is_enabled()
+            && tool_name == "set_status"
+            && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(result)
+            && parsed.get("success").and_then(|v| v.as_bool()) == Some(true)
+            && parsed.get("kind").and_then(|v| v.as_str()) == Some("outcome")
+        {
+            self.outcome_signaled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
 
         // Channel turns should end immediately after a successful reply tool call.
         // This avoids extra post-reply LLM iterations that add latency, cost, and
@@ -519,6 +613,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::{SpacebotHook, ToolNudgePolicy};
+    use crate::ProcessEvent;
     use crate::llm::SpacebotModel;
     use crate::llm::model::RawResponse;
     use crate::{ProcessId, ProcessType};
@@ -569,58 +664,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn nudges_only_on_first_two_text_only_completion_calls() {
+    async fn nudges_on_every_text_only_response_without_outcome() {
         let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
         let prompt = prompt_message();
         hook.reset_tool_nudge_state();
         hook.set_tool_nudge_request_active(true);
 
-        let first_call =
-            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
-                .await;
-        assert!(matches!(first_call, HookAction::Continue));
+        // Every text-only response should trigger a nudge when no outcome has
+        // been signaled, regardless of how many completions have occurred.
+        for i in 1..=5 {
+            let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(
+                &hook,
+                &prompt,
+                &[],
+            )
+            .await;
 
-        let first_response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
-            &hook,
-            &prompt,
-            &text_response("I can help with that."),
-        )
-        .await;
-        assert!(matches!(
-            first_response,
-            HookAction::Terminate { ref reason }
-            if reason == SpacebotHook::TOOL_NUDGE_REASON
-        ));
-
-        let second_call =
-            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
-                .await;
-        assert!(matches!(second_call, HookAction::Continue));
-
-        let second_response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
-            &hook,
-            &prompt,
-            &text_response("Still no tools."),
-        )
-        .await;
-        assert!(matches!(
-            second_response,
-            HookAction::Terminate { ref reason }
-            if reason == SpacebotHook::TOOL_NUDGE_REASON
-        ));
-
-        let third_call =
-            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
-                .await;
-        assert!(matches!(third_call, HookAction::Continue));
-
-        let third_response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
-            &hook,
-            &prompt,
-            &text_response("Third attempt should pass through."),
-        )
-        .await;
-        assert!(matches!(third_response, HookAction::Continue));
+            let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+                &hook,
+                &prompt,
+                &text_response(&format!("text-only attempt {i}")),
+            )
+            .await;
+            assert!(
+                matches!(
+                    response,
+                    HookAction::Terminate { ref reason }
+                    if reason == SpacebotHook::TOOL_NUDGE_REASON
+                ),
+                "Expected nudge on text-only response #{i}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -644,36 +718,245 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn does_not_nudge_after_any_tool_call_has_started() {
+    async fn nudges_after_tool_calls_without_outcome() {
+        // This is the exact bug case: worker calls read_skill + set_status(progress),
+        // then returns text-only. The nudge must still fire.
         let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
         let prompt = prompt_message();
         hook.reset_tool_nudge_state();
         hook.set_tool_nudge_request_active(true);
 
+        // Simulate read_skill tool call
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "read_skill",
+            None,
+            "internal_1",
+            "{\"name\":\"proton-email\"}",
+        )
+        .await;
+
+        // Simulate set_status(progress) tool call
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "set_status",
+            None,
+            "internal_2",
+            "{\"status\":\"Researching...\"}",
+        )
+        .await;
+
+        // Now the model returns text-only — must still nudge
         let _ =
             <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
                 .await;
-
-        let tool_call_action = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
-            &hook,
-            "reply",
-            None,
-            "internal",
-            "{\"content\":\"hello\"}",
-        )
-        .await;
-        assert!(matches!(
-            tool_call_action,
-            rig::agent::ToolCallHookAction::Continue
-        ));
-
         let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
             &hook,
             &prompt,
-            &text_response("final answer"),
+            &text_response("Let me create the email now..."),
         )
         .await;
-        assert!(matches!(response, HookAction::Continue));
+        assert!(
+            matches!(
+                response,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::TOOL_NUDGE_REASON
+            ),
+            "Expected nudge after tool calls without outcome signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn outcome_signal_allows_text_only_completion() {
+        let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
+        let prompt = prompt_message();
+        hook.reset_tool_nudge_state();
+        hook.set_tool_nudge_request_active(true);
+
+        // Simulate some work
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "shell",
+            None,
+            "internal_1",
+            "{\"command\":\"echo hello\"}",
+        )
+        .await;
+
+        // Signal outcome via set_status tool call + successful result
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "set_status",
+            None,
+            "internal_2",
+            "{\"status\":\"Email sent successfully\",\"kind\":\"outcome\"}",
+        )
+        .await;
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "set_status",
+            None,
+            "internal_2",
+            "{\"status\":\"Email sent successfully\",\"kind\":\"outcome\"}",
+            "{\"success\":true,\"worker_id\":1,\"status\":\"Email sent successfully\",\"kind\":\"outcome\"}",
+        )
+        .await;
+
+        // Now text-only response should be allowed
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("Email sent to jamie@spacedrive.com"),
+        )
+        .await;
+        assert!(
+            matches!(response, HookAction::Continue),
+            "Expected text-only to pass through after outcome signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn progress_status_does_not_signal_outcome() {
+        let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
+        let prompt = prompt_message();
+        hook.reset_tool_nudge_state();
+        hook.set_tool_nudge_request_active(true);
+
+        // set_status with kind "progress" should NOT signal outcome, even after
+        // successful execution.
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Working on it...\",\"kind\":\"progress\"}",
+        )
+        .await;
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Working on it...\",\"kind\":\"progress\"}",
+            "{\"success\":true,\"worker_id\":1,\"status\":\"Working on it...\",\"kind\":\"progress\"}",
+        )
+        .await;
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("I'll help with that"),
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::TOOL_NUDGE_REASON
+            ),
+            "Expected nudge — progress status is not an outcome signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_status_kind_does_not_signal_outcome() {
+        let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
+        let prompt = prompt_message();
+        hook.reset_tool_nudge_state();
+        hook.set_tool_nudge_request_active(true);
+
+        // set_status without kind field — defaults to progress. Even after
+        // successful execution, this should NOT signal outcome.
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Working on it...\"}",
+        )
+        .await;
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Working on it...\"}",
+            "{\"success\":true,\"worker_id\":1,\"status\":\"Working on it...\",\"kind\":\"progress\"}",
+        )
+        .await;
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("done"),
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::TOOL_NUDGE_REASON
+            ),
+            "Expected nudge — status without kind is not an outcome signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn failed_set_status_does_not_signal_outcome() {
+        let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
+        let prompt = prompt_message();
+        hook.reset_tool_nudge_state();
+        hook.set_tool_nudge_request_active(true);
+
+        // Simulate a set_status call with outcome kind that fails. Rig passes
+        // the error string as the result, which won't parse as valid JSON with
+        // success: true.
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Task complete\",\"kind\":\"outcome\"}",
+        )
+        .await;
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "set_status",
+            None,
+            "internal_1",
+            "{\"status\":\"Task complete\",\"kind\":\"outcome\"}",
+            "Failed to set status: worker not found",
+        )
+        .await;
+
+        // Text-only response should still be nudged because the outcome tool
+        // call failed.
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let response = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("All done!"),
+        )
+        .await;
+        assert!(
+            matches!(
+                response,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::TOOL_NUDGE_REASON
+            ),
+            "Expected nudge — failed set_status should not signal outcome"
+        );
     }
 
     #[tokio::test]
@@ -824,5 +1107,31 @@ mod tests {
 
         assert_eq!(history.len(), base_len + 1);
         assert!(matches!(history[base_len], Message::Assistant { .. }));
+    }
+
+    #[tokio::test]
+    async fn channel_text_delta_emits_process_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Channel(std::sync::Arc::<str>::from("channel")),
+            ProcessType::Channel,
+            Some(std::sync::Arc::<str>::from("channel")),
+            event_tx,
+        );
+
+        let action =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_text_delta(&hook, "hi", "hi").await;
+        assert!(matches!(action, HookAction::Continue));
+
+        let event = event_rx.recv().await.expect("text delta event");
+        assert!(matches!(
+            event,
+            ProcessEvent::TextDelta {
+                ref text_delta,
+                ref aggregated_text,
+                ..
+            } if text_delta == "hi" && aggregated_text == "hi"
+        ));
     }
 }

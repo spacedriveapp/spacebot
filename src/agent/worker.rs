@@ -62,6 +62,8 @@ pub struct Worker {
     /// Status updates.
     pub status_tx: watch::Sender<String>,
     pub status_rx: watch::Receiver<String>,
+    /// Prior conversation history for resumed workers (set by `resume_interactive`).
+    pub prior_history: Option<Vec<rig::message::Message>>,
 }
 
 impl Worker {
@@ -103,6 +105,7 @@ impl Worker {
             logs_dir,
             status_tx,
             status_rx,
+            prior_history: None,
         }
     }
 
@@ -156,6 +159,54 @@ impl Worker {
             Some(input_rx),
         );
 
+        (worker, input_tx)
+    }
+
+    /// Resume an interactive worker that was idle at shutdown.
+    ///
+    /// Instead of running the initial task, skips directly to the follow-up
+    /// loop with the prior conversation history restored from the transcript
+    /// blob. The worker keeps its original ID so the DB row stays linked.
+    #[allow(clippy::too_many_arguments)]
+    pub fn resume_interactive(
+        existing_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        task: impl Into<String>,
+        system_prompt: impl Into<String>,
+        deps: AgentDeps,
+        browser_config: BrowserConfig,
+        screenshot_dir: PathBuf,
+        brave_search_key: Option<String>,
+        logs_dir: PathBuf,
+        prior_history: Vec<rig::message::Message>,
+    ) -> (Self, mpsc::Sender<String>) {
+        let (input_tx, input_rx) = mpsc::channel(32);
+        let mut worker = Self::build(
+            channel_id,
+            task,
+            system_prompt,
+            deps,
+            browser_config,
+            screenshot_dir,
+            brave_search_key,
+            logs_dir,
+            Some(input_rx),
+        );
+        // Reuse the original worker ID so DB row stays linked.
+        worker.id = existing_id;
+        // Rebuild the hook so it publishes events under the correct worker ID
+        // (Self::build creates it with a fresh random ID).
+        let process_id = ProcessId::Worker(existing_id);
+        worker.hook = SpacebotHook::new(
+            worker.deps.agent_id.clone(),
+            process_id,
+            ProcessType::Worker,
+            worker.channel_id.clone(),
+            worker.deps.event_tx.clone(),
+        );
+        worker.state = WorkerState::WaitingForInput;
+        // Stash the prior history so `run_follow_up_loop()` can pick it up.
+        worker.prior_history = Some(prior_history);
         (worker, input_tx)
     }
 
@@ -229,97 +280,117 @@ impl Worker {
             .tool_server_handle(worker_tool_server)
             .build();
 
-        // Fresh history for the worker (no channel context)
-        let mut history = Vec::new();
+        // If this is a resumed worker, load the prior history into `history`
+        // (not `compacted_history`) so the LLM sees it as conversation context
+        // on the next follow-up call.
+        let resuming = self.prior_history.is_some();
+        let mut history = self.prior_history.take().unwrap_or_default();
         let mut compacted_history = Vec::new();
 
+        if resuming {
+            tracing::info!(
+                worker_id = %self.id,
+                prior_messages = history.len(),
+                "resuming interactive worker with prior history"
+            );
+            self.hook.send_status("resumed — waiting for input");
+            self.hook.send_worker_idle();
+        }
+
         // Run the initial task in segments with compaction checkpoints
+        // (skipped entirely for resumed workers).
         let mut prompt = self.task.clone();
         let mut segments_run = 0;
         let mut overflow_retries = 0;
 
-        let result = loop {
-            segments_run += 1;
+        let result = if resuming {
+            // For resumed workers, synthesize a "result" from the task
+            // since the original initial result was already relayed.
+            String::new()
+        } else {
+            loop {
+                segments_run += 1;
 
-            match self
-                .hook
-                .prompt_with_tool_nudge_retry(&agent, &mut history, &prompt)
-                .await
-            {
-                Ok(response) => {
-                    break response;
-                }
-                Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
-                    overflow_retries = 0;
+                match self
+                    .hook
+                    .prompt_with_tool_nudge_retry(&agent, &mut history, &prompt)
+                    .await
+                {
+                    Ok(response) => {
+                        break response;
+                    }
+                    Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                        overflow_retries = 0;
 
-                    if segments_run >= MAX_SEGMENTS {
+                        if segments_run >= MAX_SEGMENTS {
+                            tracing::warn!(
+                                worker_id = %self.id,
+                                segments = segments_run,
+                                "worker hit max segments, returning partial result"
+                            );
+                            self.hook.send_status("done (max segments)");
+                            break crate::agent::extract_last_assistant_text(&history)
+                                .unwrap_or_else(|| {
+                                    "Worker reached maximum segments without a final response."
+                                        .to_string()
+                                });
+                        }
+
+                        self.maybe_compact_history(&mut compacted_history, &mut history)
+                            .await;
+                        prompt =
+                            "Continue where you left off. Do not repeat completed work.".into();
+                        self.hook
+                            .send_status(format!("working (segment {segments_run})"));
+
+                        tracing::debug!(
+                            worker_id = %self.id,
+                            segment = segments_run,
+                            history_len = history.len(),
+                            "continuing to next segment"
+                        );
+                    }
+                    Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
+                        self.state = WorkerState::Failed;
+                        self.hook.send_status("cancelled");
+                        self.write_failure_log(&history, &format!("cancelled: {reason}"));
+                        self.persist_transcript(&compacted_history, &history).await;
+                        tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
+                        return Err(crate::error::AgentError::Cancelled { reason }.into());
+                    }
+                    Err(error) if is_context_overflow_error(&error.to_string()) => {
+                        overflow_retries += 1;
+                        if overflow_retries > MAX_OVERFLOW_RETRIES {
+                            self.state = WorkerState::Failed;
+                            self.hook.send_status("failed");
+                            self.write_failure_log(&history, &format!("context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
+                            self.persist_transcript(&compacted_history, &history).await;
+                            tracing::error!(worker_id = %self.id, %error, "worker context overflow unrecoverable");
+                            return Err(crate::error::AgentError::Other(error.into()).into());
+                        }
+
                         tracing::warn!(
                             worker_id = %self.id,
-                            segments = segments_run,
-                            "worker hit max segments, returning partial result"
+                            attempt = overflow_retries,
+                            %error,
+                            "context overflow, compacting and retrying"
                         );
-                        self.hook.send_status("done (max segments)");
-                        break crate::agent::extract_last_assistant_text(&history).unwrap_or_else(
-                            || {
-                                "Worker reached maximum segments without a final response."
-                                    .to_string()
-                            },
-                        );
-                    }
-
-                    self.maybe_compact_history(&mut compacted_history, &mut history)
-                        .await;
-                    prompt = "Continue where you left off. Do not repeat completed work.".into();
-                    self.hook
-                        .send_status(format!("working (segment {segments_run})"));
-
-                    tracing::debug!(
-                        worker_id = %self.id,
-                        segment = segments_run,
-                        history_len = history.len(),
-                        "continuing to next segment"
-                    );
-                }
-                Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
-                    self.state = WorkerState::Failed;
-                    self.hook.send_status("cancelled");
-                    self.write_failure_log(&history, &format!("cancelled: {reason}"));
-                    self.persist_transcript(&compacted_history, &history);
-                    tracing::info!(worker_id = %self.id, %reason, "worker cancelled");
-                    return Err(crate::error::AgentError::Cancelled { reason }.into());
-                }
-                Err(error) if is_context_overflow_error(&error.to_string()) => {
-                    overflow_retries += 1;
-                    if overflow_retries > MAX_OVERFLOW_RETRIES {
-                        self.state = WorkerState::Failed;
-                        self.hook.send_status("failed");
-                        self.write_failure_log(&history, &format!("context overflow after {MAX_OVERFLOW_RETRIES} compaction attempts: {error}"));
-                        self.persist_transcript(&compacted_history, &history);
-                        tracing::error!(worker_id = %self.id, %error, "worker context overflow unrecoverable");
-                        return Err(crate::error::AgentError::Other(error.into()).into());
-                    }
-
-                    tracing::warn!(
-                        worker_id = %self.id,
-                        attempt = overflow_retries,
-                        %error,
-                        "context overflow, compacting and retrying"
-                    );
-                    self.hook.send_status("compacting (overflow recovery)");
-                    self.force_compact_history(&mut compacted_history, &mut history)
-                        .await;
-                    prompt = "Continue where you left off. Do not repeat completed work. \
+                        self.hook.send_status("compacting (overflow recovery)");
+                        self.force_compact_history(&mut compacted_history, &mut history)
+                            .await;
+                        prompt = "Continue where you left off. Do not repeat completed work. \
                               Your previous attempt exceeded the context limit, so older history \
                               has been compacted."
-                        .into();
-                }
-                Err(error) => {
-                    self.state = WorkerState::Failed;
-                    self.hook.send_status("failed");
-                    self.write_failure_log(&history, &error.to_string());
-                    self.persist_transcript(&compacted_history, &history);
-                    tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
-                    return Err(crate::error::AgentError::Other(error.into()).into());
+                            .into();
+                    }
+                    Err(error) => {
+                        self.state = WorkerState::Failed;
+                        self.hook.send_status("failed");
+                        self.write_failure_log(&history, &error.to_string());
+                        self.persist_transcript(&compacted_history, &history).await;
+                        tracing::error!(worker_id = %self.id, %error, "worker LLM call failed");
+                        return Err(crate::error::AgentError::Other(error.into()).into());
+                    }
                 }
             }
         };
@@ -327,8 +398,14 @@ impl Worker {
         // For interactive workers, enter a follow-up loop
         let mut follow_up_failure: Option<String> = None;
         if let Some(mut input_rx) = self.input_rx.take() {
-            self.state = WorkerState::WaitingForInput;
-            self.hook.send_status("waiting for input");
+            if !resuming {
+                // Fresh worker: persist transcript and signal idle for the first time.
+                // Resumed workers already did this in the preamble above.
+                self.state = WorkerState::WaitingForInput;
+                self.persist_transcript(&compacted_history, &history).await;
+                self.hook.send_status("waiting for input");
+                self.hook.send_worker_idle();
+            }
 
             while let Some(follow_up) = input_rx.recv().await {
                 self.state = WorkerState::Running;
@@ -345,12 +422,12 @@ impl Worker {
                     .clone()
                     .with_tool_nudge_policy(ToolNudgePolicy::Disabled);
 
-                let follow_up_result: std::result::Result<(), String> = loop {
+                let follow_up_result: std::result::Result<String, String> = loop {
                     match follow_up_hook
                         .prompt_once(&agent, &mut history, &follow_up_prompt)
                         .await
                     {
-                        Ok(_response) => break Ok(()),
+                        Ok(response) => break Ok(response),
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {
@@ -383,20 +460,47 @@ impl Worker {
                     }
                 };
 
-                if let Err(failure_reason) = follow_up_result {
-                    self.state = WorkerState::Failed;
-                    self.hook.send_status("failed");
-                    follow_up_failure = Some(failure_reason);
-                    break;
+                match follow_up_result {
+                    Ok(response) => {
+                        // Emit follow-up result so the channel can retrigger
+                        // and relay this to the user — same as initial result.
+                        if !response.is_empty() {
+                            let scrubbed = if let Some(store) =
+                                self.deps.runtime_config.secrets.load().as_ref().as_ref()
+                            {
+                                crate::secrets::scrub::scrub_with_store(&response, store)
+                            } else {
+                                response
+                            };
+                            let scrubbed = crate::secrets::scrub::scrub_leaks(&scrubbed);
+                            self.deps
+                                .event_tx
+                                .send(crate::ProcessEvent::WorkerInitialResult {
+                                    agent_id: self.deps.agent_id.clone(),
+                                    worker_id: self.id,
+                                    channel_id: self.channel_id.clone(),
+                                    result: scrubbed,
+                                })
+                                .ok();
+                        }
+                    }
+                    Err(failure_reason) => {
+                        self.state = WorkerState::Failed;
+                        self.hook.send_status("failed");
+                        follow_up_failure = Some(failure_reason);
+                        break;
+                    }
                 }
 
                 self.state = WorkerState::WaitingForInput;
+                self.persist_transcript(&compacted_history, &history).await;
                 self.hook.send_status("waiting for input");
+                self.hook.send_worker_idle();
             }
         }
 
         if let Some(failure_reason) = follow_up_failure {
-            self.persist_transcript(&compacted_history, &history);
+            self.persist_transcript(&compacted_history, &history).await;
             tracing::error!(worker_id = %self.id, reason = %failure_reason, "worker failed");
             return Err(crate::error::AgentError::Other(anyhow::anyhow!(failure_reason)).into());
         }
@@ -410,8 +514,8 @@ impl Worker {
             self.write_success_log(&history);
         }
 
-        // Persist transcript blob (fire-and-forget)
-        self.persist_transcript(&compacted_history, &history);
+        // Persist transcript blob
+        self.persist_transcript(&compacted_history, &history).await;
 
         tracing::info!(worker_id = %self.id, "worker completed");
         Ok(result)
@@ -501,8 +605,11 @@ impl Worker {
         );
     }
 
-    /// Persist the compressed transcript blob to worker_runs. Fire-and-forget.
-    fn persist_transcript(
+    /// Persist the compressed transcript blob to worker_runs.
+    ///
+    /// Awaited directly so that at idle boundaries "idle implies persisted"
+    /// and concurrent snapshots cannot land out of order.
+    async fn persist_transcript(
         &self,
         compacted_history: &[rig::message::Message],
         history: &[rig::message::Message],
@@ -511,7 +618,6 @@ impl Worker {
         full_history.extend(history.iter().cloned());
         let transcript_blob =
             crate::conversation::worker_transcript::serialize_transcript(&full_history);
-        let pool = self.deps.sqlite_pool.clone();
         let worker_id = self.id.to_string();
 
         // Count tool calls from the Rig history (each ToolCall in an Assistant message)
@@ -528,18 +634,16 @@ impl Worker {
             })
             .sum();
 
-        tokio::spawn(async move {
-            if let Err(error) =
-                sqlx::query("UPDATE worker_runs SET transcript = ?, tool_calls = ? WHERE id = ?")
-                    .bind(&transcript_blob)
-                    .bind(tool_calls)
-                    .bind(&worker_id)
-                    .execute(&pool)
-                    .await
-            {
-                tracing::warn!(%error, worker_id, "failed to persist worker transcript");
-            }
-        });
+        if let Err(error) =
+            sqlx::query("UPDATE worker_runs SET transcript = ?, tool_calls = ? WHERE id = ?")
+                .bind(&transcript_blob)
+                .bind(tool_calls)
+                .bind(&worker_id)
+                .execute(&self.deps.sqlite_pool)
+                .await
+        {
+            tracing::warn!(%error, worker_id, "failed to persist worker transcript");
+        }
     }
 
     /// Check if worker is in a terminal state.

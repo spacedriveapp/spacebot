@@ -40,6 +40,14 @@ export interface OutboundMessageEvent {
 	text: string;
 }
 
+export interface OutboundMessageDeltaEvent {
+	type: "outbound_message_delta";
+	agent_id: string;
+	channel_id: string;
+	text_delta: string;
+	aggregated_text: string;
+}
+
 export interface TypingStateEvent {
 	type: "typing_state";
 	agent_id: string;
@@ -54,6 +62,7 @@ export interface WorkerStartedEvent {
 	worker_id: string;
 	task: string;
 	worker_type?: string;
+	interactive?: boolean;
 }
 
 export interface WorkerStatusEvent {
@@ -62,6 +71,13 @@ export interface WorkerStatusEvent {
 	channel_id: string | null;
 	worker_id: string;
 	status: string;
+}
+
+export interface WorkerIdleEvent {
+	type: "worker_idle";
+	agent_id: string;
+	channel_id: string | null;
+	worker_id: string;
 }
 
 export interface WorkerCompletedEvent {
@@ -109,17 +125,41 @@ export interface ToolCompletedEvent {
 	result: string;
 }
 
+// -- OpenCode live transcript part types --
+
+export type OpenCodeToolState =
+	| { status: "pending" }
+	| { status: "running"; title?: string; input?: string }
+	| { status: "completed"; title?: string; input?: string; output?: string }
+	| { status: "error"; error?: string };
+
+export type OpenCodePart =
+	| { type: "text"; id: string; text: string }
+	| { type: "tool"; id: string; tool: string } & OpenCodeToolState
+	| { type: "step_start"; id: string }
+	| { type: "step_finish"; id: string; reason?: string };
+
+export interface OpenCodePartUpdatedEvent {
+	type: "opencode_part_updated";
+	agent_id: string;
+	worker_id: string;
+	part: OpenCodePart;
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
+	| OutboundMessageDeltaEvent
 	| TypingStateEvent
 	| WorkerStartedEvent
 	| WorkerStatusEvent
+	| WorkerIdleEvent
 	| WorkerCompletedEvent
 	| BranchStartedEvent
 	| BranchCompletedEvent
 	| ToolStartedEvent
-	| ToolCompletedEvent;
+	| ToolCompletedEvent
+	| OpenCodePartUpdatedEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);
@@ -172,6 +212,7 @@ export interface WorkerStatusInfo {
 	started_at: string;
 	notify_on_complete: boolean;
 	tool_calls: number;
+	interactive: boolean;
 }
 
 export interface BranchStatusInfo {
@@ -219,6 +260,8 @@ export interface WorkerRunInfo {
 	has_transcript: boolean;
 	live_status: string | null;
 	tool_calls: number;
+	opencode_port: number | null;
+	interactive: boolean;
 }
 
 export interface WorkerDetailResponse {
@@ -233,6 +276,10 @@ export interface WorkerDetailResponse {
 	completed_at: string | null;
 	transcript: TranscriptStep[] | null;
 	tool_calls: number;
+	opencode_session_id: string | null;
+	opencode_port: number | null;
+	interactive: boolean;
+	directory: string | null;
 }
 
 export interface WorkerListResponse {
@@ -564,6 +611,12 @@ export interface BrowserSection {
 	enabled: boolean;
 	headless: boolean;
 	evaluate_enabled: boolean;
+	persist_session: boolean;
+	close_policy: "close_browser" | "close_tabs" | "detach";
+}
+
+export interface ChannelSection {
+	listen_only_mode: boolean;
 }
 
 export interface SandboxSection {
@@ -584,6 +637,7 @@ export interface AgentConfigResponse {
 	coalesce: CoalesceSection;
 	memory_persistence: MemoryPersistenceSection;
 	browser: BrowserSection;
+	channel: ChannelSection;
 	discord: DiscordSection;
 	sandbox: SandboxSection;
 }
@@ -646,6 +700,12 @@ export interface BrowserUpdate {
 	enabled?: boolean;
 	headless?: boolean;
 	evaluate_enabled?: boolean;
+	persist_session?: boolean;
+	close_policy?: "close_browser" | "close_tabs" | "detach";
+}
+
+export interface ChannelUpdate {
+	listen_only_mode?: boolean;
 }
 
 export interface SandboxUpdate {
@@ -666,6 +726,7 @@ export interface AgentConfigUpdateRequest {
 	coalesce?: CoalesceUpdate;
 	memory_persistence?: MemoryPersistenceUpdate;
 	browser?: BrowserUpdate;
+	channel?: ChannelUpdate;
 	discord?: DiscordUpdate;
 	sandbox?: SandboxUpdate;
 }

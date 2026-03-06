@@ -84,9 +84,11 @@ pub(super) async fn events_sse(
                         let event_type = match &event {
                             ApiEvent::InboundMessage { .. } => "inbound_message",
                             ApiEvent::OutboundMessage { .. } => "outbound_message",
+                            ApiEvent::OutboundMessageDelta { .. } => "outbound_message_delta",
                             ApiEvent::TypingState { .. } => "typing_state",
                             ApiEvent::WorkerStarted { .. } => "worker_started",
                             ApiEvent::WorkerStatusUpdate { .. } => "worker_status",
+                            ApiEvent::WorkerIdle { .. } => "worker_idle",
                             ApiEvent::WorkerCompleted { .. } => "worker_completed",
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
@@ -96,6 +98,7 @@ pub(super) async fn events_sse(
                             ApiEvent::AgentMessageSent { .. } => "agent_message_sent",
                             ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
                             ApiEvent::TaskUpdated { .. } => "task_updated",
+                            ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)
@@ -103,16 +106,17 @@ pub(super) async fn events_sse(
                     }
                 }
                 Err(error) => {
-                    if let crate::agent::EventRecvDisposition::Continue { lagged_count } =
-                        crate::agent::classify_event_recv_error(&error)
-                    {
-                        let count = lagged_count.unwrap_or(0);
-                        tracing::debug!(count, "SSE client lagged");
-                        yield Ok(axum::response::sse::Event::default()
-                            .event("lagged")
-                            .data(format!("{{\"skipped\":{count}}}")));
-                    } else {
-                        break;
+                    match crate::classify_broadcast_recv_result::<ApiEvent>(Err(error)) {
+                        crate::BroadcastRecvResult::Lagged(count) => {
+                            tracing::debug!(count, "SSE client lagged");
+                            yield Ok(axum::response::sse::Event::default()
+                                .event("lagged")
+                                .data(format!("{{\"skipped\":{count}}}")));
+                        }
+                        crate::BroadcastRecvResult::Closed => break,
+                        crate::BroadcastRecvResult::Event(_) => unreachable!(
+                            "classifying an Err recv result should never produce Event"
+                        ),
                     }
                 }
             }

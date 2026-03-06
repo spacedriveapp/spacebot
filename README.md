@@ -424,6 +424,11 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 ```bash
 git clone https://github.com/spacedriveapp/spacebot
 cd spacebot
+
+# Optional: build the OpenCode embedded UI (requires Node 22+ and bun)
+# Without this, OpenCode workers still work — the Workers tab shows a transcript view instead.
+# ./scripts/build-opencode-embed.sh
+
 cargo build --release
 ```
 

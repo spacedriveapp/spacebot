@@ -32,6 +32,7 @@ use slack_morphism::prelude::*;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
+use tokio::time::{Duration, timeout};
 
 /// State shared with socket mode callbacks via `SlackClientEventsUserState`.
 struct SlackAdapterState {
@@ -260,6 +261,58 @@ async fn handle_message_event(
         &adapter_state.channel_name_cache,
     )
     .await;
+    let mut metadata = metadata;
+    let bot_mention = format!("<@{}>", adapter_state.bot_user_id);
+    let mentioned_bot = msg_event
+        .content
+        .as_ref()
+        .and_then(|content| content.text.as_ref())
+        .map(|text| text.contains(&bot_mention))
+        .unwrap_or(false);
+    let token = SlackApiToken::new(SlackApiTokenValue(adapter_state.bot_token.clone()));
+    let session = client.open_session(&token);
+    let replied_to_bot = if let Some(thread_ts) = msg_event.origin.thread_ts.as_ref() {
+        // For threaded replies, treat as explicit invoke only when the thread
+        // root message belongs to this bot.
+        if thread_ts.0 != ts {
+            let thread_replies_request = SlackApiConversationsRepliesRequest::new(
+                SlackChannelId(channel_id.clone()),
+                thread_ts.clone(),
+            )
+            .with_limit(1);
+            match timeout(
+                Duration::from_secs(2),
+                session.conversations_replies(&thread_replies_request),
+            )
+            .await
+            {
+                Ok(Ok(response)) => response
+                    .messages
+                    .first()
+                    .and_then(|message| message.sender.user.as_ref())
+                    .is_some_and(|user| user.0 == adapter_state.bot_user_id),
+                Ok(Err(error)) => {
+                    tracing::debug!(%error, "failed to resolve slack thread parent for reply invoke");
+                    false
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "timed out resolving slack thread parent for reply invoke"
+                    );
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    metadata.insert(
+        "slack_mentions_or_replies_to_bot".into(),
+        serde_json::Value::Bool(mentioned_bot || replied_to_bot),
+    );
 
     send_inbound(
         &adapter_state.inbound_tx,
@@ -350,6 +403,11 @@ async fn handle_app_mention_event(
         &adapter_state.channel_name_cache,
     )
     .await;
+    let mut metadata = metadata;
+    metadata.insert(
+        "slack_mentions_or_replies_to_bot".into(),
+        serde_json::Value::Bool(true),
+    );
 
     send_inbound(
         &adapter_state.inbound_tx,

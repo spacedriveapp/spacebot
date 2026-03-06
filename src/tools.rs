@@ -63,7 +63,7 @@ pub mod worker_inspect;
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
 pub use browser::{
     ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
-    TabInfo,
+    SharedBrowserHandle, TabInfo,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
@@ -98,7 +98,7 @@ pub use send_file::{SendFileArgs, SendFileError, SendFileOutput, SendFileTool};
 pub use send_message_to_another_channel::{
     SendMessageArgs, SendMessageError, SendMessageOutput, SendMessageTool,
 };
-pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool};
+pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
 pub use shell::{ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
 pub use spacebot_docs::{
@@ -388,6 +388,14 @@ pub async fn remove_channel_tools(
     Ok(())
 }
 
+fn memory_save_with_events(
+    memory_search: Arc<MemorySearch>,
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+) -> MemorySaveTool {
+    MemorySaveTool::new(memory_search).with_event_bus(agent_id, memory_event_tx)
+}
+
 /// Create a per-branch ToolServer with memory tools.
 ///
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
@@ -400,12 +408,17 @@ pub fn create_branch_tool_server(
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     runtime_config: Arc<RuntimeConfig>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save_with_events(
+            memory_search.clone(),
+            agent_id.clone(),
+            memory_event_tx.clone(),
+        ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
@@ -473,7 +486,16 @@ pub fn create_worker_tool_server(
     }
 
     if browser_config.enabled {
-        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+        let browser_tool = if let Some(shared) = runtime_config
+            .shared_browser
+            .as_ref()
+            .filter(|_| browser_config.persist_session)
+        {
+            BrowserTool::new_shared(shared.clone(), browser_config, screenshot_dir)
+        } else {
+            BrowserTool::new(browser_config, screenshot_dir)
+        };
+        server = server.tool(browser_tool);
     }
 
     if let Some(key) = brave_search_key {
@@ -491,9 +513,17 @@ pub fn create_worker_tool_server(
 ///
 /// The cortex only needs memory_save for consolidation. Additional tools can be
 /// added later as cortex capabilities expand.
-pub fn create_cortex_tool_server(memory_search: Arc<MemorySearch>) -> ToolServerHandle {
+pub fn create_cortex_tool_server(
+    agent_id: AgentId,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
     ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search))
+        .tool(memory_save_with_events(
+            memory_search,
+            agent_id,
+            memory_event_tx,
+        ))
         .run()
 }
 
@@ -509,6 +539,7 @@ pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
+    memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
@@ -520,12 +551,19 @@ pub fn create_cortex_chat_tool_server(
     runtime_config: Arc<RuntimeConfig>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
-        .tool(MemorySaveTool::new(memory_search.clone()))
+        .tool(memory_save_with_events(
+            memory_search.clone(),
+            agent_id.clone(),
+            memory_event_tx,
+        ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
-        .tool(ConfigInspectTool::new(agent_id.to_string(), runtime_config))
+        .tool(ConfigInspectTool::new(
+            agent_id.to_string(),
+            runtime_config.clone(),
+        ))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
             task_store.clone(),
@@ -539,7 +577,16 @@ pub fn create_cortex_chat_tool_server(
         .tool(ExecTool::new(workspace, sandbox));
 
     if browser_config.enabled {
-        server = server.tool(BrowserTool::new(browser_config, screenshot_dir));
+        let browser_tool = if let Some(shared) = runtime_config
+            .shared_browser
+            .as_ref()
+            .filter(|_| browser_config.persist_session)
+        {
+            BrowserTool::new_shared(shared.clone(), browser_config, screenshot_dir)
+        } else {
+            BrowserTool::new(browser_config, screenshot_dir)
+        };
+        server = server.tool(browser_tool);
     }
 
     if let Some(key) = brave_search_key {

@@ -39,8 +39,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install protoc
-        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
+          sudo apt-get install -y nodejs
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build OpenCode embed
+        run: |
+          cd interface && bun install --frozen-lockfile && cd ..
+          ./scripts/build-opencode-embed.sh
 
       - name: Determine version tag
         id: version

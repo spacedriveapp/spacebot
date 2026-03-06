@@ -10,13 +10,14 @@ use super::providers::{
 };
 use super::toml_schema::*;
 use super::{
-    AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, CoalesceConfig, CompactionConfig,
-    Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig, DiscordInstanceConfig,
-    EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig, LinkDef, LlmConfig,
-    McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig, MetricsConfig,
-    OpenCodeConfig, ProviderConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig,
-    TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig,
-    WarmupConfig, WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
+    AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
+    CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
+    DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
+    LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
+    MetricsConfig, OpenCodeConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
+    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
+    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
+    validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -106,6 +107,67 @@ pub(super) fn warn_unknown_config_keys(content: &str) {
                  it will be silently ignored by the parser. Check for typos \
                  or consult the configuration reference."
             );
+        }
+    }
+}
+
+fn parse_close_policy(value: Option<&str>) -> Option<ClosePolicy> {
+    match value? {
+        "close_browser" => Some(ClosePolicy::CloseBrowser),
+        "close_tabs" => Some(ClosePolicy::CloseTabs),
+        "detach" => Some(ClosePolicy::Detach),
+        other => {
+            tracing::warn!(
+                value = other,
+                "unknown close_policy value, expected one of: close_browser, close_tabs, detach"
+            );
+            None
+        }
+    }
+}
+
+impl CortexConfig {
+    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> CortexConfig {
+        CortexConfig {
+            tick_interval_secs: overrides
+                .tick_interval_secs
+                .unwrap_or(defaults.tick_interval_secs),
+            worker_timeout_secs: overrides
+                .worker_timeout_secs
+                .unwrap_or(defaults.worker_timeout_secs),
+            branch_timeout_secs: overrides
+                .branch_timeout_secs
+                .unwrap_or(defaults.branch_timeout_secs),
+            detached_worker_timeout_retry_limit: overrides
+                .detached_worker_timeout_retry_limit
+                .unwrap_or(defaults.detached_worker_timeout_retry_limit),
+            supervisor_kill_budget_per_tick: overrides
+                .supervisor_kill_budget_per_tick
+                .unwrap_or(defaults.supervisor_kill_budget_per_tick),
+            circuit_breaker_threshold: overrides
+                .circuit_breaker_threshold
+                .unwrap_or(defaults.circuit_breaker_threshold),
+            bulletin_interval_secs: overrides
+                .bulletin_interval_secs
+                .unwrap_or(defaults.bulletin_interval_secs),
+            bulletin_max_words: overrides
+                .bulletin_max_words
+                .unwrap_or(defaults.bulletin_max_words),
+            bulletin_max_turns: overrides
+                .bulletin_max_turns
+                .unwrap_or(defaults.bulletin_max_turns),
+            association_interval_secs: overrides
+                .association_interval_secs
+                .unwrap_or(defaults.association_interval_secs),
+            association_similarity_threshold: overrides
+                .association_similarity_threshold
+                .unwrap_or(defaults.association_similarity_threshold),
+            association_updates_threshold: overrides
+                .association_updates_threshold
+                .unwrap_or(defaults.association_updates_threshold),
+            association_max_per_pass: overrides
+                .association_max_per_pass
+                .unwrap_or(defaults.association_max_per_pass),
         }
     }
 }
@@ -730,6 +792,7 @@ impl Config {
             cortex: None,
             warmup: None,
             browser: None,
+            channel: None,
             mcp: None,
             brave_search_key: None,
             cron_timezone: None,
@@ -1326,41 +1389,7 @@ impl Config {
             cortex: toml
                 .defaults
                 .cortex
-                .map(|c| CortexConfig {
-                    tick_interval_secs: c
-                        .tick_interval_secs
-                        .unwrap_or(base_defaults.cortex.tick_interval_secs),
-                    worker_timeout_secs: c
-                        .worker_timeout_secs
-                        .unwrap_or(base_defaults.cortex.worker_timeout_secs),
-                    branch_timeout_secs: c
-                        .branch_timeout_secs
-                        .unwrap_or(base_defaults.cortex.branch_timeout_secs),
-                    circuit_breaker_threshold: c
-                        .circuit_breaker_threshold
-                        .unwrap_or(base_defaults.cortex.circuit_breaker_threshold),
-                    bulletin_interval_secs: c
-                        .bulletin_interval_secs
-                        .unwrap_or(base_defaults.cortex.bulletin_interval_secs),
-                    bulletin_max_words: c
-                        .bulletin_max_words
-                        .unwrap_or(base_defaults.cortex.bulletin_max_words),
-                    bulletin_max_turns: c
-                        .bulletin_max_turns
-                        .unwrap_or(base_defaults.cortex.bulletin_max_turns),
-                    association_interval_secs: c
-                        .association_interval_secs
-                        .unwrap_or(base_defaults.cortex.association_interval_secs),
-                    association_similarity_threshold: c
-                        .association_similarity_threshold
-                        .unwrap_or(base_defaults.cortex.association_similarity_threshold),
-                    association_updates_threshold: c
-                        .association_updates_threshold
-                        .unwrap_or(base_defaults.cortex.association_updates_threshold),
-                    association_max_per_pass: c
-                        .association_max_per_pass
-                        .unwrap_or(base_defaults.cortex.association_max_per_pass),
-                })
+                .map(|c| CortexConfig::resolve(c, base_defaults.cortex))
                 .unwrap_or(base_defaults.cortex),
             warmup: toml
                 .defaults
@@ -1393,6 +1422,9 @@ impl Config {
                                 .screenshot_dir
                                 .map(PathBuf::from)
                                 .or_else(|| base.screenshot_dir.clone()),
+                            persist_session: b.persist_session.unwrap_or(base.persist_session),
+                            close_policy: parse_close_policy(b.close_policy.as_deref())
+                                .unwrap_or(base.close_policy),
                             chrome_cache_dir: chrome_cache_dir.clone(),
                         }
                     })
@@ -1401,6 +1433,15 @@ impl Config {
                         ..base_defaults.browser.clone()
                     })
             },
+            channel: toml
+                .defaults
+                .channel
+                .map(|channel_config| ChannelConfig {
+                    listen_only_mode: channel_config
+                        .listen_only_mode
+                        .unwrap_or(base_defaults.channel.listen_only_mode),
+                })
+                .unwrap_or(base_defaults.channel),
             mcp: default_mcp,
             brave_search_key: toml
                 .defaults
@@ -1532,41 +1573,7 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
-                    cortex: a.cortex.map(|c| CortexConfig {
-                        tick_interval_secs: c
-                            .tick_interval_secs
-                            .unwrap_or(defaults.cortex.tick_interval_secs),
-                        worker_timeout_secs: c
-                            .worker_timeout_secs
-                            .unwrap_or(defaults.cortex.worker_timeout_secs),
-                        branch_timeout_secs: c
-                            .branch_timeout_secs
-                            .unwrap_or(defaults.cortex.branch_timeout_secs),
-                        circuit_breaker_threshold: c
-                            .circuit_breaker_threshold
-                            .unwrap_or(defaults.cortex.circuit_breaker_threshold),
-                        bulletin_interval_secs: c
-                            .bulletin_interval_secs
-                            .unwrap_or(defaults.cortex.bulletin_interval_secs),
-                        bulletin_max_words: c
-                            .bulletin_max_words
-                            .unwrap_or(defaults.cortex.bulletin_max_words),
-                        bulletin_max_turns: c
-                            .bulletin_max_turns
-                            .unwrap_or(defaults.cortex.bulletin_max_turns),
-                        association_interval_secs: c
-                            .association_interval_secs
-                            .unwrap_or(defaults.cortex.association_interval_secs),
-                        association_similarity_threshold: c
-                            .association_similarity_threshold
-                            .unwrap_or(defaults.cortex.association_similarity_threshold),
-                        association_updates_threshold: c
-                            .association_updates_threshold
-                            .unwrap_or(defaults.cortex.association_updates_threshold),
-                        association_max_per_pass: c
-                            .association_max_per_pass
-                            .unwrap_or(defaults.cortex.association_max_per_pass),
-                    }),
+                    cortex: a.cortex.map(|c| CortexConfig::resolve(c, defaults.cortex)),
                     warmup: a.warmup.map(|w| WarmupConfig {
                         enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
                         eager_embedding_load: w
@@ -1590,7 +1597,17 @@ impl Config {
                             .screenshot_dir
                             .map(PathBuf::from)
                             .or_else(|| defaults.browser.screenshot_dir.clone()),
+                        persist_session: b
+                            .persist_session
+                            .unwrap_or(defaults.browser.persist_session),
+                        close_policy: parse_close_policy(b.close_policy.as_deref())
+                            .unwrap_or(defaults.browser.close_policy),
                         chrome_cache_dir: defaults.browser.chrome_cache_dir.clone(),
+                    }),
+                    channel: a.channel.and_then(|channel_config| {
+                        channel_config
+                            .listen_only_mode
+                            .map(|listen_only_mode| ChannelConfig { listen_only_mode })
                     }),
                     mcp: match a.mcp {
                         Some(mcp_servers) => Some(
@@ -1630,6 +1647,7 @@ impl Config {
                 cortex: None,
                 warmup: None,
                 browser: None,
+                channel: None,
                 mcp: None,
                 brave_search_key: None,
                 cron_timezone: None,

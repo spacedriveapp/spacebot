@@ -79,6 +79,10 @@ pub struct Metrics {
     /// Labels: agent_id, dispatch_type, reason.
     pub dispatch_while_cold_count: IntCounterVec,
 
+    /// Total broadcast events dropped because a receiver lagged.
+    /// Labels: agent_id, receiver.
+    pub event_receiver_lagged_events_total: IntCounterVec,
+
     /// Time-to-recovery for forced warmup passes kicked by dispatch paths, in ms.
     /// Labels: agent_id, dispatch_type.
     pub warmup_recovery_latency_ms: HistogramVec,
@@ -208,6 +212,15 @@ impl Metrics {
         )
         .expect("hardcoded metric descriptor");
 
+        let event_receiver_lagged_events_total = IntCounterVec::new(
+            Opts::new(
+                "spacebot_event_receiver_lagged_events_total",
+                "Total broadcast events dropped because a receiver lagged",
+            ),
+            &["agent_id", "receiver"],
+        )
+        .expect("hardcoded metric descriptor");
+
         let warmup_recovery_latency_ms = HistogramVec::new(
             HistogramOpts::new(
                 "spacebot_warmup_recovery_latency_ms",
@@ -266,6 +279,9 @@ impl Metrics {
             .register(Box::new(dispatch_while_cold_count.clone()))
             .expect("hardcoded metric");
         registry
+            .register(Box::new(event_receiver_lagged_events_total.clone()))
+            .expect("hardcoded metric");
+        registry
             .register(Box::new(warmup_recovery_latency_ms.clone()))
             .expect("hardcoded metric");
 
@@ -286,6 +302,7 @@ impl Metrics {
             process_errors_total,
             memory_updates_total,
             dispatch_while_cold_count,
+            event_receiver_lagged_events_total,
             warmup_recovery_latency_ms,
         }
     }

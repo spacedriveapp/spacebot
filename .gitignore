@@ -5,6 +5,8 @@
 # Interface
 interface/node_modules/
 interface/dist/
+interface/public/opencode-embed/
+.opencode-build-cache/
 
 .idea
 list/

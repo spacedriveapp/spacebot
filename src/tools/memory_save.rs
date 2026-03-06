@@ -3,6 +3,7 @@
 use crate::error::Result;
 use crate::memory::types::Association;
 use crate::memory::{Memory, MemorySearch, MemoryType};
+use crate::{AgentId, ProcessEvent};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -17,12 +18,35 @@ const MAX_MEMORY_CONTENT_BYTES: usize = 50_000;
 #[derive(Debug, Clone)]
 pub struct MemorySaveTool {
     memory_search: Arc<MemorySearch>,
+    event_context: Option<MemorySaveEventContext>,
+}
+
+#[derive(Debug, Clone)]
+struct MemorySaveEventContext {
+    agent_id: AgentId,
+    memory_event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
 }
 
 impl MemorySaveTool {
     /// Create a new memory save tool.
     pub fn new(memory_search: Arc<MemorySearch>) -> Self {
-        Self { memory_search }
+        Self {
+            memory_search,
+            event_context: None,
+        }
+    }
+
+    /// Enable process event emission for successful memory saves.
+    pub fn with_event_bus(
+        mut self,
+        agent_id: AgentId,
+        memory_event_tx: tokio::sync::broadcast::Sender<ProcessEvent>,
+    ) -> Self {
+        self.event_context = Some(MemorySaveEventContext {
+            agent_id,
+            memory_event_tx,
+        });
+        self
     }
 }
 
@@ -290,6 +314,26 @@ impl Tool for MemorySaveTool {
             tracing::warn!(%error, "failed to ensure FTS index after memory save");
         }
 
+        if let Some(event_context) = &self.event_context
+            && event_context.memory_event_tx.receiver_count() > 0
+        {
+            let event = ProcessEvent::MemorySaved {
+                agent_id: event_context.agent_id.clone(),
+                memory_id: memory.id.clone(),
+                channel_id: memory.channel_id.clone(),
+                memory_type: memory.memory_type,
+                importance: memory.importance,
+                content_summary: summarize_memory_content(&memory.content),
+            };
+            if let Err(error) = event_context.memory_event_tx.send(event) {
+                tracing::debug!(
+                    memory_id = %memory.id,
+                    %error,
+                    "failed to emit memory-saved event"
+                );
+            }
+        }
+
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
@@ -329,4 +373,26 @@ pub async fn save_fact(
         .await
         .map_err(|e| crate::error::AgentError::Other(anyhow::anyhow!(e)))?;
     Ok(output.memory_id)
+}
+
+fn summarize_memory_content(content: &str) -> String {
+    crate::summarize_first_non_empty_line(content, crate::EVENT_SUMMARY_MAX_CHARS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::summarize_memory_content;
+
+    #[test]
+    fn summarize_memory_content_prefers_first_non_empty_line() {
+        let content = "\n\nFirst line summary\nSecond line details";
+        assert_eq!(summarize_memory_content(content), "First line summary");
+    }
+
+    #[test]
+    fn summarize_memory_content_truncates_to_max_chars() {
+        let content = "a".repeat(200);
+        let summary = summarize_memory_content(&content);
+        assert_eq!(summary.chars().count(), crate::EVENT_SUMMARY_MAX_CHARS);
+    }
 }
