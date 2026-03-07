@@ -448,15 +448,14 @@ fn convert_history(history: &[rig::message::Message]) -> Vec<TranscriptStep> {
                                 text: truncated,
                             });
                         }
-                        rig::message::UserContent::Text(text)
-                            // Skip compaction markers and system-injected messages
-                            if !text.text.is_empty() && !text.text.starts_with("[System:") => {
-                                steps.push(TranscriptStep::Action {
-                                    content: vec![ActionContent::Text {
-                                        text: text.text.clone(),
-                                    }],
-                                });
-                            }
+        rig::message::UserContent::Text(text)
+            // Skip compaction markers and system-injected messages
+            if !text.text.is_empty() && !text.text.starts_with("[System:") =>
+        {
+            steps.push(TranscriptStep::UserText {
+                text: text.text.clone(),
+            });
+        }
                         _ => {}
                     }
                 }

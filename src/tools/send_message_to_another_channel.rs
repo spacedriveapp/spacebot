@@ -140,8 +140,11 @@ impl Tool for SendMessageTool {
 
         // Check for explicit Signal target first
         if let Some(mut explicit_target) = parse_explicit_signal_target(&args.target) {
-            // Use the current adapter (e.g., "signal:gvoice1") instead of generic "signal"
-            if let Some(ref current_adapter) = self.current_adapter {
+            // Only use current adapter if no explicit adapter was parsed
+            // This prevents retargeting "signal:+1555..." to the wrong adapter
+            if explicit_target.adapter.is_empty()
+                && let Some(ref current_adapter) = self.current_adapter
+            {
                 explicit_target.adapter = current_adapter.clone();
             }
             self.messaging_manager

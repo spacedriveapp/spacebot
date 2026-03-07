@@ -2420,13 +2420,23 @@ impl SystemSecrets for SignalConfig {
     }
 
     fn secret_fields() -> &'static [SecretField] {
-        &[SecretField {
-            toml_key: "http_url",
-            secret_name: "SIGNAL_HTTP_URL",
-            instance_pattern: Some(InstancePattern {
-                platform_prefix: "SIGNAL",
-                field_suffix: "HTTP_URL",
-            }),
-        }]
+        &[
+            SecretField {
+                toml_key: "http_url",
+                secret_name: "SIGNAL_HTTP_URL",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SIGNAL",
+                    field_suffix: "HTTP_URL",
+                }),
+            },
+            SecretField {
+                toml_key: "account",
+                secret_name: "SIGNAL_ACCOUNT",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "SIGNAL",
+                    field_suffix: "ACCOUNT",
+                }),
+            },
+        ]
     }
 }

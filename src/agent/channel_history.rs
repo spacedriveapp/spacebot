@@ -321,10 +321,12 @@ pub(crate) fn format_user_message(
         .metadata
         .get("sender_context")
         .and_then(|v| v.as_str())
-        .unwrap_or("");
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
 
     format!(
-        "{display_name}{bot_tag}{reply_context} {sender_context} [{timestamp_text}]: {text_content}"
+        "{display_name}{bot_tag}{reply_context}{sender_context} [{timestamp_text}]: {text_content}"
     )
 }
 

@@ -155,9 +155,13 @@ pub(super) struct UpdateBindingRequest {
     #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
+    group_ids: Vec<String>,
+    #[serde(default)]
     require_mention: bool,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    group_allowed_users: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -808,6 +812,16 @@ pub(super) async fn update_binding(
         binding.remove("channel_ids");
     }
 
+    if !request.group_ids.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_ids {
+            arr.push(id.as_str());
+        }
+        binding["group_ids"] = toml_edit::value(arr);
+    } else {
+        binding.remove("group_ids");
+    }
+
     if request.require_mention {
         binding["require_mention"] = toml_edit::value(true);
     } else {
@@ -822,6 +836,16 @@ pub(super) async fn update_binding(
         binding["dm_allowed_users"] = toml_edit::value(arr);
     } else {
         binding.remove("dm_allowed_users");
+    }
+
+    if !request.group_allowed_users.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_allowed_users {
+            arr.push(id.as_str());
+        }
+        binding["group_allowed_users"] = toml_edit::value(arr);
+    } else {
+        binding.remove("group_allowed_users");
     }
 
     tokio::fs::write(&config_path, doc.to_string())

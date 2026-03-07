@@ -284,14 +284,14 @@ impl SignalAdapter {
             response_body.extend_from_slice(&chunk);
         }
 
-        if response_body.is_empty() {
-            return Ok(None);
-        }
-
         if !status.is_success() {
             let truncated_length = std::cmp::min(response_body.len(), 512);
             let truncated_body = String::from_utf8_lossy(&response_body[..truncated_length]);
             anyhow::bail!("signal RPC HTTP {}: {truncated_body}", status.as_u16());
+        }
+
+        if response_body.is_empty() {
+            return Ok(None);
         }
 
         let parsed: serde_json::Value =
@@ -395,7 +395,13 @@ impl SignalAdapter {
             })?;
 
         // Write temp file with a unique name to avoid collisions.
-        let unique_name = format!("{}_{filename}", Uuid::new_v4());
+        // Sanitize filename to prevent path traversal.
+        let safe_filename = std::path::Path::new(filename)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("attachment.bin");
+        let unique_name = format!("{}_{}", Uuid::new_v4(), safe_filename);
         let tmp_path = self.tmp_dir.join(&unique_name);
         tokio::fs::write(&tmp_path, data).await.with_context(|| {
             format!(
@@ -477,11 +483,12 @@ impl SignalAdapter {
                 }
             })?;
 
-        // Resolve sender: prefer sourceNumber (E.164), fall back to source (UUID).
+        // Resolve sender: prefer sourceNumber (E.164), fall back to source (UUID), then source_uuid.
         let sender = envelope
             .source_number
             .as_deref()
             .or(envelope.source.as_deref())
+            .or(envelope.source_uuid.as_deref())
             .map(String::from)?;
 
         // Determine if this is a group message.

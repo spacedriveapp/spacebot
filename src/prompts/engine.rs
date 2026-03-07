@@ -74,6 +74,10 @@ impl PromptEngine {
             "adapters/email",
             crate::prompts::text::get("adapters/email"),
         )?;
+        env.add_template(
+            "adapters/signal",
+            crate::prompts::text::get("adapters/signal"),
+        )?;
 
         // Fragment templates
         env.add_template(

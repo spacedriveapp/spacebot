@@ -1329,6 +1329,7 @@ impl Channel {
                 &conversation_id,
                 attachment_parts,
                 false, // not a retrigger
+                self.current_adapter(),
             )
             .await?;
 
@@ -1624,6 +1625,10 @@ impl Channel {
             Vec::new()
         };
 
+        let adapter = message
+            .adapter
+            .as_deref()
+            .or_else(|| self.current_adapter());
         let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
@@ -1631,6 +1636,7 @@ impl Channel {
                 &message.conversation_id,
                 attachment_content,
                 is_retrigger,
+                adapter,
             )
             .await?;
 
@@ -2009,6 +2015,7 @@ impl Channel {
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
         is_retrigger: bool,
+        adapter: Option<&str>,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
@@ -2036,7 +2043,7 @@ impl Channel {
             self.deps.cron_tool.clone(),
             send_agent_message_tool,
             allow_direct_reply,
-            self.current_adapter().map(|s| s.to_string()),
+            adapter.map(|s| s.to_string()),
         )
         .await
         {
@@ -2375,10 +2382,10 @@ impl Channel {
                 let error_msg =
                     "Sorry — something went wrong while generating a response. Please try again."
                         .to_string();
-                let _ = self
-                    .response_tx
+                self.response_tx
                     .send(OutboundResponse::Text(error_msg))
-                    .await;
+                    .await
+                    .ok();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }

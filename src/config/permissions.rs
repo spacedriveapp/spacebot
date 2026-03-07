@@ -395,10 +395,11 @@ impl SignalPermissions {
 
             // Check for wildcard in seed
             if all_group_ids.iter().any(|id| id.trim() == "*") {
+                // Wildcard for groups only - don't affect DM permissions
                 return Self {
                     group_filter: Some(vec!["*".to_string()]),
-                    dm_allowed_users: vec!["*".to_string()],
-                    group_allowed_users: vec!["*".to_string()],
+                    dm_allowed_users: seed_dm_allowed_users.clone(),
+                    group_allowed_users: seed_group_allowed_users.clone(),
                 };
             }
 
@@ -410,11 +411,11 @@ impl SignalPermissions {
                         continue;
                     }
                     if id == "*" {
-                        // Wildcard in binding means allow all groups
+                        // Wildcard in binding means allow all groups - don't affect DM permissions
                         return Self {
                             group_filter: Some(vec!["*".to_string()]),
-                            dm_allowed_users: vec!["*".to_string()],
-                            group_allowed_users: vec!["*".to_string()],
+                            dm_allowed_users: seed_dm_allowed_users.clone(),
+                            group_allowed_users: seed_group_allowed_users.clone(),
                         };
                     }
                     // Signal group IDs are base64-encoded; validate format.
@@ -431,7 +432,11 @@ impl SignalPermissions {
                 }
             }
 
-            Some(all_group_ids)
+            if all_group_ids.is_empty() {
+                None
+            } else {
+                Some(all_group_ids)
+            }
         };
 
         // Build dm_allowed_users separately (for DMs only)
