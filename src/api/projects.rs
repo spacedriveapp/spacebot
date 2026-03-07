@@ -853,7 +853,7 @@ pub(super) async fn disk_usage(
         });
     }
 
-    entries.sort_by(|a, b| b.bytes.cmp(&a.bytes));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.bytes));
 
     Ok(Json(DiskUsageResponse {
         total_bytes,
