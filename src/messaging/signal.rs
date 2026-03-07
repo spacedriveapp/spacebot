@@ -39,10 +39,8 @@ use crate::{InboundMessage, MessageContent, OutboundResponse, StatusUpdate, meta
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use futures::StreamExt;
-use lru::LruCache;
 use serde::Deserialize;
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -212,10 +210,6 @@ pub struct SignalAdapter {
     client: reqwest::Client,
     /// Directory for temporary outbound attachment files.
     tmp_dir: PathBuf,
-    /// Maps conversation_id → reply target string for outbound routing.
-    /// The target is either a phone number/UUID (DM) or `"group:{id}"` (group).
-    /// Limited to 10,000 entries to prevent unbounded growth.
-    reply_targets: Arc<RwLock<LruCache<String, String>>>,
     /// Repeating typing indicator tasks per conversation_id.
     typing_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     /// Shutdown signal for the SSE listener loop.
@@ -243,7 +237,13 @@ impl SignalAdapter {
         let client = reqwest::Client::builder()
             .connect_timeout(HTTP_CONNECT_TIMEOUT)
             .build()
-            .expect("failed to build reqwest client for signal adapter");
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    %error,
+                    "failed to build reqwest client for signal adapter; falling back to default client"
+                );
+                reqwest::Client::new()
+            });
 
         Self {
             runtime_key: runtime_key.into(),
@@ -253,9 +253,6 @@ impl SignalAdapter {
             permissions,
             client,
             tmp_dir,
-            reply_targets: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(10_000).expect("10_000 is non-zero"),
-            ))),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
         }
@@ -394,10 +391,9 @@ impl SignalAdapter {
 
     // ── outbound helpers ────────────────────────────────────────
 
-    /// Resolve the outbound target for a conversation from metadata or the
-    /// reply target cache.
+    /// Resolve the outbound target for a conversation from message metadata.
     fn resolve_target(&self, message: &InboundMessage) -> Option<RecipientTarget> {
-        // First try metadata (set during inbound processing).
+        // Target is set during inbound processing via signal_target metadata.
         if let Some(target_string) = message
             .metadata
             .get("signal_target")
@@ -747,7 +743,6 @@ impl Messaging for SignalAdapter {
         let runtime_key = self.runtime_key.clone();
         let ignore_stories = self.ignore_stories;
         let permissions = self.permissions.clone();
-        let reply_targets = self.reply_targets.clone();
         let tmp_dir = self.tmp_dir.clone();
 
         tokio::spawn(async move {
@@ -761,21 +756,11 @@ impl Messaging for SignalAdapter {
                 permissions,
                 client: client.clone(),
                 tmp_dir,
-                reply_targets: reply_targets.clone(),
                 typing_tasks: Arc::new(RwLock::new(HashMap::new())),
                 shutdown_tx: Arc::new(RwLock::new(None)),
             };
 
-            sse_listener(
-                adapter,
-                client,
-                http_url,
-                account,
-                inbound_tx,
-                reply_targets,
-                shutdown_rx,
-            )
-            .await;
+            sse_listener(adapter, client, http_url, account, inbound_tx, shutdown_rx).await;
         });
 
         let stream = tokio_stream::wrappers::ReceiverStream::new(inbound_rx);
@@ -1062,7 +1047,6 @@ async fn sse_listener(
     http_url: String,
     account: String,
     inbound_tx: mpsc::Sender<InboundMessage>,
-    reply_targets: Arc<RwLock<LruCache<String, String>>>,
     mut shutdown_rx: mpsc::Receiver<()>,
 ) {
     let sse_url = match reqwest::Url::parse(&format!("{http_url}{SSE_ENDPOINT}")) {
@@ -1131,126 +1115,121 @@ async fn sse_listener(
 
         'stream: loop {
             tokio::select! {
-                _ = shutdown_rx.recv() => {
-                    tracing::info!("signal SSE listener shutting down");
-                    return;
-                }
-                chunk = bytes_stream.next() => {
-                    let Some(chunk) = chunk else {
-                        // Stream ended — break to reconnect.
-                        break 'stream;
-                    };
-                    let chunk = match chunk {
-                        Ok(chunk) => chunk,
-                        Err(error) => {
-                            tracing::debug!(%error, "signal SSE chunk error, reconnecting");
-                            break 'stream;
-                        }
-                    };
+                      _ = shutdown_rx.recv() => {
+                          tracing::info!("signal SSE listener shutting down");
+                          return;
+                      }
+                      chunk = bytes_stream.next() => {
+                          let Some(chunk) = chunk else {
+                              // Stream ended — break to reconnect.
+                              break 'stream;
+                          };
+                          let chunk = match chunk {
+                              Ok(chunk) => chunk,
+                              Err(error) => {
+                                  tracing::debug!(%error, "signal SSE chunk error, reconnecting");
+                                  break 'stream;
+                              }
+                          };
 
-                    // Prepend any leftover bytes from the previous chunk.
-                    let decode_buf = if utf8_carry.is_empty() {
-                        chunk.to_vec()
-                    } else {
-                        let mut combined = std::mem::take(&mut utf8_carry);
-                        combined.extend_from_slice(&chunk);
-                        combined
-                    };
+                          // Prepend any leftover bytes from the previous chunk.
+                          let decode_buf = if utf8_carry.is_empty() {
+                              chunk.to_vec()
+                          } else {
+                              let mut combined = std::mem::take(&mut utf8_carry);
+                              combined.extend_from_slice(&chunk);
+                              combined
+                          };
 
-                    // Decode as much valid UTF-8 as possible, carrying over any
-                    // incomplete trailing sequence to the next iteration.
-                    let (valid_len, carry_start) = match std::str::from_utf8(&decode_buf) {
-                        Ok(_) => (decode_buf.len(), decode_buf.len()),
-                        Err(error) => {
-                            let valid_up_to = error.valid_up_to();
-                            match error.error_len() {
-                                Some(bad_len) => {
-                                    // Genuinely invalid byte sequence — skip the bad byte(s).
-                                    tracing::debug!(
-                                        offset = valid_up_to,
-                                        "signal SSE: invalid UTF-8 byte, skipping"
-                                    );
-                                    (valid_up_to, valid_up_to + bad_len)
-                                }
-                                None => {
-                                    // Incomplete multi-byte sequence at the end — carry it over.
-                                    (valid_up_to, valid_up_to)
-                                }
-                            }
-                        }
-                    };
+                          // Decode as much valid UTF-8 as possible, carrying over any
+                          // incomplete trailing sequence to the next iteration.
+                          let (valid_len, carry_start) = match std::str::from_utf8(&decode_buf) {
+                              Ok(_) => (decode_buf.len(), decode_buf.len()),
+                              Err(error) => {
+                                  let valid_up_to = error.valid_up_to();
+                                  match error.error_len() {
+                                      Some(bad_len) => {
+                                          // Genuinely invalid byte sequence — skip the bad byte(s).
+                                          tracing::debug!(
+                                              offset = valid_up_to,
+                                              "signal SSE: invalid UTF-8 byte, skipping"
+                                          );
+                                          (valid_up_to, valid_up_to + bad_len)
+                                      }
+                                      None => {
+                                          // Incomplete multi-byte sequence at the end — carry it over.
+                                          (valid_up_to, valid_up_to)
+                                      }
+                                  }
+                              }
+                          };
 
-                    let text = match std::str::from_utf8(&decode_buf[..valid_len]) {
-                        Ok(s) => s,
-                        Err(_) => {
-                            tracing::warn!(
-                                "signal SSE: unexpected invalid UTF-8 at boundary, skipping chunk"
-                            );
-                            continue;
-                        }
-                    };
+                          let text = match std::str::from_utf8(&decode_buf[..valid_len]) {
+                              Ok(s) => s,
+                              Err(_) => {
+                                  tracing::warn!(
+                                      "signal SSE: unexpected invalid UTF-8 at boundary, skipping chunk"
+                                  );
+                                  continue;
+                              }
+                          };
 
-                    // Buffer overflow protection.
-                    if buffer.len() + text.len() > MAX_SSE_BUFFER_SIZE {
-                        tracing::warn!(
-                            buffer_len = buffer.len(),
-                            text_len = text.len(),
-                            "signal SSE buffer overflow, resetting"
-                        );
-                        buffer.clear();
-                        utf8_carry.clear();
-                        current_data.clear();
-                        continue;
-                    }
-                    buffer.push_str(text);
+                          // Buffer overflow protection.
+                          if buffer.len() + text.len() > MAX_SSE_BUFFER_SIZE {
+                              tracing::warn!(
+                                  buffer_len = buffer.len(),
+                                  text_len = text.len(),
+                                  "signal SSE buffer overflow, resetting"
+                              );
+                              buffer.clear();
+                              utf8_carry.clear();
+                              current_data.clear();
+                              continue;
+                          }
+                          buffer.push_str(text);
 
-                    // Preserve any trailing incomplete bytes for the next chunk.
-                    if carry_start < decode_buf.len() {
-                        utf8_carry.extend_from_slice(&decode_buf[carry_start..]);
-                    }
+                          // Preserve any trailing incomplete bytes for the next chunk.
+                          if carry_start < decode_buf.len() {
+                              utf8_carry.extend_from_slice(&decode_buf[carry_start..]);
+                          }
 
-                    // Parse complete lines from the buffer.
-                    while let Some(newline_pos) = buffer.find('\n') {
-                        let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
-                        buffer.drain(..=newline_pos);
+                          // Parse complete lines from the buffer.
+                          while let Some(newline_pos) = buffer.find('\n') {
+                              let line = buffer[..newline_pos].trim_end_matches('\r').to_string();
+                              buffer.drain(..=newline_pos);
 
-                        // Skip SSE comments (keepalive pings).
-                        if line.starts_with(':') {
-                            continue;
-                        }
+                              // Skip SSE comments (keepalive pings).
+                              if line.starts_with(':') {
+                                  continue;
+                              }
 
-                        if line.is_empty() {
-                            // Empty line = event boundary — dispatch accumulated data.
-                            if !current_data.is_empty() {
-                                process_sse_event(
-                                    &adapter,
-                                    &current_data,
-                                    &inbound_tx,
-                                    &reply_targets,
-                                ).await;
-                                current_data.clear();
-                            }
-                        } else if let Some(data) = line.strip_prefix("data:") {
-                            // Guard against oversized single events.
-                            if current_data.len() + data.len() > MAX_SSE_EVENT_SIZE {
-                                tracing::warn!("signal SSE event too large, dropping");
-                                current_data.clear();
-                                continue;
-                            }
-                            if !current_data.is_empty() {
-                                current_data.push('\n');
-                            }
-                            current_data.push_str(data.trim_start());
-                        }
-                        // Ignore "event:", "id:", "retry:" lines.
-                    }
-                }
+                              if line.is_empty() {
+                                  // Empty line = event boundary — dispatch accumulated data.
+            if !current_data.is_empty() {
+              process_sse_event(&adapter, &current_data, &inbound_tx).await;
+              current_data.clear();
             }
+                              } else if let Some(data) = line.strip_prefix("data:") {
+                                  // Guard against oversized single events.
+                                  if current_data.len() + data.len() > MAX_SSE_EVENT_SIZE {
+                                      tracing::warn!("signal SSE event too large, dropping");
+                                      current_data.clear();
+                                      continue;
+                                  }
+                                  if !current_data.is_empty() {
+                                      current_data.push('\n');
+                                  }
+                                  current_data.push_str(data.trim_start());
+                              }
+                              // Ignore "event:", "id:", "retry:" lines.
+                          }
+                      }
+                  }
         }
 
         // Process any trailing data before reconnect.
         if !current_data.is_empty() {
-            process_sse_event(&adapter, &current_data, &inbound_tx, &reply_targets).await;
+            process_sse_event(&adapter, &current_data, &inbound_tx).await;
         }
 
         tracing::debug!("signal SSE stream ended, reconnecting with backoff...");
@@ -1264,7 +1243,6 @@ async fn process_sse_event(
     adapter: &SignalAdapter,
     data: &str,
     inbound_tx: &mpsc::Sender<InboundMessage>,
-    reply_targets: &Arc<RwLock<LruCache<String, String>>>,
 ) {
     let sse: SseEnvelope = match serde_json::from_str(data) {
         Ok(sse) => sse,
@@ -1278,15 +1256,9 @@ async fn process_sse_event(
         return;
     };
 
-    let Some((inbound, reply_target)) = adapter.process_envelope(envelope) else {
+    let Some((inbound, _reply_target)) = adapter.process_envelope(envelope) else {
         return;
     };
-
-    // Cache the reply target so outbound routing works for this conversation.
-    reply_targets
-        .write()
-        .await
-        .put(inbound.conversation_id.clone(), reply_target);
 
     if let Err(error) = inbound_tx.send(inbound).await {
         tracing::warn!(%error, "signal: inbound channel closed (receiver dropped)");
@@ -1922,9 +1894,6 @@ mod tests {
             permissions: Arc::new(ArcSwap::from_pointee(perms)),
             client: reqwest::Client::new(),
             tmp_dir: PathBuf::from("/tmp/spacebot-test"),
-            reply_targets: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(10_000).expect("10_000 is non-zero"),
-            ))),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
         }
@@ -2067,9 +2036,6 @@ mod rpc_error_tests {
             permissions: Arc::new(ArcSwap::from_pointee(perms)),
             client: reqwest::Client::new(),
             tmp_dir: PathBuf::from("/tmp/spacebot-test"),
-            reply_targets: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(10_000).expect("10_000 is non-zero"),
-            ))),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
         }
