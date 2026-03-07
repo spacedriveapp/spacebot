@@ -111,15 +111,8 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
             {
                 signal_target
             } else {
-                // Fallback: parse from channel ID format
-                // signal:uuid:xxxx or signal:group:xxxx or signal:+1234567890
-                let parts: Vec<&str> = channel.id.splitn(3, ':').collect();
-                match parts.as_slice() {
-                    ["signal", "uuid", uuid] => format!("uuid:{}", uuid),
-                    ["signal", "group", group_id] => format!("group:{}", group_id),
-                    ["signal", phone] if phone.starts_with('+') => phone.to_string(),
-                    _ => return None,
-                }
+                // Reuse normalized channel id
+                channel.id.strip_prefix("signal:")?.to_string()
             }
         }
         "email" => {
