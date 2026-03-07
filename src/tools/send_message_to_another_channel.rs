@@ -11,6 +11,12 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+/// Check if a string is a valid UUID format.
+/// Accepts standard UUID format: 8-4-4-4-12 hexadecimal digits.
+fn is_valid_uuid(s: &str) -> bool {
+    uuid::Uuid::parse_str(s).is_ok()
+}
+
 /// Tool for sending messages to other channels or DMs.
 ///
 /// Resolves targets by name or ID via the channel store, extracts the
@@ -265,9 +271,9 @@ fn parse_explicit_signal_target(raw: &str) -> Option<crate::messaging::target::B
         return crate::messaging::target::parse_delivery_target(trimmed);
     }
 
-    // Check for bare formats that look like Signal targets
-    // UUID format: xxxx-xxxx-xxxx-xxxx (contains dashes)
-    if trimmed.contains('-') && trimmed.len() > 8 && trimmed.chars().any(|c| c.is_ascii_digit()) {
+    // Check for bare UUID format (strict validation)
+    // Must be a valid UUID: 8-4-4-4-12 hexadecimal digits (e.g., 550e8400-e29b-41d4-a716-446655440000)
+    if is_valid_uuid(trimmed) {
         return crate::messaging::target::parse_delivery_target(&format!("signal:uuid:{trimmed}"));
     }
 
