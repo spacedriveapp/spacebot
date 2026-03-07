@@ -1519,6 +1519,51 @@ impl Binding {
             }
         }
 
+        // Signal-specific matching logic
+        if self.channel == "signal" {
+            let chat_type = message
+                .metadata
+                .get("signal_chat_type")
+                .and_then(|v| v.as_str());
+
+            match chat_type {
+                Some("group") => {
+                    // For group chats: check group_id is allowed OR sender is in group_allowed_users
+                    let group_allowed = if !self.group_ids.is_empty() {
+                        message
+                            .metadata
+                            .get("signal_group_id")
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|gid| self.group_ids.contains(&gid.to_string()))
+                    } else {
+                        false
+                    };
+
+                    let sender_allowed = if !self.group_allowed_users.is_empty() {
+                        self.group_allowed_users.contains(&message.sender_id)
+                    } else {
+                        false
+                    };
+
+                    if !group_allowed && !sender_allowed {
+                        return false;
+                    }
+                }
+                Some("dm") | Some("private") => {
+                    // For DMs: sender must be in dm_allowed_users (if specified)
+                    if !self.dm_allowed_users.is_empty()
+                        && !self.dm_allowed_users.contains(&message.sender_id)
+                    {
+                        return false;
+                    }
+                }
+                _ => {
+                    // Unknown chat type, can't match
+                    return false;
+                }
+            }
+        }
+
         true
     }
 }
