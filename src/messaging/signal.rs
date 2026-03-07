@@ -89,6 +89,28 @@ const SSE_INITIAL_BACKOFF: Duration = Duration::from_secs(2);
 /// Maximum SSE reconnection delay.
 const SSE_MAX_BACKOFF: Duration = Duration::from_secs(60);
 
+// ── PII redaction helpers ───────────────────────────────────────
+
+/// Redact a Signal identifier (phone number or UUID) for logging.
+/// Keeps first 4 and last 4 characters, masks the middle with "****".
+fn redact_identifier(id: &str) -> String {
+    if id.len() <= 8 {
+        return "[redacted]".to_string();
+    }
+    let prefix = &id[..4.min(id.len())];
+    let suffix = &id[id.len().saturating_sub(4)..];
+    format!("{}****{}", prefix, suffix)
+}
+
+/// Redact a URL for logging, keeping only the scheme and domain.
+fn redact_url(url: &str) -> String {
+    url.split('/')
+        .take(3) // scheme://domain
+        .collect::<Vec<_>>()
+        .join("/")
+        .to_string()
+}
+
 // ── signal-cli SSE event JSON shapes ────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -505,17 +527,19 @@ impl SignalAdapter {
             // Group filter: None/empty = block all groups, ["*"] = allow all, specific list = check
             match &permissions.group_filter {
                 None => {
+                    let redacted_group = group_id.map(redact_identifier);
                     tracing::info!(
-                        group_id = ?group_id,
-                        "signal: group message blocked (no groups configured): "
+                        group_id = ?redacted_group,
+                        "signal: group message blocked (no groups configured)"
                     );
                     return None;
                 }
                 Some(allowed_groups) => {
                     if allowed_groups.is_empty() {
+                        let redacted_group = group_id.map(redact_identifier);
                         tracing::info!(
-                            group_id = ?group_id,
-                            "signal: group message blocked (empty group filter): "
+                            group_id = ?redacted_group,
+                            "signal: group message blocked (empty group filter)"
                         );
                         return None;
                     }
@@ -525,8 +549,8 @@ impl SignalAdapter {
                         && !allowed_groups.iter().any(|allowed| allowed == gid)
                     {
                         tracing::info!(
-                            group_id = %gid,
-                            "signal: group message rejected (not in group filter): "
+                            group_id = %redact_identifier(gid),
+                            "signal: group message rejected (not in group filter)"
                         );
                         return None;
                     }
@@ -556,8 +580,8 @@ impl SignalAdapter {
             };
             if !sender_allowed {
                 tracing::info!(
-                    sender = %sender,
-                    "signal: group message rejected (sender not in allowed users): "
+                    sender = %redact_identifier(&sender),
+                    "signal: group message rejected (sender not in allowed users)"
                 );
                 return None;
             }
@@ -583,8 +607,8 @@ impl SignalAdapter {
             };
             if !sender_allowed {
                 tracing::info!(
-                    sender = %sender,
-                    "signal: DM rejected (sender not in dm_allowed_users): "
+                    sender = %redact_identifier(&sender),
+                    "signal: DM rejected (sender not in dm_allowed_users)"
                 );
                 return None;
             }
@@ -597,7 +621,7 @@ impl SignalAdapter {
             .or(envelope.source_number.as_deref())
             .unwrap_or(&sender);
         tracing::info!(
-            sender = %sender_display,
+            sender = %redact_identifier(sender_display),
             text_len = %text.len(),
             is_group = is_group,
             "signal: message received"
@@ -694,7 +718,7 @@ impl Messaging for SignalAdapter {
 
         tracing::info!(
             adapter = %self.runtime_key,
-            account = %self.account,
+            account = %redact_identifier(&self.account),
             "signal adapter connected"
         );
 
@@ -891,7 +915,7 @@ impl Messaging for SignalAdapter {
 
     async fn health_check(&self) -> crate::Result<()> {
         let url = format!("{}{HEALTH_ENDPOINT}", self.http_url);
-        tracing::debug!(url = %url, "Signal health check: GET");
+        tracing::debug!(url = %redact_url(&url), "Signal health check: GET");
         let response = self
             .client
             .get(&url)
