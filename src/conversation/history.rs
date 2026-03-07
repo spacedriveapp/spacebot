@@ -1,5 +1,6 @@
 //! Conversation message persistence (SQLite).
 
+use crate::agent::channel_dispatch::WorkerTaskPreset;
 use crate::{BranchId, ChannelId, WorkerId};
 
 use serde::Serialize;
@@ -343,6 +344,7 @@ impl ProcessRunLogger {
         agent_id: &crate::AgentId,
         interactive: bool,
         directory: Option<&std::path::Path>,
+        task_preset: WorkerTaskPreset,
     ) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
@@ -351,11 +353,12 @@ impl ProcessRunLogger {
         let worker_type = worker_type.to_string();
         let agent_id = agent_id.to_string();
         let directory = directory.map(|d| d.to_string_lossy().to_string());
+        let task_preset = task_preset.as_db_value().to_string();
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task, worker_type, agent_id, interactive, directory) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "INSERT OR IGNORE INTO worker_runs (id, channel_id, task, worker_type, agent_id, interactive, directory, task_preset) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             )
             .bind(&id)
             .bind(&channel_id)
@@ -364,6 +367,7 @@ impl ProcessRunLogger {
             .bind(&agent_id)
             .bind(interactive)
             .bind(&directory)
+            .bind(&task_preset)
             .execute(&pool)
             .await
             {
@@ -562,7 +566,8 @@ impl ProcessRunLogger {
         let rows = sqlx::query_as::<_, IdleWorkerRow>(
             "SELECT id, task, channel_id, worker_type, transcript, \
                     COALESCE(tool_calls, 0) AS tool_calls, \
-                    opencode_session_id, opencode_port, directory \
+                    opencode_session_id, opencode_port, directory, \
+                    COALESCE(task_preset, 'default') AS task_preset \
              FROM worker_runs \
              WHERE status = 'idle' AND interactive = TRUE \
                    AND (agent_id = ? OR agent_id IS NULL)",
@@ -937,6 +942,7 @@ pub struct IdleWorkerRow {
     pub opencode_session_id: Option<String>,
     pub opencode_port: Option<i32>,
     pub directory: Option<String>,
+    pub task_preset: String,
 }
 
 /// A worker run row with full detail including the transcript blob.
@@ -962,11 +968,12 @@ pub struct WorkerDetailRow {
 #[cfg(test)]
 mod tests {
     use super::ProcessRunLogger;
+    use crate::agent::channel_dispatch::WorkerTaskPreset;
 
     async fn setup_worker_runs_table() -> sqlx::SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
-            .connect("sqlite::memory:")
+            .connect("sqlite::memory:?cache=shared")
             .await
             .expect("failed to create sqlite memory pool");
 
@@ -974,9 +981,19 @@ mod tests {
             "CREATE TABLE worker_runs (
                 id TEXT PRIMARY KEY,
                 channel_id TEXT,
+                task TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL,
                 result TEXT,
-                completed_at TIMESTAMP
+                completed_at TIMESTAMP,
+                worker_type TEXT NOT NULL DEFAULT 'builtin',
+                agent_id TEXT,
+                transcript BLOB,
+                tool_calls INTEGER NOT NULL DEFAULT 0,
+                opencode_session_id TEXT,
+                opencode_port INTEGER,
+                interactive BOOLEAN NOT NULL DEFAULT FALSE,
+                directory TEXT,
+                task_preset TEXT NOT NULL DEFAULT 'default'
             )",
         )
         .execute(&pool)
@@ -1043,5 +1060,36 @@ mod tests {
             .expect("failed to fetch worker row");
         let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
         assert_eq!(status, "running");
+    }
+
+    #[tokio::test]
+    async fn get_idle_interactive_workers_loads_task_preset_for_resume() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+        let agent_id: crate::AgentId = std::sync::Arc::from("agent-1");
+
+        sqlx::query(
+            "INSERT INTO worker_runs (id, channel_id, task, status, worker_type, agent_id, interactive, task_preset) \
+             VALUES (?, NULL, ?, 'idle', 'builtin', ?, TRUE, ?)",
+        )
+            .bind(worker_id.to_string())
+            .bind("find the launch research")
+            .bind(agent_id.as_ref())
+            .bind(WorkerTaskPreset::Retrieval.as_db_value())
+            .execute(&pool)
+            .await
+            .expect("failed to insert idle worker row");
+
+        let rows = logger
+            .get_idle_interactive_workers(agent_id.as_ref())
+            .await
+            .expect("failed to load idle workers");
+
+        let row = rows
+            .into_iter()
+            .find(|row| row.id == worker_id.to_string())
+            .expect("worker row should be returned");
+        assert_eq!(row.task_preset, "retrieval");
     }
 }

@@ -2501,6 +2501,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         &deps.agent_id,
         false,
         None,
+        crate::agent::channel_dispatch::WorkerTaskPreset::Default,
     );
 
     let task_store = deps.task_store.clone();

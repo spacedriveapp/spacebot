@@ -2,7 +2,7 @@
 
 use crate::agent::channel_attachments;
 use crate::agent::channel_attachments::download_attachments;
-use crate::agent::channel_dispatch::spawn_memory_persistence_branch;
+use crate::agent::channel_dispatch::{WorkerTaskPreset, spawn_memory_persistence_branch};
 use crate::agent::channel_history::{
     apply_history_after_turn, event_is_for_channel, extract_message_id,
     extract_reply_from_tool_syntax, format_batched_user_message, format_user_message,
@@ -28,6 +28,7 @@ use rig::completion::CompletionModel;
 use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
+use serde::Deserialize;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
@@ -50,6 +51,35 @@ struct PendingResult {
     result: String,
     /// Whether the process completed successfully.
     success: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RetrievalWorkerStatus {
+    Success,
+    Partial,
+    Unavailable,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetrievalWorkerSource {
+    source: String,
+    tool: String,
+    retrieval_mode: Option<String>,
+    locator: String,
+    title: String,
+    snippet: String,
+    why_it_matters: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RetrievalWorkerPayload {
+    status: RetrievalWorkerStatus,
+    summary: String,
+    #[serde(default)]
+    sources: Vec<RetrievalWorkerSource>,
+    #[serde(default)]
+    gaps: Vec<String>,
 }
 
 const EVENT_LAG_WARNING_INTERVAL_SECS: u64 = 30;
@@ -87,6 +117,9 @@ pub struct ChannelState {
     pub active_workers: Arc<RwLock<HashMap<WorkerId, Worker>>>,
     /// Tokio task handles for running workers, used for cancellation via abort().
     pub worker_handles: Arc<RwLock<HashMap<WorkerId, tokio::task::JoinHandle<()>>>>,
+    /// Task-shaping metadata for workers so completion results can be mediated
+    /// before they are fed back through the generic retrigger path.
+    pub worker_task_presets: Arc<RwLock<HashMap<WorkerId, WorkerTaskPreset>>>,
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
@@ -140,6 +173,7 @@ impl ChannelState {
             .remove(&worker_id)
             .is_some();
         self.worker_injections.write().await.remove(&worker_id);
+        self.worker_task_presets.write().await.remove(&worker_id);
         let removed_status = self.status_block.write().await.remove_worker(worker_id);
         let should_emit = removed || handle.is_some();
 
@@ -313,6 +347,136 @@ impl std::fmt::Debug for ChannelState {
     }
 }
 
+fn mediate_worker_result_for_retrigger(
+    result: &str,
+    task_preset: WorkerTaskPreset,
+    process_succeeded: bool,
+) -> (String, bool) {
+    match task_preset {
+        WorkerTaskPreset::Default => (result.to_string(), process_succeeded),
+        WorkerTaskPreset::Retrieval => {
+            mediate_retrieval_result_for_retrigger(result, process_succeeded)
+        }
+    }
+}
+
+fn mediate_retrieval_result_for_retrigger(result: &str, process_succeeded: bool) -> (String, bool) {
+    let trimmed = result.trim();
+
+    if !process_succeeded {
+        if trimmed.is_empty() || crate::tools::should_block_user_visible_text(trimmed) {
+            return (
+                "Retrieval worker failed before it could return safe structured evidence. Retry the lookup or inspect the worker transcript."
+                    .to_string(),
+                false,
+            );
+        }
+
+        return (
+            format!(
+                "Retrieval worker failed before it could return structured evidence.\n\nDetails:\n{}",
+                crate::tools::truncate_utf8_ellipsis(trimmed, 800)
+            ),
+            false,
+        );
+    }
+
+    let payload: RetrievalWorkerPayload = match serde_json::from_str(trimmed) {
+        Ok(payload) => payload,
+        Err(_) => {
+            return (
+                "Retrieval worker returned malformed structured output and the result could not be safely relayed. Retry the lookup or inspect the worker transcript."
+                    .to_string(),
+                false,
+            )
+        }
+    };
+
+    if payload.summary.trim().is_empty() {
+        return (
+            "Retrieval worker returned structured output without a usable summary. Retry the lookup or inspect the worker transcript."
+                .to_string(),
+            false,
+        );
+    }
+
+    if matches!(payload.status, RetrievalWorkerStatus::Success) && payload.sources.is_empty() {
+        return (
+            "Retrieval worker claimed success but returned no supporting evidence. Retry the lookup or inspect the worker transcript."
+                .to_string(),
+            false,
+        );
+    }
+
+    if !matches!(payload.status, RetrievalWorkerStatus::Success) && payload.gaps.is_empty() {
+        return (
+            "Retrieval worker returned an incomplete result without explaining the gap. Retry the lookup or inspect the worker transcript."
+                .to_string(),
+            false,
+        );
+    }
+
+    let mut lines = vec![payload.summary.trim().to_string()];
+
+    if !payload.sources.is_empty() {
+        lines.push("Supporting evidence:".to_string());
+        for source in payload.sources.iter().take(5) {
+            let title = if source.title.trim().is_empty() {
+                if source.locator.trim().is_empty() {
+                    source.source.trim()
+                } else {
+                    source.locator.trim()
+                }
+            } else {
+                source.title.trim()
+            };
+
+            let mut metadata = vec![source.source.trim().to_string()];
+            if !source.tool.trim().is_empty() {
+                metadata.push(format!("via {}", source.tool.trim()));
+            }
+            if let Some(mode) = source.retrieval_mode.as_deref()
+                && !mode.trim().is_empty()
+            {
+                metadata.push(mode.trim().to_string());
+            }
+            if !source.locator.trim().is_empty() {
+                metadata.push(source.locator.trim().to_string());
+            }
+
+            lines.push(format!("- {} ({})", title, metadata.join("; ")));
+
+            if !source.snippet.trim().is_empty() {
+                lines.push(format!(
+                    "  {}",
+                    crate::tools::truncate_utf8_ellipsis(source.snippet.trim(), 240)
+                ));
+            }
+            if !source.why_it_matters.trim().is_empty() {
+                lines.push(format!(
+                    "  Why it matters: {}",
+                    crate::tools::truncate_utf8_ellipsis(source.why_it_matters.trim(), 200)
+                ));
+            }
+        }
+    }
+
+    if !payload.gaps.is_empty() {
+        lines.push("Remaining gaps:".to_string());
+        for gap in payload.gaps.iter().take(5) {
+            if !gap.trim().is_empty() {
+                lines.push(format!(
+                    "- {}",
+                    crate::tools::truncate_utf8_ellipsis(gap.trim(), 200)
+                ));
+            }
+        }
+    }
+
+    let relayed_success = !matches!(payload.status, RetrievalWorkerStatus::Unavailable);
+    (lines.join("\n"), relayed_success)
+}
+
 /// User-facing conversation process.
 pub struct Channel {
     pub id: ChannelId,
@@ -430,6 +594,7 @@ impl Channel {
             active_branches: active_branches.clone(),
             active_workers: active_workers.clone(),
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
+            worker_task_presets: Arc::new(RwLock::new(HashMap::new())),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             worker_injections: Arc::new(RwLock::new(HashMap::new())),
             reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
@@ -2655,6 +2820,14 @@ impl Channel {
                 directory,
                 ..
             } => {
+                let task_preset = self
+                    .state
+                    .worker_task_presets
+                    .read()
+                    .await
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or(WorkerTaskPreset::Default);
                 run_logger.log_worker_started(
                     channel_id.as_ref(),
                     *worker_id,
@@ -2663,6 +2836,7 @@ impl Channel {
                     &self.deps.agent_id,
                     *interactive,
                     directory.as_deref().map(std::path::Path::new),
+                    task_preset,
                 );
             }
             ProcessEvent::WorkerStatus {
@@ -2693,22 +2867,39 @@ impl Channel {
                     return Ok(());
                 }
 
-                run_logger.log_worker_completed(*worker_id, result, *success);
-
                 self.state.active_workers.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
                 self.state.worker_injections.write().await.remove(worker_id);
+                let worker_task_preset = self
+                    .state
+                    .worker_task_presets
+                    .write()
+                    .await
+                    .remove(worker_id)
+                    .unwrap_or(WorkerTaskPreset::Default);
+                let worker_task_preset = self
+                    .state
+                    .worker_task_presets
+                    .write()
+                    .await
+                    .remove(worker_id)
+                    .unwrap_or(WorkerTaskPreset::Default);
 
                 if *notify {
+                    let (result, success) =
+                        mediate_worker_result_for_retrigger(result, worker_task_preset, *success);
+                    run_logger.log_worker_completed(*worker_id, &result, success);
                     // Accumulate result for the next retrigger instead of
                     // injecting into history as a fake user message.
                     self.pending_results.push(PendingResult {
                         process_type: "worker",
                         process_id: worker_id.to_string(),
-                        result: result.clone(),
-                        success: *success,
+                        result,
+                        success,
                     });
                     should_retrigger = true;
+                } else {
+                    run_logger.log_worker_completed(*worker_id, result, *success);
                 }
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
@@ -2724,14 +2915,24 @@ impl Channel {
             ProcessEvent::WorkerInitialResult {
                 worker_id, result, ..
             } => {
+                let worker_task_preset = self
+                    .state
+                    .worker_task_presets
+                    .read()
+                    .await
+                    .get(worker_id)
+                    .copied()
+                    .unwrap_or(WorkerTaskPreset::Default);
+                let (result, success) =
+                    mediate_worker_result_for_retrigger(result, worker_task_preset, true);
                 // Interactive worker completed a task (initial or follow-up)
                 // but stays alive for more input. Deliver the result to the
                 // channel without removing the worker from the active set.
                 self.pending_results.push(PendingResult {
                     process_type: "worker",
                     process_id: worker_id.to_string(),
-                    result: result.clone(),
-                    success: true,
+                    result,
+                    success,
                 });
                 should_retrigger = true;
                 tracing::info!(
@@ -3002,7 +3203,10 @@ impl Channel {
 
 #[cfg(test)]
 mod tests {
-    use super::{recv_channel_event, should_process_event_for_channel};
+    use super::{
+        WorkerTaskPreset, mediate_worker_result_for_retrigger, recv_channel_event,
+        should_process_event_for_channel,
+    };
     use crate::memory::MemoryType;
     use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
     use std::sync::Arc;
@@ -3145,5 +3349,72 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn retrieval_result_mediation_formats_structured_success_payload() {
+        let (relayed, success) = mediate_worker_result_for_retrigger(
+            r#"{
+                "status":"success",
+                "summary":"Found the launch video research notes.",
+                "sources":[
+                    {
+                        "source":"qmd",
+                        "tool":"qmd_search",
+                        "retrieval_mode":"keyword",
+                        "locator":"notes/launch-video.md",
+                        "title":"Launch Video Plan",
+                        "snippet":"Need to emphasize the recall workflow in the intro.",
+                        "why_it_matters":"This is the strongest direct evidence for the prior video research."
+                    }
+                ],
+                "gaps":[]
+            }"#,
+            WorkerTaskPreset::Retrieval,
+            true,
+        );
+
+        assert!(success);
+        assert!(relayed.contains("Found the launch video research notes."));
+        assert!(relayed.contains("Supporting evidence:"));
+        assert!(relayed.contains("Launch Video Plan"));
+        assert!(relayed.contains("Why it matters:"));
+        assert!(!crate::tools::should_block_user_visible_text(&relayed));
+    }
+
+    #[test]
+    fn retrieval_result_mediation_marks_unavailable_as_failed_plaintext() {
+        let (relayed, success) = mediate_worker_result_for_retrigger(
+            r#"{
+                "status":"unavailable",
+                "summary":"QMD was unavailable during the lookup.",
+                "sources":[],
+                "gaps":["The qmd MCP server did not respond."]
+            }"#,
+            WorkerTaskPreset::Retrieval,
+            true,
+        );
+
+        assert!(!success);
+        assert!(relayed.contains("QMD was unavailable during the lookup."));
+        assert!(relayed.contains("Remaining gaps:"));
+        assert!(relayed.contains("qmd MCP server did not respond"));
+        assert!(!crate::tools::should_block_user_visible_text(&relayed));
+    }
+
+    #[test]
+    fn retrieval_result_mediation_rejects_malformed_structured_output() {
+        let (relayed, success) = mediate_worker_result_for_retrigger(
+            "{\"status\":\"success\",\"summary\":\"ok\"}",
+            WorkerTaskPreset::Retrieval,
+            true,
+        );
+
+        assert!(!success);
+        assert!(
+            relayed.contains("returned malformed structured output")
+                || relayed.contains("no supporting evidence")
+        );
+        assert!(!crate::tools::should_block_user_visible_text(&relayed));
     }
 }

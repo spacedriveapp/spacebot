@@ -7,7 +7,9 @@
 
 use crate::WorkerId;
 use crate::agent::channel::ChannelState;
-use crate::agent::channel_dispatch::{spawn_opencode_worker_from_state, spawn_worker_from_state};
+use crate::agent::channel_dispatch::{
+    WorkerTaskPreset, spawn_opencode_worker_from_state, spawn_worker_from_state,
+};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -47,7 +49,12 @@ pub struct SpawnWorkerArgs {
     /// suggested skills are flagged as recommended for this task.
     #[serde(default)]
     pub suggested_skills: Vec<String>,
-    /// Worker type: "builtin" (default) runs a Rig agent loop with shell/file
+    /// Optional task preset that wraps the task with additional execution
+    /// structure. `retrieval` is for external knowledge lookups where the
+    /// worker should return evidence with provenance instead of raw tool dumps.
+    #[serde(default)]
+    pub task_preset: WorkerTaskPreset,
+    /// Worker type: "builtin" (default) runs a Rig agent loop with shell/file/exec
     /// tools. "opencode" spawns an OpenCode subprocess with full coding agent
     /// capabilities. Use "opencode" for complex coding tasks that benefit from
     /// codebase exploration and context management.
@@ -128,6 +135,12 @@ impl Tool for SpawnWorkerTool {
                 "type": "array",
                 "items": { "type": "string" },
                 "description": "Skill names from <available_skills> that are likely relevant to this task. The worker sees all skills and decides what to read, but suggested skills are flagged as recommended."
+            },
+            "task_preset": {
+                "type": "string",
+                "enum": ["default", "retrieval"],
+                "default": "default",
+                "description": "Optional task wrapper. Use \"retrieval\" when the worker should search external knowledge tools (for example QMD via MCP) and return evidence with provenance in a structured final response."
             }
         });
 
@@ -199,6 +212,8 @@ impl Tool for SpawnWorkerTool {
                 });
             }
         }
+        validate_worker_request(is_opencode, args.task_preset)?;
+        validate_worker_request(is_opencode, args.task_preset)?;
 
         // Resolve working directory from project/worktree if not explicitly set.
         let resolved_directory = resolve_directory_from_project(
@@ -230,6 +245,7 @@ impl Tool for SpawnWorkerTool {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
+                args.task_preset,
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?
@@ -555,4 +571,52 @@ async fn resolve_directory_from_project(
     }
 
     None
+}
+
+fn validate_worker_request(
+    is_opencode: bool,
+    task_preset: WorkerTaskPreset,
+) -> Result<(), SpawnWorkerError> {
+    if is_opencode && task_preset == WorkerTaskPreset::Retrieval {
+        return Err(SpawnWorkerError(
+            "task_preset=\"retrieval\" is not supported for opencode workers; use the builtin worker for retrieval tasks".into(),
+        ));
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SpawnWorkerArgs, validate_worker_request};
+    use crate::agent::channel_dispatch::WorkerTaskPreset;
+
+    #[test]
+    fn spawn_worker_args_default_to_default_preset() {
+        let args: SpawnWorkerArgs =
+            serde_json::from_str(r#"{"task":"find launch notes","interactive":false}"#).unwrap();
+
+        assert_eq!(args.task_preset, WorkerTaskPreset::Default);
+    }
+
+    #[test]
+    fn spawn_worker_args_parse_retrieval_preset() {
+        let args: SpawnWorkerArgs =
+            serde_json::from_str(r#"{"task":"find launch notes","task_preset":"retrieval"}"#)
+                .unwrap();
+
+        assert_eq!(args.task_preset, WorkerTaskPreset::Retrieval);
+    }
+
+    #[test]
+    fn opencode_rejects_retrieval_task_preset() {
+        let error = validate_worker_request(true, WorkerTaskPreset::Retrieval)
+            .expect_err("opencode retrieval preset should be rejected");
+
+        assert!(
+            error
+                .to_string()
+                .contains("task_preset=\"retrieval\" is not supported for opencode workers")
+        );
+    }
 }

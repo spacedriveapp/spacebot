@@ -83,7 +83,10 @@ pub struct McpToolError(String);
 
 #[derive(Debug, Serialize)]
 pub struct McpToolOutput {
+    pub server: String,
+    pub tool: String,
     pub result: String,
+    pub structured_content: Option<Value>,
 }
 
 impl Tool for McpToolAdapter {
@@ -110,10 +113,16 @@ impl Tool for McpToolAdapter {
             .connection
             .call_tool(&self.tool_name, args)
             .await
-            .map_err(|error| McpToolError(error.to_string()))?;
+            .map_err(|error| {
+                McpToolError(format!(
+                    "server '{}' tool '{}' failed: {}",
+                    self.server_name, self.tool_name, error
+                ))
+            })?;
 
         let output_text = Self::collect_result_text(&result);
         let output_text = truncate_output(&output_text, crate::tools::MAX_TOOL_OUTPUT_BYTES);
+        let structured_content = result.structured_content.clone();
 
         if result.is_error.unwrap_or(false) {
             let message = if output_text.is_empty() {
@@ -129,12 +138,18 @@ impl Tool for McpToolAdapter {
 
         if output_text.is_empty() {
             return Ok(McpToolOutput {
+                server: self.server_name.clone(),
+                tool: self.tool_name.clone(),
                 result: "[tool returned no content]".to_string(),
+                structured_content,
             });
         }
 
         Ok(McpToolOutput {
+            server: self.server_name.clone(),
+            tool: self.tool_name.clone(),
             result: output_text,
+            structured_content,
         })
     }
 }

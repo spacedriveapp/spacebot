@@ -227,6 +227,8 @@ Spawns a branch process — a fork of the channel's context that thinks independ
 
 Creates a worker process for a specific task. Supports both fire-and-forget (do a job, return result) and interactive (accepts follow-up messages) modes. Returns immediately with a `worker_id`.
 
+`spawn_worker` also supports a `task_preset` field for higher-level task shaping without exposing new raw tools. The first preset is `retrieval`, which tells the worker to search worker-only knowledge tools (such as configured `mcp_*` sources) and return synthesized evidence with provenance instead of a raw tool dump.
+
 ### route
 
 Sends a follow-up message to an active interactive worker. The channel uses this to continue a multi-turn task without spawning a new worker.

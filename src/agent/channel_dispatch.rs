@@ -11,6 +11,8 @@ use crate::agent::worker::Worker;
 use crate::error::{AgentError, Error as SpacebotError};
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, WorkerId};
 use futures::FutureExt as _;
+use schemars::JsonSchema;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
@@ -88,6 +90,37 @@ fn completion_flags(kind: WorkerCompletionKind) -> (bool, bool) {
     (notify, success)
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkerTaskPreset {
+    #[default]
+    Default,
+    Retrieval,
+}
+
+impl WorkerTaskPreset {
+    pub(crate) const fn as_db_value(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Retrieval => "retrieval",
+        }
+    }
+
+    pub(crate) fn from_db_value(value: &str) -> Self {
+        match value {
+            "default" => Self::Default,
+            "retrieval" => Self::Retrieval,
+            other => {
+                tracing::warn!(
+                    task_preset = other,
+                    "unknown worker task preset persisted; defaulting to default"
+                );
+                Self::Default
+            }
+        }
+    }
+}
+
 /// Normalize worker completion into event payload fields.
 pub(crate) fn map_worker_completion_result(
     result: std::result::Result<String, WorkerCompletionError>,
@@ -95,6 +128,18 @@ pub(crate) fn map_worker_completion_result(
     let (result_text, kind) = classify_worker_completion_result(result);
     let (notify, success) = completion_flags(kind);
     (result_text, notify, success)
+}
+
+async fn remember_worker_task_preset(
+    state: &ChannelState,
+    worker_id: WorkerId,
+    task_preset: WorkerTaskPreset,
+) {
+    state
+        .worker_task_presets
+        .write()
+        .await
+        .insert(worker_id, task_preset);
 }
 
 /// Spawn a branch from a ChannelState. Used by the BranchTool.
@@ -389,13 +434,15 @@ pub async fn spawn_worker_from_state(
     task: impl Into<String>,
     interactive: bool,
     suggested_skills: &[&str],
+    task_preset: WorkerTaskPreset,
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
     let task = task.into();
     reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "worker");
+    let preset_task = apply_worker_task_preset(&task, task_preset);
 
-    let result = spawn_worker_inner(state, &task, interactive, suggested_skills).await;
+    let result = spawn_worker_inner(state, &task, interactive, suggested_skills, task_preset).await;
 
     // Release the reservation regardless of success or failure.
     // On success the task is now in the status block; on failure it needs cleanup.
@@ -411,12 +458,14 @@ async fn spawn_worker_inner(
     task: &str,
     interactive: bool,
     suggested_skills: &[&str],
+    task_preset: WorkerTaskPreset,
 ) -> std::result::Result<WorkerId, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let temporal_context = TemporalContext::from_runtime(rc.as_ref());
+    let preset_task = apply_worker_task_preset(task, task_preset);
     let worker_task =
-        build_worker_task_with_temporal_context(task, &temporal_context, &prompt_engine)
+        build_worker_task_with_temporal_context(&preset_task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let sandbox_enabled = state.deps.sandbox.mode_enabled();
     let sandbox_containment_active = state.deps.sandbox.containment_active();
@@ -520,6 +569,7 @@ async fn spawn_worker_inner(
     );
 
     state.worker_handles.write().await.insert(worker_id, handle);
+    remember_worker_task_preset(state, worker_id, task_preset).await;
 
     {
         let mut status = state.status_block.write().await;
@@ -543,6 +593,45 @@ async fn spawn_worker_inner(
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "worker spawned");
 
     Ok(worker_id)
+}
+
+fn apply_worker_task_preset(task: &str, task_preset: WorkerTaskPreset) -> String {
+    match task_preset {
+        WorkerTaskPreset::Default => task.to_string(),
+        WorkerTaskPreset::Retrieval => format!(
+            "{task}\n\n\
+             Retrieval contract:\n\
+             - Use worker-accessible retrieval tools to search for evidence.\n\
+             - Prefer local knowledge tools such as QMD MCP when available.\n\
+             - Do not return raw tool dumps as your final answer.\n\
+             - Synthesize the findings into one JSON object and return only that JSON object in your final text response.\n\
+             - If a source is unavailable or incomplete, report that explicitly instead of fabricating.\n\
+             - Keep snippets concise and cite the exact source/tool that produced them.\n\n\
+             Final response JSON schema:\n\
+             {{\n\
+               \"status\": \"success\" | \"partial\" | \"unavailable\",\n\
+               \"summary\": \"short answer or conclusion\",\n\
+               \"sources\": [\n\
+                 {{\n\
+                   \"source\": \"qmd | other source name\",\n\
+                   \"tool\": \"tool name used\",\n\
+                   \"retrieval_mode\": \"keyword | semantic | hybrid | exact | unknown\",\n\
+                   \"locator\": \"file path, document id, URL, or other canonical locator\",\n\
+                   \"title\": \"short document/result title\",\n\
+                   \"snippet\": \"short supporting snippet\",\n\
+                   \"why_it_matters\": \"why this evidence supports the summary\"\n\
+                 }}\n\
+               ],\n\
+               \"gaps\": [\"missing source, unavailable system, uncertainty, or next lookup\"]\n\
+             }}\n\n\
+             Constraints:\n\
+             - `status = success` only when you have concrete supporting evidence.\n\
+             - `status = partial` when you found some evidence but important gaps remain.\n\
+             - `status = unavailable` when the required source or tool was unavailable.\n\
+             - Include at least one `gaps` entry whenever status is not `success`.\n\
+             - If multiple tools disagree, say so in `gaps` and prefer the most direct source."
+        ),
+    }
 }
 
 /// Spawn an OpenCode-backed worker for coding tasks.
@@ -949,6 +1038,12 @@ pub async fn resume_idle_worker_into_state(
             );
 
             state.worker_handles.write().await.insert(worker_id, handle);
+            remember_worker_task_preset(
+                state,
+                worker_id,
+                WorkerTaskPreset::from_db_value(&idle_worker.task_preset),
+            )
+            .await;
 
             let opencode_task = format!("[opencode] {}", idle_worker.task);
             {
@@ -1051,6 +1146,12 @@ pub async fn resume_idle_worker_into_state(
             );
 
             state.worker_handles.write().await.insert(worker_id, handle);
+            remember_worker_task_preset(
+                state,
+                worker_id,
+                WorkerTaskPreset::from_db_value(&idle_worker.task_preset),
+            )
+            .await;
 
             {
                 let mut status = state.status_block.write().await;
@@ -1097,7 +1198,10 @@ fn expand_tilde(path: &str) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use super::{WorkerCompletionError, map_worker_completion_result, spawn_worker_task};
+    use super::{
+        WorkerCompletionError, WorkerTaskPreset, apply_worker_task_preset,
+        map_worker_completion_result, spawn_worker_task,
+    };
     use crate::{ProcessEvent, WorkerId};
     use std::sync::Arc;
     use std::time::Duration;
@@ -1195,5 +1299,19 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[test]
+    fn retrieval_task_preset_wraps_task_with_json_contract() {
+        let wrapped = apply_worker_task_preset(
+            "Find the prior research notes about the launch video.",
+            WorkerTaskPreset::Retrieval,
+        );
+
+        assert!(wrapped.contains("Find the prior research notes about the launch video."));
+        assert!(wrapped.contains("Retrieval contract:"));
+        assert!(wrapped.contains("\"status\": \"success\" | \"partial\" | \"unavailable\""));
+        assert!(wrapped.contains("\"source\": \"qmd | other source name\""));
+        assert!(wrapped.contains("Prefer local knowledge tools such as QMD MCP when available."));
     }
 }

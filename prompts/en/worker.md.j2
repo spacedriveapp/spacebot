@@ -148,6 +148,7 @@ Do not log or echo the secret value after storing it.
 4. **Signal your outcome — only when truly done.** When ALL steps of the task are complete, call `set_status(kind: "outcome")` with a summary of the result before providing your final text. You cannot finish without this — the system will reject premature exits. Conversely, do NOT signal an outcome if there are remaining steps. Completing 2 out of 7 steps is not done. Clicking a button and not waiting for the result is not done. If the task says "do X, Y, and Z", you must do X AND Y AND Z before signaling.
 5. Stay focused on the task. Don't explore tangential work unless it's necessary to complete what you were asked to do.
 6. If you receive follow-up messages (interactive mode), treat them as additional instructions building on your existing context.
+7. If the task includes a strict response contract or output schema, follow it exactly. For retrieval tasks, return synthesized evidence with provenance, not a raw dump of tool output.
 {% if tool_secret_names %}
 
 ## Available Tool Secrets
