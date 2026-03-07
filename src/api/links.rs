@@ -44,6 +44,8 @@ struct TopologyHuman {
     role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bio: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +119,7 @@ pub async fn topology(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
             display_name: h.display_name.clone(),
             role: h.role.clone(),
             bio: h.bio.clone(),
+            description: h.description.clone(),
         })
         .collect();
 
@@ -642,6 +645,7 @@ pub struct CreateHumanRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub bio: Option<String>,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -649,6 +653,7 @@ pub struct UpdateHumanRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,
     pub bio: Option<String>,
+    pub description: Option<String>,
 }
 
 /// List all humans.
@@ -714,6 +719,11 @@ pub async fn create_human(
     {
         table["bio"] = toml_edit::value(bio.as_str());
     }
+    if let Some(description) = &request.description
+        && !description.is_empty()
+    {
+        table["description"] = toml_edit::value(description.as_str());
+    }
     humans_array.push(table);
 
     tokio::fs::write(&config_path, doc.to_string())
@@ -728,6 +738,7 @@ pub async fn create_human(
         display_name: request.display_name.clone().filter(|s| !s.is_empty()),
         role: request.role.clone().filter(|s| !s.is_empty()),
         bio: request.bio.clone().filter(|s| !s.is_empty()),
+        description: request.description.clone().filter(|s| !s.is_empty()),
     };
     let mut humans = (**existing).clone();
     humans.push(new_human.clone());
@@ -775,6 +786,13 @@ pub async fn update_human(
             Some(bio.clone())
         };
     }
+    if let Some(description) = &request.description {
+        updated.description = if description.is_empty() {
+            None
+        } else {
+            Some(description.clone())
+        };
+    }
 
     let config_path = state.config_path.read().await.clone();
     let content = tokio::fs::read_to_string(&config_path)
@@ -809,6 +827,11 @@ pub async fn update_human(
                     table["bio"] = toml_edit::value(bio.as_str());
                 } else if request.bio.is_some() {
                     table.remove("bio");
+                }
+                if let Some(description) = &updated.description {
+                    table["description"] = toml_edit::value(description.as_str());
+                } else if request.description.is_some() {
+                    table.remove("description");
                 }
                 break;
             }

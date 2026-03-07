@@ -68,6 +68,7 @@ impl PromptEngine {
             "cortex_profile",
             crate::prompts::text::get("cortex_profile"),
         )?;
+        env.add_template("factory", crate::prompts::text::get("factory"))?;
 
         // Adapter-specific prompt fragments
         env.add_template(
@@ -501,6 +502,7 @@ impl PromptEngine {
         changelog_highlights: Option<String>,
         runtime_config_snapshot: Option<String>,
         worker_capabilities: String,
+        factory_enabled: bool,
     ) -> Result<String> {
         self.render(
             "cortex_chat",
@@ -512,6 +514,25 @@ impl PromptEngine {
                 changelog_highlights => changelog_highlights,
                 runtime_config_snapshot => runtime_config_snapshot,
                 worker_capabilities => worker_capabilities,
+                factory_enabled => factory_enabled,
+            },
+        )
+    }
+
+    /// Render the factory system prompt for agent creation conversations.
+    ///
+    /// The factory prompt instructs the LLM on how to create and configure new agents
+    /// using preset archetypes, organizational memory, and user preferences.
+    pub fn render_factory_prompt(
+        &self,
+        identity_context: Option<String>,
+        memory_bulletin: Option<String>,
+    ) -> Result<String> {
+        self.render(
+            "factory",
+            context! {
+                identity_context => identity_context,
+                memory_bulletin => memory_bulletin,
             },
         )
     }
@@ -581,6 +602,13 @@ pub struct LinkedAgent {
     pub id: String,
     /// Whether this is a human (true) or an agent (false).
     pub is_human: bool,
+    /// The human's role (e.g. "Founder", "Lead Developer"). Only set for humans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Rich context about the human — background, preferences, communication
+    /// style, etc. Sourced from `HumanDef.description`. Only set for humans.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Information about a skill for template rendering.

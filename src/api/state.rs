@@ -62,6 +62,9 @@ pub struct ApiState {
     pub agent_workspaces: arc_swap::ArcSwap<HashMap<String, PathBuf>>,
     /// Path to the instance config.toml file.
     pub config_path: RwLock<PathBuf>,
+    /// Guards read-modify-write cycles on config.toml to prevent concurrent
+    /// modifications from clobbering each other.
+    pub config_write_mutex: tokio::sync::Mutex<()>,
     /// Per-agent cron stores for cron job CRUD operations.
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
@@ -265,6 +268,7 @@ impl ApiState {
             cortex_chat_sessions: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             agent_workspaces: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             config_path: RwLock::new(PathBuf::new()),
+            config_write_mutex: tokio::sync::Mutex::new(()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),

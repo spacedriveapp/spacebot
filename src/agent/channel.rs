@@ -1653,6 +1653,12 @@ impl Channel {
             return None;
         }
 
+        // Build a lookup map for humans so we can surface display names,
+        // roles, and descriptions in the org context prompt.
+        let all_humans = self.deps.humans.load();
+        let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+            all_humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
         let mut superiors = Vec::new();
         let mut subordinates = Vec::new();
         let mut peers = Vec::new();
@@ -1666,17 +1672,32 @@ impl Channel {
             };
 
             let is_human = !self.deps.agent_names.contains_key(other_id.as_str());
-            let name = self
-                .deps
-                .agent_names
-                .get(other_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| other_id.clone());
+
+            let (name, role, description) = if let Some(human) = humans_by_id.get(other_id.as_str())
+            {
+                // Human node — use display_name, role, and description from HumanDef
+                let name = human
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone(), human.description.clone())
+            } else {
+                // Agent node — use agent display name, no role/description
+                let name = self
+                    .deps
+                    .agent_names
+                    .get(other_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, None, None)
+            };
 
             let info = crate::prompts::engine::LinkedAgent {
                 name,
                 id: other_id.clone(),
                 is_human,
+                role,
+                description,
             };
 
             match link.kind {

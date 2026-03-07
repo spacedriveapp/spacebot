@@ -819,6 +819,7 @@ impl Config {
                 display_name: None,
                 role: None,
                 bio: None,
+                description: None,
             }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
@@ -2121,6 +2122,7 @@ impl Config {
                 display_name: h.display_name,
                 role: h.role,
                 bio: h.bio,
+                description: h.description,
             })
             .collect();
 
@@ -2131,6 +2133,7 @@ impl Config {
                 display_name: None,
                 role: None,
                 bio: None,
+                description: None,
             });
         }
 

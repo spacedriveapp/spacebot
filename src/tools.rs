@@ -60,6 +60,13 @@ pub mod task_update;
 pub mod web_search;
 pub mod worker_inspect;
 
+pub mod factory_create_agent;
+pub mod factory_list_presets;
+pub mod factory_load_preset;
+pub mod factory_search_context;
+pub mod factory_update_config;
+pub mod factory_update_identity;
+
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
 pub use browser::{
     ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
@@ -111,6 +118,30 @@ pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpd
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
+};
+
+pub use factory_create_agent::{
+    FactoryCreateAgentArgs, FactoryCreateAgentError, FactoryCreateAgentOutput,
+    FactoryCreateAgentTool,
+};
+pub use factory_list_presets::{
+    FactoryListPresetsArgs, FactoryListPresetsError, FactoryListPresetsOutput,
+    FactoryListPresetsTool,
+};
+pub use factory_load_preset::{
+    FactoryLoadPresetArgs, FactoryLoadPresetError, FactoryLoadPresetOutput, FactoryLoadPresetTool,
+};
+pub use factory_search_context::{
+    FactorySearchContextArgs, FactorySearchContextError, FactorySearchContextOutput,
+    FactorySearchContextTool,
+};
+pub use factory_update_config::{
+    FactoryUpdateConfigArgs, FactoryUpdateConfigError, FactoryUpdateConfigOutput,
+    FactoryUpdateConfigTool,
+};
+pub use factory_update_identity::{
+    FactoryUpdateIdentityArgs, FactoryUpdateIdentityError, FactoryUpdateIdentityOutput,
+    FactoryUpdateIdentityTool,
 };
 
 use crate::agent::channel::ChannelState;
@@ -594,6 +625,51 @@ pub fn create_cortex_chat_tool_server(
     }
 
     server.run()
+}
+
+/// Create a ToolServer for factory conversations (agent creation/refinement).
+///
+/// Factory tools are system-level — they receive `Arc<ApiState>` directly since
+/// they perform cross-agent mutations (creating agents, writing config, creating
+/// links). The memory search is from the main agent (the one running the factory
+/// conversation) to provide organizational context.
+pub fn create_factory_tool_server(
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
+    ToolServer::new()
+        .tool(FactoryListPresetsTool::new())
+        .tool(FactoryLoadPresetTool::new())
+        .tool(FactorySearchContextTool::new(memory_search))
+        .tool(FactoryCreateAgentTool::new(state.clone()))
+        .tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .tool(FactoryUpdateConfigTool::new(state))
+        .run()
+}
+
+/// Add factory tools (agent creation/refinement) to an existing tool server handle.
+///
+/// Used to augment the cortex chat tool server with factory capabilities.
+/// The `memory_search` should be from the agent running the factory conversation
+/// (typically the main agent) so `factory_search_context` queries its memories.
+pub async fn add_factory_tools(
+    handle: &ToolServerHandle,
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    handle.add_tool(FactoryListPresetsTool::new()).await?;
+    handle.add_tool(FactoryLoadPresetTool::new()).await?;
+    handle
+        .add_tool(FactorySearchContextTool::new(memory_search))
+        .await?;
+    handle
+        .add_tool(FactoryCreateAgentTool::new(state.clone()))
+        .await?;
+    handle
+        .add_tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .await?;
+    handle.add_tool(FactoryUpdateConfigTool::new(state)).await?;
+    Ok(())
 }
 
 #[cfg(test)]

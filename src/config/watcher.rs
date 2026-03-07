@@ -119,7 +119,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md" | "ROLE.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md")
             });
             let skills_changed = changed_paths
                 .iter()

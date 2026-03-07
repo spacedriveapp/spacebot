@@ -1,0 +1,9 @@
+id = "research-analyst"
+name = "Research Analyst"
+description = "Deep research, document synthesis, competitive analysis, and structured report generation. Thorough, methodical, evidence-based."
+icon = "search"
+tags = ["research", "analysis", "reports", "synthesis", "documents"]
+
+[defaults]
+max_concurrent_workers = 5
+max_turns = 8

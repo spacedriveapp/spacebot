@@ -1,0 +1,9 @@
+id = "content-writer"
+name = "Content Writer"
+description = "Blog posts, documentation, social media, changelogs, and marketing copy. Maintains a consistent voice across all output."
+icon = "pen"
+tags = ["writing", "content", "blog", "docs", "social-media"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 6

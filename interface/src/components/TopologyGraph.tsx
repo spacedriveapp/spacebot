@@ -538,10 +538,10 @@ function EdgeConfigPanel({
 // -- Human Edit Dialog --
 
 interface HumanEditDialogProps {
-	human: { id: string; display_name?: string; role?: string; bio?: string } | null;
+	human: { id: string; display_name?: string; role?: string; bio?: string; description?: string } | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	onUpdate: (displayName: string, role: string, bio: string) => void;
+	onUpdate: (displayName: string, role: string, bio: string, description: string) => void;
 	onDelete: () => void;
 }
 
@@ -555,6 +555,7 @@ function HumanEditDialog({
 	const [displayName, setDisplayName] = useState("");
 	const [role, setRole] = useState("");
 	const [bio, setBio] = useState("");
+	const [description, setDescription] = useState("");
 
 	// Sync state when a different human is selected
 	const prevId = useRef<string | null>(null);
@@ -563,13 +564,14 @@ function HumanEditDialog({
 		setDisplayName(human.display_name ?? "");
 		setRole(human.role ?? "");
 		setBio(human.bio ?? "");
+		setDescription(human.description ?? "");
 	}
 
 	if (!human) return null;
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="max-w-sm">
+			<DialogContent className="max-w-md">
 				<DialogHeader>
 					<DialogTitle>Edit Human</DialogTitle>
 				</DialogHeader>
@@ -599,8 +601,19 @@ function HumanEditDialog({
 							value={bio}
 							onChange={(e) => setBio(e.target.value)}
 							placeholder="A short description..."
-							rows={3}
+							rows={2}
 							className="w-full rounded-md bg-app-input px-3 py-2 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50 resize-none"
+						/>
+					</div>
+					<div>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Full Context</label>
+						<p className="mb-1.5 text-tiny text-ink-faint">Background, preferences, communication style, timezone. Agents linked to this human will see this in their system prompt.</p>
+						<textarea
+							value={description}
+							onChange={(e) => setDescription(e.target.value)}
+							placeholder="e.g. Jamie Pine (@jamiepine). Timezone: America/Vancouver. Full-stack developer, prefers direct communication..."
+							rows={6}
+							className="w-full rounded-md bg-app-input px-3 py-2 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50 resize-y"
 						/>
 					</div>
 				</div>
@@ -612,7 +625,7 @@ function HumanEditDialog({
 					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
 						Cancel
 					</Button>
-					<Button size="sm" onClick={() => onUpdate(displayName, role, bio)}>
+					<Button size="sm" onClick={() => onUpdate(displayName, role, bio, description)}>
 						Save
 					</Button>
 				</DialogFooter>
@@ -980,11 +993,12 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	});
 
 	const updateHuman = useMutation({
-		mutationFn: (params: { id: string; displayName?: string; role?: string; bio?: string }) =>
+		mutationFn: (params: { id: string; displayName?: string; role?: string; bio?: string; description?: string }) =>
 			api.updateHuman(params.id, {
 				display_name: params.displayName,
 				role: params.role,
 				bio: params.bio,
+				description: params.description,
 			}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["topology"] });
@@ -1402,13 +1416,14 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 					setHumanDialogOpen(open);
 					if (!open) setSelectedHuman(null);
 				}}
-				onUpdate={(displayName, role, bio) => {
+				onUpdate={(displayName, role, bio, description) => {
 					if (selectedHuman) {
 						updateHuman.mutate({
 							id: selectedHuman.id,
 							displayName: displayName || undefined,
 							role: role || undefined,
 							bio: bio || undefined,
+							description: description || undefined,
 						});
 						setHumanDialogOpen(false);
 					}

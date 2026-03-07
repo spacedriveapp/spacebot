@@ -2,9 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, opencode_proxy, providers, secrets, settings, skills, system, tasks, tools, webchat,
-    workers,
+    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
+    messaging, models, opencode_proxy, providers, secrets, settings, skills, system, tasks, tools,
+    webchat, workers,
 };
 
 use axum::Json;
@@ -231,6 +231,9 @@ pub async fn start_http_server(
             "/humans/{id}",
             put(links::update_human).delete(links::delete_human),
         )
+        // Factory: preset archetypes
+        .route("/factory/presets", get(factory::list_presets))
+        .route("/factory/presets/{id}", get(factory::get_preset))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),

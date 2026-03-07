@@ -120,6 +120,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
             std::collections::HashMap::new(),
         )),
@@ -693,8 +694,8 @@ async fn dump_all_contexts() {
         }
     );
     println!(
-        "  USER.md:     {}",
-        if identity.user.is_some() {
+        "  ROLE.md:     {}",
+        if identity.role.is_some() {
             "loaded"
         } else {
             "empty"

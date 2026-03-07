@@ -9,6 +9,7 @@ pub mod cron;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub mod factory;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -375,6 +376,9 @@ pub struct AgentDeps {
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
+    /// to surface human display names, roles, and descriptions in agent prompts.
+    pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
     /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
     /// reachable via links. Used by `send_agent_message` to create tasks on
     /// target agents and by the cortex to look up delegation metadata.

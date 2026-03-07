@@ -1,0 +1,9 @@
+id = "project-manager"
+name = "Project Manager"
+description = "Task tracking, status updates, cross-team coordination, timeline management, and progress reporting."
+icon = "kanban"
+tags = ["project-management", "tasks", "coordination", "status", "planning"]
+
+[defaults]
+max_concurrent_workers = 4
+max_turns = 6

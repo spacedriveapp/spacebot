@@ -64,6 +64,7 @@ pub(super) struct TomlHumanDef {
     pub(super) display_name: Option<String>,
     pub(super) role: Option<String>,
     pub(super) bio: Option<String>,
+    pub(super) description: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

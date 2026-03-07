@@ -1,4 +1,7 @@
-//! Identity file loading: SOUL.md, IDENTITY.md, USER.md.
+//! Identity file loading: SOUL.md, IDENTITY.md, ROLE.md.
+//!
+//! USER.md is deprecated — human context now lives on the org graph via
+//! `HumanDef.description` and is inherited by linked agents automatically.
 
 use anyhow::Context as _;
 use std::path::Path;
@@ -8,7 +11,6 @@ use std::path::Path;
 pub struct Identity {
     pub soul: Option<String>,
     pub identity: Option<String>,
-    pub user: Option<String>,
     pub role: Option<String>,
 }
 
@@ -18,7 +20,6 @@ impl Identity {
         Self {
             soul: load_optional_file(&workspace.join("SOUL.md")).await,
             identity: load_optional_file(&workspace.join("IDENTITY.md")).await,
-            user: load_optional_file(&workspace.join("USER.md")).await,
             role: load_optional_file(&workspace.join("ROLE.md")).await,
         }
     }
@@ -35,11 +36,6 @@ impl Identity {
         if let Some(identity) = &self.identity {
             output.push_str("## Identity\n\n");
             output.push_str(identity);
-            output.push_str("\n\n");
-        }
-        if let Some(user) = &self.user {
-            output.push_str("## User\n\n");
-            output.push_str(user);
             output.push_str("\n\n");
         }
         if let Some(role) = &self.role {
@@ -61,10 +57,6 @@ const DEFAULT_IDENTITY_FILES: &[(&str, &str)] = &[
     (
         "IDENTITY.md",
         "<!-- Define this agent's identity: name, nature, purpose. -->\n",
-    ),
-    (
-        "USER.md",
-        "<!-- Describe the human this agent interacts with: name, preferences, context. -->\n",
     ),
 ];
 

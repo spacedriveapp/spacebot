@@ -103,7 +103,6 @@ pub(super) struct AgentProfileResponse {
 pub(super) struct IdentityResponse {
     soul: Option<String>,
     identity: Option<String>,
-    user: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -116,7 +115,6 @@ pub(super) struct IdentityUpdateRequest {
     agent_id: String,
     soul: Option<String>,
     identity: Option<String>,
-    user: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -125,10 +123,17 @@ pub(super) struct AgentOverviewQuery {
 }
 
 #[derive(Deserialize)]
-pub(super) struct CreateAgentRequest {
-    agent_id: String,
-    display_name: Option<String>,
-    role: Option<String>,
+pub struct CreateAgentRequest {
+    pub agent_id: String,
+    pub display_name: Option<String>,
+    pub role: Option<String>,
+}
+
+/// Result from internal agent creation logic.
+pub struct CreateAgentResult {
+    pub success: bool,
+    pub agent_id: String,
+    pub message: String,
 }
 
 #[derive(Deserialize)]
@@ -419,6 +424,7 @@ pub(super) async fn trigger_warmup(
                 task_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
+                humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 task_store_registry,
                 process_control_registry: Arc::new(
                     crate::agent::process_control::ProcessControlRegistry::new(),
@@ -442,31 +448,43 @@ pub(super) async fn create_agent(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateAgentRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    match create_agent_internal(&state, request).await {
+        Ok(result) => Ok(Json(serde_json::json!({
+            "success": result.success,
+            "agent_id": result.agent_id,
+            "message": result.message
+        }))),
+        Err(message) => Ok(Json(serde_json::json!({
+            "success": false,
+            "message": message
+        }))),
+    }
+}
+
+/// Internal agent creation logic shared between the API handler and factory tools.
+pub async fn create_agent_internal(
+    state: &Arc<ApiState>,
+    request: CreateAgentRequest,
+) -> Result<CreateAgentResult, String> {
     if let Some(limit) = hosted_agent_limit() {
         let existing = state.agent_configs.load();
         if existing.len() >= limit {
-            return Ok(Json(serde_json::json!({
-                "success": false,
-                "message": format!("agent limit reached for this instance: up to {limit} agent{}", if limit == 1 { "" } else { "s" })
-            })));
+            return Err(format!(
+                "agent limit reached for this instance: up to {limit} agent{}",
+                if limit == 1 { "" } else { "s" }
+            ));
         }
     }
 
     let agent_id = request.agent_id.trim().to_string();
     if agent_id.is_empty() {
-        return Ok(Json(serde_json::json!({
-            "success": false,
-            "message": "Agent ID cannot be empty"
-        })));
+        return Err("Agent ID cannot be empty".into());
     }
 
     {
         let existing = state.agent_configs.load();
         if existing.iter().any(|a| a.id == agent_id) {
-            return Ok(Json(serde_json::json!({
-                "success": false,
-                "message": format!("Agent '{agent_id}' already exists")
-            })));
+            return Err(format!("Agent '{agent_id}' already exists"));
         }
     }
 
@@ -478,14 +496,14 @@ pub(super) async fn create_agent(
             .await
             .map_err(|error| {
                 tracing::warn!(%error, "failed to read config.toml");
-                StatusCode::INTERNAL_SERVER_ERROR
+                format!("failed to read config.toml: {error}")
             })?
     } else {
         String::new()
     };
     let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
         tracing::warn!(%error, "failed to parse config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
+        format!("failed to parse config.toml: {error}")
     })?;
 
     if doc.get("agents").is_none() {
@@ -493,7 +511,7 @@ pub(super) async fn create_agent(
     }
     let agents_array = doc["agents"]
         .as_array_of_tables_mut()
-        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
+        .ok_or_else(|| "agents is not an array of tables in config.toml".to_string())?;
 
     let mut new_table = toml_edit::Table::new();
     new_table["id"] = toml_edit::value(&agent_id);
@@ -513,7 +531,7 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to write config.toml: {error}")
         })?;
 
     // Read defaults directly from the config we just wrote to disk rather than
@@ -543,7 +561,7 @@ pub(super) async fn create_agent(
         cached_defaults = state.defaults_config.read().await;
         cached_defaults.as_ref().ok_or_else(|| {
             tracing::error!("defaults config not available");
-            StatusCode::INTERNAL_SERVER_ERROR
+            "defaults config not available".to_string()
         })?
     };
 
@@ -585,7 +603,7 @@ pub(super) async fn create_agent(
     ] {
         std::fs::create_dir_all(dir).map_err(|error| {
             tracing::error!(%error, dir = %dir.display(), "failed to create agent directory");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to create directory {}: {error}", dir.display())
         })?;
     }
 
@@ -593,14 +611,14 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to connect agent databases");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to connect databases: {error}")
         })?;
 
     let settings_path = agent_config.data_dir.join("settings.redb");
     let settings_store = std::sync::Arc::new(
         crate::settings::SettingsStore::new(&settings_path).map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to init settings store");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to init settings store: {error}")
         })?,
     );
 
@@ -610,7 +628,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("embedding model not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "embedding model not available".to_string()
             })?
             .clone()
     };
@@ -620,7 +638,7 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to init embeddings");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to init embeddings: {error}")
         })?;
 
     if let Err(error) = embedding_table.ensure_fts_index().await {
@@ -641,7 +659,7 @@ pub(super) async fn create_agent(
         .await
         .map_err(|error| {
             tracing::error!(%error, agent_id = %agent_id, "failed to scaffold identity files");
-            StatusCode::INTERNAL_SERVER_ERROR
+            format!("failed to scaffold identity files: {error}")
         })?;
     let identity = crate::identity::Identity::load(&agent_config.workspace).await;
 
@@ -655,7 +673,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("prompt engine not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "prompt engine not available".to_string()
             })?
             .clone()
     };
@@ -668,7 +686,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("defaults config not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "defaults config not available".to_string()
             })?
             .clone()
     };
@@ -690,7 +708,7 @@ pub(super) async fn create_agent(
             .as_ref()
             .ok_or_else(|| {
                 tracing::error!("LLM manager not available");
-                StatusCode::INTERNAL_SERVER_ERROR
+                "LLM manager not available".to_string()
             })?
             .clone()
     };
@@ -752,6 +770,9 @@ pub(super) async fn create_agent(
             });
             Arc::new(names)
         },
+        humans: Arc::new(arc_swap::ArcSwap::from_pointee(
+            (**state.agent_humans.load()).clone(),
+        )),
     };
 
     let event_rx = event_tx.subscribe();
@@ -797,12 +818,21 @@ pub(super) async fn create_agent(
         sandbox.clone(),
         runtime_config.clone(),
     );
+    // Add factory tools to the cortex chat tool server
+    if let Err(error) =
+        crate::tools::add_factory_tools(&cortex_tool_server, state.clone(), memory_search.clone())
+            .await
+    {
+        tracing::warn!(%error, agent_id = %agent_id, "failed to add factory tools to cortex chat");
+    }
+
     let cortex_store = crate::agent::cortex_chat::CortexChatStore::new(db.sqlite.clone());
     let cortex_session = crate::agent::cortex_chat::CortexChatSession::new(
         deps.clone(),
         cortex_tool_server,
         cortex_store,
-    );
+    )
+    .with_factory(true);
 
     let cortex_logger = crate::agent::cortex::CortexLogger::new(db.sqlite.clone());
     let _warmup_loop = crate::agent::cortex::spawn_warmup_loop(deps.clone(), cortex_logger.clone());
@@ -901,11 +931,11 @@ pub(super) async fn create_agent(
 
     tracing::info!(agent_id = %agent_id, "agent created and initialized via API");
 
-    Ok(Json(serde_json::json!({
-        "success": true,
-        "agent_id": agent_id,
-        "message": format!("Agent '{agent_id}' created and running")
-    })))
+    Ok(CreateAgentResult {
+        success: true,
+        agent_id: agent_id.clone(),
+        message: format!("Agent '{agent_id}' created and running"),
+    })
 }
 
 /// Update an agent's display_name and role in config.toml.
@@ -1414,7 +1444,7 @@ pub(super) async fn get_agent_profile(
     Ok(Json(AgentProfileResponse { profile }))
 }
 
-/// Get identity files (SOUL.md, IDENTITY.md, USER.md) for an agent.
+/// Get identity files (SOUL.md, IDENTITY.md) for an agent.
 pub(super) async fn get_identity(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IdentityQuery>,
@@ -1429,7 +1459,6 @@ pub(super) async fn get_identity(
     Ok(Json(IdentityResponse {
         soul: identity.soul,
         identity: identity.identity,
-        user: identity.user,
     }))
 }
 
@@ -1462,21 +1491,11 @@ pub(super) async fn update_identity(
             })?;
     }
 
-    if let Some(user) = &request.user {
-        tokio::fs::write(workspace.join("USER.md"), user)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "failed to write USER.md");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
-    }
-
     let updated = crate::identity::Identity::load(workspace).await;
 
     Ok(Json(IdentityResponse {
         soul: updated.soul,
         identity: updated.identity,
-        user: updated.user,
     }))
 }
 

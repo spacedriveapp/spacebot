@@ -104,6 +104,9 @@ pub struct HumanDef {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
+    /// Rich long-form context about this person — replaces per-agent USER.md.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// A visual group definition for the topology UI.

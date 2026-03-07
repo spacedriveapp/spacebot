@@ -218,7 +218,7 @@ impl Tool for FileTool {
                 // When sandbox is disabled, the user has opted into full access.
                 if self.sandbox.mode_enabled() {
                     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
+                    const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md"];
                     if PROTECTED_FILES
                         .iter()
                         .any(|f| file_name.eq_ignore_ascii_case(f))

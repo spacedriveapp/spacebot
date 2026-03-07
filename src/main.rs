@@ -1445,6 +1445,9 @@ async fn run(
         tracing::info!(count = config.links.len(), "loaded agent links from config");
     }
 
+    // Shared humans list (hot-reloadable via ArcSwap, same pattern as agent_links)
+    let agent_humans = Arc::new(ArcSwap::from_pointee(config.humans.clone()));
+
     // These hold the initialized subsystems. Empty until agents are initialized.
     let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
     let mut messaging_manager: Arc<spacebot::messaging::MessagingManager> =
@@ -1504,6 +1507,7 @@ async fn run(
             &mut telegram_permissions,
             &mut twitch_permissions,
             agent_links.clone(),
+            agent_humans.clone(),
             injection_tx.clone(),
             task_store_registry.clone(),
             &bootstrapped_store,
@@ -2182,6 +2186,7 @@ async fn run(
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
                                     agent_links.clone(),
+                                    agent_humans.clone(),
                                     injection_tx.clone(),
                                     task_store_registry.clone(),
                                     &bootstrapped_store,
@@ -2318,6 +2323,7 @@ async fn initialize_agents(
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
+    agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
     task_store_registry: Arc<
         ArcSwap<std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>>>,
@@ -2522,6 +2528,7 @@ async fn initialize_agents(
             sandbox,
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
+            humans: agent_humans.clone(),
             task_store_registry: task_store_registry.clone(),
             process_control_registry: Arc::new(
                 spacebot::agent::process_control::ProcessControlRegistry::new(),
@@ -3134,12 +3141,24 @@ async fn initialize_agents(
                 agent.deps.sandbox.clone(),
                 agent.deps.runtime_config.clone(),
             );
+            // Add factory tools to the cortex chat tool server
+            if let Err(error) = spacebot::tools::add_factory_tools(
+                &tool_server,
+                api_state.clone(),
+                agent.deps.memory_search.clone(),
+            )
+            .await
+            {
+                tracing::warn!(%error, agent_id = %agent_id, "failed to add factory tools to cortex chat");
+            }
+
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
             let session = spacebot::agent::cortex_chat::CortexChatSession::new(
                 agent.deps.clone(),
                 tool_server,
                 store,
-            );
+            )
+            .with_factory(true);
             sessions.insert(agent_id.to_string(), std::sync::Arc::new(session));
         }
         api_state.set_cortex_chat_sessions(sessions);

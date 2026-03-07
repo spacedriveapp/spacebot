@@ -270,6 +270,8 @@ pub struct CortexChatSession {
     pub deps: AgentDeps,
     pub tool_server: ToolServerHandle,
     pub store: CortexChatStore,
+    /// Whether factory tools (agent creation/refinement) are available.
+    pub factory_enabled: bool,
     /// Prevent concurrent sends — only one request at a time per agent.
     send_lock: Arc<Mutex<()>>,
 }
@@ -280,8 +282,15 @@ impl CortexChatSession {
             deps,
             tool_server,
             store,
+            factory_enabled: false,
             send_lock: Arc::new(Mutex::new(())),
         }
+    }
+
+    /// Enable factory tools for this session (agent creation/refinement).
+    pub fn with_factory(mut self, enabled: bool) -> Self {
+        self.factory_enabled = enabled;
+        self
     }
 
     /// Send a message and stream events (tool calls, completion) back via an mpsc channel.
@@ -458,6 +467,7 @@ impl CortexChatSession {
             empty_to_none(changelog_highlights),
             empty_to_none(runtime_config_snapshot),
             worker_capabilities,
+            self.factory_enabled,
         )
     }
 

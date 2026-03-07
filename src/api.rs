@@ -4,12 +4,13 @@
 //! managing agents, viewing status, and interacting with the system.
 //! Includes an SSE endpoint for realtime event streaming.
 
-mod agents;
+pub mod agents;
 mod bindings;
 mod channels;
 mod config;
 mod cortex;
 mod cron;
+mod factory;
 mod ingest;
 mod links;
 mod mcp;
