@@ -525,7 +525,8 @@ fn binding_adapter_selector_matches(binding: &Binding, adapter_selector: Option<
 /// Signal group IDs are base64-encoded.
 fn is_valid_base64(s: &str) -> bool {
     use base64::{
-        Engine, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE_NO_PAD,
+        Engine, engine::general_purpose::STANDARD, engine::general_purpose::URL_SAFE,
+        engine::general_purpose::URL_SAFE_NO_PAD,
     };
 
     let trimmed = s.trim();
@@ -533,7 +534,9 @@ fn is_valid_base64(s: &str) -> bool {
         return false;
     }
 
-    URL_SAFE_NO_PAD.decode(trimmed).is_ok() || STANDARD.decode(trimmed).is_ok()
+    URL_SAFE_NO_PAD.decode(trimmed).is_ok()
+        || URL_SAFE.decode(trimmed).is_ok()
+        || STANDARD.decode(trimmed).is_ok()
 }
 
 #[cfg(test)]
@@ -544,7 +547,8 @@ mod base64_tests {
     fn test_valid_url_safe_base64() {
         // URL-safe base64 without padding (common for Signal group IDs)
         assert!(is_valid_base64("abc123def456"));
-        assert!(is_valid_base64("abc123_def_456"));
+        assert!(is_valid_base64("abc123-def456_")); // 16 chars, valid unpadded
+        assert!(is_valid_base64("abc123_def_456==")); // 16 chars with padding
     }
 
     #[test]

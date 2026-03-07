@@ -357,16 +357,18 @@ mod tests {
     #[test]
     fn parses_signal_uuid_prefixed() {
         let target =
-            parse_explicit_signal_target("signal:uuid:abc-123-def").expect("signal target");
+            parse_explicit_signal_target("signal:uuid:123e4567-e89b-12d3-a456-426655440000")
+                .expect("signal target");
         assert_eq!(target.adapter, "signal");
-        assert_eq!(target.target, "uuid:abc-123-def");
+        assert_eq!(target.target, "uuid:123e4567-e89b-12d3-a456-426655440000");
     }
 
     #[test]
     fn parses_signal_bare_uuid() {
-        let target = parse_explicit_signal_target("abc-123-def").expect("signal target");
+        let target = parse_explicit_signal_target("123e4567-e89b-12d3-a456-426655440000")
+            .expect("signal target");
         assert_eq!(target.adapter, "signal");
-        assert_eq!(target.target, "uuid:abc-123-def");
+        assert_eq!(target.target, "uuid:123e4567-e89b-12d3-a456-426655440000");
     }
 
     #[test]
@@ -399,10 +401,10 @@ mod tests {
     }
 
     #[test]
-    fn parses_signal_bare_phone_digits() {
-        let target = parse_explicit_signal_target("1234567890").expect("signal target");
-        assert_eq!(target.adapter, "signal");
-        assert_eq!(target.target, "+1234567890");
+    fn ignores_bare_phone_digits() {
+        // Bare phone numbers without + or signal: prefix are rejected
+        // to avoid confusing numeric channel IDs with Signal numbers
+        assert!(parse_explicit_signal_target("1234567890").is_none());
     }
 
     #[test]
