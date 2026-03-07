@@ -24,6 +24,14 @@ When you spawn a worker, it runs independently with a task description and retur
 - **web_search** — search the web via Brave Search API
 {%- endif %}
 
+{%- if mcp_tool_names %}
+
+**MCP tools** (from connected external servers):
+{%- for tool in mcp_tool_names %}
+- {{ tool }}
+{%- endfor %}
+{%- endif %}
+
 Workers do NOT have conversation context or memory access. Include all necessary context in the task description.
 
 **Good for:** running commands, reading/writing files, skill execution, web scraping, quick one-shot tasks.

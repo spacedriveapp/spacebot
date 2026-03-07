@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// - `secret:NAME` — look up from the secrets store (if available).
 /// - `env:VAR_NAME` — read from system environment variable.
 /// - Anything else — literal value.
-pub(super) fn resolve_env_value(value: &str) -> Option<String> {
+pub(crate) fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
         let guard = RESOLVE_SECRETS_STORE.load();
         match (*guard).as_ref() {

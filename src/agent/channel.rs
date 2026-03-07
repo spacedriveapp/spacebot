@@ -1365,10 +1365,12 @@ impl Channel {
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let sandbox_enabled = self.deps.sandbox.containment_active();
+        let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            &mcp_tool_names,
         )?;
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
@@ -1956,10 +1958,12 @@ impl Channel {
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let sandbox_enabled = self.deps.sandbox.containment_active();
+        let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            &mcp_tool_names,
         )?;
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());

@@ -41,19 +41,14 @@ struct McpClientHandler {
 
 impl McpClientHandler {
     fn new(tool_list_changed: Arc<AtomicBool>) -> Self {
-        let client_info = rmcp::model::ClientInfo {
-            meta: None,
-            protocol_version: rmcp::model::ProtocolVersion::default(),
-            capabilities: rmcp::model::ClientCapabilities::default(),
-            client_info: rmcp::model::Implementation {
-                name: "spacebot".to_string(),
-                title: None,
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                description: Some("Spacebot MCP client".to_string()),
-                icons: None,
-                website_url: None,
-            },
-        };
+        let implementation =
+            rmcp::model::Implementation::new("spacebot", env!("CARGO_PKG_VERSION"))
+                .with_description("Spacebot MCP client");
+
+        let client_info = rmcp::model::ClientInfo::new(
+            rmcp::model::ClientCapabilities::default(),
+            implementation,
+        );
 
         Self {
             tool_list_changed,
@@ -261,12 +256,10 @@ impl McpConnection {
             return Err(anyhow!("mcp server '{}' is not connected", self.name));
         };
 
-        let params = rmcp::model::CallToolRequestParams {
-            meta: None,
-            name: Cow::Owned(tool_name.to_string()),
-            arguments,
-            task: None,
-        };
+        let mut params = rmcp::model::CallToolRequestParams::new(Cow::Owned(tool_name.to_string()));
+        if let Some(args) = arguments {
+            params = params.with_arguments(args);
+        }
 
         client
             .call_tool(params)
@@ -336,7 +329,18 @@ impl McpConnection {
                     .collect::<HashMap<_, _>>();
 
                 let mut custom_headers = HashMap::new();
+                let mut auth_header_value = None;
                 for (header_name, header_value) in resolved_headers {
+                    if header_name.eq_ignore_ascii_case("authorization") {
+                        HeaderValue::from_str(&header_value).with_context(|| {
+                            format!(
+                                "invalid mcp header value for '{}' on server '{}'",
+                                header_name, self.name
+                            )
+                        })?;
+                        auth_header_value = Some(header_value);
+                        continue;
+                    }
                     let parsed_name = HeaderName::from_str(&header_name).with_context(|| {
                         format!(
                             "invalid mcp header name '{}' for server '{}'",
@@ -352,11 +356,16 @@ impl McpConnection {
                     custom_headers.insert(parsed_name, parsed_value);
                 }
 
-                let transport_config =
+                let mut transport_config =
                     rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
                         resolved_url,
                     )
                     .custom_headers(custom_headers);
+
+                if let Some(auth_value) = auth_header_value {
+                    let token = parse_bearer_token(&auth_value, &self.name)?;
+                    transport_config = transport_config.auth_header(&token);
+                }
 
                 let transport =
                     rmcp::transport::StreamableHttpClientTransport::from_config(transport_config);
@@ -444,6 +453,48 @@ impl McpManager {
         }
 
         adapters
+    }
+
+    /// Return namespaced tool names for all connected MCP servers.
+    ///
+    /// Used to inform the channel prompt about available MCP tools so the
+    /// agent knows it can delegate work that uses them.
+    pub async fn get_tool_names(&self) -> Vec<String> {
+        let connections = self
+            .connections
+            .read()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+
+        let mut names = Vec::new();
+        for connection in connections {
+            if !connection.is_connected().await {
+                continue;
+            }
+
+            let server_name = connection.name().to_string();
+            let tools = connection.list_tools().await;
+            for tool in tools {
+                let description = tool
+                    .description
+                    .as_ref()
+                    .map(|d| d.as_ref().to_string())
+                    .unwrap_or_default();
+                names.push(format!(
+                    "{} — {}",
+                    tool.name,
+                    if description.is_empty() {
+                        format!("from {}", server_name)
+                    } else {
+                        description
+                    }
+                ));
+            }
+        }
+
+        names
     }
 
     pub async fn reconnect(&self, name: &str) -> Result<()> {
@@ -603,6 +654,42 @@ impl McpManager {
     }
 }
 
+/// Parse a Bearer token from an Authorization header value.
+///
+/// rmcp's `auth_header()` uses reqwest's `.bearer_auth()` which always
+/// prepends `"Bearer "`. This function strips any `Bearer` prefix
+/// (case-insensitive) and rejects non-Bearer schemes and empty tokens.
+fn parse_bearer_token(auth_value: &str, server_name: &str) -> anyhow::Result<String> {
+    let trimmed = auth_value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("empty Authorization header value for mcp server '{server_name}'");
+    }
+
+    // Check if the value starts with a known scheme word (case-insensitive).
+    // We split on the first space to detect "Bearer <token>" vs "Basic ..." etc.
+    if let Some(space_pos) = trimmed.find(' ') {
+        let scheme = &trimmed[..space_pos];
+        if !scheme.eq_ignore_ascii_case("Bearer") {
+            anyhow::bail!(
+                "unsupported Authorization scheme '{scheme}' for mcp server \
+                 '{server_name}': only Bearer tokens are supported (rmcp always \
+                 sends Bearer auth). Remove the scheme prefix or use a Bearer token."
+            );
+        }
+        let token = trimmed[space_pos + 1..].trim();
+        if token.is_empty() {
+            anyhow::bail!("empty Bearer token value for mcp server '{server_name}'");
+        }
+        Ok(token.to_string())
+    } else if trimmed.eq_ignore_ascii_case("Bearer") {
+        // Bare "Bearer" with no token value.
+        anyhow::bail!("empty Bearer token value for mcp server '{server_name}'");
+    } else {
+        // Raw token with no scheme prefix — pass through as-is.
+        Ok(trimmed.to_string())
+    }
+}
+
 fn service_error_to_anyhow(error: ServiceError) -> anyhow::Error {
     anyhow!(error.to_string())
 }
@@ -626,7 +713,10 @@ fn interpolate_env_placeholders(value: &str) -> String {
         if var_name.is_empty() {
             output.push_str("${}");
         } else {
-            let resolved = std::env::var(var_name).unwrap_or_default();
+            let resolved = std::env::var(var_name)
+                .ok()
+                .or_else(|| crate::config::resolve_env_value(&format!("secret:{var_name}")))
+                .unwrap_or_default();
             output.push_str(&resolved);
         }
 
@@ -635,4 +725,71 @@ fn interpolate_env_placeholders(value: &str) -> String {
 
     output.push_str(&value[cursor..]);
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_bearer_token_strips_bearer_prefix() {
+        let token = parse_bearer_token("Bearer abc123", "test").unwrap();
+        assert_eq!(token, "abc123");
+    }
+
+    #[test]
+    fn parse_bearer_token_case_insensitive() {
+        assert_eq!(parse_bearer_token("bearer abc", "test").unwrap(), "abc");
+        assert_eq!(parse_bearer_token("BEARER abc", "test").unwrap(), "abc");
+        assert_eq!(parse_bearer_token("BeArEr abc", "test").unwrap(), "abc");
+    }
+
+    #[test]
+    fn parse_bearer_token_raw_token_passthrough() {
+        let token = parse_bearer_token("abc123", "test").unwrap();
+        assert_eq!(token, "abc123");
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_non_bearer_scheme() {
+        let err = parse_bearer_token("Basic dXNlcjpwYXNz", "myserver").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("unsupported Authorization scheme 'Basic'")
+        );
+        assert!(err.to_string().contains("myserver"));
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_empty_value() {
+        assert!(parse_bearer_token("", "test").is_err());
+        assert!(parse_bearer_token("   ", "test").is_err());
+    }
+
+    #[test]
+    fn parse_bearer_token_rejects_empty_bearer_value() {
+        let err = parse_bearer_token("Bearer ", "test").unwrap_err();
+        assert!(err.to_string().contains("empty Bearer token"));
+    }
+
+    #[test]
+    fn parse_bearer_token_trims_whitespace() {
+        assert_eq!(parse_bearer_token("  Bearer abc  ", "test").unwrap(), "abc");
+        assert_eq!(
+            parse_bearer_token("  raw_token  ", "test").unwrap(),
+            "raw_token"
+        );
+    }
+
+    #[test]
+    fn interpolate_env_placeholders_no_placeholders() {
+        assert_eq!(interpolate_env_placeholders("hello world"), "hello world");
+    }
+
+    #[test]
+    fn interpolate_env_placeholders_literal_passthrough() {
+        assert_eq!(interpolate_env_placeholders("no-vars-here"), "no-vars-here");
+        assert_eq!(interpolate_env_placeholders("${"), "${");
+        assert_eq!(interpolate_env_placeholders("${}"), "${}");
+    }
 }
