@@ -54,6 +54,12 @@ pub struct SetStatusError(String);
 /// way the worker can describe). Workers **must** emit an `outcome` status
 /// before finishing; the system will nudge them back to work if they try to
 /// stop without one.
+///
+/// NOTE: The outcome gate only checks *whether* an outcome was signaled, not
+/// *whether all task steps are actually complete*. Premature outcome signaling
+/// (e.g. after 2 of 7 steps) is handled via prompt-level instructions, not
+/// structural enforcement. See the worker prompt for the anti-premature-exit
+/// language.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusKind {
@@ -110,7 +116,7 @@ impl Tool for SetStatusTool {
                         "type": "string",
                         "enum": ["progress", "outcome"],
                         "default": "progress",
-                        "description": "Use \"progress\" for intermediate updates. Use \"outcome\" when the task has reached a terminal result (success or failure) and you are ready to finish."
+                        "description": "Use \"progress\" for intermediate updates. Use \"outcome\" ONLY when ALL steps of the task have reached a terminal result (success or failure) and you are ready to finish. Do not signal outcome if there are remaining steps — premature outcome signaling causes the task to be incorrectly reported as complete."
                     }
                 },
                 "required": ["status"]

@@ -67,8 +67,8 @@ pub use attachment_recall::{
 };
 pub use branch_tool::{BranchArgs, BranchError, BranchOutput, BranchTool};
 pub use browser::{
-    ActKind, BrowserAction, BrowserArgs, BrowserError, BrowserOutput, BrowserTool, ElementSummary,
-    SharedBrowserHandle, TabInfo,
+    BrowserError, BrowserOutput, SharedBrowserHandle, TabInfo, new_shared_browser_handle,
+    register_browser_tools,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
 pub use channel_recall::{
@@ -518,16 +518,7 @@ pub fn create_worker_tool_server(
     }
 
     if browser_config.enabled {
-        let browser_tool = if let Some(shared) = runtime_config
-            .shared_browser
-            .as_ref()
-            .filter(|_| browser_config.persist_session)
-        {
-            BrowserTool::new_shared(shared.clone(), browser_config, screenshot_dir)
-        } else {
-            BrowserTool::new(browser_config, screenshot_dir)
-        };
-        server = server.tool(browser_tool);
+        server = register_browser_tools(server, browser_config, screenshot_dir, &runtime_config);
     }
 
     if let Some(key) = brave_search_key {
@@ -609,16 +600,7 @@ pub fn create_cortex_chat_tool_server(
         .tool(ExecTool::new(workspace, sandbox));
 
     if browser_config.enabled {
-        let browser_tool = if let Some(shared) = runtime_config
-            .shared_browser
-            .as_ref()
-            .filter(|_| browser_config.persist_session)
-        {
-            BrowserTool::new_shared(shared.clone(), browser_config, screenshot_dir)
-        } else {
-            BrowserTool::new(browser_config, screenshot_dir)
-        };
-        server = server.tool(browser_tool);
+        server = register_browser_tools(server, browser_config, screenshot_dir, &runtime_config);
     }
 
     if let Some(key) = brave_search_key {

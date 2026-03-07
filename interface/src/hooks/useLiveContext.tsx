@@ -1,6 +1,6 @@
 import { createContext, useContext, useCallback, useRef, useState, useMemo, type ReactNode } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type WorkerStatusEvent, type TranscriptStep, type OpenCodePart, type OpenCodePartUpdatedEvent } from "@/api/client";
+import { api, type AgentMessageEvent, type ChannelInfo, type ToolStartedEvent, type ToolCompletedEvent, type TranscriptStep, type OpenCodePart, type OpenCodePartUpdatedEvent, type WorkerTextEvent } from "@/api/client";
 import { generateId } from "@/lib/id";
 import { useEventSource, type ConnectionState } from "@/hooks/useEventSource";
 import { useChannelLiveState, type ChannelLiveState, type ActiveWorker } from "@/hooks/useChannelLiveState";
@@ -147,18 +147,9 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 
 	const wrappedWorkerStatus = useCallback((data: unknown) => {
 		channelHandlers.worker_status(data);
-		const event = data as WorkerStatusEvent;
-		// Push status text as an action step in the live transcript
-		if (event.status && event.status !== "starting" && event.status !== "running") {
-			setLiveTranscripts((prev) => {
-				const steps = prev[event.worker_id] ?? [];
-				const step: TranscriptStep = {
-					type: "action",
-					content: [{ type: "text", text: event.status }],
-				};
-				return { ...prev, [event.worker_id]: [...steps, step] };
-			});
-		}
+		// Status text comes from set_status tool calls which already appear as
+		// paired tool_started/tool_completed events in the transcript. No need
+		// to duplicate them as standalone text steps.
 		bumpWorkerVersion();
 	}, [channelHandlers, bumpWorkerVersion]);
 
@@ -249,6 +240,20 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		bumpWorkerVersion();
 	}, [bumpWorkerVersion]);
 
+	// Handle worker text — model reasoning text emitted between tool calls
+	const handleWorkerText = useCallback((data: unknown) => {
+		const event = data as WorkerTextEvent;
+		setLiveTranscripts((prev) => {
+			const steps = prev[event.worker_id] ?? [];
+			const step: TranscriptStep = {
+				type: "action",
+				content: [{ type: "text", text: event.text }],
+			};
+			return { ...prev, [event.worker_id]: [...steps, step] };
+		});
+		bumpWorkerVersion();
+	}, [bumpWorkerVersion]);
+
 	// Merge channel handlers with agent message + task handlers
 	const handlers = useMemo(
 		() => ({
@@ -260,11 +265,12 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 			tool_started: wrappedToolStarted,
 			tool_completed: wrappedToolCompleted,
 			opencode_part_updated: handleOpenCodePartUpdated,
+			worker_text: handleWorkerText,
 			agent_message_sent: handleAgentMessage,
 			agent_message_received: handleAgentMessage,
 			task_updated: bumpTaskVersion,
 		}),
-		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleAgentMessage, bumpTaskVersion],
+		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleWorkerText, handleAgentMessage, bumpTaskVersion],
 	);
 
 	const onReconnect = useCallback(() => {

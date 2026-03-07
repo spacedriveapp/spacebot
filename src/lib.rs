@@ -289,6 +289,14 @@ pub enum ProcessEvent {
         text_delta: String,
         aggregated_text: String,
     },
+    /// A worker emitted text content (model reasoning between tool calls).
+    /// Sent once per completion response, containing the full text for that turn.
+    WorkerText {
+        agent_id: AgentId,
+        worker_id: WorkerId,
+        channel_id: Option<ChannelId>,
+        text: String,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.

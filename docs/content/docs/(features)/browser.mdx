@@ -79,11 +79,26 @@ Single `browser` tool with an `action` discriminator. All actions share one argu
 Act kinds:
 
 - **`click`** -- Click an element by ref.
-- **`type`** -- Click an element to focus it, then type `text` into it.
+- **`type`** -- Click an element to focus it, then type `text` into it. For passwords and credentials, use `secret` instead of `text` (see below).
 - **`press_key`** -- Press a keyboard key (e.g., `Enter`, `Tab`, `Escape`). With `element_ref`, presses on that element. Without, dispatches to the page.
 - **`hover`** -- Move the mouse over an element.
 - **`scroll_into_view`** -- Scroll an element into the viewport.
 - **`focus`** -- Focus an element without clicking.
+
+### Secure Text Entry
+
+The `browser_type` tool accepts a `secret` parameter as an alternative to `text` for typing sensitive values into form fields. When `secret` is provided, the value is resolved from the [secret store](/docs/secrets) and typed into the element without ever appearing in tool arguments, output, or LLM context.
+
+```
+browser_type { index: 2, secret: "GH_PASSWORD" }
+  → resolves GH_PASSWORD from the secret store
+  → types the value into the element
+  → returns: "Typed secret 'GH_PASSWORD' into element at index 2"
+```
+
+The `text` and `secret` parameters are mutually exclusive. Use `text` for non-sensitive input (usernames, search queries, form data) and `secret` for passwords, tokens, API keys, and any other credentials. Both tool-category and system-category secrets can be used.
+
+If a task references a credential by environment variable name (e.g. "use password from `$GH_PASSWORD`"), the worker should pass that name to the `secret` parameter. Never shell out to `echo` or otherwise resolve credential values into plain text for browser entry.
 
 ### JavaScript
 
@@ -96,19 +111,17 @@ Act kinds:
 ## Typical Workflow
 
 ```
-browser { action: "launch" }
-browser { action: "navigate", url: "https://example.com" }
-browser { action: "snapshot" }
-  → e0: [textbox] "Email", e1: [textbox] "Password", e2: [button] "Sign In"
-browser { action: "act", act_kind: "click", element_ref: "e0" }
-browser { action: "act", act_kind: "type", element_ref: "e0", text: "user@example.com" }
-browser { action: "act", act_kind: "click", element_ref: "e1" }
-browser { action: "act", act_kind: "type", element_ref: "e1", text: "hunter2" }
-browser { action: "act", act_kind: "click", element_ref: "e2" }
-browser { action: "snapshot" }
+browser_launch {}
+browser_navigate { url: "https://example.com" }
+browser_snapshot {}
+  → [index=0] textbox "Email", [index=1] textbox "Password", [index=2] button "Sign In"
+browser_type { index: 0, text: "user@example.com" }
+browser_type { index: 1, secret: "ACCOUNT_PASSWORD" }   ← password from secret store
+browser_click { index: 2 }
+browser_snapshot {}
   → (new page state after login)
-browser { action: "screenshot" }
-browser { action: "close" }
+browser_screenshot {}
+browser_close {}
 ```
 
 ## Screenshots

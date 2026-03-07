@@ -422,7 +422,8 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         } => event_channel.as_ref() == Some(channel_id),
         ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::StatusUpdate { .. }
-        | ProcessEvent::TaskUpdated { .. } => false,
+        | ProcessEvent::TaskUpdated { .. }
+        | ProcessEvent::WorkerText { .. } => false,
     }
 }
 

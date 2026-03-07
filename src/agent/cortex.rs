@@ -1257,7 +1257,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         // UI-only events — no cortex signal needed.
         ProcessEvent::OpenCodeSessionCreated { .. }
         | ProcessEvent::OpenCodePartUpdated { .. }
-        | ProcessEvent::WorkerInitialResult { .. } => return None,
+        | ProcessEvent::WorkerInitialResult { .. }
+        | ProcessEvent::WorkerText { .. } => return None,
     })
 }
 

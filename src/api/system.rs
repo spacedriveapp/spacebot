@@ -99,6 +99,7 @@ pub(super) async fn events_sse(
                             ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
                             ApiEvent::TaskUpdated { .. } => "task_updated",
                             ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
+                            ApiEvent::WorkerText { .. } => "worker_text",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

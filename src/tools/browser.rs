@@ -1,18 +1,32 @@
-//! Browser automation tool for workers.
+//! Browser automation tools for workers.
 //!
-//! Provides navigation, element interaction, screenshots, and page observation
-//! via headless Chrome using chromiumoxide. Uses an accessibility-tree based
-//! ref system for LLM-friendly element addressing.
+//! Provides a suite of separate tools (navigate, click, type, snapshot, etc.)
+//! backed by a shared browser state. Uses Chrome's native CDP Accessibility API
+//! (`Accessibility.getFullAXTree`) to extract the ARIA tree directly from the
+//! browser's accessibility layer. Interactive elements get sequential indices
+//! and their `BackendNodeId` is stored for reliable element resolution.
+//!
+//! Element resolution: index → `BackendNodeId` (from CDP accessibility tree) →
+//! `DOM.getBoxModel` for coordinates → `Input.dispatchMouseEvent` for clicks.
+//! This avoids fragile CSS selectors and works reliably on SPAs and complex
+//! pages where JS injection fails.
 
 use crate::config::BrowserConfig;
+use crate::secrets::store::SecretsStore;
+
 use chromiumoxide::browser::{Browser, BrowserConfig as ChromeConfig};
 use chromiumoxide::fetcher::{BrowserFetcher, BrowserFetcherOptions};
+use chromiumoxide::handler::viewport::Viewport;
 use chromiumoxide::page::ScreenshotParams;
 use chromiumoxide_cdp::cdp::browser_protocol::accessibility::{
-    EnableParams as AxEnableParams, GetFullAxTreeParams,
+    AxNode, AxPropertyName, GetFullAxTreeParams,
+};
+use chromiumoxide_cdp::cdp::browser_protocol::dom::{
+    BackendNodeId, GetBoxModelParams, ResolveNodeParams,
 };
 use chromiumoxide_cdp::cdp::browser_protocol::input::{
-    DispatchKeyEventParams, DispatchKeyEventType,
+    DispatchKeyEventParams, DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
+    MouseButton,
 };
 use chromiumoxide_cdp::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use futures::StreamExt as _;
@@ -22,11 +36,13 @@ use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+// URL validation (SSRF protection)
 
 /// Validate that a URL is safe for the browser to navigate to.
 /// Blocks private/loopback IPs, link-local addresses, and cloud metadata endpoints
@@ -48,7 +64,6 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
         return Err(BrowserError::new("URL has no host"));
     };
 
-    // Block cloud metadata endpoints regardless of how the IP resolves
     if host == "metadata.google.internal"
         || host == "169.254.169.254"
         || host == "metadata.aws.internal"
@@ -58,7 +73,6 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
         ));
     }
 
-    // If the host parses as an IP address, check against blocked ranges
     if let Ok(ip) = host.parse::<IpAddr>()
         && is_blocked_ip(ip)
     {
@@ -67,7 +81,6 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
         )));
     }
 
-    // IPv6 addresses in brackets (url crate strips them for host_str)
     if let Some(stripped) = host.strip_prefix('[').and_then(|h| h.strip_suffix(']'))
         && let Ok(ip) = stripped.parse::<IpAddr>()
         && is_blocked_ip(ip)
@@ -80,50 +93,520 @@ fn validate_url(url: &str) -> Result<(), BrowserError> {
     Ok(())
 }
 
-/// Returns true if the IP address belongs to a private, loopback, or
-/// link-local range that should not be reachable from the browser tool.
 fn is_blocked_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
-            v4.is_loopback()                             // 127.0.0.0/8
-            || v4.is_private()                            // 10/8, 172.16/12, 192.168/16
-            || v4.is_link_local()                         // 169.254.0.0/16
-            || v4.is_broadcast()                          // 255.255.255.255
-            || v4.is_unspecified()                        // 0.0.0.0
-            || is_v4_cgnat(v4) // 100.64.0.0/10
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_unspecified()
+                || is_v4_cgnat(v4)
         }
         IpAddr::V6(v6) => {
-            v6.is_loopback()                             // ::1
-            || v6.is_unspecified()                        // ::
-            || is_v6_unique_local(v6)                    // fd00::/8 (fc00::/7)
-            || is_v6_link_local(v6)                      // fe80::/10
-            || is_v4_mapped_blocked(v6)
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || is_v6_unique_local(v6)
+                || is_v6_link_local(v6)
+                || is_v4_mapped_blocked(v6)
         }
     }
 }
 
 fn is_v4_cgnat(ip: Ipv4Addr) -> bool {
     let octets = ip.octets();
-    octets[0] == 100 && (octets[1] & 0xC0) == 64 // 100.64.0.0/10
+    octets[0] == 100 && (octets[1] & 0xC0) == 64
 }
 
-fn is_v6_unique_local(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xFE00) == 0xFC00 // fc00::/7
+fn is_v6_unique_local(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFE00) == 0xFC00
 }
 
-fn is_v6_link_local(ip: Ipv6Addr) -> bool {
-    (ip.segments()[0] & 0xFFC0) == 0xFE80 // fe80::/10
+fn is_v6_link_local(ip: std::net::Ipv6Addr) -> bool {
+    (ip.segments()[0] & 0xFFC0) == 0xFE80
 }
 
-/// Check if an IPv6 address is a v4-mapped address (::ffff:x.x.x.x)
-/// pointing to a blocked IPv4 range.
-fn is_v4_mapped_blocked(ip: Ipv6Addr) -> bool {
+fn is_v4_mapped_blocked(ip: std::net::Ipv6Addr) -> bool {
     if let Some(v4) = ip.to_ipv4_mapped() {
         is_blocked_ip(IpAddr::V4(v4))
     } else {
         false
     }
 }
+
+// Page readiness helper
+
+/// Wait for the page to be "ready enough" for DOM extraction.
+///
+/// Many sites are SPAs that load a shell document and then hydrate with JS.
+/// `chromiumoxide::Page::goto` returns after the main-frame load event, but
+/// interactive content may not exist yet. This helper polls the page's
+/// `document.readyState` and body child count to detect when content has
+/// rendered, with a generous timeout so we don't block forever on broken pages.
+async fn wait_for_page_ready(page: &chromiumoxide::Page) {
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
+    const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+    let start = std::time::Instant::now();
+
+    loop {
+        if start.elapsed() >= MAX_WAIT {
+            break;
+        }
+
+        // Check if the page has meaningful content: readyState is "complete"
+        // and the body has at least one child element.
+        let ready = page
+            .evaluate(
+                "(document.readyState === 'complete' && \
+                 document.body && document.body.children.length > 0)",
+            )
+            .await
+            .ok()
+            .and_then(|result| result.value().cloned())
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        if ready {
+            // Give JS frameworks one more tick to finish hydration.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            break;
+        }
+
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+// Accessibility snapshot types (CDP-native)
+
+/// Roles that represent interactive elements the LLM can target via index.
+/// Only nodes with these roles get assigned an index in the snapshot.
+const INTERACTIVE_ROLES: &[&str] = &[
+    "button",
+    "checkbox",
+    "combobox",
+    "link",
+    "menuitem",
+    "menuitemcheckbox",
+    "menuitemradio",
+    "option",
+    "radio",
+    "searchbox",
+    "slider",
+    "spinbutton",
+    "switch",
+    "tab",
+    "textbox",
+    "treeitem",
+];
+
+/// Roles that are structural noise and should be skipped when they have no
+/// name and no interactive descendants. Keeps the YAML output compact.
+const SKIP_UNNAMED_ROLES: &[&str] = &[
+    "generic",
+    "none",
+    "presentation",
+    "InlineTextBox",
+    "LineBreak",
+];
+
+/// A snapshot of the page's accessibility tree, extracted via CDP.
+///
+/// Contains a tree of `SnapshotNode`s for LLM display and a parallel map from
+/// element indices to `BackendNodeId` for interaction.
+#[derive(Debug, Clone)]
+pub(crate) struct AxSnapshot {
+    /// Root nodes of the tree (usually one, but CDP can return multiple roots).
+    pub roots: Vec<SnapshotNode>,
+    /// `BackendNodeId` for each indexed interactive element.
+    /// `node_ids[i]` corresponds to the element with `index == i` in the tree.
+    pub node_ids: Vec<BackendNodeId>,
+}
+
+/// A node in the processed accessibility tree, ready for rendering.
+#[derive(Debug, Clone)]
+pub(crate) struct SnapshotNode {
+    pub role: String,
+    pub name: String,
+    /// Sequential index assigned to interactive elements. `None` for structural nodes.
+    pub index: Option<usize>,
+    pub children: Vec<SnapshotNode>,
+    // State properties
+    pub checked: Option<String>,
+    pub disabled: bool,
+    pub expanded: Option<bool>,
+    pub selected: bool,
+    pub level: Option<i64>,
+    pub pressed: Option<String>,
+    pub value: Option<String>,
+    pub description: Option<String>,
+}
+
+impl AxSnapshot {
+    /// Build from a flat CDP `AxNode` list by reconstructing the tree and
+    /// assigning sequential indices to interactive elements.
+    fn from_ax_nodes(nodes: Vec<AxNode>) -> Self {
+        // Build a lookup from AxNodeId → index in the flat list.
+        let id_to_idx: HashMap<String, usize> = nodes
+            .iter()
+            .enumerate()
+            .map(|(i, node)| (node.node_id.inner().clone(), i))
+            .collect();
+
+        // Track which nodes are roots (no parent) or whose parent_id doesn't
+        // exist in the tree (happens with frame roots).
+        let root_indices: Vec<usize> = nodes
+            .iter()
+            .enumerate()
+            .filter(|(_, node)| {
+                node.parent_id
+                    .as_ref()
+                    .is_none_or(|pid| !id_to_idx.contains_key(pid.inner()))
+            })
+            .map(|(i, _)| i)
+            .collect();
+
+        let mut next_index: usize = 0;
+        let mut node_ids: Vec<BackendNodeId> = Vec::new();
+
+        // Collect non-ignored descendants of an ignored node. The CDP AX
+        // tree marks many structural nodes as ignored, but their children may
+        // be interactive (button inside an ignored generic div). We must walk
+        // through ignored nodes to reach them.
+        fn collect_children_of_ignored(
+            flat: &[AxNode],
+            idx: usize,
+            id_to_idx: &HashMap<String, usize>,
+            next_index: &mut usize,
+            node_ids: &mut Vec<BackendNodeId>,
+        ) -> Vec<SnapshotNode> {
+            let ax = &flat[idx];
+            let mut result = Vec::new();
+            if let Some(child_ids) = &ax.child_ids {
+                for child_id in child_ids {
+                    if let Some(&child_idx) = id_to_idx.get(child_id.inner()) {
+                        if flat[child_idx].ignored {
+                            // Recursively collect through chains of ignored nodes.
+                            result.extend(collect_children_of_ignored(
+                                flat, child_idx, id_to_idx, next_index, node_ids,
+                            ));
+                        } else if let Some(child_node) =
+                            build_node(flat, child_idx, id_to_idx, next_index, node_ids)
+                        {
+                            result.push(child_node);
+                        }
+                    }
+                }
+            }
+            result
+        }
+
+        // Recursive tree builder
+        fn build_node(
+            flat: &[AxNode],
+            idx: usize,
+            id_to_idx: &HashMap<String, usize>,
+            next_index: &mut usize,
+            node_ids: &mut Vec<BackendNodeId>,
+        ) -> Option<SnapshotNode> {
+            let ax = &flat[idx];
+
+            // Ignored nodes aren't rendered, but their children may contain
+            // non-ignored interactive elements. Handled by the caller via
+            // `collect_children_of_ignored`.
+            if ax.ignored {
+                return None;
+            }
+
+            let role = ax
+                .role
+                .as_ref()
+                .and_then(|v| v.value.as_ref())
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let name = ax
+                .name
+                .as_ref()
+                .and_then(|v| v.value.as_ref())
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+
+            let description = ax
+                .description
+                .as_ref()
+                .and_then(|v| v.value.as_ref())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+
+            let value_text = ax
+                .value
+                .as_ref()
+                .and_then(|v| v.value.as_ref())
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty());
+
+            // Extract state properties from the properties array.
+            let mut checked = None;
+            let mut disabled = false;
+            let mut expanded = None;
+            let mut selected = false;
+            let mut level = None;
+            let mut pressed = None;
+
+            if let Some(properties) = &ax.properties {
+                for prop in properties {
+                    match prop.name {
+                        AxPropertyName::Checked => {
+                            checked = prop
+                                .value
+                                .value
+                                .as_ref()
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                        AxPropertyName::Disabled => {
+                            disabled = prop
+                                .value
+                                .value
+                                .as_ref()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                        }
+                        AxPropertyName::Expanded => {
+                            expanded = prop.value.value.as_ref().and_then(|v| v.as_bool());
+                        }
+                        AxPropertyName::Selected => {
+                            selected = prop
+                                .value
+                                .value
+                                .as_ref()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                        }
+                        AxPropertyName::Level => {
+                            level = prop.value.value.as_ref().and_then(|v| v.as_i64());
+                        }
+                        AxPropertyName::Pressed => {
+                            pressed = prop
+                                .value
+                                .value
+                                .as_ref()
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            // Build children recursively. Ignored children are transparent —
+            // we walk through them to collect their non-ignored descendants.
+            let mut children = Vec::new();
+            if let Some(child_ids) = &ax.child_ids {
+                for child_id in child_ids {
+                    if let Some(&child_idx) = id_to_idx.get(child_id.inner()) {
+                        if flat[child_idx].ignored {
+                            children.extend(collect_children_of_ignored(
+                                flat, child_idx, id_to_idx, next_index, node_ids,
+                            ));
+                        } else if let Some(child_node) =
+                            build_node(flat, child_idx, id_to_idx, next_index, node_ids)
+                        {
+                            children.push(child_node);
+                        }
+                    }
+                }
+            }
+
+            // Assign an index to interactive elements that have a BackendNodeId.
+            let role_lower = role.to_lowercase();
+            let is_interactive = INTERACTIVE_ROLES.contains(&role_lower.as_str());
+            let element_index =
+                if let Some(backend_node_id) = ax.backend_dom_node_id.filter(|_| is_interactive) {
+                    let idx = *next_index;
+                    *next_index += 1;
+                    node_ids.push(backend_node_id);
+                    Some(idx)
+                } else {
+                    None
+                };
+
+            // Skip structural nodes that have no name, no index, and only serve
+            // as tree wrappers — but only if they have exactly one child (pass
+            // through) or zero children (prune entirely).
+            if SKIP_UNNAMED_ROLES.contains(&role.as_str())
+                && element_index.is_none()
+                && name.is_empty()
+            {
+                match children.len() {
+                    0 => return None,
+                    1 => return Some(children.into_iter().next().expect("len checked")),
+                    _ => {
+                        // Multiple children — keep the node as a container
+                        // but only if children are non-trivial.
+                    }
+                }
+            }
+
+            Some(SnapshotNode {
+                role,
+                name,
+                index: element_index,
+                children,
+                checked,
+                disabled,
+                expanded,
+                selected,
+                level,
+                pressed,
+                value: value_text,
+                description,
+            })
+        }
+
+        let mut roots = Vec::new();
+        for &root_idx in &root_indices {
+            if nodes[root_idx].ignored {
+                // Root itself is ignored — collect its non-ignored descendants.
+                roots.extend(collect_children_of_ignored(
+                    &nodes,
+                    root_idx,
+                    &id_to_idx,
+                    &mut next_index,
+                    &mut node_ids,
+                ));
+            } else if let Some(node) =
+                build_node(&nodes, root_idx, &id_to_idx, &mut next_index, &mut node_ids)
+            {
+                roots.push(node);
+            }
+        }
+
+        Self { roots, node_ids }
+    }
+
+    /// Render the accessibility tree as compact YAML-like text for LLM consumption.
+    pub fn render(&self) -> String {
+        let mut output = String::with_capacity(4096);
+        for root in &self.roots {
+            render_snapshot_node(root, 0, &mut output);
+        }
+        output
+    }
+
+    /// Look up the `BackendNodeId` for an element index.
+    pub fn backend_node_id_for_index(&self, index: usize) -> Option<BackendNodeId> {
+        self.node_ids.get(index).copied()
+    }
+
+    /// Total number of indexed interactive elements.
+    pub fn element_count(&self) -> usize {
+        self.node_ids.len()
+    }
+}
+
+fn render_snapshot_node(node: &SnapshotNode, depth: usize, output: &mut String) {
+    let indent = "  ".repeat(depth);
+
+    // Skip the root "RootWebArea" wrapper — just render children directly.
+    if node.role == "RootWebArea" || node.role == "rootWebArea" {
+        for child in &node.children {
+            render_snapshot_node(child, depth, output);
+        }
+        return;
+    }
+
+    // Build the line: `- role "name" [attrs]:`
+    output.push_str(&indent);
+    output.push_str("- ");
+    output.push_str(&node.role);
+
+    if !node.name.is_empty() {
+        output.push_str(" \"");
+        // Truncate very long names for context efficiency.
+        let display_name = if node.name.len() > 200 {
+            format!("{}...", &node.name[..200])
+        } else {
+            node.name.clone()
+        };
+        output.push_str(&display_name.replace('"', "\\\""));
+        output.push('"');
+    }
+
+    // Attributes
+    if let Some(index) = node.index {
+        output.push_str(&format!(" [index={index}]"));
+    }
+    if let Some(level) = node.level {
+        output.push_str(&format!(" [level={level}]"));
+    }
+    if node.disabled {
+        output.push_str(" [disabled]");
+    }
+    if node.selected {
+        output.push_str(" [selected]");
+    }
+    if let Some(ref checked) = node.checked {
+        match checked.as_str() {
+            "true" => output.push_str(" [checked]"),
+            "false" => output.push_str(" [unchecked]"),
+            "mixed" => output.push_str(" [checked=mixed]"),
+            _ => {}
+        }
+    }
+    if let Some(ref pressed) = node.pressed {
+        match pressed.as_str() {
+            "true" => output.push_str(" [pressed]"),
+            "mixed" => output.push_str(" [pressed=mixed]"),
+            _ => {}
+        }
+    }
+    if let Some(true) = node.expanded {
+        output.push_str(" [expanded]");
+    } else if let Some(false) = node.expanded {
+        output.push_str(" [collapsed]");
+    }
+
+    // Value (e.g., text input current value)
+    if let Some(ref value) = node.value {
+        let display_value = if value.len() > 100 {
+            format!("{}...", &value[..100])
+        } else {
+            value.clone()
+        };
+        output.push_str(&format!(
+            " value=\"{}\"",
+            display_value.replace('"', "\\\"")
+        ));
+    }
+
+    let has_children = !node.children.is_empty();
+    let has_description = node.description.is_some();
+
+    if has_children || has_description {
+        output.push_str(":\n");
+    } else {
+        output.push('\n');
+    }
+
+    if let Some(ref description) = node.description {
+        output.push_str(&indent);
+        output.push_str("  /description: ");
+        output.push_str(description);
+        output.push('\n');
+    }
+
+    for child in &node.children {
+        render_snapshot_node(child, depth + 1, output);
+    }
+}
+
+// Shared browser state
 
 /// Opaque handle to shared browser state that persists across worker lifetimes.
 ///
@@ -136,38 +619,22 @@ pub fn new_shared_browser_handle() -> SharedBrowserHandle {
     Arc::new(Mutex::new(BrowserState::new()))
 }
 
-/// Tool for browser automation (worker-only).
-#[derive(Debug, Clone)]
-pub struct BrowserTool {
-    state: Arc<Mutex<BrowserState>>,
-    config: BrowserConfig,
-    screenshot_dir: PathBuf,
-}
-
 /// Internal browser state managed across tool invocations.
 ///
 /// When `persist_session` is enabled this struct lives in `RuntimeConfig` (via
 /// `SharedBrowserHandle`) and is shared across worker lifetimes. Otherwise each
-/// `BrowserTool` owns its own instance.
+/// tool set owns its own instance.
 pub struct BrowserState {
     browser: Option<Browser>,
-    /// Background task driving the CDP WebSocket handler.
     _handler_task: Option<JoinHandle<()>>,
-    /// Tracked pages by target ID.
     pages: HashMap<String, chromiumoxide::Page>,
-    /// Currently active page target ID.
     active_target: Option<String>,
-    /// Element ref map from the last snapshot, keyed by ref like "e1".
-    element_refs: HashMap<String, ElementRef>,
-    /// Counter for generating element refs.
-    next_ref: usize,
-    /// Chrome's user data directory. For ephemeral sessions this is a random
-    /// temp dir cleaned up on drop. For persistent sessions this is a stable
-    /// path under the instance dir that survives agent restarts.
+    /// Cached accessibility snapshot from the last `browser_snapshot` call.
+    /// Invalidated on navigation, tab switch, and explicit snapshot refresh.
+    snapshot: Option<AxSnapshot>,
     user_data_dir: Option<PathBuf>,
     /// When true, `user_data_dir` is a stable path that should NOT be deleted
-    /// on drop — it holds cookies, localStorage, and login sessions that must
-    /// survive across agent restarts.
+    /// on drop — it holds cookies, localStorage, and login sessions.
     persistent_profile: bool,
 }
 
@@ -178,28 +645,27 @@ impl BrowserState {
             _handler_task: None,
             pages: HashMap::new(),
             active_target: None,
-            element_refs: HashMap::new(),
-            next_ref: 0,
+            snapshot: None,
             user_data_dir: None,
             persistent_profile: false,
         }
+    }
+
+    /// Invalidate the cached snapshot. Called after any page-mutating action.
+    fn invalidate_snapshot(&mut self) {
+        self.snapshot = None;
     }
 }
 
 impl Drop for BrowserState {
     fn drop(&mut self) {
-        // Browser and handler task are dropped automatically —
-        // chromiumoxide's Child has kill_on_drop(true).
-
-        // Persistent profiles store cookies, localStorage, and login sessions
-        // that must survive across agent restarts — never delete them.
+        // Persistent profiles store cookies and login sessions that must
+        // survive across agent restarts — never delete them.
         if self.persistent_profile {
             return;
         }
 
         if let Some(dir) = self.user_data_dir.take() {
-            // Offload sync fs cleanup to a blocking thread so we don't stall
-            // the tokio worker that's dropping this state.
             if let Ok(handle) = tokio::runtime::Handle::try_current() {
                 handle.spawn_blocking(move || {
                     if let Err(error) = std::fs::remove_dir_all(&dir) {
@@ -210,14 +676,11 @@ impl Drop for BrowserState {
                         );
                     }
                 });
-            } else {
-                // Dropped outside a tokio runtime (unlikely) — clean up inline.
-                if let Err(error) = std::fs::remove_dir_all(&dir) {
-                    eprintln!(
-                        "failed to clean up browser user data dir {}: {error}",
-                        dir.display()
-                    );
-                }
+            } else if let Err(error) = std::fs::remove_dir_all(&dir) {
+                eprintln!(
+                    "failed to clean up browser user data dir {}: {error}",
+                    dir.display()
+                );
             }
         }
     }
@@ -229,53 +692,14 @@ impl std::fmt::Debug for BrowserState {
             .field("has_browser", &self.browser.is_some())
             .field("pages", &self.pages.len())
             .field("active_target", &self.active_target)
-            .field("element_refs", &self.element_refs.len())
+            .field("has_snapshot", &self.snapshot.is_some())
             .field("persistent_profile", &self.persistent_profile)
             .finish()
     }
 }
 
-/// Stored info about an element from the accessibility tree snapshot.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-struct ElementRef {
-    role: String,
-    name: Option<String>,
-    description: Option<String>,
-    /// The AX node ID from the accessibility tree.
-    ax_node_id: String,
-    backend_node_id: Option<i64>,
-}
+// Error type
 
-impl BrowserTool {
-    /// Create a tool with its own isolated browser state (default, non-persistent).
-    pub fn new(config: BrowserConfig, screenshot_dir: PathBuf) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(BrowserState::new())),
-            config,
-            screenshot_dir,
-        }
-    }
-
-    /// Create a tool backed by a shared browser state handle.
-    ///
-    /// Used when `persist_session = true`. Multiple workers share the same
-    /// `SharedBrowserHandle`, so the browser process and tabs survive across
-    /// worker lifetimes.
-    pub fn new_shared(
-        shared_state: SharedBrowserHandle,
-        config: BrowserConfig,
-        screenshot_dir: PathBuf,
-    ) -> Self {
-        Self {
-            state: shared_state,
-            config,
-            screenshot_dir,
-        }
-    }
-}
-
-/// Error type for browser tool operations.
 #[derive(Debug, thiserror::Error)]
 #[error("Browser error: {message}")]
 pub struct BrowserError {
@@ -290,104 +714,24 @@ impl BrowserError {
     }
 }
 
-/// The action to perform.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum BrowserAction {
-    /// Launch the browser. Must be called before any other action.
-    Launch,
-    /// Navigate the active tab to a URL.
-    Navigate,
-    /// Open a new tab, optionally at a URL.
-    Open,
-    /// List all open tabs.
-    Tabs,
-    /// Focus a tab by its target ID.
-    Focus,
-    /// Close a tab by its target ID (or the active tab if omitted).
-    CloseTab,
-    /// Get an accessibility tree snapshot of the active page with element refs.
-    Snapshot,
-    /// Perform an interaction on an element by ref.
-    Act,
-    /// Take a screenshot of the active page or a specific element.
-    Screenshot,
-    /// Evaluate JavaScript in the active page.
-    Evaluate,
-    /// Get the page HTML content.
-    Content,
-    /// Shut down the browser.
-    Close,
-}
+// Common output type
 
-/// The kind of interaction to perform via the `act` action.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum ActKind {
-    /// Click an element by ref.
-    Click,
-    /// Type text into an element by ref.
-    Type,
-    /// Press a keyboard key (e.g., "Enter", "Tab", "Escape").
-    PressKey,
-    /// Hover over an element by ref.
-    Hover,
-    /// Scroll an element into the viewport by ref.
-    ScrollIntoView,
-    /// Focus an element by ref.
-    Focus,
-}
-
-/// Arguments for the browser tool.
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct BrowserArgs {
-    /// The action to perform.
-    pub action: BrowserAction,
-    /// URL for navigate/open actions.
-    pub url: Option<String>,
-    /// Target ID for focus/close_tab actions.
-    pub target_id: Option<String>,
-    /// Element reference (e.g., "e3") for act/screenshot actions.
-    pub element_ref: Option<String>,
-    /// Kind of interaction for the act action.
-    pub act_kind: Option<ActKind>,
-    /// Text to type for act:type.
-    pub text: Option<String>,
-    /// Key to press for act:press_key (e.g., "Enter", "Tab").
-    pub key: Option<String>,
-    /// Whether to take a full-page screenshot.
-    #[serde(default)]
-    pub full_page: bool,
-    /// JavaScript expression to evaluate.
-    pub script: Option<String>,
-}
-
-/// Output from the browser tool.
 #[derive(Debug, Serialize)]
 pub struct BrowserOutput {
-    /// Whether the action succeeded.
     pub success: bool,
-    /// Human-readable result message.
     pub message: String,
-    /// Page title (when available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// Current URL (when available).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
-    /// Element snapshot data from the accessibility tree.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub elements: Option<Vec<ElementSummary>>,
-    /// List of open tabs.
+    pub snapshot: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tabs: Option<Vec<TabInfo>>,
-    /// Path to saved screenshot file.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub screenshot_path: Option<String>,
-    /// JavaScript evaluation result.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub eval_result: Option<serde_json::Value>,
-    /// Page HTML content.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,
 }
@@ -399,7 +743,7 @@ impl BrowserOutput {
             message: message.into(),
             title: None,
             url: None,
-            elements: None,
+            snapshot: None,
             tabs: None,
             screenshot_path: None,
             eval_result: None,
@@ -414,25 +758,6 @@ impl BrowserOutput {
     }
 }
 
-/// Summary of an interactive element from the accessibility tree.
-#[derive(Debug, Clone, Serialize)]
-pub struct ElementSummary {
-    /// Short ref like "e1", "e2" for use in subsequent act calls.
-    pub ref_id: String,
-    /// ARIA role (e.g., "button", "textbox", "link").
-    pub role: String,
-    /// Accessible name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Accessible description.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
-    /// Current value (for inputs, sliders, etc.).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub value: Option<String>,
-}
-
-/// Info about an open browser tab.
 #[derive(Debug, Clone, Serialize)]
 pub struct TabInfo {
     pub target_id: String,
@@ -441,141 +766,333 @@ pub struct TabInfo {
     pub active: bool,
 }
 
-/// Roles that are interactive and worth assigning refs to.
-const INTERACTIVE_ROLES: &[&str] = &[
-    "button",
-    "checkbox",
-    "combobox",
-    "link",
-    "listbox",
-    "menu",
-    "menubar",
-    "menuitem",
-    "menuitemcheckbox",
-    "menuitemradio",
-    "option",
-    "radio",
-    "scrollbar",
-    "searchbox",
-    "slider",
-    "spinbutton",
-    "switch",
-    "tab",
-    "textbox",
-    "treeitem",
-];
+// Shared helper struct that all tools reference
 
-/// Max elements to assign refs to in a single snapshot.
-const MAX_ELEMENT_REFS: usize = 200;
-
-impl Tool for BrowserTool {
-    const NAME: &'static str = "browser";
-
-    type Error = BrowserError;
-    type Args = BrowserArgs;
-    type Output = BrowserOutput;
-
-    async fn definition(&self, _prompt: String) -> ToolDefinition {
-        ToolDefinition {
-            name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/browser").to_string(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["launch", "navigate", "open", "tabs", "focus", "close_tab",
-                                 "snapshot", "act", "screenshot", "evaluate", "content", "close"],
-                        "description": "The browser action to perform"
-                    },
-                    "url": {
-                        "type": "string",
-                        "description": "URL for navigate/open actions"
-                    },
-                    "target_id": {
-                        "type": "string",
-                        "description": "Tab target ID for focus/close_tab actions"
-                    },
-                    "element_ref": {
-                        "type": "string",
-                        "description": "Element reference from snapshot (e.g., \"e3\") for act/screenshot"
-                    },
-                    "act_kind": {
-                        "type": "string",
-                        "enum": ["click", "type", "press_key", "hover", "scroll_into_view", "focus"],
-                        "description": "Kind of interaction for the act action"
-                    },
-                    "text": {
-                        "type": "string",
-                        "description": "Text to type for act:type"
-                    },
-                    "key": {
-                        "type": "string",
-                        "description": "Key to press for act:press_key (e.g., \"Enter\", \"Tab\", \"Escape\")"
-                    },
-                    "full_page": {
-                        "type": "boolean",
-                        "default": false,
-                        "description": "Take full-page screenshot instead of viewport only"
-                    },
-                    "script": {
-                        "type": "string",
-                        "description": "JavaScript expression to evaluate (requires evaluate_enabled in config)"
-                    }
-                },
-                "required": ["action"]
-            }),
-        }
-    }
-
-    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        match args.action {
-            BrowserAction::Launch => self.handle_launch().await,
-            BrowserAction::Navigate => self.handle_navigate(args.url).await,
-            BrowserAction::Open => self.handle_open(args.url).await,
-            BrowserAction::Tabs => self.handle_tabs().await,
-            BrowserAction::Focus => self.handle_focus(args.target_id).await,
-            BrowserAction::CloseTab => self.handle_close_tab(args.target_id).await,
-            BrowserAction::Snapshot => self.handle_snapshot().await,
-            BrowserAction::Act => {
-                self.handle_act(args.act_kind, args.element_ref, args.text, args.key)
-                    .await
-            }
-            BrowserAction::Screenshot => {
-                self.handle_screenshot(args.element_ref, args.full_page)
-                    .await
-            }
-            BrowserAction::Evaluate => self.handle_evaluate(args.script).await,
-            BrowserAction::Content => self.handle_content().await,
-            BrowserAction::Close => self.handle_close().await,
-        }
-    }
+/// Shared context cloned into each browser tool. Holds the browser state mutex,
+/// config, screenshot directory, and optional secrets store for secure text entry.
+#[derive(Debug, Clone)]
+pub(crate) struct BrowserContext {
+    state: Arc<Mutex<BrowserState>>,
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    /// Secrets store for resolving secret names in `browser_type`. When present,
+    /// the `secret` parameter can look up credential values without exposing
+    /// them in tool arguments or output.
+    secrets: Option<Arc<SecretsStore>>,
 }
 
-impl BrowserTool {
-    async fn handle_launch(&self) -> Result<BrowserOutput, BrowserError> {
-        // Quick check under the lock — if a browser is already running and
-        // we're in persistent mode, reconnect to existing tabs.
+impl BrowserContext {
+    fn new(
+        state: Arc<Mutex<BrowserState>>,
+        config: BrowserConfig,
+        screenshot_dir: PathBuf,
+        secrets: Option<Arc<SecretsStore>>,
+    ) -> Self {
+        Self {
+            state,
+            config,
+            screenshot_dir,
+            secrets,
+        }
+    }
+
+    /// Get the active page or return an error. Does NOT hold the lock — caller
+    /// must pass a reference to the already-locked state.
+    fn require_active_page<'a>(
+        &self,
+        state: &'a BrowserState,
+    ) -> Result<&'a chromiumoxide::Page, BrowserError> {
+        let target = state
+            .active_target
+            .as_ref()
+            .ok_or_else(|| BrowserError::new("no active tab — navigate or open a tab first"))?;
+        state
+            .pages
+            .get(target)
+            .ok_or_else(|| BrowserError::new("active tab no longer exists"))
+    }
+
+    /// Extract the accessibility snapshot from the active page via CDP.
+    /// Caches the result on `BrowserState` so repeated reads don't re-extract.
+    async fn extract_snapshot<'a>(
+        &self,
+        state: &'a mut BrowserState,
+    ) -> Result<&'a AxSnapshot, BrowserError> {
+        // The `is_some` + `expect` pattern is intentional — `if let Some(s) =
+        // state.snapshot.as_ref()` would borrow `state` for `'a`, preventing
+        // the mutable assignment to `state.snapshot` in the cache-miss path.
+        #[allow(clippy::unnecessary_unwrap)]
+        if state.snapshot.is_some() {
+            return Ok(state.snapshot.as_ref().expect("just checked"));
+        }
+
+        let page = self.require_active_page(state)?;
+
+        let result = page
+            .execute(GetFullAxTreeParams::default())
+            .await
+            .map_err(|error| {
+                BrowserError::new(format!("accessibility tree extraction failed: {error}"))
+            })?;
+
+        let ax_nodes = result.result.nodes;
+
+        tracing::debug!(
+            node_count = ax_nodes.len(),
+            "CDP Accessibility.getFullAXTree returned"
+        );
+
+        let snapshot = AxSnapshot::from_ax_nodes(ax_nodes);
+
+        tracing::debug!(
+            interactive_count = snapshot.element_count(),
+            "accessibility snapshot built"
+        );
+
+        state.snapshot = Some(snapshot);
+        Ok(state.snapshot.as_ref().expect("just stored"))
+    }
+
+    /// Resolve an element target to a `BackendNodeId` for interaction.
+    ///
+    /// When an index is provided, the cached snapshot's `BackendNodeId` map is
+    /// used. When a CSS selector string is provided, it's resolved via
+    /// `page.find_element()` — this path is a fallback for when the LLM already
+    /// knows a selector (e.g., `#login_field`).
+    async fn find_element(
+        &self,
+        state: &mut BrowserState,
+        target: &ElementTarget,
+    ) -> Result<ElementHandle, BrowserError> {
+        match target {
+            ElementTarget::Index(index) => {
+                self.extract_snapshot(state).await?;
+                let snapshot = state.snapshot.as_ref().expect("just extracted");
+
+                let backend_node_id =
+                    snapshot.backend_node_id_for_index(*index).ok_or_else(|| {
+                        BrowserError::new(format!(
+                            "element index {index} not found — run browser_snapshot to get fresh \
+                             indices (max index in current snapshot: {})",
+                            snapshot.element_count().saturating_sub(1)
+                        ))
+                    })?;
+
+                Ok(ElementHandle::BackendNode(backend_node_id))
+            }
+            ElementTarget::Selector(selector) => {
+                let page = self.require_active_page(state)?;
+                let element = page.find_element(selector).await.map_err(|error| {
+                    BrowserError::new(format!(
+                        "element not found via selector '{selector}': {error}. \
+                             The page may have changed — run browser_snapshot again."
+                    ))
+                })?;
+                Ok(ElementHandle::CssElement(element))
+            }
+        }
+    }
+
+    /// Click an element resolved by `find_element`. Uses CDP mouse events for
+    /// `BackendNodeId` targets (avoids CSS selector fragility) and the
+    /// chromiumoxide `Element::click()` for CSS selector targets.
+    async fn click_element(
+        &self,
+        state: &BrowserState,
+        handle: &ElementHandle,
+    ) -> Result<(), BrowserError> {
+        match handle {
+            ElementHandle::BackendNode(backend_node_id) => {
+                let page = self.require_active_page(state)?;
+                let (center_x, center_y) = get_element_center(page, *backend_node_id).await?;
+
+                page.execute(
+                    DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MousePressed)
+                        .x(center_x)
+                        .y(center_y)
+                        .button(MouseButton::Left)
+                        .click_count(1)
+                        .build()
+                        .map_err(|error| {
+                            BrowserError::new(format!("failed to build mouse press event: {error}"))
+                        })?,
+                )
+                .await
+                .map_err(|error| BrowserError::new(format!("mouse press failed: {error}")))?;
+
+                page.execute(
+                    DispatchMouseEventParams::builder()
+                        .r#type(DispatchMouseEventType::MouseReleased)
+                        .x(center_x)
+                        .y(center_y)
+                        .button(MouseButton::Left)
+                        .click_count(1)
+                        .build()
+                        .map_err(|error| {
+                            BrowserError::new(format!(
+                                "failed to build mouse release event: {error}"
+                            ))
+                        })?,
+                )
+                .await
+                .map_err(|error| BrowserError::new(format!("mouse release failed: {error}")))?;
+
+                Ok(())
+            }
+            ElementHandle::CssElement(element) => {
+                element
+                    .click()
+                    .await
+                    .map_err(|error| BrowserError::new(format!("click failed: {error}")))?;
+                Ok(())
+            }
+        }
+    }
+
+    /// Focus an element and type text into it. Uses CDP `DOM.focus` for
+    /// `BackendNodeId` targets.
+    async fn focus_and_type(
+        &self,
+        state: &BrowserState,
+        handle: &ElementHandle,
+        text: &str,
+        clear: bool,
+    ) -> Result<(), BrowserError> {
+        let page = self.require_active_page(state)?;
+
+        match handle {
+            ElementHandle::BackendNode(backend_node_id) => {
+                // Resolve BackendNodeId to RemoteObject so we can call JS on it
+                let resolve_result = page
+                    .execute(ResolveNodeParams {
+                        backend_node_id: Some(*backend_node_id),
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|error| {
+                        BrowserError::new(format!("failed to resolve node for typing: {error}"))
+                    })?;
+
+                let object_id = resolve_result.result.object.object_id.ok_or_else(|| {
+                    BrowserError::new(
+                        "resolved node has no object_id — element may have been removed",
+                    )
+                })?;
+
+                // Use callFunctionOn to focus, validate, clear, and set value
+                let text_json = serde_json::to_string(text).unwrap_or_default();
+                let clear_js = if clear {
+                    "if (this.isContentEditable) { this.textContent = ''; } else { this.value = ''; }"
+                } else {
+                    ""
+                };
+
+                let js = format!(
+                    r#"function() {{
+                        const tag = this.tagName;
+                        const editable = this.isContentEditable;
+                        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT' && !editable) {{
+                            return 'element is a ' + tag.toLowerCase() + ', not a text input';
+                        }}
+                        this.focus();
+                        {clear_js}
+                        if (editable) {{
+                            this.textContent = {text_json};
+                        }} else {{
+                            this.value = {text_json};
+                        }}
+                        this.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        this.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return null;
+                    }}"#,
+                );
+
+                let call_result = page
+                    .execute(
+                        chromiumoxide_cdp::cdp::js_protocol::runtime::CallFunctionOnParams::builder()
+                            .function_declaration(js)
+                            .object_id(object_id)
+                            .return_by_value(true)
+                            .user_gesture(true)
+                            .silent(true)
+                            .build()
+                            .map_err(|error| {
+                                BrowserError::new(format!(
+                                    "failed to build CallFunctionOn params: {error}"
+                                ))
+                            })?,
+                    )
+                    .await
+                    .map_err(|error| {
+                        BrowserError::new(format!("type action failed: {error}"))
+                    })?;
+
+                // Check for validation error returned from the JS function.
+                // The function returns null on success, or an error string.
+                if let Some(value) = &call_result.result.result.value
+                    && let Some(error_msg) = value.as_str()
+                {
+                    return Err(BrowserError::new(error_msg.to_string()));
+                }
+
+                Ok(())
+            }
+            ElementHandle::CssElement(element) => {
+                // CSS selector path — click to focus, then use JS to type.
+                element
+                    .click()
+                    .await
+                    .map_err(|error| BrowserError::new(format!("focus failed: {error}")))?;
+
+                let text_json = serde_json::to_string(text).unwrap_or_default();
+                let clear_js = if clear { "el.value = '';" } else { "" };
+                let js = format!(
+                    r#"(() => {{
+                        const el = document.activeElement;
+                        if (!el) return 'no focused element after click';
+                        const tag = el.tagName;
+                        const editable = el.isContentEditable;
+                        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && tag !== 'SELECT' && !editable) {{
+                            return 'element is a ' + tag.toLowerCase() + ', not a text input';
+                        }}
+                        if (editable) {{
+                            {clear_editable}
+                            el.textContent = {text_json};
+                        }} else {{
+                            {clear_js}
+                            el.value = {text_json};
+                        }}
+                        el.dispatchEvent(new Event('input', {{bubbles: true}}));
+                        el.dispatchEvent(new Event('change', {{bubbles: true}}));
+                        return null;
+                    }})()"#,
+                    clear_editable = if clear { "el.textContent = '';" } else { "" },
+                );
+
+                page.evaluate(js)
+                    .await
+                    .map_err(|error| BrowserError::new(format!("type failed: {error}")))?;
+
+                Ok(())
+            }
+        }
+    }
+
+    /// Launch the browser if not already running. Returns a status message.
+    async fn ensure_launched(&self) -> Result<String, BrowserError> {
         {
             let mut state = self.state.lock().await;
             if state.browser.is_some() {
                 if self.config.persist_session {
                     return self.reconnect_existing_tabs(&mut state).await;
                 }
-                return Ok(BrowserOutput::success("Browser already running"));
+                return Ok("Browser already running".to_string());
             }
         }
 
-        // Resolve the Chrome executable path (may download ~150MB on first use):
-        //   1. Explicit config override
-        //   2. CHROME / CHROME_PATH env vars
-        //   3. chromiumoxide default detection (system PATH + well-known paths)
-        //   4. Auto-download via BrowserFetcher (cached in chrome_cache_dir)
         let executable = resolve_chrome_executable(&self.config).await?;
 
-        // Persistent sessions use a stable profile dir under chrome_cache_dir so
-        // cookies, localStorage, and login sessions survive across agent restarts.
-        // Ephemeral sessions use a random temp dir to avoid singleton lock collisions.
         let (user_data_dir, persistent_profile) = if self.config.persist_session {
             (self.config.chrome_cache_dir.join("profile"), true)
         } else {
@@ -584,13 +1101,33 @@ impl BrowserTool {
             (dir, false)
         };
 
+        if persistent_profile {
+            let lock_file = user_data_dir.join("SingletonLock");
+            if lock_file.exists() {
+                tracing::debug!(path = %lock_file.display(), "removing stale Chrome SingletonLock");
+                let _ = std::fs::remove_file(&lock_file);
+            }
+        }
+
         let mut builder = ChromeConfig::builder()
             .no_sandbox()
             .chrome_executable(&executable)
             .user_data_dir(&user_data_dir);
 
-        if !self.config.headless {
-            builder = builder.with_head().window_size(1280, 900);
+        if self.config.headless {
+            // Headless has no real window — set an explicit viewport so
+            // screenshots render at a reasonable desktop size instead of
+            // the chromiumoxide default of 800x600.
+            builder = builder.viewport(Viewport {
+                width: 1280,
+                height: 900,
+                ..Default::default()
+            });
+        } else {
+            // Headed mode: disable viewport emulation so the page fills
+            // the actual window. The default 800x600 viewport constrains
+            // page content to a smaller area than the window.
+            builder = builder.with_head().window_size(1280, 900).viewport(None);
         }
 
         let chrome_config = builder.build().map_err(|error| {
@@ -610,18 +1147,12 @@ impl BrowserTool {
 
         let handler_task = tokio::spawn(async move { while handler.next().await.is_some() {} });
 
-        // Re-acquire the lock only to store state.
         let mut state = self.state.lock().await;
 
-        // Guard against a concurrent launch that won the race.
+        // Guard against concurrent launch race
         if state.browser.is_some() {
-            // Another call launched while we were downloading/starting. Clean up
-            // the browser we just created and return success.
             drop(browser);
             handler_task.abort();
-            // Clean up the temp user data dir — but only for ephemeral sessions.
-            // Persistent profiles use a shared stable path that the winner is
-            // actively using.
             if !persistent_profile {
                 let dir = user_data_dir;
                 tokio::spawn(async move {
@@ -634,11 +1165,10 @@ impl BrowserTool {
                     }
                 });
             }
-
             if self.config.persist_session {
                 return self.reconnect_existing_tabs(&mut state).await;
             }
-            return Ok(BrowserOutput::success("Browser already running"));
+            return Ok("Browser already running".to_string());
         }
 
         state.browser = Some(browser);
@@ -647,24 +1177,14 @@ impl BrowserTool {
         state.persistent_profile = persistent_profile;
 
         tracing::info!("browser launched");
-        Ok(BrowserOutput::success("Browser launched successfully"))
+        Ok("Browser launched successfully".to_string())
     }
 
     /// Discover existing tabs from the browser and rebuild the page map.
-    ///
-    /// Called when a worker connects to an already-running persistent browser.
-    /// Rebuilds `state.pages` from `browser.pages()` so stale entries (tabs
-    /// closed externally) are pruned. Validates that `active_target` still
-    /// points to a live page.
-    ///
-    /// Note: holds the mutex across CDP calls. `Browser::pages()` and the
-    /// per-tab title/url queries are quick CDP round-trips, and concurrent
-    /// browser use during reconnect is rare (workers typically call `launch`
-    /// once at the start of their run).
     async fn reconnect_existing_tabs(
         &self,
         state: &mut BrowserState,
-    ) -> Result<BrowserOutput, BrowserError> {
+    ) -> Result<String, BrowserError> {
         let browser = state
             .browser
             .as_ref()
@@ -674,7 +1194,6 @@ impl BrowserTool {
             BrowserError::new(format!("failed to enumerate existing tabs: {error}"))
         })?;
 
-        // Rebuild the page map from the live browser, pruning stale entries.
         let previous_ids: std::collections::HashSet<String> = state.pages.keys().cloned().collect();
         let mut refreshed_pages = HashMap::with_capacity(pages.len());
         for page in pages {
@@ -685,9 +1204,10 @@ impl BrowserTool {
             .keys()
             .filter(|id| !previous_ids.contains(*id))
             .count();
-        state.pages = refreshed_pages;
 
-        // Ensure active_target points to a valid page.
+        state.pages = refreshed_pages;
+        state.invalidate_snapshot();
+
         let active_valid = state
             .active_target
             .as_ref()
@@ -697,76 +1217,625 @@ impl BrowserTool {
         }
 
         let tab_count = state.pages.len();
-        let mut tabs = Vec::with_capacity(tab_count);
-        for (id, page) in &state.pages {
-            let title = page.get_title().await.ok().flatten();
-            let url = page.url().await.ok().flatten();
-            let is_active = state.active_target.as_deref() == Some(id);
-            tabs.push(TabInfo {
-                target_id: id.clone(),
-                url,
-                title,
-                active: is_active,
-            });
-        }
-
         tracing::info!(tab_count, discovered, "reconnected to persistent browser");
+
+        Ok(format!(
+            "Connected to persistent browser ({tab_count} tab{} open, {discovered} newly discovered)",
+            if tab_count == 1 { "" } else { "s" }
+        ))
+    }
+}
+
+// Tool: browser_launch
+
+#[derive(Debug, Clone)]
+pub struct BrowserLaunchTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserLaunchArgs {}
+
+impl Tool for BrowserLaunchTool {
+    const NAME: &'static str = "browser_launch";
+    type Error = BrowserError;
+    type Args = BrowserLaunchArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Launch the browser. Must be called before any other browser tool."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let message = self.context.ensure_launched().await?;
+        Ok(BrowserOutput::success(message))
+    }
+}
+
+// Tool: browser_navigate
+
+#[derive(Debug, Clone)]
+pub struct BrowserNavigateTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserNavigateArgs {
+    /// The URL to navigate to.
+    pub url: String,
+}
+
+impl Tool for BrowserNavigateTool {
+    const NAME: &'static str = "browser_navigate";
+    type Error = BrowserError;
+    type Args = BrowserNavigateArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Navigate the active tab to a URL. Auto-launches the browser if needed."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "The URL to navigate to" }
+                },
+                "required": ["url"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        validate_url(&args.url)?;
+        self.context.ensure_launched().await?;
+
+        let mut state = self.context.state.lock().await;
+
+        // Get or create the active page
+        let page = get_or_create_page(&self.context, &mut state, Some(&args.url)).await?;
+
+        page.goto(&args.url)
+            .await
+            .map_err(|error| BrowserError::new(format!("navigation failed: {error}")))?;
+
+        // Wait briefly for SPA content to render. Many sites load a shell via
+        // the initial HTML then hydrate with JS — without this pause,
+        // `browser_snapshot` runs before any interactive elements exist.
+        wait_for_page_ready(page).await;
+
+        let title = page.get_title().await.ok().flatten();
+        let current_url = page.url().await.ok().flatten();
+        state.invalidate_snapshot();
+
+        Ok(BrowserOutput::success(format!("Navigated to {}", args.url))
+            .with_page_info(title, current_url))
+    }
+}
+
+// Tool: browser_snapshot
+
+#[derive(Debug, Clone)]
+pub struct BrowserSnapshotTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserSnapshotArgs {}
+
+impl Tool for BrowserSnapshotTool {
+    const NAME: &'static str = "browser_snapshot";
+    type Error = BrowserError;
+    type Args = BrowserSnapshotArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Get the page's ARIA accessibility tree with numbered element indices. \
+                          Use the [index=N] values in browser_click, browser_type, etc. When \
+                          you see password fields or other sensitive inputs, use browser_type \
+                          with the `secret` parameter (not `text`) to type credentials securely."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let mut state = self.context.state.lock().await;
+
+        // Force a fresh snapshot
+        state.invalidate_snapshot();
+        let snapshot = self.context.extract_snapshot(&mut state).await?;
+
+        let rendered = snapshot.render();
+        let element_count = snapshot.element_count();
+        let title = self
+            .context
+            .require_active_page(&state)?
+            .get_title()
+            .await
+            .ok()
+            .flatten();
+        let url = self
+            .context
+            .require_active_page(&state)?
+            .url()
+            .await
+            .ok()
+            .flatten();
 
         Ok(BrowserOutput {
             success: true,
-            message: format!(
-                "Connected to persistent browser ({tab_count} tab{} open, {discovered} newly discovered)",
-                if tab_count == 1 { "" } else { "s" }
-            ),
-            url: None,
-            title: None,
-            elements: None,
-            tabs: Some(tabs),
+            message: format!("{element_count} interactive element(s) found"),
+            title,
+            url,
+            snapshot: Some(rendered),
+            tabs: None,
             screenshot_path: None,
             eval_result: None,
             content: None,
         })
     }
+}
 
-    async fn handle_navigate(&self, url: Option<String>) -> Result<BrowserOutput, BrowserError> {
-        let Some(url) = url else {
-            return Err(BrowserError::new("url is required for navigate action"));
-        };
+// Shared element targeting — tools accept either an index or a CSS selector.
 
-        validate_url(&url)?;
+/// A resolved element handle — either a CDP `BackendNodeId` (from snapshot
+/// index lookup) or a chromiumoxide `Element` (from CSS selector query).
+enum ElementHandle {
+    BackendNode(BackendNodeId),
+    CssElement(chromiumoxide::Element),
+}
 
-        let mut state = self.state.lock().await;
-        let page = self.get_or_create_page(&mut state, Some(&url)).await?;
+/// Resolved element target for click/type/press_key tools.
+enum ElementTarget {
+    Index(usize),
+    Selector(String),
+}
 
-        page.goto(&url)
-            .await
-            .map_err(|error| BrowserError::new(format!("navigation failed: {error}")))?;
-
-        let title = page.get_title().await.ok().flatten();
-        let current_url = page.url().await.ok().flatten();
-
-        // Clear stale element refs on navigation
-        state.element_refs.clear();
-        state.next_ref = 0;
-
-        Ok(
-            BrowserOutput::success(format!("Navigated to {url}"))
-                .with_page_info(title, current_url),
-        )
+impl ElementTarget {
+    /// Build from optional index + optional selector args.
+    /// At least one must be provided; `selector` wins if both are present.
+    fn from_args(index: Option<usize>, selector: Option<String>) -> Result<Self, BrowserError> {
+        match (selector, index) {
+            (Some(sel), _) if !sel.is_empty() => Ok(Self::Selector(sel)),
+            (_, Some(idx)) => Ok(Self::Index(idx)),
+            _ => Err(BrowserError::new(
+                "provide either `index` (from browser_snapshot) or `selector` (CSS selector)",
+            )),
+        }
     }
 
-    async fn handle_open(&self, url: Option<String>) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
-        let browser = state
-            .browser
-            .as_ref()
-            .ok_or_else(|| BrowserError::new("browser not launched — call launch first"))?;
+    fn display(&self) -> String {
+        match self {
+            Self::Index(i) => format!("index {i}"),
+            Self::Selector(s) => format!("selector '{s}'"),
+        }
+    }
+}
 
-        let target_url = url.as_deref().unwrap_or("about:blank");
+// Tool: browser_click
 
+#[derive(Debug, Clone)]
+pub struct BrowserClickTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserClickArgs {
+    /// The element index from the snapshot (e.g., 5).
+    pub index: Option<usize>,
+    /// CSS selector to target directly (e.g., "#login_field"). Use this when
+    /// you know the selector — it's more reliable than index for dynamic pages.
+    pub selector: Option<String>,
+}
+
+impl Tool for BrowserClickTool {
+    const NAME: &'static str = "browser_click";
+    type Error = BrowserError;
+    type Args = BrowserClickArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Click an element by index (from browser_snapshot) or CSS selector."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Element index from snapshot" },
+                    "selector": { "type": "string", "description": "CSS selector (e.g. \"#my-button\", \"button.submit\")" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let target = ElementTarget::from_args(args.index, args.selector)?;
+        let label = target.display();
+
+        let mut state = self.context.state.lock().await;
+        let handle = self.context.find_element(&mut state, &target).await?;
+
+        self.context.click_element(&state, &handle).await?;
+
+        // Clicks often trigger navigation or DOM changes — give the page a
+        // moment to settle before the next snapshot.
+        let page = self.context.require_active_page(&state)?;
+        wait_for_page_ready(page).await;
+
+        state.invalidate_snapshot();
+
+        Ok(BrowserOutput::success(format!(
+            "Clicked element at {label}"
+        )))
+    }
+}
+
+// Tool: browser_type
+
+#[derive(Debug, Clone)]
+pub struct BrowserTypeTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserTypeArgs {
+    /// The element index from the snapshot.
+    pub index: Option<usize>,
+    /// CSS selector to target directly (e.g., "#login_field", "input[name='email']").
+    pub selector: Option<String>,
+    /// The text to type into the element. Mutually exclusive with `secret`.
+    /// Do NOT put secret values (passwords, tokens, API keys) here — they will
+    /// appear in tool output. Use the `secret` parameter instead.
+    pub text: Option<String>,
+    /// Name of a secret from the secret store to type into the element.
+    /// The secret value is resolved server-side and never appears in tool
+    /// arguments, output, or LLM context. Use this for passwords, tokens,
+    /// API keys, and any other sensitive values. Mutually exclusive with `text`.
+    pub secret: Option<String>,
+    /// Whether to clear the field before typing. Defaults to true.
+    #[serde(default = "default_true")]
+    pub clear: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Tool for BrowserTypeTool {
+    const NAME: &'static str = "browser_type";
+    type Error = BrowserError;
+    type Args = BrowserTypeArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Type text into an input element by index (from browser_snapshot) or \
+                          CSS selector. Provide either `text` for plain text or `secret` for \
+                          sensitive values (passwords, tokens, API keys). When using `secret`, \
+                          pass the secret name (e.g. \"GH_PASSWORD\") — the value is resolved \
+                          from the secret store and typed without ever appearing in tool \
+                          arguments or output. NEVER put passwords or credentials in the `text` \
+                          parameter — always use `secret` for sensitive values."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "index": { "type": "integer", "description": "Element index from snapshot" },
+                    "selector": { "type": "string", "description": "CSS selector (e.g. \"#login_field\", \"input[name='email']\")" },
+                    "text": { "type": "string", "description": "Plain text to type. Do NOT use for passwords or secrets — use the `secret` parameter instead." },
+                    "secret": { "type": "string", "description": "Name of a secret from the secret store (e.g. \"GH_PASSWORD\", \"NPM_TOKEN\"). The value is resolved securely and never appears in output." },
+                    "clear": { "type": "boolean", "default": true, "description": "Clear the field before typing (default true)" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let target = ElementTarget::from_args(args.index, args.selector)?;
+        let label = target.display();
+
+        // Resolve the text to type: either from `secret` (secure) or `text` (plain).
+        let (text_value, is_secret) = match (&args.secret, &args.text) {
+            (Some(secret_name), None) => {
+                let store = self.context.secrets.as_ref().ok_or_else(|| {
+                    BrowserError::new(
+                        "secret store is not available — secrets cannot be resolved. \
+                         Add the secret via the API or use the `text` parameter instead.",
+                    )
+                })?;
+                let decrypted = store.get(secret_name).map_err(|error| {
+                    BrowserError::new(format!("failed to resolve secret '{secret_name}': {error}"))
+                })?;
+                (decrypted.expose().to_string(), true)
+            }
+            (None, Some(text)) => (text.clone(), false),
+            (Some(_), Some(_)) => {
+                return Err(BrowserError::new(
+                    "`text` and `secret` are mutually exclusive — provide one or the other",
+                ));
+            }
+            (None, None) => {
+                return Err(BrowserError::new(
+                    "provide either `text` (plain text) or `secret` (secret name from the \
+                     secret store) to type into the element",
+                ));
+            }
+        };
+
+        let mut state = self.context.state.lock().await;
+        let handle = self.context.find_element(&mut state, &target).await?;
+
+        self.context
+            .focus_and_type(&state, &handle, &text_value, args.clear)
+            .await?;
+
+        state.invalidate_snapshot();
+
+        // Secret values must never appear in tool output.
+        let message = if is_secret {
+            format!(
+                "Typed secret '{}' into element at {label}",
+                args.secret.as_deref().unwrap_or("unknown")
+            )
+        } else {
+            let display_text = if text_value.len() > 50 {
+                format!("{}...", &text_value[..50])
+            } else {
+                text_value
+            };
+            format!("Typed '{display_text}' into element at {label}")
+        };
+
+        Ok(BrowserOutput::success(message))
+    }
+}
+
+// Tool: browser_press_key
+
+#[derive(Debug, Clone)]
+pub struct BrowserPressKeyTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserPressKeyArgs {
+    /// The key to press (e.g., "Enter", "Tab", "Escape", "ArrowDown").
+    pub key: String,
+}
+
+impl Tool for BrowserPressKeyTool {
+    const NAME: &'static str = "browser_press_key";
+    type Error = BrowserError;
+    type Args = BrowserPressKeyArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Press a keyboard key (e.g., \"Enter\", \"Tab\", \"Escape\").".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string", "description": "Key name (Enter, Tab, Escape, ArrowDown, etc.)" }
+                },
+                "required": ["key"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let state = self.context.state.lock().await;
+        let page = self.context.require_active_page(&state)?;
+        dispatch_key_press(page, &args.key).await?;
+        Ok(BrowserOutput::success(format!(
+            "Pressed key '{}'",
+            args.key
+        )))
+    }
+}
+
+// Tool: browser_screenshot
+
+#[derive(Debug, Clone)]
+pub struct BrowserScreenshotTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserScreenshotArgs {
+    /// Whether to take a full-page screenshot.
+    #[serde(default)]
+    pub full_page: bool,
+}
+
+impl Tool for BrowserScreenshotTool {
+    const NAME: &'static str = "browser_screenshot";
+    type Error = BrowserError;
+    type Args = BrowserScreenshotArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description:
+                "Take a screenshot of the current page. Saves to disk and returns the file path."
+                    .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "full_page": { "type": "boolean", "default": false, "description": "Capture entire page, not just viewport" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let state = self.context.state.lock().await;
+        let page = self.context.require_active_page(&state)?;
+
+        let params = ScreenshotParams::builder()
+            .format(CaptureScreenshotFormat::Png)
+            .full_page(args.full_page)
+            .build();
+
+        let screenshot_data = page
+            .screenshot(params)
+            .await
+            .map_err(|error| BrowserError::new(format!("screenshot failed: {error}")))?;
+
+        let filename = format!(
+            "screenshot_{}.png",
+            chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f")
+        );
+        let filepath = self.context.screenshot_dir.join(&filename);
+
+        tokio::fs::create_dir_all(&self.context.screenshot_dir)
+            .await
+            .map_err(|error| {
+                BrowserError::new(format!("failed to create screenshot dir: {error}"))
+            })?;
+
+        tokio::fs::write(&filepath, &screenshot_data)
+            .await
+            .map_err(|error| BrowserError::new(format!("failed to save screenshot: {error}")))?;
+
+        let path_str = filepath.to_string_lossy().to_string();
+        let size_kb = screenshot_data.len() / 1024;
+        tracing::debug!(path = %path_str, size_kb, "screenshot saved");
+
+        Ok(BrowserOutput {
+            success: true,
+            message: format!("Screenshot saved ({size_kb}KB)"),
+            title: None,
+            url: None,
+            snapshot: None,
+            tabs: None,
+            screenshot_path: Some(path_str),
+            eval_result: None,
+            content: None,
+        })
+    }
+}
+
+// Tool: browser_evaluate
+
+#[derive(Debug, Clone)]
+pub struct BrowserEvaluateTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserEvaluateArgs {
+    /// JavaScript expression to evaluate in the page.
+    pub script: String,
+}
+
+impl Tool for BrowserEvaluateTool {
+    const NAME: &'static str = "browser_evaluate";
+    type Error = BrowserError;
+    type Args = BrowserEvaluateArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Evaluate JavaScript in the active page and return the result."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "script": { "type": "string", "description": "JavaScript expression to evaluate" }
+                },
+                "required": ["script"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        if !self.context.config.evaluate_enabled {
+            return Err(BrowserError::new(
+                "JavaScript evaluation is disabled in browser config (set evaluate_enabled = true)",
+            ));
+        }
+
+        let state = self.context.state.lock().await;
+        let page = self.context.require_active_page(&state)?;
+
+        let result = page
+            .evaluate(args.script)
+            .await
+            .map_err(|error| BrowserError::new(format!("evaluate failed: {error}")))?;
+
+        let value = result.value().cloned();
+
+        Ok(BrowserOutput {
+            success: true,
+            message: "JavaScript evaluated".to_string(),
+            title: None,
+            url: None,
+            snapshot: None,
+            tabs: None,
+            screenshot_path: None,
+            eval_result: value,
+            content: None,
+        })
+    }
+}
+
+// Tool: browser_tab_open
+
+#[derive(Debug, Clone)]
+pub struct BrowserTabOpenTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserTabOpenArgs {
+    /// URL to open in the new tab. Defaults to about:blank.
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+impl Tool for BrowserTabOpenTool {
+    const NAME: &'static str = "browser_tab_open";
+    type Error = BrowserError;
+    type Args = BrowserTabOpenArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Open a new browser tab, optionally at a URL.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "url": { "type": "string", "description": "URL to open (default: about:blank)" }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let target_url = args.url.as_deref().unwrap_or("about:blank");
         if target_url != "about:blank" {
             validate_url(target_url)?;
         }
+
+        let mut state = self.context.state.lock().await;
+        let browser = state
+            .browser
+            .as_ref()
+            .ok_or_else(|| BrowserError::new("browser not launched — call browser_launch first"))?;
 
         let page = browser
             .new_page(target_url)
@@ -779,33 +1848,54 @@ impl BrowserTool {
 
         state.pages.insert(target_id.clone(), page);
         state.active_target = Some(target_id.clone());
-
-        // Clear refs when switching pages
-        state.element_refs.clear();
-        state.next_ref = 0;
+        state.invalidate_snapshot();
 
         Ok(BrowserOutput {
-            tabs: None,
-            elements: None,
-            screenshot_path: None,
-            eval_result: None,
-            content: None,
             success: true,
             message: format!("Opened new tab (target: {target_id})"),
             title,
             url: current_url,
+            snapshot: None,
+            tabs: None,
+            screenshot_path: None,
+            eval_result: None,
+            content: None,
         })
     }
+}
 
-    async fn handle_tabs(&self) -> Result<BrowserOutput, BrowserError> {
-        let state = self.state.lock().await;
+// Tool: browser_tab_list
 
+#[derive(Debug, Clone)]
+pub struct BrowserTabListTool {
+    context: BrowserContext,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserTabListArgs {}
+
+impl Tool for BrowserTabListTool {
+    const NAME: &'static str = "browser_tab_list";
+    type Error = BrowserError;
+    type Args = BrowserTabListArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "List all open browser tabs with their target IDs, titles, and URLs."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
+        }
+    }
+
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let state = self.context.state.lock().await;
         let mut tabs = Vec::new();
         for (target_id, page) in &state.pages {
             let title = page.get_title().await.ok().flatten();
             let url = page.url().await.ok().flatten();
             let active = state.active_target.as_ref() == Some(target_id);
-
             tabs.push(TabInfo {
                 target_id: target_id.clone(),
                 title,
@@ -820,41 +1910,53 @@ impl BrowserTool {
             message: format!("{count} tab(s) open"),
             title: None,
             url: None,
-            elements: None,
+            snapshot: None,
             tabs: Some(tabs),
             screenshot_path: None,
             eval_result: None,
             content: None,
         })
     }
+}
 
-    async fn handle_focus(&self, target_id: Option<String>) -> Result<BrowserOutput, BrowserError> {
-        let Some(target_id) = target_id else {
-            return Err(BrowserError::new("target_id is required for focus action"));
-        };
+// Tool: browser_tab_close
 
-        let mut state = self.state.lock().await;
+#[derive(Debug, Clone)]
+pub struct BrowserTabCloseTool {
+    context: BrowserContext,
+}
 
-        if !state.pages.contains_key(&target_id) {
-            return Err(BrowserError::new(format!(
-                "no tab with target_id '{target_id}'"
-            )));
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserTabCloseArgs {
+    /// Target ID of the tab to close. If omitted, closes the active tab.
+    #[serde(default)]
+    pub target_id: Option<String>,
+}
+
+impl Tool for BrowserTabCloseTool {
+    const NAME: &'static str = "browser_tab_close";
+    type Error = BrowserError;
+    type Args = BrowserTabCloseArgs;
+    type Output = BrowserOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Close a browser tab by target_id, or the active tab if omitted."
+                .to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "target_id": { "type": "string", "description": "Tab target ID (from browser_tab_list). Omit for active tab." }
+                }
+            }),
         }
-
-        state.active_target = Some(target_id.clone());
-        state.element_refs.clear();
-        state.next_ref = 0;
-
-        Ok(BrowserOutput::success(format!("Focused tab {target_id}")))
     }
 
-    async fn handle_close_tab(
-        &self,
-        target_id: Option<String>,
-    ) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
-
-        let id = target_id
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let mut state = self.context.state.lock().await;
+        let id = args
+            .target_id
             .or_else(|| state.active_target.clone())
             .ok_or_else(|| BrowserError::new("no active tab to close"))?;
 
@@ -870,336 +1972,55 @@ impl BrowserTool {
         if state.active_target.as_ref() == Some(&id) {
             state.active_target = state.pages.keys().next().cloned();
         }
-
-        state.element_refs.clear();
-        state.next_ref = 0;
+        state.invalidate_snapshot();
 
         Ok(BrowserOutput::success(format!("Closed tab {id}")))
     }
+}
 
-    async fn handle_snapshot(&self) -> Result<BrowserOutput, BrowserError> {
-        let mut state = self.state.lock().await;
-        let page = self.require_active_page(&state)?.clone();
+// Tool: browser_close
 
-        // Enable accessibility domain if not already enabled
-        page.execute(AxEnableParams::default())
-            .await
-            .map_err(|error| {
-                BrowserError::new(format!("failed to enable accessibility: {error}"))
-            })?;
+#[derive(Debug, Clone)]
+pub struct BrowserCloseTool {
+    context: BrowserContext,
+}
 
-        let ax_tree = page
-            .execute(GetFullAxTreeParams::default())
-            .await
-            .map_err(|error| {
-                BrowserError::new(format!("failed to get accessibility tree: {error}"))
-            })?;
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BrowserCloseArgs {}
 
-        state.element_refs.clear();
-        state.next_ref = 0;
+impl Tool for BrowserCloseTool {
+    const NAME: &'static str = "browser_close";
+    type Error = BrowserError;
+    type Args = BrowserCloseArgs;
+    type Output = BrowserOutput;
 
-        let mut elements = Vec::new();
-
-        for node in &ax_tree.result.nodes {
-            if node.ignored {
-                continue;
-            }
-
-            let role = extract_ax_value_string(&node.role);
-            let Some(role) = role else { continue };
-
-            let role_lower = role.to_lowercase();
-            let is_interactive = INTERACTIVE_ROLES.contains(&role_lower.as_str());
-
-            if !is_interactive {
-                continue;
-            }
-
-            if state.next_ref >= MAX_ELEMENT_REFS {
-                break;
-            }
-
-            let name = extract_ax_value_string(&node.name);
-            let description = extract_ax_value_string(&node.description);
-            let value = extract_ax_value_string(&node.value);
-            let backend_node_id = node.backend_dom_node_id.as_ref().map(|id| *id.inner());
-
-            let ref_id = format!("e{}", state.next_ref);
-            state.next_ref += 1;
-
-            state.element_refs.insert(
-                ref_id.clone(),
-                ElementRef {
-                    role: role.clone(),
-                    name: name.clone(),
-                    description: description.clone(),
-                    ax_node_id: node.node_id.inner().clone(),
-                    backend_node_id,
-                },
-            );
-
-            elements.push(ElementSummary {
-                ref_id,
-                role,
-                name,
-                description,
-                value,
-            });
-        }
-
-        let title = page.get_title().await.ok().flatten();
-        let url = page.url().await.ok().flatten();
-        let count = elements.len();
-
-        Ok(BrowserOutput {
-            success: true,
-            message: format!("{count} interactive element(s) found"),
-            title,
-            url,
-            elements: Some(elements),
-            tabs: None,
-            screenshot_path: None,
-            eval_result: None,
-            content: None,
-        })
-    }
-
-    async fn handle_act(
-        &self,
-        act_kind: Option<ActKind>,
-        element_ref: Option<String>,
-        text: Option<String>,
-        key: Option<String>,
-    ) -> Result<BrowserOutput, BrowserError> {
-        let Some(act_kind) = act_kind else {
-            return Err(BrowserError::new("act_kind is required for act action"));
-        };
-
-        let state = self.state.lock().await;
-        let page = self.require_active_page(&state)?;
-
-        match act_kind {
-            ActKind::Click => {
-                let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .click()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("click failed: {error}")))?;
-                Ok(BrowserOutput::success("Clicked element"))
-            }
-            ActKind::Type => {
-                let Some(text) = text else {
-                    return Err(BrowserError::new("text is required for act:type"));
-                };
-                let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .click()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("focus failed: {error}")))?;
-                element
-                    .type_str(&text)
-                    .await
-                    .map_err(|error| BrowserError::new(format!("type failed: {error}")))?;
-                Ok(BrowserOutput::success(format!(
-                    "Typed '{}' into element",
-                    truncate_for_display(&text, 50)
-                )))
-            }
-            ActKind::PressKey => {
-                let Some(key) = key else {
-                    return Err(BrowserError::new("key is required for act:press_key"));
-                };
-                if element_ref.is_some() {
-                    let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                    element
-                        .press_key(&key)
-                        .await
-                        .map_err(|error| BrowserError::new(format!("press_key failed: {error}")))?;
-                } else {
-                    dispatch_key_press(page, &key).await?;
-                }
-                Ok(BrowserOutput::success(format!("Pressed key '{key}'")))
-            }
-            ActKind::Hover => {
-                let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .hover()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("hover failed: {error}")))?;
-                Ok(BrowserOutput::success("Hovered over element"))
-            }
-            ActKind::ScrollIntoView => {
-                let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element.scroll_into_view().await.map_err(|error| {
-                    BrowserError::new(format!("scroll_into_view failed: {error}"))
-                })?;
-                Ok(BrowserOutput::success("Scrolled element into view"))
-            }
-            ActKind::Focus => {
-                let element = self.resolve_element_ref(&state, page, element_ref).await?;
-                element
-                    .focus()
-                    .await
-                    .map_err(|error| BrowserError::new(format!("focus failed: {error}")))?;
-                Ok(BrowserOutput::success("Focused element"))
-            }
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Close or detach from the browser (behavior depends on config)."
+                .to_string(),
+            parameters: serde_json::json!({ "type": "object", "properties": {} }),
         }
     }
 
-    async fn handle_screenshot(
-        &self,
-        element_ref: Option<String>,
-        full_page: bool,
-    ) -> Result<BrowserOutput, BrowserError> {
-        let state = self.state.lock().await;
-        let page = self.require_active_page(&state)?;
-
-        let screenshot_data = if let Some(ref_id) = element_ref {
-            let element = self.resolve_element_ref(&state, page, Some(ref_id)).await?;
-            element
-                .screenshot(CaptureScreenshotFormat::Png)
-                .await
-                .map_err(|error| BrowserError::new(format!("element screenshot failed: {error}")))?
-        } else {
-            let params = ScreenshotParams::builder()
-                .format(CaptureScreenshotFormat::Png)
-                .full_page(full_page)
-                .build();
-            page.screenshot(params)
-                .await
-                .map_err(|error| BrowserError::new(format!("screenshot failed: {error}")))?
-        };
-
-        // Save to disk
-        let filename = format!(
-            "screenshot_{}.png",
-            chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f")
-        );
-        let filepath = self.screenshot_dir.join(&filename);
-
-        tokio::fs::create_dir_all(&self.screenshot_dir)
-            .await
-            .map_err(|error| {
-                BrowserError::new(format!("failed to create screenshot dir: {error}"))
-            })?;
-
-        tokio::fs::write(&filepath, &screenshot_data)
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to save screenshot: {error}")))?;
-
-        let path_str = filepath.to_string_lossy().to_string();
-        let size_kb = screenshot_data.len() / 1024;
-
-        tracing::debug!(path = %path_str, size_kb, "screenshot saved");
-
-        Ok(BrowserOutput {
-            success: true,
-            message: format!("Screenshot saved ({size_kb}KB)"),
-            title: None,
-            url: None,
-            elements: None,
-            tabs: None,
-            screenshot_path: Some(path_str),
-            eval_result: None,
-            content: None,
-        })
-    }
-
-    async fn handle_evaluate(&self, script: Option<String>) -> Result<BrowserOutput, BrowserError> {
-        if !self.config.evaluate_enabled {
-            return Err(BrowserError::new(
-                "JavaScript evaluation is disabled in browser config (set evaluate_enabled = true)",
-            ));
-        }
-
-        let Some(script) = script else {
-            return Err(BrowserError::new("script is required for evaluate action"));
-        };
-
-        let state = self.state.lock().await;
-        let page = self.require_active_page(&state)?;
-
-        let result = page
-            .evaluate(script)
-            .await
-            .map_err(|error| BrowserError::new(format!("evaluate failed: {error}")))?;
-
-        let value = result.value().cloned();
-
-        Ok(BrowserOutput {
-            success: true,
-            message: "JavaScript evaluated".to_string(),
-            title: None,
-            url: None,
-            elements: None,
-            tabs: None,
-            screenshot_path: None,
-            eval_result: value,
-            content: None,
-        })
-    }
-
-    async fn handle_content(&self) -> Result<BrowserOutput, BrowserError> {
-        let state = self.state.lock().await;
-        let page = self.require_active_page(&state)?;
-
-        let html = page
-            .content()
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to get page content: {error}")))?;
-
-        let title = page.get_title().await.ok().flatten();
-        let url = page.url().await.ok().flatten();
-
-        // Truncate very large pages for LLM consumption
-        let truncated = if html.len() > 100_000 {
-            format!(
-                "{}... [truncated, {} bytes total]",
-                &html[..100_000],
-                html.len()
-            )
-        } else {
-            html
-        };
-
-        Ok(BrowserOutput {
-            success: true,
-            message: "Page content retrieved".to_string(),
-            title,
-            url,
-            elements: None,
-            tabs: None,
-            screenshot_path: None,
-            eval_result: None,
-            content: Some(truncated),
-        })
-    }
-
-    async fn handle_close(&self) -> Result<BrowserOutput, BrowserError> {
+    async fn call(&self, _args: Self::Args) -> Result<Self::Output, Self::Error> {
         use crate::config::ClosePolicy;
 
-        match self.config.close_policy {
+        match self.context.config.close_policy {
             ClosePolicy::Detach => {
-                let mut state = self.state.lock().await;
-                // Clear per-worker element refs but preserve tabs, browser,
-                // handler, and active_target so the next worker picks up
-                // exactly where this one left off.
-                state.element_refs.clear();
-                state.next_ref = 0;
+                let mut state = self.context.state.lock().await;
+                state.invalidate_snapshot();
                 tracing::info!(policy = "detach", "worker detached from browser");
                 Ok(BrowserOutput::success(
                     "Detached from browser (tabs and session preserved)",
                 ))
             }
             ClosePolicy::CloseTabs => {
-                // Drain pages under the lock, then close them outside it so
-                // other workers aren't blocked by CDP round-trips.
                 let pages_to_close: Vec<(String, chromiumoxide::Page)> = {
-                    let mut state = self.state.lock().await;
+                    let mut state = self.context.state.lock().await;
                     let pages = state.pages.drain().collect();
                     state.active_target = None;
-                    state.element_refs.clear();
-                    state.next_ref = 0;
+                    state.invalidate_snapshot();
                     pages
                 };
 
@@ -1229,18 +2050,15 @@ impl BrowserTool {
                 ))
             }
             ClosePolicy::CloseBrowser => {
-                // Take everything out of state under the lock, then do the
-                // actual teardown outside it.
                 let (browser, handler_task, user_data_dir, persistent_profile) = {
-                    let mut state = self.state.lock().await;
+                    let mut state = self.context.state.lock().await;
                     let browser = state.browser.take();
                     let handler_task = state._handler_task.take();
                     let user_data_dir = state.user_data_dir.take();
                     let persistent_profile = state.persistent_profile;
                     state.pages.clear();
                     state.active_target = None;
-                    state.element_refs.clear();
-                    state.next_ref = 0;
+                    state.invalidate_snapshot();
                     (browser, handler_task, user_data_dir, persistent_profile)
                 };
 
@@ -1256,9 +2074,6 @@ impl BrowserTool {
                     return Err(BrowserError::new(message));
                 }
 
-                // Clean up the user data dir — but only for ephemeral sessions.
-                // Persistent profiles hold cookies and login sessions that must
-                // survive browser restarts.
                 if !persistent_profile && let Some(dir) = user_data_dir {
                     tokio::spawn(async move {
                         if let Err(error) = tokio::fs::remove_dir_all(&dir).await {
@@ -1276,80 +2091,104 @@ impl BrowserTool {
             }
         }
     }
+}
 
-    /// Get the active page, or create a first one if the browser has no pages yet.
-    async fn get_or_create_page<'a>(
-        &self,
-        state: &'a mut BrowserState,
-        url: Option<&str>,
-    ) -> Result<&'a chromiumoxide::Page, BrowserError> {
-        if let Some(target) = state.active_target.as_ref()
-            && state.pages.contains_key(target)
-        {
-            return Ok(&state.pages[target]);
-        }
+// Tool registration helper
 
-        let browser = state
-            .browser
-            .as_ref()
-            .ok_or_else(|| BrowserError::new("browser not launched — call launch first"))?;
+/// Register all browser tools on a `ToolServer`. The tools share a single
+/// `BrowserState` (via `SharedBrowserHandle` for persistent sessions, or a
+/// fresh instance for ephemeral sessions).
+pub fn register_browser_tools(
+    server: rig::tool::server::ToolServer,
+    config: BrowserConfig,
+    screenshot_dir: PathBuf,
+    runtime_config: &crate::config::RuntimeConfig,
+) -> rig::tool::server::ToolServer {
+    let state = if let Some(shared) = runtime_config
+        .shared_browser
+        .as_ref()
+        .filter(|_| config.persist_session)
+    {
+        shared.clone()
+    } else {
+        Arc::new(Mutex::new(BrowserState::new()))
+    };
 
-        let target_url = url.unwrap_or("about:blank");
-        let page = browser
-            .new_page(target_url)
-            .await
-            .map_err(|error| BrowserError::new(format!("failed to create page: {error}")))?;
+    let secrets = runtime_config.secrets.load().as_ref().as_ref().cloned();
 
-        let target_id = page_target_id(&page);
-        state.pages.insert(target_id.clone(), page);
-        state.active_target = Some(target_id.clone());
+    let context = BrowserContext::new(state, config, screenshot_dir, secrets);
 
-        Ok(&state.pages[&target_id])
-    }
-
-    /// Get the active page or return an error.
-    fn require_active_page<'a>(
-        &self,
-        state: &'a BrowserState,
-    ) -> Result<&'a chromiumoxide::Page, BrowserError> {
-        let target = state
-            .active_target
-            .as_ref()
-            .ok_or_else(|| BrowserError::new("no active tab — navigate or open a tab first"))?;
-
-        state
-            .pages
-            .get(target)
-            .ok_or_else(|| BrowserError::new("active tab no longer exists"))
-    }
-
-    /// Resolve an element ref (like "e3") to a chromiumoxide Element on the page.
-    async fn resolve_element_ref(
-        &self,
-        state: &BrowserState,
-        page: &chromiumoxide::Page,
-        element_ref: Option<String>,
-    ) -> Result<chromiumoxide::Element, BrowserError> {
-        let Some(ref_id) = element_ref else {
-            return Err(BrowserError::new("element_ref is required for this action"));
-        };
-
-        let elem_ref = state.element_refs.get(&ref_id).ok_or_else(|| {
-            BrowserError::new(format!(
-                "unknown element ref '{ref_id}' — run snapshot first to get element refs"
-            ))
-        })?;
-
-        // Use backend_node_id to find the element via CSS selector derived from role+name,
-        // or fall back to XPath with aria role and name attributes
-        let selector = build_selector_for_ref(elem_ref);
-
-        page.find_element(&selector).await.map_err(|error| {
-            BrowserError::new(format!(
-                "failed to find element for ref '{ref_id}' (selector: {selector}): {error}"
-            ))
+    server
+        .tool(BrowserLaunchTool {
+            context: context.clone(),
         })
+        .tool(BrowserNavigateTool {
+            context: context.clone(),
+        })
+        .tool(BrowserSnapshotTool {
+            context: context.clone(),
+        })
+        .tool(BrowserClickTool {
+            context: context.clone(),
+        })
+        .tool(BrowserTypeTool {
+            context: context.clone(),
+        })
+        .tool(BrowserPressKeyTool {
+            context: context.clone(),
+        })
+        .tool(BrowserScreenshotTool {
+            context: context.clone(),
+        })
+        .tool(BrowserEvaluateTool {
+            context: context.clone(),
+        })
+        .tool(BrowserTabOpenTool {
+            context: context.clone(),
+        })
+        .tool(BrowserTabListTool {
+            context: context.clone(),
+        })
+        .tool(BrowserTabCloseTool {
+            context: context.clone(),
+        })
+        .tool(BrowserCloseTool { context })
+}
+
+// Shared helpers
+
+/// Get the active page, or create a first one if the browser has no pages yet.
+async fn get_or_create_page<'a>(
+    context: &BrowserContext,
+    state: &'a mut BrowserState,
+    url: Option<&str>,
+) -> Result<&'a chromiumoxide::Page, BrowserError> {
+    if let Some(target) = state.active_target.as_ref()
+        && state.pages.contains_key(target)
+    {
+        return Ok(&state.pages[target]);
     }
+
+    let browser = state
+        .browser
+        .as_ref()
+        .ok_or_else(|| BrowserError::new("browser not launched — call browser_launch first"))?;
+
+    let target_url = url.unwrap_or("about:blank");
+    let page = browser
+        .new_page(target_url)
+        .await
+        .map_err(|error| BrowserError::new(format!("failed to create page: {error}")))?;
+
+    let target_id = page_target_id(&page);
+    state.pages.insert(target_id.clone(), page);
+    state.active_target = Some(target_id.clone());
+
+    // Suppress the "unused variable" warning — we need `context` for the type
+    // signature to match the pattern used by the navigate tool.
+    let _ = context;
+
+    Ok(&state.pages[&target_id])
 }
 
 /// Dispatch a key press event to the page via CDP Input domain.
@@ -1377,52 +2216,47 @@ async fn dispatch_key_press(page: &chromiumoxide::Page, key: &str) -> Result<(),
     Ok(())
 }
 
-/// Extract the string value from an AxValue option.
-fn extract_ax_value_string(
-    ax_value: &Option<chromiumoxide_cdp::cdp::browser_protocol::accessibility::AxValue>,
-) -> Option<String> {
-    let val = ax_value.as_ref()?;
-    val.value
-        .as_ref()
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
-}
-
-/// Build a CSS selector from an ElementRef's role and name.
-fn build_selector_for_ref(elem_ref: &ElementRef) -> String {
-    // Use ARIA role attribute as primary selector, with name for disambiguation
-    let role_selector = format!("[role='{}']", elem_ref.role);
-
-    if let Some(name) = &elem_ref.name {
-        // Escape single quotes in the name for CSS selector safety
-        let escaped = name.replace('\'', "\\'");
-        format!("{role_selector}[aria-label='{escaped}']")
-    } else {
-        role_selector
-    }
-}
-
-/// Extract target ID string from a Page.
 fn page_target_id(page: &chromiumoxide::Page) -> String {
     page.target_id().inner().clone()
 }
 
-/// Truncate a string for display, appending "..." if truncated.
-fn truncate_for_display(text: &str, max_len: usize) -> String {
-    if text.len() <= max_len {
-        text.to_string()
-    } else {
-        format!("{}...", &text[..max_len])
+/// Get the center coordinates of an element identified by `BackendNodeId`.
+/// Uses `DOM.getBoxModel` to get the content box, then computes center.
+async fn get_element_center(
+    page: &chromiumoxide::Page,
+    backend_node_id: BackendNodeId,
+) -> Result<(f64, f64), BrowserError> {
+    let box_model = page
+        .execute(GetBoxModelParams {
+            backend_node_id: Some(backend_node_id),
+            ..Default::default()
+        })
+        .await
+        .map_err(|error| {
+            BrowserError::new(format!(
+                "failed to get box model for element: {error}. \
+                 The element may not be visible — try scrolling or taking a screenshot."
+            ))
+        })?;
+
+    // The content quad is a flat array of 8 values: [x1,y1, x2,y2, x3,y3, x4,y4]
+    let quad = &box_model.result.model.content;
+    if quad.inner().len() < 8 {
+        return Err(BrowserError::new(
+            "element has no visible content box — it may be hidden or zero-sized",
+        ));
     }
+
+    let points = quad.inner();
+    let center_x = (points[0] + points[2] + points[4] + points[6]) / 4.0;
+    let center_y = (points[1] + points[3] + points[5] + points[7]) / 4.0;
+
+    Ok((center_x, center_y))
 }
 
-/// Resolve the Chrome/Chromium executable path using a layered detection chain:
-///
-/// 1. Explicit config override (`executable_path` in TOML)
-/// 2. `CHROME` / `CHROME_PATH` environment variables
-/// 3. chromiumoxide default detection (system PATH + well-known install paths)
-/// 4. Auto-download via `BrowserFetcher` (cached in `chrome_cache_dir`)
+// Chrome executable resolution
+
 async fn resolve_chrome_executable(config: &BrowserConfig) -> Result<PathBuf, BrowserError> {
-    // 1. Explicit config
     if let Some(path) = &config.executable_path {
         let path = PathBuf::from(path);
         if path.exists() {
@@ -1435,19 +2269,16 @@ async fn resolve_chrome_executable(config: &BrowserConfig) -> Result<PathBuf, Br
         );
     }
 
-    // 2. Environment variables
     if let Some(path) = detect_chrome_from_env() {
         tracing::debug!(path = %path.display(), "using chrome from environment variable");
         return Ok(path);
     }
 
-    // 3. chromiumoxide default detection (PATH lookup + well-known install paths)
     if let Ok(path) = chromiumoxide::detection::default_executable(Default::default()) {
         tracing::debug!(path = %path.display(), "using system-detected chrome");
         return Ok(path);
     }
 
-    // 4. Auto-download via fetcher
     tracing::info!(
         cache_dir = %config.chrome_cache_dir.display(),
         "no system Chrome found, downloading via fetcher"
@@ -1455,7 +2286,6 @@ async fn resolve_chrome_executable(config: &BrowserConfig) -> Result<PathBuf, Br
     fetch_chrome(&config.chrome_cache_dir).await
 }
 
-/// Check `CHROME` and `CHROME_PATH` environment variables for a Chrome binary.
 fn detect_chrome_from_env() -> Option<PathBuf> {
     for variable in ["CHROME", "CHROME_PATH"] {
         if let Ok(value) = std::env::var(variable) {
@@ -1468,8 +2298,6 @@ fn detect_chrome_from_env() -> Option<PathBuf> {
     None
 }
 
-/// Download Chromium using chromiumoxide's built-in fetcher.
-/// The binary is cached in `cache_dir` and reused on subsequent launches.
 async fn fetch_chrome(cache_dir: &Path) -> Result<PathBuf, BrowserError> {
     tokio::fs::create_dir_all(cache_dir)
         .await

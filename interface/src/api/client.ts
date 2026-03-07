@@ -146,6 +146,13 @@ export interface OpenCodePartUpdatedEvent {
 	part: OpenCodePart;
 }
 
+export interface WorkerTextEvent {
+	type: "worker_text";
+	agent_id: string;
+	worker_id: string;
+	text: string;
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -159,7 +166,8 @@ export type ApiEvent =
 	| BranchCompletedEvent
 	| ToolStartedEvent
 	| ToolCompletedEvent
-	| OpenCodePartUpdatedEvent;
+	| OpenCodePartUpdatedEvent
+	| WorkerTextEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${API_BASE}${path}`);

@@ -4,8 +4,6 @@ import { useWebChat } from "@/hooks/useWebChat";
 import { isOpenCodeWorker, type ActiveWorker } from "@/hooks/useChannelLiveState";
 import { useLiveContext } from "@/hooks/useLiveContext";
 import { Markdown } from "@/components/Markdown";
-import { LiveDuration } from "@/components/LiveDuration";
-import type { TimelineWorkerRun } from "@/api/client";
 
 interface WebChatPanelProps {
 	agentId: string;
@@ -56,88 +54,6 @@ function ActiveWorkersPanel({ workers, agentId }: { workers: ActiveWorker[]; age
 					);
 				})}
 			</div>
-		</div>
-	);
-}
-
-function ChatWorkerRunItem({ item, live, agentId }: { item: TimelineWorkerRun; live?: ActiveWorker; agentId: string }) {
-	const [expanded, setExpanded] = useState(!!live);
-	const wasLiveRef = useRef(!!live);
-
-	// Auto-expand when a worker becomes live after initial mount
-	useEffect(() => {
-		if (live && !wasLiveRef.current) {
-			setExpanded(true);
-		}
-		wasLiveRef.current = !!live;
-	}, [live]);
-
-	const oc = isOpenCodeWorker(live ?? { task: item.task });
-	const isLive = !!live;
-
-	return (
-		<div className={`rounded-lg border px-3 py-2 transition-colors ${
-			oc ? "border-zinc-500/20 bg-zinc-500/5 hover:bg-zinc-500/10" : "border-amber-500/20 bg-amber-500/5 hover:bg-amber-500/10"
-		}`}>
-			<div className="flex min-w-0 items-center gap-2">
-				<button
-					type="button"
-					onClick={() => {
-						if (isLive || item.result) setExpanded(!expanded);
-					}}
-					className="min-w-0 flex-1 text-left"
-				>
-					<div className="flex min-w-0 items-center gap-2">
-						<div className={`h-1.5 w-1.5 rounded-full ${
-							isLive
-								? `animate-pulse ${oc ? "bg-zinc-400" : "bg-amber-400"}`
-								: `${oc ? "bg-zinc-400/50" : "bg-amber-400/50"}`
-						}`} />
-						<span className={`text-tiny font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}>Worker</span>
-						<span className={`min-w-0 flex-1 text-tiny text-ink-dull ${
-							expanded ? "whitespace-normal break-words" : "truncate"
-						}`}>{item.task}</span>
-						{(isLive || item.result) && (
-							<span className="flex-shrink-0 text-tiny text-ink-faint">
-								{expanded ? "\u25BE" : "\u25B8"}
-							</span>
-						)}
-					</div>
-				</button>
-				<Link
-					to="/agents/$agentId/workers"
-					params={{ agentId }}
-					search={{ worker: item.id }}
-					className={`flex-shrink-0 rounded border px-1.5 py-0.5 text-tiny font-medium transition-colors ${
-						oc
-							? "border-zinc-400/30 text-zinc-300 hover:border-zinc-400/60 hover:bg-zinc-500/15"
-							: "border-amber-400/30 text-amber-300 hover:border-amber-400/60 hover:bg-amber-500/15"
-					}`}
-				>
-					Open
-				</Link>
-			</div>
-			{expanded && isLive && live && (
-				<div className="mt-1.5 flex items-center gap-3 pl-4 text-tiny text-ink-faint">
-					<LiveDuration startMs={live.startedAt} />
-					<span className="truncate">{live.status}</span>
-					{live.currentTool && (
-						<span className={`truncate ${oc ? "text-zinc-400/70" : "text-amber-400/70"}`}>{live.currentTool}</span>
-					)}
-					{live.toolCalls > 0 && (
-						<span>{live.toolCalls} tool calls</span>
-					)}
-				</div>
-			)}
-			{expanded && !isLive && item.result && (
-				<div className={`mt-1.5 rounded-md border px-3 py-2 ${
-					oc ? "border-zinc-500/10 bg-zinc-500/5" : "border-amber-500/10 bg-amber-500/5"
-				}`}>
-					<div className="text-sm text-ink-dull">
-						<Markdown className="whitespace-pre-wrap break-words">{item.result}</Markdown>
-					</div>
-				</div>
-			)}
 		</div>
 	);
 }
@@ -285,17 +201,6 @@ export function WebChatPanel({ agentId }: WebChatPanelProps) {
 					)}
 
 					{timeline.map((item) => {
-						if (item.type === "worker_run") {
-							const live = liveState?.workers[item.id];
-							return (
-								<ChatWorkerRunItem
-									key={item.id}
-									item={item}
-									live={live}
-									agentId={agentId}
-								/>
-							);
-						}
 						if (item.type !== "message") return null;
 						return (
 							<div key={item.id}>

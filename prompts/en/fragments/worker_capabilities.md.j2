@@ -18,7 +18,7 @@ When you spawn a worker, it runs independently with a task description and retur
 - **exec** — run subprocesses with environment control
 - **set_status** — update worker status visible in your status block
 {%- if browser_enabled %}
-- **browser** — browse web pages, take screenshots, click elements, fill forms
+- **browser_*** — suite of browser tools: navigate, snapshot, click, type, screenshot, press_key, evaluate, tab management
 {%- endif %}
 {%- if web_search_enabled %}
 - **web_search** — search the web via Brave Search API

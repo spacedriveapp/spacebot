@@ -170,13 +170,18 @@ pub(super) async fn worker_detail(
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let transcript = detail.transcript_blob.as_deref().and_then(|blob| {
-        worker_transcript::deserialize_transcript(blob)
+    let transcript = match detail.transcript_blob.as_deref() {
+        Some(blob) => worker_transcript::deserialize_transcript(blob)
             .map_err(|error| {
                 tracing::warn!(%error, worker_id = %query.worker_id, "failed to decompress transcript");
             })
-            .ok()
-    });
+            .ok(),
+        None => {
+            // No persisted transcript yet — check the live transcript cache
+            // so page refreshes can recover in-progress worker transcripts.
+            state.get_live_transcript(&query.worker_id).await
+        }
+    };
 
     Ok(Json(WorkerDetailResponse {
         id: detail.id,

@@ -336,6 +336,7 @@ impl Worker {
                                 });
                         }
 
+                        self.persist_transcript(&compacted_history, &history).await;
                         self.maybe_compact_history(&mut compacted_history, &mut history)
                             .await;
                         prompt =
@@ -394,6 +395,21 @@ impl Worker {
                 }
             }
         };
+
+        // Safety net: if the worker produced an empty result (e.g. reasoning-only
+        // response that slipped past the nudge gate), treat it as a failure. An empty
+        // result means the channel has nothing to relay to the user.
+        if !resuming && result.trim().is_empty() {
+            self.state = WorkerState::Failed;
+            self.hook.send_status("failed (empty result)");
+            self.write_failure_log(&history, "worker produced empty result — likely a reasoning-only exit that bypassed the outcome gate");
+            self.persist_transcript(&compacted_history, &history).await;
+            tracing::error!(worker_id = %self.id, "worker produced empty result, treating as failure");
+            return Err(crate::error::AgentError::Other(anyhow::anyhow!(
+                "worker produced empty result without signaling a meaningful outcome"
+            ))
+            .into());
+        }
 
         // For interactive workers, enter a follow-up loop
         let mut follow_up_failure: Option<String> = None;
