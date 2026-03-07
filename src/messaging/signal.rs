@@ -913,15 +913,16 @@ impl Messaging for SignalAdapter {
                             Ok(response) => {
                                 if !response.status().is_success() {
                                     let status = response.status();
-                                    let body_text = response
-                                        .text()
-                                        .await
-                                        .unwrap_or_else(|_| "<failed to read body>".to_string());
-                                    tracing::warn!(
-                                        %status,
-                                        %body_text,
-                                        "signal typing indicator request failed"
-                                    );
+                                    // Log response body at debug level only (may contain sensitive data)
+                                    if let Ok(body_text) = response.text().await {
+                                        let truncated = if body_text.len() > 200 {
+                                            format!("{}...<truncated>", &body_text[..200])
+                                        } else {
+                                            body_text
+                                        };
+                                        tracing::debug!(%status, body = %truncated, "signal typing indicator failed");
+                                    }
+                                    tracing::warn!(%status, "signal typing indicator request failed");
                                     break;
                                 }
                             }
@@ -1039,8 +1040,8 @@ impl Messaging for SignalAdapter {
         }
 
         // Signal the SSE listener to stop.
-        if let Some(shutdown_tx) = self.shutdown_tx.read().await.as_ref() {
-            shutdown_tx.send(()).await.ok();
+        if let Some(shutdown_tx) = self.shutdown_tx.write().await.take() {
+            shutdown_tx.try_send(()).ok();
         }
 
         tracing::info!(adapter = %self.runtime_key, "signal adapter shut down");

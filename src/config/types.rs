@@ -1528,33 +1528,63 @@ impl Binding {
 
             match chat_type {
                 Some("group") => {
-                    // For group chats: check group_id is allowed OR sender is in group_allowed_users
-                    let group_allowed = if !self.group_ids.is_empty() {
+                    // For group chats: group_id must be allowed AND sender must be allowed
+                    let group_allowed = if self.group_ids.is_empty() {
+                        false // Empty = block all groups
+                    } else if self.group_ids.iter().any(|g| g == "*") {
+                        true // Wildcard = allow all groups
+                    } else {
                         message
                             .metadata
                             .get("signal_group_id")
                             .and_then(|v| v.as_str())
                             .is_some_and(|gid| self.group_ids.contains(&gid.to_string()))
-                    } else {
-                        false
                     };
 
-                    let sender_allowed = if !self.group_allowed_users.is_empty() {
-                        self.group_allowed_users.contains(&message.sender_id)
+                    // Reject if group is not allowed (regardless of sender)
+                    if !group_allowed {
+                        return false;
+                    }
+
+                    // Check sender is allowed
+                    let sender_allowed = if self.group_allowed_users.is_empty() {
+                        false // Empty = block all
+                    } else if self.group_allowed_users.iter().any(|u| u == "*") {
+                        true // Wildcard = allow all
                     } else {
-                        false
+                        Self::signal_sender_matches(
+                            &self.group_allowed_users,
+                            &message.sender_id,
+                            message
+                                .metadata
+                                .get("signal_source_number")
+                                .and_then(|v| v.as_str()),
+                        )
                     };
 
-                    if !group_allowed && !sender_allowed {
+                    if !sender_allowed {
                         return false;
                     }
                 }
                 Some("dm") | Some("private") => {
                     // For DMs: when dm_allowed_users is empty, block all DMs.
                     // When non-empty, only allow DMs from listed sender_ids.
-                    if self.dm_allowed_users.is_empty()
-                        || !self.dm_allowed_users.contains(&message.sender_id)
-                    {
+                    let sender_allowed = if self.dm_allowed_users.is_empty() {
+                        false // Empty = block all DMs
+                    } else if self.dm_allowed_users.iter().any(|u| u == "*") {
+                        true // Wildcard = allow all DMs
+                    } else {
+                        Self::signal_sender_matches(
+                            &self.dm_allowed_users,
+                            &message.sender_id,
+                            message
+                                .metadata
+                                .get("signal_source_number")
+                                .and_then(|v| v.as_str()),
+                        )
+                    };
+
+                    if !sender_allowed {
                         return false;
                     }
                 }
@@ -1566,6 +1596,18 @@ impl Binding {
         }
 
         true
+    }
+
+    /// Check if a Signal sender matches an allowed users list.
+    /// Matches against both UUID (sender_id) and phone number (source_number).
+    fn signal_sender_matches(
+        allowed_users: &[String],
+        sender_id: &str,
+        source_number: Option<&str>,
+    ) -> bool {
+        allowed_users
+            .iter()
+            .any(|allowed| allowed == sender_id || source_number.is_some_and(|num| allowed == num))
     }
 }
 

@@ -144,40 +144,37 @@ impl Tool for SendMessageTool {
             "send_message_to_another_channel tool called"
         );
 
-        // Check for explicit Signal target first
-        if let Some(mut explicit_target) = parse_explicit_signal_target(&args.target) {
-            // Only apply current adapter if the target didn't explicitly specify one
-            // (i.e., target was not prefixed with "signal:", so parse_explicit_signal_target
-            // defaulted to "signal" adapter). If target was "signal:personal:...", we
-            // preserve the parsed adapter ("signal:personal").
-            if !args.target.starts_with("signal:")
-                && let Some(current_adapter) = self
-                    .current_adapter
-                    .as_ref()
-                    .filter(|adapter| adapter.starts_with("signal"))
-            {
-                explicit_target.adapter = current_adapter.clone();
+        // Check for explicit Signal target (named adapter only)
+        // Only treat as explicit if it's a named adapter (e.g., "signal:work:..."),
+        // not the default "signal:..." forms which should route via current_adapter.
+        // Default "signal:" targets fall through to channel lookup or current_adapter below.
+        if let Some(explicit_target) = parse_explicit_signal_target(&args.target) {
+            // Only proceed if this is a named adapter (not the default "signal")
+            if explicit_target.adapter != "signal" {
+                self.messaging_manager
+                    .broadcast(
+                        &explicit_target.adapter,
+                        &explicit_target.target,
+                        crate::OutboundResponse::Text(args.message),
+                    )
+                    .await
+                    .map_err(|error| {
+                        SendMessageError(format!("failed to send message: {error}"))
+                    })?;
+
+                tracing::info!(
+                  adapter = %explicit_target.adapter,
+                  broadcast_target = %explicit_target.target,
+                  "message sent via explicit target"
+                );
+
+                return Ok(SendMessageOutput {
+                    success: true,
+                    target: explicit_target.target,
+                    platform: explicit_target.adapter,
+                });
             }
-            self.messaging_manager
-                .broadcast(
-                    &explicit_target.adapter,
-                    &explicit_target.target,
-                    crate::OutboundResponse::Text(args.message),
-                )
-                .await
-                .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
-
-            tracing::info!(
-                adapter = %explicit_target.adapter,
-                broadcast_target = %explicit_target.target,
-                "message sent via explicit target"
-            );
-
-            return Ok(SendMessageOutput {
-                success: true,
-                target: explicit_target.target,
-                platform: explicit_target.adapter,
-            });
+            // If adapter is "signal" (default), fall through to use current_adapter
         }
 
         // Check for explicit email target
@@ -205,17 +202,56 @@ impl Tool for SendMessageTool {
             });
         }
 
-        let channel = self
+        // Try to find channel by name first
+        let channel_result = self
             .channel_store
             .find_by_name(&args.target)
             .await
-            .map_err(|error| SendMessageError(format!("failed to search channels: {error}")))?
-            .ok_or_else(|| {
-                SendMessageError(format!(
+            .map_err(|error| SendMessageError(format!("failed to search channels: {error}")))?;
+
+        // If channel not found, check if it's a Signal target and we have a current adapter
+        let channel = match channel_result {
+            Some(ch) => ch,
+            None => {
+                // Check if target looks like a Signal target and we have current_adapter
+                if let Some(current_adapter) = self.current_adapter.clone()
+                    && current_adapter.starts_with("signal")
+                {
+                    // Try to parse as Signal target using current adapter
+                    if let Some(normalized_target) =
+                        crate::messaging::target::normalize_target("signal", &args.target)
+                    {
+                        self.messaging_manager
+                            .broadcast(
+                                &current_adapter,
+                                &normalized_target,
+                                crate::OutboundResponse::Text(args.message.clone()),
+                            )
+                            .await
+                            .map_err(|error| {
+                                SendMessageError(format!("failed to send message: {error}"))
+                            })?;
+
+                        tracing::info!(
+                          adapter = %current_adapter,
+                          broadcast_target = %normalized_target,
+                          "message sent via current signal adapter"
+                        );
+
+                        return Ok(SendMessageOutput {
+                            success: true,
+                            target: normalized_target,
+                            platform: current_adapter,
+                        });
+                    }
+                }
+
+                return Err(SendMessageError(format!(
                     "no channel found matching '{}'. Use a channel name/ID from the available channels list or an explicit email target like email:alice@example.com.",
                     args.target
-                ))
-            })?;
+                )));
+            }
+        };
 
         let broadcast_target = crate::messaging::target::resolve_broadcast_target(&channel)
             .ok_or_else(|| {

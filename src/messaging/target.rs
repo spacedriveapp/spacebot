@@ -109,16 +109,9 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .and_then(|meta| meta.get("signal_target"))
                 .and_then(json_value_to_string)
             {
-                // Parse from signal_target which already includes the normalized format
-                // e.g., "uuid:xxxx" or "group:xxxx" or "+1234567890"
-                // Preserve named adapter from channel.id (e.g., "signal:work" -> "signal:work")
-                let channel_parts: Vec<&str> = channel.id.split(':').collect();
-                let adapter = if channel_parts.len() >= 3 {
-                    // Named adapter: signal:{instance}:...
-                    format!("signal:{}", channel_parts[1])
-                } else {
-                    "signal".to_string()
-                };
+                // signal_target is already normalized (e.g., "uuid:xxxx", "group:xxxx", "+123...")
+                // Determine adapter from channel.id: named if format is "signal:{name}:..."
+                let adapter = extract_signal_adapter_from_channel_id(&channel.id);
                 return Some(BroadcastTarget {
                     adapter,
                     target: signal_target,
@@ -160,7 +153,7 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
     })
 }
 
-fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
+pub fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
     let trimmed = raw_target.trim();
     if trimmed.is_empty() {
         return None;
@@ -334,6 +327,30 @@ fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
         return Some(number.to_string());
     }
     None
+}
+
+/// Extract the Signal adapter name from a channel ID.
+///
+/// Channel ID formats:
+/// - "signal:{target}" -> default adapter "signal"
+/// - "signal:{instance}:{target}" -> named adapter "signal:{instance}"
+///
+/// Where {target} is uuid:xxx, group:xxx, or +xxx (starts with valid target prefix)
+fn extract_signal_adapter_from_channel_id(channel_id: &str) -> String {
+    let parts: Vec<&str> = channel_id.split(':').collect();
+    match parts.as_slice() {
+        // Named adapter: signal:{instance}:{target}
+        // target must start with "uuid:", "group:", or "+" to confirm it's a real target
+        ["signal", instance, target_part, ..]
+            if target_part.starts_with("uuid:")
+                || target_part.starts_with("group:")
+                || target_part.starts_with('+') =>
+        {
+            format!("signal:{instance}")
+        }
+        // Default adapter: signal:{target}
+        _ => "signal".to_string(),
+    }
 }
 
 /// Parse Signal target components into BroadcastTarget.

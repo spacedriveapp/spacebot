@@ -461,8 +461,13 @@ impl SignalPermissions {
         // - "*" means allow all DM users
         // - Empty list means block all DMs
         // - Specific list means only those users are allowed for DMs
-        let mut dm_users = seed_dm_allowed_users.clone();
-        let mut dm_wildcard = dm_users.iter().any(|id| id.trim() == "*");
+        // Process seed values with same trimming/filtering as bindings for consistency
+        let mut dm_users: Vec<String> = seed_dm_allowed_users
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let mut dm_wildcard = dm_users.iter().any(|id| id == "*");
 
         // Add dm_allowed_users from bindings
         if !dm_wildcard {
@@ -490,8 +495,13 @@ impl SignalPermissions {
         // - "*" means allow all group users
         // - Empty list means block all group users
         // - Specific list means only those users are allowed in groups
-        let mut group_users = seed_group_allowed_users.clone();
-        let mut group_wildcard = group_users.iter().any(|id| id.trim() == "*");
+        // Process seed values with same trimming/filtering as bindings for consistency
+        let mut group_users: Vec<String> = seed_group_allowed_users
+            .iter()
+            .map(|id| id.trim().to_string())
+            .filter(|id| !id.is_empty())
+            .collect();
+        let mut group_wildcard = group_users.iter().any(|id| id == "*");
 
         // Add group_allowed_users from bindings
         if !group_wildcard {
