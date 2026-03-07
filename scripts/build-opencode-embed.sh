@@ -65,17 +65,21 @@ echo "[opencode-embed] Using node $(node -v)"
 # ---------------------------------------------------------------------------
 if [ -d "${CACHE_DIR}/.git" ]; then
   echo "[opencode-embed] Fetching updates..."
-  # Unshallow if this was a prior shallow clone, otherwise fetch fails
-  # to retrieve older commits.
-  if [ -f "${CACHE_DIR}/.git/shallow" ]; then
-    git -C "${CACHE_DIR}" fetch --unshallow origin
-  else
-    git -C "${CACHE_DIR}" fetch origin
+  # If the commit is already available locally, skip the fetch entirely.
+  if ! git -C "${CACHE_DIR}" cat-file -e "${OPENCODE_COMMIT}^{commit}" 2>/dev/null; then
+    if [ -f "${CACHE_DIR}/.git/shallow" ]; then
+      git -C "${CACHE_DIR}" fetch --progress --unshallow origin
+    else
+      git -C "${CACHE_DIR}" fetch --progress origin
+    fi
   fi
   git -C "${CACHE_DIR}" checkout "${OPENCODE_COMMIT}" --force
 else
-  echo "[opencode-embed] Cloning opencode..."
-  git clone "${OPENCODE_REPO}" "${CACHE_DIR}"
+  echo "[opencode-embed] Cloning opencode (this may take a minute)..."
+  # Use --single-branch to skip other branches. --progress forces output
+  # even when stderr is not a TTY (fixes apparent hang on non-interactive
+  # terminals).
+  git clone --progress --single-branch "${OPENCODE_REPO}" "${CACHE_DIR}"
   git -C "${CACHE_DIR}" checkout "${OPENCODE_COMMIT}" --force
 fi
 
