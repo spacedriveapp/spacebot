@@ -382,6 +382,13 @@ pub(super) async fn update_global_settings(
     }))
 }
 
+/// Return the embedded CHANGELOG.md content.
+pub(super) async fn changelog() -> Json<serde_json::Value> {
+    Json(serde_json::json!({
+        "content": crate::self_awareness::changelog_content(),
+    }))
+}
+
 /// Return the current update status (from background check).
 pub(super) async fn update_check(
     State(state): State<Arc<ApiState>>,

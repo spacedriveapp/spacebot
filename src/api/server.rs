@@ -211,6 +211,7 @@ pub async fn start_http_server(
             get(settings::update_check).post(settings::update_check_now),
         )
         .route("/update/apply", post(settings::update_apply))
+        .route("/changelog", get(settings::changelog))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
         .route("/links", get(links::list_links).post(links::create_link))

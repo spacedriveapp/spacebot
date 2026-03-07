@@ -42,15 +42,8 @@ fn tool_nudge_policy_enum_values() {
     let enabled = ToolNudgePolicy::Enabled;
     let disabled = ToolNudgePolicy::Disabled;
 
-    match enabled {
-        ToolNudgePolicy::Enabled => {}
-        ToolNudgePolicy::Disabled => panic!("Expected Enabled"),
-    }
-
-    match disabled {
-        ToolNudgePolicy::Enabled => panic!("Expected Disabled"),
-        ToolNudgePolicy::Disabled => {}
-    }
+    assert!(matches!(enabled, ToolNudgePolicy::Enabled));
+    assert!(matches!(disabled, ToolNudgePolicy::Disabled));
 
     // Test Debug output
     let debug_str = format!("{:?}", enabled);
@@ -167,11 +160,13 @@ async fn hook_send_status_generates_event() {
     hook.send_status("test status");
 
     let event = event_rx.try_recv().expect("Should receive status event");
-    match event {
-        spacebot::ProcessEvent::StatusUpdate { status, .. } => {
-            assert_eq!(status, "test status");
-        }
-        _ => panic!("Expected StatusUpdate event, got {:?}", event),
+    assert!(
+        matches!(&event, spacebot::ProcessEvent::StatusUpdate { .. }),
+        "Expected StatusUpdate event, got {:?}",
+        event
+    );
+    if let spacebot::ProcessEvent::StatusUpdate { status, .. } = event {
+        assert_eq!(status, "test status");
     }
 }
 
@@ -207,11 +202,13 @@ async fn tool_call_emits_started_event() {
     let event = event_rx
         .try_recv()
         .expect("Should receive tool started event");
-    match event {
-        spacebot::ProcessEvent::ToolStarted { tool_name, .. } => {
-            assert_eq!(tool_name, "test_tool");
-        }
-        _ => panic!("Expected ToolStarted event, got {:?}", event),
+    assert!(
+        matches!(&event, spacebot::ProcessEvent::ToolStarted { .. }),
+        "Expected ToolStarted event, got {:?}",
+        event
+    );
+    if let spacebot::ProcessEvent::ToolStarted { tool_name, .. } = event {
+        assert_eq!(tool_name, "test_tool");
     }
 }
 
@@ -263,14 +260,17 @@ async fn tool_result_emits_completed_event() {
     let event = event_rx
         .try_recv()
         .expect("Should receive tool completed event");
-    match event {
-        spacebot::ProcessEvent::ToolCompleted {
-            tool_name, result, ..
-        } => {
-            assert_eq!(tool_name, "test_tool");
-            assert_eq!(result, "Tool result content");
-        }
-        _ => panic!("Expected ToolCompleted event, got {:?}", event),
+    assert!(
+        matches!(&event, spacebot::ProcessEvent::ToolCompleted { .. }),
+        "Expected ToolCompleted event, got {:?}",
+        event
+    );
+    if let spacebot::ProcessEvent::ToolCompleted {
+        tool_name, result, ..
+    } = event
+    {
+        assert_eq!(tool_name, "test_tool");
+        assert_eq!(result, "Tool result content");
     }
 }
 
