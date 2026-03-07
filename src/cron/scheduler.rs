@@ -303,12 +303,32 @@ impl Scheduler {
                     let _guard = guard;
                     match run_cron_job(&job, &exec_context).await {
                         Ok(()) => {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .cron_executions_total
+                                .with_label_values(&[
+                                    &exec_context.deps.agent_id,
+                                    &exec_job_id,
+                                    "success",
+                                ])
+                                .inc();
+
                             let mut j = exec_jobs.write().await;
                             if let Some(j) = j.get_mut(&exec_job_id) {
                                 j.consecutive_failures = 0;
                             }
                         }
                         Err(error) => {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .cron_executions_total
+                                .with_label_values(&[
+                                    &exec_context.deps.agent_id,
+                                    &exec_job_id,
+                                    "failure",
+                                ])
+                                .inc();
+
                             tracing::error!(
                                 cron_id = %exec_job_id,
                                 %error,

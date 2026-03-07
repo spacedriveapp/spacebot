@@ -85,6 +85,38 @@ pub struct McpConnection {
     tool_list_changed: Arc<AtomicBool>,
 }
 
+#[cfg(feature = "metrics")]
+fn set_mcp_connection_state(
+    server_name: &str,
+    connected: i64,
+    connecting: i64,
+    disconnected: i64,
+    failed: i64,
+    tools_registered: i64,
+) {
+    let metrics = crate::telemetry::Metrics::global();
+    metrics
+        .mcp_connections
+        .with_label_values(&[server_name, "connected"])
+        .set(connected);
+    metrics
+        .mcp_connections
+        .with_label_values(&[server_name, "connecting"])
+        .set(connecting);
+    metrics
+        .mcp_connections
+        .with_label_values(&[server_name, "disconnected"])
+        .set(disconnected);
+    metrics
+        .mcp_connections
+        .with_label_values(&[server_name, "failed"])
+        .set(failed);
+    metrics
+        .mcp_tools_registered
+        .with_label_values(&[server_name])
+        .set(tools_registered);
+}
+
 impl McpConnection {
     pub fn new(config: McpServerConfig) -> Self {
         Self {
@@ -110,10 +142,16 @@ impl McpConnection {
     }
 
     pub async fn connect(&self) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let connect_start = std::time::Instant::now();
+
         {
             let mut state = self.state.write().await;
             *state = McpConnectionState::Connecting;
         }
+
+        #[cfg(feature = "metrics")]
+        set_mcp_connection_state(&self.name, 0, 1, 0, 0, 0);
 
         let session_result = self.connect_session().await;
         let mut client_guard = self.client.lock().await;
@@ -139,11 +177,24 @@ impl McpConnection {
                         let error_message = error.to_string();
                         let mut state = self.state.write().await;
                         *state = McpConnectionState::Failed(error_message.clone());
+
+                        #[cfg(feature = "metrics")]
+                        {
+                            crate::telemetry::Metrics::global()
+                                .mcp_connection_attempts_total
+                                .with_label_values(&[&self.name, "failure"])
+                                .inc();
+                            set_mcp_connection_state(&self.name, 0, 0, 0, 1, 0);
+                        }
+
                         return Err(anyhow!(error_message));
                     }
                 };
                 *client_guard = Some(session);
                 drop(client_guard);
+
+                #[cfg(feature = "metrics")]
+                let tool_count = tools.len() as i64;
 
                 {
                     let mut cached_tools = self.tools.write().await;
@@ -151,8 +202,26 @@ impl McpConnection {
                 }
                 self.tool_list_changed.store(false, Ordering::SeqCst);
 
-                let mut state = self.state.write().await;
-                *state = McpConnectionState::Connected;
+                {
+                    let mut state = self.state.write().await;
+                    *state = McpConnectionState::Connected;
+                }
+
+                #[cfg(feature = "metrics")]
+                {
+                    let metrics = crate::telemetry::Metrics::global();
+                    let elapsed = connect_start.elapsed().as_secs_f64();
+                    metrics
+                        .mcp_connection_attempts_total
+                        .with_label_values(&[&self.name, "success"])
+                        .inc();
+                    metrics
+                        .mcp_connection_duration_seconds
+                        .with_label_values(&[&self.name])
+                        .observe(elapsed);
+                    set_mcp_connection_state(&self.name, 1, 0, 0, 0, tool_count);
+                }
+
                 Ok(())
             }
             Err(error) => {
@@ -167,6 +236,16 @@ impl McpConnection {
                 let error_message = error.to_string();
                 let mut state = self.state.write().await;
                 *state = McpConnectionState::Failed(error_message.clone());
+
+                #[cfg(feature = "metrics")]
+                {
+                    crate::telemetry::Metrics::global()
+                        .mcp_connection_attempts_total
+                        .with_label_values(&[&self.name, "failure"])
+                        .inc();
+                    set_mcp_connection_state(&self.name, 0, 0, 0, 1, 0);
+                }
+
                 Err(anyhow!(error_message))
             }
         }
@@ -185,7 +264,17 @@ impl McpConnection {
 
         for attempt in 1..=MAX_ATTEMPTS {
             match self.connect().await {
-                Ok(()) => return true,
+                Ok(()) => {
+                    #[cfg(feature = "metrics")]
+                    if attempt > 1 {
+                        let metrics = crate::telemetry::Metrics::global();
+                        metrics
+                            .mcp_reconnects_total
+                            .with_label_values(&[&self.name])
+                            .inc();
+                    }
+                    return true;
+                }
                 Err(error) => {
                     tracing::warn!(
                         server = %self.name,
@@ -231,6 +320,9 @@ impl McpConnection {
 
         let mut state = self.state.write().await;
         *state = McpConnectionState::Disconnected;
+
+        #[cfg(feature = "metrics")]
+        set_mcp_connection_state(&self.name, 0, 0, 1, 0, 0);
     }
 
     pub async fn list_tools(&self) -> Vec<rmcp::model::Tool> {
@@ -248,6 +340,9 @@ impl McpConnection {
         tool_name: &str,
         arguments: serde_json::Value,
     ) -> Result<rmcp::model::CallToolResult> {
+        #[cfg(feature = "metrics")]
+        let call_start = std::time::Instant::now();
+
         let arguments = match arguments {
             serde_json::Value::Object(map) => Some(map),
             serde_json::Value::Null => None,
@@ -268,10 +363,26 @@ impl McpConnection {
             task: None,
         };
 
-        client
+        let result = client
             .call_tool(params)
             .await
-            .map_err(service_error_to_anyhow)
+            .map_err(service_error_to_anyhow);
+
+        #[cfg(feature = "metrics")]
+        {
+            let metrics = crate::telemetry::Metrics::global();
+            let elapsed = call_start.elapsed().as_secs_f64();
+            metrics
+                .mcp_tool_calls_total
+                .with_label_values(&[&self.name, tool_name])
+                .inc();
+            metrics
+                .mcp_tool_call_duration_seconds
+                .with_label_values(&[&self.name, tool_name])
+                .observe(elapsed);
+        }
+
+        result
     }
 
     async fn refresh_tools(&self) -> Result<()> {
@@ -471,7 +582,18 @@ impl McpManager {
             return Ok(());
         }
 
-        connection.connect().await
+        let result = connection.connect().await;
+
+        #[cfg(feature = "metrics")]
+        if result.is_ok() {
+            let metrics = crate::telemetry::Metrics::global();
+            metrics
+                .mcp_reconnects_total
+                .with_label_values(&[name])
+                .inc();
+        }
+
+        result
     }
 
     pub async fn reconcile(

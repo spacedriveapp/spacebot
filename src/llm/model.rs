@@ -52,6 +52,7 @@ pub struct SpacebotModel {
     routing: Option<RoutingConfig>,
     agent_id: Option<String>,
     process_type: Option<String>,
+    worker_type: Option<String>,
 }
 
 impl SpacebotModel {
@@ -79,6 +80,12 @@ impl SpacebotModel {
     ) -> Self {
         self.agent_id = Some(agent_id.into());
         self.process_type = Some(process_type.into());
+        self
+    }
+
+    /// Attach a worker type label for metrics (e.g. "builtin", "opencode").
+    pub fn with_worker_type(mut self, worker_type: impl Into<String>) -> Self {
+        self.worker_type = Some(worker_type.into());
         self
     }
 
@@ -258,6 +265,7 @@ impl CompletionModel for SpacebotModel {
             routing: None,
             agent_id: None,
             process_type: None,
+            worker_type: None,
         }
     }
 
@@ -365,14 +373,19 @@ impl CompletionModel for SpacebotModel {
             let elapsed = start.elapsed().as_secs_f64();
             let agent_label = self.agent_id.as_deref().unwrap_or("unknown");
             let tier_label = self.process_type.as_deref().unwrap_or("unknown");
+            let worker_label = match self.worker_type.as_deref() {
+                Some(worker_type) => worker_type,
+                None if tier_label == "worker" => "unknown",
+                None => "",
+            };
             let metrics = crate::telemetry::Metrics::global();
             metrics
                 .llm_requests_total
-                .with_label_values(&[agent_label, &self.full_model_name, tier_label])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
                 .inc();
             metrics
                 .llm_request_duration_seconds
-                .with_label_values(&[agent_label, &self.full_model_name, tier_label])
+                .with_label_values(&[agent_label, &self.full_model_name, tier_label, worker_label])
                 .observe(elapsed);
 
             if let Ok(ref response) = result {
@@ -385,6 +398,7 @@ impl CompletionModel for SpacebotModel {
                             &self.full_model_name,
                             tier_label,
                             "input",
+                            worker_label,
                         ])
                         .inc_by(usage.input_tokens);
                     metrics
@@ -394,6 +408,7 @@ impl CompletionModel for SpacebotModel {
                             &self.full_model_name,
                             tier_label,
                             "output",
+                            worker_label,
                         ])
                         .inc_by(usage.output_tokens);
                     if usage.cached_input_tokens > 0 {
@@ -404,6 +419,7 @@ impl CompletionModel for SpacebotModel {
                                 &self.full_model_name,
                                 tier_label,
                                 "cached_input",
+                                worker_label,
                             ])
                             .inc_by(usage.cached_input_tokens);
                     }
@@ -417,8 +433,21 @@ impl CompletionModel for SpacebotModel {
                     if cost > 0.0 {
                         metrics
                             .llm_estimated_cost_dollars
-                            .with_label_values(&[agent_label, &self.full_model_name, tier_label])
+                            .with_label_values(&[
+                                agent_label,
+                                &self.full_model_name,
+                                tier_label,
+                                worker_label,
+                            ])
                             .inc_by(cost);
+
+                        // Track per-worker cost separately when this is a worker process.
+                        if tier_label == "worker" {
+                            metrics
+                                .worker_cost_dollars
+                                .with_label_values(&[agent_label, worker_label])
+                                .inc_by(cost);
+                        }
                     }
                 }
             }
@@ -440,8 +469,15 @@ impl CompletionModel for SpacebotModel {
                 };
                 metrics
                     .process_errors_total
-                    .with_label_values(&[agent_label, tier_label, error_type])
+                    .with_label_values(&[agent_label, tier_label, error_type, worker_label])
                     .inc();
+
+                if error_type == "context_overflow" {
+                    metrics
+                        .context_overflow_total
+                        .with_label_values(&[agent_label, tier_label])
+                        .inc();
+                }
             }
         }
 

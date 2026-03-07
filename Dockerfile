@@ -28,7 +28,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
-    && cargo build --release \
+    && cargo build --release --features metrics \
     && rm -rf src
 
 # 2. Install frontend dependencies.
@@ -59,7 +59,7 @@ COPY migrations/ migrations/
 COPY docs/ docs/
 COPY AGENTS.md README.md CHANGELOG.md ./
 COPY src/ src/
-RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
+RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release --features metrics \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
 
@@ -100,7 +100,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV SPACEBOT_DIR=/data
 ENV SPACEBOT_DEPLOYMENT=docker
-EXPOSE 19898 18789
+EXPOSE 19898 18789 9090
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:19898/api/health || exit 1
