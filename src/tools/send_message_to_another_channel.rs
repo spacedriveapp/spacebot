@@ -113,7 +113,7 @@ impl Tool for SendMessageTool {
                 " Signal messaging is enabled: you can target `signal:uuid:{uuid}`, `signal:group:{group_id}`, or `signal:+{phone}`.",
             );
             target_description.push_str(
-                " With Signal enabled, explicit targets are also allowed: `signal:uuid:{uuid}`, `signal:group:{group_id}`, `signal:+{phone}`, or bare UUIDs and phone numbers.",
+                " With Signal enabled, explicit targets are also allowed: `signal:uuid:{uuid}`, `signal:group:{group_id}`, `signal:+{phone}`",
             );
         }
 
