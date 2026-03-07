@@ -15,6 +15,20 @@ $SPACEBOT_DIR/config.toml        # env override
 spacebot --config /path/to.toml  # CLI override
 ```
 
+## Environment Variables
+
+These environment variables control instance-level behavior and are not set in `config.toml`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SPACEBOT_DIR` | `~/.spacebot` | Instance root directory. All data, config, databases, and sockets live under this path. Set this to run multiple isolated instances (e.g. dev and prod) side by side. |
+| `SPACEBOT_DEPLOYMENT` | auto-detected | Deployment mode: `docker`, `hosted`, or native (auto-detected). Affects API bind address, agent limits, and update behavior. |
+| `SPACEBOT_MAX_AGENTS` | unlimited | Maximum number of agents (enforced in hosted mode only). |
+| `SPACEBOT_CRON_TIMEZONE` | server local | Default timezone for cron active-hours evaluation (IANA name). Overridden by `defaults.cron_timezone` or `agents.cron_timezone` in config. |
+| `SPACEBOT_USER_TIMEZONE` | inherits cron | Default timezone for channel/worker temporal context. Overridden by config equivalents. |
+| `SPACEBOT_CHANNEL_MODEL` | `anthropic/claude-sonnet-4-20250514` | Default channel model (env-only mode). |
+| `SPACEBOT_WORKER_MODEL` | `anthropic/claude-haiku-4.5-20250514` | Default worker model (env-only mode). |
+
 ## Full Reference
 
 ```toml

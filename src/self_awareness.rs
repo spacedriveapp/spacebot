@@ -56,6 +56,11 @@ pub fn agents_manifest_for_prompt() -> String {
     )
 }
 
+/// Full embedded `CHANGELOG.md` content for the web UI.
+pub fn changelog_content() -> &'static str {
+    CHANGELOG_DOC
+}
+
 /// Most recent release notes extracted from `CHANGELOG.md`.
 pub fn changelog_highlights() -> String {
     let highlights = latest_release_notes(CHANGELOG_DOC, 3).unwrap_or_else(|| {

@@ -51,6 +51,7 @@
         "react-hook-form": "^7.71.1",
         "react-markdown": "^10.1.0",
         "recharts": "^3.7.0",
+        "rehype-raw": "^7.0.0",
         "remark-gfm": "^4.0.1",
         "sigma": "^3.0.2",
         "smol-toml": "^1.6.0",

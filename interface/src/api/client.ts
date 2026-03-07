@@ -1820,6 +1820,12 @@ export const api = {
 		return response.json() as Promise<RawConfigUpdateResponse>;
 	},
 
+	// Changelog API
+	changelog: async (): Promise<string> => {
+		const data = await fetchJson<{ content: string }>("/changelog");
+		return data.content;
+	},
+
 	// Update API
 	updateCheck: () => fetchJson<UpdateStatus>("/update/check"),
 	updateCheckNow: async () => {
