@@ -214,7 +214,10 @@ fn cmd_start(
     debug: bool,
     foreground: bool,
 ) -> anyhow::Result<()> {
-    let paths = spacebot::daemon::DaemonPaths::from_default();
+    // Use the config path (if provided) to derive the correct instance dir
+    // for the PID check, so it matches the PID file written during daemonize.
+    let instance_dir = resolve_instance_dir(&config_path);
+    let paths = spacebot::daemon::DaemonPaths::new(&instance_dir);
 
     // Bail if already running
     if let Some(pid) = spacebot::daemon::is_running(&paths) {
@@ -232,23 +235,28 @@ fn cmd_start(
         None
     };
 
-    // Open the instance-level secrets store so `secret:` references in config.toml
-    // resolve during Config::load(). The store is shared with all agents.
-    let bootstrapped_store = bootstrap_secrets_store(&resolved_config_path);
-
-    // Validate config loads successfully before forking
-    let config = load_config(&resolved_config_path)?;
-
     if !foreground {
-        // Fork the process before creating any Tokio runtime. After daemonize()
-        // returns, we are in the child process — the parent has exited. Any
-        // runtime created before this point would be in a broken state inside
-        // the child (Tokio's I/O driver and thread pool don't survive fork),
-        // which is why tracing init (and the OTLP batch exporter it creates)
-        // must happen *after* this call.
-        let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
+        // Fork BEFORE touching the macOS Keychain or any CoreFoundation API.
+        //
+        // bootstrap_secrets_store() loads the master key from the macOS Keychain
+        // (Security framework), which initializes CoreFoundation internally.
+        // On macOS, CoreFoundation state is not safe to use after fork() — the
+        // child process receives SIGBUS from the kernel. To avoid this, we
+        // determine the instance directory (needed for the PID file path)
+        // without loading the full config or accessing the Keychain, then fork
+        // first. Config loading and secrets resolution happen in the child.
+        //
+        // Tokio's I/O driver and thread pool also don't survive fork, so the
+        // runtime and tracing init must happen after this call as well.
         spacebot::daemon::daemonize(&paths)?;
     }
+
+    // Open the instance-level secrets store so `secret:` references in config.toml
+    // resolve during Config::load(). Now safe to access the macOS Keychain —
+    // we are either in foreground mode (no fork) or in the daemon child process.
+    let bootstrapped_store = bootstrap_secrets_store(&resolved_config_path);
+
+    let config = load_config(&resolved_config_path)?;
 
     // Build a fresh Tokio runtime in this process (the child after daemonize,
     // or the foreground process). Tracing init — including the OTLP batch
@@ -270,6 +278,19 @@ fn cmd_start(
 
         run(config, foreground, otel_provider, bootstrapped_store).await
     })
+}
+
+/// Resolve the instance directory from the config path without loading the
+/// full config or touching platform credential stores. Used to determine
+/// daemon file paths (PID, socket) before fork.
+fn resolve_instance_dir(config_path: &Option<std::path::PathBuf>) -> std::path::PathBuf {
+    if let Some(path) = config_path {
+        path.parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::path::PathBuf::from("."))
+    } else {
+        spacebot::config::Config::default_instance_dir()
+    }
 }
 
 #[tokio::main]
@@ -1149,13 +1170,7 @@ fn bootstrap_secrets_store(
     // is disabled but workers still start normally.
     spacebot::secrets::keystore::probe_keyring_support();
 
-    let instance_dir = if let Some(path) = config_path {
-        path.parent()
-            .map(|p| p.to_path_buf())
-            .unwrap_or_else(|| std::path::PathBuf::from("."))
-    } else {
-        spacebot::config::Config::default_instance_dir()
-    };
+    let instance_dir = resolve_instance_dir(config_path);
 
     let data_dir = instance_dir.join("data");
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
