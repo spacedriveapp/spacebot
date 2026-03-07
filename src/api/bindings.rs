@@ -14,9 +14,11 @@ pub(super) struct BindingResponse {
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
+    group_ids: Vec<String>,
     channel_ids: Vec<String>,
     require_mention: bool,
     dm_allowed_users: Vec<String>,
+    group_allowed_users: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -43,11 +45,15 @@ pub(super) struct CreateBindingRequest {
     #[serde(default)]
     chat_id: Option<String>,
     #[serde(default)]
+    group_ids: Vec<String>,
+    #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
     require_mention: bool,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    group_allowed_users: Vec<String>,
     /// Optional: set platform credentials if not yet configured.
     #[serde(default)]
     platform_credentials: Option<PlatformCredentials>,
@@ -149,9 +155,13 @@ pub(super) struct UpdateBindingRequest {
     #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
+    group_ids: Vec<String>,
+    #[serde(default)]
     require_mention: bool,
     #[serde(default)]
     dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    group_allowed_users: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -185,9 +195,11 @@ pub(super) async fn list_bindings(
             guild_id: b.guild_id,
             workspace_id: b.workspace_id,
             chat_id: b.chat_id,
+            group_ids: b.group_ids,
             channel_ids: b.channel_ids,
             require_mention: b.require_mention,
             dm_allowed_users: b.dm_allowed_users,
+            group_allowed_users: b.group_allowed_users,
         })
         .collect();
 
@@ -433,6 +445,13 @@ pub(super) async fn create_binding(
     if let Some(chat_id) = &request.chat_id {
         binding_table["chat_id"] = toml_edit::value(chat_id.as_str());
     }
+    if !request.group_ids.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_ids {
+            arr.push(id.as_str());
+        }
+        binding_table["group_ids"] = toml_edit::value(arr);
+    }
     if !request.channel_ids.is_empty() {
         let mut arr = toml_edit::Array::new();
         for id in &request.channel_ids {
@@ -449,6 +468,13 @@ pub(super) async fn create_binding(
             arr.push(id.as_str());
         }
         binding_table["dm_allowed_users"] = toml_edit::value(arr);
+    }
+    if !request.group_allowed_users.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_allowed_users {
+            arr.push(id.as_str());
+        }
+        binding_table["group_allowed_users"] = toml_edit::value(arr);
     }
     bindings_array.push(binding_table);
 
@@ -786,6 +812,16 @@ pub(super) async fn update_binding(
         binding.remove("channel_ids");
     }
 
+    if !request.group_ids.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_ids {
+            arr.push(id.as_str());
+        }
+        binding["group_ids"] = toml_edit::value(arr);
+    } else {
+        binding.remove("group_ids");
+    }
+
     if request.require_mention {
         binding["require_mention"] = toml_edit::value(true);
     } else {
@@ -800,6 +836,16 @@ pub(super) async fn update_binding(
         binding["dm_allowed_users"] = toml_edit::value(arr);
     } else {
         binding.remove("dm_allowed_users");
+    }
+
+    if !request.group_allowed_users.is_empty() {
+        let mut arr = toml_edit::Array::new();
+        for id in &request.group_allowed_users {
+            arr.push(id.as_str());
+        }
+        binding["group_allowed_users"] = toml_edit::value(arr);
+    } else {
+        binding.remove("group_allowed_users");
     }
 
     tokio::fs::write(&config_path, doc.to_string())

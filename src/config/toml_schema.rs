@@ -485,6 +485,7 @@ pub(super) struct TomlMessagingConfig {
     pub(super) email: Option<TomlEmailConfig>,
     pub(super) webhook: Option<TomlWebhookConfig>,
     pub(super) twitch: Option<TomlTwitchConfig>,
+    pub(super) signal: Option<TomlSignalConfig>,
 }
 
 #[derive(Deserialize)]
@@ -676,6 +677,45 @@ pub(super) struct TomlTwitchInstanceConfig {
     pub(super) trigger_prefix: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct TomlSignalConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) http_url: Option<String>,
+    pub(super) account: Option<String>,
+    #[serde(default)]
+    pub(super) instances: Vec<TomlSignalInstanceConfig>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) group_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) group_allowed_users: Vec<String>,
+    #[serde(default = "default_signal_ignore_stories")]
+    pub(super) ignore_stories: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlSignalInstanceConfig {
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) http_url: Option<String>,
+    pub(super) account: Option<String>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) group_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) group_allowed_users: Vec<String>,
+    #[serde(default = "default_signal_ignore_stories")]
+    pub(super) ignore_stories: bool,
+}
+
+pub(super) fn default_signal_ignore_stories() -> bool {
+    true
+}
+
 pub(super) fn default_webhook_port() -> u16 {
     18789
 }
@@ -725,9 +765,13 @@ pub(super) struct TomlBinding {
     pub(super) workspace_id: Option<String>,
     pub(super) chat_id: Option<String>,
     #[serde(default)]
+    pub(super) group_ids: Vec<String>,
+    #[serde(default)]
     pub(super) channel_ids: Vec<String>,
     #[serde(default)]
     pub(super) require_mention: bool,
     #[serde(default)]
     pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) group_allowed_users: Vec<String>,
 }

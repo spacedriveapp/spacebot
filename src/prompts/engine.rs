@@ -74,6 +74,10 @@ impl PromptEngine {
             "adapters/email",
             crate::prompts::text::get("adapters/email"),
         )?;
+        env.add_template(
+            "adapters/signal",
+            crate::prompts::text::get("adapters/signal"),
+        )?;
 
         // Fragment templates
         env.add_template(
@@ -482,6 +486,7 @@ impl PromptEngine {
     pub fn render_channel_adapter_prompt(&self, adapter: &str) -> Option<String> {
         let template_name = match adapter {
             "email" => "adapters/email",
+            "signal" => "adapters/signal",
             _ => return None,
         };
 
