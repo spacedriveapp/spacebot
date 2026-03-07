@@ -1550,9 +1550,10 @@ impl Binding {
                     }
                 }
                 Some("dm") | Some("private") => {
-                    // For DMs: sender must be in dm_allowed_users (if specified)
-                    if !self.dm_allowed_users.is_empty()
-                        && !self.dm_allowed_users.contains(&message.sender_id)
+                    // For DMs: when dm_allowed_users is empty, block all DMs.
+                    // When non-empty, only allow DMs from listed sender_ids.
+                    if self.dm_allowed_users.is_empty()
+                        || !self.dm_allowed_users.contains(&message.sender_id)
                     {
                         return false;
                     }

@@ -278,6 +278,7 @@ fn parse_explicit_signal_target(raw: &str) -> Option<crate::messaging::target::B
     }
 
     // Phone number format: starts with + followed by 7+ digits
+    // Only treat as Signal if explicitly prefixed with signal:
     if trimmed.starts_with('+')
         && trimmed[1..].len() >= 7
         && trimmed[1..].chars().all(|c| c.is_ascii_digit())
@@ -285,9 +286,11 @@ fn parse_explicit_signal_target(raw: &str) -> Option<crate::messaging::target::B
         return crate::messaging::target::parse_delivery_target(&format!("signal:{trimmed}"));
     }
 
-    // Bare phone number (7+ digits)
-    if trimmed.len() >= 7 && trimmed.chars().all(|c| c.is_ascii_digit()) {
-        return crate::messaging::target::parse_delivery_target(&format!("signal:+{trimmed}"));
+    // Bare phone numbers (7+ digits) require explicit Signal indicator
+    // to avoid treating numeric channel IDs as Signal numbers.
+    // Only parse as Signal if input explicitly starts with "signal:"
+    if trimmed.starts_with("signal:") {
+        return crate::messaging::target::parse_delivery_target(trimmed);
     }
 
     // Group ID format: group:xxx (might be passed directly)

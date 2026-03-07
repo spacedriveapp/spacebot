@@ -1316,6 +1316,13 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await?;
 
+        // Extract adapter from messages (prefer explicit message.adapter, fall back to source)
+        // This preserves per-message adapter for Signal named instances
+        let batch_adapter = messages
+            .iter()
+            .find_map(|m| m.adapter.as_deref())
+            .or_else(|| self.current_adapter());
+
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
             *reply_target = messages.iter().rev().find_map(extract_message_id);
@@ -1329,7 +1336,7 @@ impl Channel {
                 &conversation_id,
                 attachment_parts,
                 false, // not a retrigger
-                self.current_adapter(),
+                batch_adapter,
             )
             .await?;
 

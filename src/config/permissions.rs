@@ -390,49 +390,47 @@ impl SignalPermissions {
         // - "*" means allow all groups
         // - Empty list means block all groups
         // - Specific IDs means only those groups are allowed
+        let mut group_filter_wildcard = false;
         let group_filter = {
             let mut all_group_ids = seed_group_ids.clone();
 
             // Check for wildcard in seed
             if all_group_ids.iter().any(|id| id.trim() == "*") {
-                // Wildcard for groups only - don't affect DM permissions
-                return Self {
-                    group_filter: Some(vec!["*".to_string()]),
-                    dm_allowed_users: seed_dm_allowed_users.clone(),
-                    group_allowed_users: seed_group_allowed_users.clone(),
-                };
-            }
-
-            // Add group_ids from bindings (Vec<String>)
-            for binding in &signal_bindings {
-                for id in &binding.group_ids {
-                    let id = id.trim().to_string();
-                    if id.is_empty() {
-                        continue;
+                group_filter_wildcard = true;
+            } else {
+                // Add group_ids from bindings (Vec<String>)
+                for binding in &signal_bindings {
+                    for id in &binding.group_ids {
+                        let id = id.trim().to_string();
+                        if id.is_empty() {
+                            continue;
+                        }
+                        if id == "*" {
+                            // Wildcard in binding means allow all groups - don't affect DM permissions
+                            group_filter_wildcard = true;
+                            break;
+                        }
+                        // Signal group IDs are base64-encoded; validate format.
+                        if !is_valid_base64(&id) {
+                            tracing::warn!(
+                                group_id = %id,
+                                "signal: group_id is not valid base64, dropping"
+                            );
+                            continue;
+                        }
+                        if !all_group_ids.contains(&id) {
+                            all_group_ids.push(id);
+                        }
                     }
-                    if id == "*" {
-                        // Wildcard in binding means allow all groups - don't affect DM permissions
-                        return Self {
-                            group_filter: Some(vec!["*".to_string()]),
-                            dm_allowed_users: seed_dm_allowed_users.clone(),
-                            group_allowed_users: seed_group_allowed_users.clone(),
-                        };
-                    }
-                    // Signal group IDs are base64-encoded; validate format.
-                    if !is_valid_base64(&id) {
-                        tracing::warn!(
-                            group_id = %id,
-                            "signal: group_id is not valid base64, dropping"
-                        );
-                        continue;
-                    }
-                    if !all_group_ids.contains(&id) {
-                        all_group_ids.push(id);
+                    if group_filter_wildcard {
+                        break;
                     }
                 }
             }
 
-            if all_group_ids.is_empty() {
+            if group_filter_wildcard {
+                Some(vec!["*".to_string()])
+            } else if all_group_ids.is_empty() {
                 None
             } else {
                 Some(all_group_ids)
@@ -444,32 +442,26 @@ impl SignalPermissions {
         // - Empty list means block all DMs
         // - Specific list means only those users are allowed for DMs
         let mut dm_users = seed_dm_allowed_users.clone();
-
-        // Check for wildcard in seed dm_allowed_users
-        if dm_users.iter().any(|id| id.trim() == "*") {
-            return Self {
-                group_filter,
-                dm_allowed_users: vec!["*".to_string()],
-                group_allowed_users: vec![],
-            };
-        }
+        let mut dm_wildcard = dm_users.iter().any(|id| id.trim() == "*");
 
         // Add dm_allowed_users from bindings
-        for binding in &signal_bindings {
-            for id in &binding.dm_allowed_users {
-                let id = id.trim().to_string();
-                if id.is_empty() {
-                    continue;
+        if !dm_wildcard {
+            for binding in &signal_bindings {
+                for id in &binding.dm_allowed_users {
+                    let id = id.trim().to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    if id == "*" {
+                        dm_wildcard = true;
+                        break;
+                    }
+                    if !dm_users.contains(&id) {
+                        dm_users.push(id);
+                    }
                 }
-                if id == "*" {
-                    return Self {
-                        group_filter,
-                        dm_allowed_users: vec!["*".to_string()],
-                        group_allowed_users: vec![],
-                    };
-                }
-                if !dm_users.contains(&id) {
-                    dm_users.push(id);
+                if dm_wildcard {
+                    break;
                 }
             }
         }
@@ -479,40 +471,42 @@ impl SignalPermissions {
         // - Empty list means block all group users
         // - Specific list means only those users are allowed in groups
         let mut group_users = seed_group_allowed_users.clone();
-
-        // Check for wildcard in seed group_allowed_users
-        if group_users.iter().any(|id| id.trim() == "*") {
-            return Self {
-                group_filter,
-                dm_allowed_users: dm_users,
-                group_allowed_users: vec!["*".to_string()],
-            };
-        }
+        let mut group_wildcard = group_users.iter().any(|id| id.trim() == "*");
 
         // Add group_allowed_users from bindings
-        for binding in &signal_bindings {
-            for id in &binding.group_allowed_users {
-                let id = id.trim().to_string();
-                if id.is_empty() {
-                    continue;
+        if !group_wildcard {
+            for binding in &signal_bindings {
+                for id in &binding.group_allowed_users {
+                    let id = id.trim().to_string();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    if id == "*" {
+                        group_wildcard = true;
+                        break;
+                    }
+                    if !group_users.contains(&id) {
+                        group_users.push(id);
+                    }
                 }
-                if id == "*" {
-                    return Self {
-                        group_filter,
-                        dm_allowed_users: dm_users,
-                        group_allowed_users: vec!["*".to_string()],
-                    };
-                }
-                if !group_users.contains(&id) {
-                    group_users.push(id);
+                if group_wildcard {
+                    break;
                 }
             }
         }
 
         Self {
             group_filter,
-            dm_allowed_users: dm_users,
-            group_allowed_users: group_users,
+            dm_allowed_users: if dm_wildcard {
+                vec!["*".to_string()]
+            } else {
+                dm_users
+            },
+            group_allowed_users: if group_wildcard {
+                vec!["*".to_string()]
+            } else {
+                group_users
+            },
         }
     }
 }

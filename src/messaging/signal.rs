@@ -884,7 +884,7 @@ impl Messaging for SignalAdapter {
                             "id": Uuid::new_v4().to_string(),
                         });
 
-                        if let Err(error) = client
+                        match client
                             .post(&rpc_url)
                             .timeout(RPC_REQUEST_TIMEOUT)
                             .header("Content-Type", "application/json")
@@ -892,8 +892,25 @@ impl Messaging for SignalAdapter {
                             .send()
                             .await
                         {
-                            tracing::debug!(%error, "failed to send signal typing indicator");
-                            break;
+                            Ok(response) => {
+                                if !response.status().is_success() {
+                                    let status = response.status();
+                                    let body_text = response
+                                        .text()
+                                        .await
+                                        .unwrap_or_else(|_| "<failed to read body>".to_string());
+                                    tracing::warn!(
+                                        %status,
+                                        %body_text,
+                                        "signal typing indicator request failed"
+                                    );
+                                    break;
+                                }
+                            }
+                            Err(error) => {
+                                tracing::debug!(%error, "failed to send signal typing indicator");
+                                break;
+                            }
                         }
 
                         tokio::time::sleep(TYPING_REPEAT_INTERVAL).await;

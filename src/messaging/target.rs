@@ -343,14 +343,19 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
             adapter: "signal".to_string(),
             target: format!("group:{group_id}"),
         }),
-        ["e164", phone] => Some(BroadcastTarget {
-            adapter: "signal".to_string(),
-            target: phone.to_string(),
-        }),
-        [phone] if phone.starts_with('+') => Some(BroadcastTarget {
-            adapter: "signal".to_string(),
-            target: phone.to_string(),
-        }),
+        // Use normalize_signal_target for phone/e164 to ensure consistent parsing
+        ["e164", phone] => {
+            normalize_signal_target(&format!("e164:{phone}")).map(|target| BroadcastTarget {
+                adapter: "signal".to_string(),
+                target,
+            })
+        }
+        [phone] if phone.starts_with('+') => {
+            normalize_signal_target(phone).map(|target| BroadcastTarget {
+                adapter: "signal".to_string(),
+                target,
+            })
+        }
         // Named adapter: signal:instance:uuid:xxx, signal:instance:group:xxx
         [instance, "uuid", uuid] => Some(BroadcastTarget {
             adapter: format!("signal:{instance}"),
@@ -360,16 +365,20 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
             adapter: format!("signal:{instance}"),
             target: format!("group:{group_id}"),
         }),
-        // Named adapter: signal:instance:e164:+xxx
-        [instance, "e164", phone] => Some(BroadcastTarget {
-            adapter: format!("signal:{instance}"),
-            target: phone.to_string(),
-        }),
-        // Named adapter: signal:instance:+xxx
-        [instance, phone] if phone.starts_with('+') => Some(BroadcastTarget {
-            adapter: format!("signal:{instance}"),
-            target: phone.to_string(),
-        }),
+        // Named adapter: signal:instance:e164:+xxx - use normalize_signal_target
+        [instance, "e164", phone] => {
+            normalize_signal_target(&format!("e164:{phone}")).map(|target| BroadcastTarget {
+                adapter: format!("signal:{instance}"),
+                target,
+            })
+        }
+        // Named adapter: signal:instance:+xxx - use normalize_signal_target
+        [instance, phone] if phone.starts_with('+') => {
+            normalize_signal_target(phone).map(|target| BroadcastTarget {
+                adapter: format!("signal:{instance}"),
+                target,
+            })
+        }
         _ => None,
     }
 }
