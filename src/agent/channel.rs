@@ -1110,11 +1110,13 @@ impl Channel {
             self.conversation_id = Some(first.conversation_id.clone());
         }
 
+        // Track source adapter from the first non-system message
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none()
             && let Some(first) = messages.first()
             && first.source != "system"
         {
-            self.source_adapter = Some(first.source.clone());
+            self.source_adapter = first.adapter.clone().or_else(|| Some(first.source.clone()));
         }
 
         // Capture conversation context from the first message
@@ -1316,12 +1318,12 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await?;
 
-        // Extract adapter from messages (prefer explicit message.adapter, fall back to source)
-        // This preserves per-message adapter for Signal named instances
+        // Extract adapter from messages (prefer explicit message.adapter, fall back to stored source_adapter)
+        // This preserves per-message adapter for Signal named instances (e.g., "signal:work")
         let batch_adapter = messages
             .iter()
             .find_map(|m| m.adapter.as_deref())
-            .or_else(|| self.current_adapter());
+            .or(self.source_adapter.as_deref());
 
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
@@ -1441,8 +1443,13 @@ impl Channel {
             self.conversation_id = Some(message.conversation_id.clone());
         }
 
+        // Track source adapter from non-system messages
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none() && message.source != "system" {
-            self.source_adapter = Some(message.source.clone());
+            self.source_adapter = message
+                .adapter
+                .clone()
+                .or_else(|| Some(message.source.clone()));
         }
 
         let (raw_text, attachments) = match &message.content {

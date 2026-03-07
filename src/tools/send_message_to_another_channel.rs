@@ -146,11 +146,15 @@ impl Tool for SendMessageTool {
 
         // Check for explicit Signal target first
         if let Some(mut explicit_target) = parse_explicit_signal_target(&args.target) {
-            // This prevents retargeting "signal:+1555..." to the wrong adapter
-            if let Some(current_adapter) = self
-                .current_adapter
-                .as_ref()
-                .filter(|adapter| adapter.starts_with("signal"))
+            // Only apply current adapter if the target didn't explicitly specify one
+            // (i.e., target was not prefixed with "signal:", so parse_explicit_signal_target
+            // defaulted to "signal" adapter). If target was "signal:personal:...", we
+            // preserve the parsed adapter ("signal:personal").
+            if !args.target.starts_with("signal:")
+                && let Some(current_adapter) = self
+                    .current_adapter
+                    .as_ref()
+                    .filter(|adapter| adapter.starts_with("signal"))
             {
                 explicit_target.adapter = current_adapter.clone();
             }

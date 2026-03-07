@@ -102,13 +102,31 @@ fn redact_identifier(id: &str) -> String {
     format!("{}****{}", prefix, suffix)
 }
 
-/// Redact a URL for logging, keeping only the scheme and domain.
+/// Redact a URL for logging, keeping only the scheme and host (no userinfo).
+/// Parses the URL to properly handle user:pass@host patterns.
 fn redact_url(url: &str) -> String {
-    url.split('/')
-        .take(3) // scheme://domain
-        .collect::<Vec<_>>()
-        .join("/")
-        .to_string()
+    // Find the scheme separator
+    let Some(scheme_end) = url.find("://") else {
+        // Not a proper URL, return as-is truncated
+        return url.chars().take(50).collect();
+    };
+
+    let scheme = &url[..scheme_end];
+    let after_scheme = &url[scheme_end + 3..];
+
+    // Skip userinfo if present (user:pass@host)
+    let host_start = after_scheme.find('@').map(|i| i + 1).unwrap_or(0);
+    let host_port = &after_scheme[host_start..];
+
+    // Extract just the host (and port if present), stopping at first path segment
+    let host_end = host_port.find('/').unwrap_or(host_port.len());
+    let host = &host_port[..host_end];
+
+    if host.is_empty() {
+        url.chars().take(50).collect()
+    } else {
+        format!("{}://{}", scheme, host)
+    }
 }
 
 // ── signal-cli SSE event JSON shapes ────────────────────────────
@@ -1287,9 +1305,12 @@ fn build_metadata(
     let mut metadata = HashMap::new();
 
     // Sender identifiers.
+    // Try phone number first, then UUID, then source (legacy), then unknown
+    // This ensures UUID-only privacy-mode envelopes preserve sender identity
     let sender = envelope
         .source_number
         .as_deref()
+        .or(envelope.source_uuid.as_deref())
         .or(envelope.source.as_deref())
         .unwrap_or("unknown");
 

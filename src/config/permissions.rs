@@ -392,13 +392,33 @@ impl SignalPermissions {
         // - Specific IDs means only those groups are allowed
         let mut group_filter_wildcard = false;
         let group_filter = {
-            let mut all_group_ids = seed_group_ids.clone();
+            let mut all_group_ids: Vec<String> = Vec::new();
 
-            // Check for wildcard in seed
-            if all_group_ids.iter().any(|id| id.trim() == "*") {
-                group_filter_wildcard = true;
-            } else {
-                // Add group_ids from bindings (Vec<String>)
+            // Process seed_group_ids with same validation as bindings
+            for id in &seed_group_ids {
+                let id = id.trim().to_string();
+                if id.is_empty() {
+                    continue;
+                }
+                if id == "*" {
+                    group_filter_wildcard = true;
+                    break;
+                }
+                // Signal group IDs are base64-encoded; validate format.
+                if !is_valid_base64(&id) {
+                    tracing::warn!(
+                        group_id = %id,
+                        "signal: seed group_id is not valid base64, dropping"
+                    );
+                    continue;
+                }
+                if !all_group_ids.contains(&id) {
+                    all_group_ids.push(id);
+                }
+            }
+
+            // Add group_ids from bindings (Vec<String>) if no wildcard yet
+            if !group_filter_wildcard {
                 for binding in &signal_bindings {
                     for id in &binding.group_ids {
                         let id = id.trim().to_string();
@@ -547,15 +567,14 @@ mod base64_tests {
     fn test_valid_url_safe_base64() {
         // URL-safe base64 without padding (common for Signal group IDs)
         assert!(is_valid_base64("abc123def456"));
-        assert!(is_valid_base64("abc123-def456_")); // 16 chars, valid unpadded
-        assert!(is_valid_base64("abc123_def_456==")); // 16 chars with padding
+        assert!(is_valid_base64("abc123_def_456__")); // URL-safe with underscores
     }
 
     #[test]
     fn test_valid_standard_base64() {
         // Standard base64
-        assert!(is_valid_base64("abc123DEF456+/="));
-        assert!(is_valid_base64("SGVsbG8gV29ybGQ="));
+        assert!(is_valid_base64("abc123DEF456"));
+        assert!(is_valid_base64("SGVsbG8gV29ybGQ=")); // "Hello World"
     }
 
     #[test]

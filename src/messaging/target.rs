@@ -111,7 +111,18 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
             {
                 // Parse from signal_target which already includes the normalized format
                 // e.g., "uuid:xxxx" or "group:xxxx" or "+1234567890"
-                return parse_delivery_target(&format!("signal:{signal_target}"));
+                // Preserve named adapter from channel.id (e.g., "signal:work" -> "signal:work")
+                let channel_parts: Vec<&str> = channel.id.split(':').collect();
+                let adapter = if channel_parts.len() >= 3 {
+                    // Named adapter: signal:{instance}:...
+                    format!("signal:{}", channel_parts[1])
+                } else {
+                    "signal".to_string()
+                };
+                return Some(BroadcastTarget {
+                    adapter,
+                    target: signal_target,
+                });
             }
 
             // Fallback: parse from conversation ID
