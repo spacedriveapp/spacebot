@@ -262,13 +262,13 @@ fn parse_explicit_signal_target(raw: &str) -> Option<crate::messaging::target::B
         return None;
     }
 
-    // Check if it starts with signal: prefix
-    if trimmed.starts_with("signal:uuid:")
-        || trimmed.starts_with("signal:group:")
-        || trimmed.starts_with("signal:e164:")
-        || trimmed.starts_with("signal:+")
-    {
-        return crate::messaging::target::parse_delivery_target(trimmed);
+    // Check if it starts with signal: prefix and handle both default and named adapters
+    if let Some(rest) = trimmed.strip_prefix("signal:") {
+        let parts: Vec<&str> = rest.split(':').collect();
+        // Use shared parser for Signal target components
+        if let Some(target) = crate::messaging::target::parse_signal_target_parts(&parts) {
+            return Some(target);
+        }
     }
 
     // Check for bare UUID format (strict validation)

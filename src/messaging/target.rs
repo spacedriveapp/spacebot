@@ -109,11 +109,17 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .and_then(|meta| meta.get("signal_target"))
                 .and_then(json_value_to_string)
             {
-                signal_target
-            } else {
-                // Reuse normalized channel id
-                channel.id.strip_prefix("signal:")?.to_string()
+                // Parse from signal_target which already includes the normalized format
+                // e.g., "uuid:xxxx" or "group:xxxx" or "+1234567890"
+                return parse_delivery_target(&format!("signal:{signal_target}"));
             }
+
+            // Fallback: parse from conversation ID
+            // Format: signal:{target} or signal:{instance}:{target}
+            // where {target} is uuid:xxx, group:xxx, or +xxx
+            let parts: Vec<&str> = channel.id.split(':').collect();
+            // Skip "signal" prefix and use shared parser for the rest
+            return parse_signal_target_parts(parts.get(1..).unwrap_or(&[]));
         }
         "email" => {
             let reply_to = channel
@@ -319,6 +325,55 @@ fn json_value_to_string(value: &serde_json::Value) -> Option<String> {
     None
 }
 
+/// Parse Signal target components into BroadcastTarget.
+///
+/// Handles formats:
+/// - Default adapter: ["uuid", xxx], ["group", xxx], ["e164", +xxx], ["+xxx"]
+/// - Named adapter: [instance, "uuid", xxx], [instance, "group", xxx], [instance, "e164", +xxx], [instance, "+xxx"]
+///
+/// Returns None for invalid formats.
+pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
+    match parts {
+        // Default adapter: signal:uuid:xxx, signal:group:xxx, signal:e164:+xxx, signal:+xxx
+        ["uuid", uuid] => Some(BroadcastTarget {
+            adapter: "signal".to_string(),
+            target: format!("uuid:{uuid}"),
+        }),
+        ["group", group_id] => Some(BroadcastTarget {
+            adapter: "signal".to_string(),
+            target: format!("group:{group_id}"),
+        }),
+        ["e164", phone] => Some(BroadcastTarget {
+            adapter: "signal".to_string(),
+            target: phone.to_string(),
+        }),
+        [phone] if phone.starts_with('+') => Some(BroadcastTarget {
+            adapter: "signal".to_string(),
+            target: phone.to_string(),
+        }),
+        // Named adapter: signal:instance:uuid:xxx, signal:instance:group:xxx
+        [instance, "uuid", uuid] => Some(BroadcastTarget {
+            adapter: format!("signal:{instance}"),
+            target: format!("uuid:{uuid}"),
+        }),
+        [instance, "group", group_id] => Some(BroadcastTarget {
+            adapter: format!("signal:{instance}"),
+            target: format!("group:{group_id}"),
+        }),
+        // Named adapter: signal:instance:e164:+xxx
+        [instance, "e164", phone] => Some(BroadcastTarget {
+            adapter: format!("signal:{instance}"),
+            target: phone.to_string(),
+        }),
+        // Named adapter: signal:instance:+xxx
+        [instance, phone] if phone.starts_with('+') => Some(BroadcastTarget {
+            adapter: format!("signal:{instance}"),
+            target: phone.to_string(),
+        }),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{parse_delivery_target, resolve_broadcast_target};
@@ -488,5 +543,115 @@ mod tests {
                 target: "+1234567890".to_string(),
             })
         );
+    }
+
+    // Tests for parse_signal_target_parts
+    #[test]
+    fn parse_signal_target_parts_uuid_default() {
+        let parsed =
+            super::parse_signal_target_parts(&["uuid", "550e8400-e29b-41d4-a716-446655440000"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal".to_string(),
+                target: "uuid:550e8400-e29b-41d4-a716-446655440000".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_group_default() {
+        let parsed = super::parse_signal_target_parts(&["group", "grp123"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal".to_string(),
+                target: "group:grp123".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_phone_default() {
+        let parsed = super::parse_signal_target_parts(&["+1234567890"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal".to_string(),
+                target: "+1234567890".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_e164_default() {
+        let parsed = super::parse_signal_target_parts(&["e164", "+1234567890"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal".to_string(),
+                target: "+1234567890".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_uuid_named() {
+        let parsed = super::parse_signal_target_parts(&[
+            "gvoice1",
+            "uuid",
+            "550e8400-e29b-41d4-a716-446655440000",
+        ]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal:gvoice1".to_string(),
+                target: "uuid:550e8400-e29b-41d4-a716-446655440000".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_group_named() {
+        let parsed = super::parse_signal_target_parts(&["gvoice1", "group", "grp123"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal:gvoice1".to_string(),
+                target: "group:grp123".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_phone_named() {
+        let parsed = super::parse_signal_target_parts(&["gvoice1", "+1234567890"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal:gvoice1".to_string(),
+                target: "+1234567890".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_e164_named() {
+        let parsed = super::parse_signal_target_parts(&["gvoice1", "e164", "+1234567890"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "signal:gvoice1".to_string(),
+                target: "+1234567890".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_signal_target_parts_invalid() {
+        assert!(super::parse_signal_target_parts(&[]).is_none());
+        assert!(super::parse_signal_target_parts(&["unknown"]).is_none());
+        assert!(super::parse_signal_target_parts(&["uuid"]).is_none()); // missing UUID value
+        assert!(super::parse_signal_target_parts(&["gvoice1", "unknown"]).is_none());
     }
 }

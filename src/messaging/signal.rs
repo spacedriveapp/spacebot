@@ -913,6 +913,66 @@ impl Messaging for SignalAdapter {
         Ok(())
     }
 
+    async fn broadcast(
+        &self,
+        target: &str,
+        response: crate::OutboundResponse,
+    ) -> crate::Result<()> {
+        // Parse target into RecipientTarget
+        // Format: uuid:xxx, group:xxx, or +xxx
+        let recipient = if let Some(uuid) = target.strip_prefix("uuid:") {
+            RecipientTarget::Direct(uuid.to_string())
+        } else if let Some(group_id) = target.strip_prefix("group:") {
+            RecipientTarget::Group(group_id.to_string())
+        } else if target.starts_with('+') {
+            RecipientTarget::Direct(target.to_string())
+        } else {
+            return Err(crate::Error::Other(anyhow::anyhow!(
+                "invalid signal broadcast target format: {target}"
+            )));
+        };
+
+        match response {
+            crate::OutboundResponse::Text(text) => {
+                self.send_text(&recipient, &text).await?;
+            }
+            crate::OutboundResponse::RichMessage { text, .. } => {
+                // Signal has no rich formatting — send plain text
+                self.send_text(&recipient, &text).await?;
+            }
+            crate::OutboundResponse::File {
+                filename,
+                data,
+                caption,
+                ..
+            } => {
+                self.send_file(&recipient, &filename, &data, caption.as_deref())
+                    .await?;
+            }
+            crate::OutboundResponse::ThreadReply { text, .. } => {
+                // Signal has no threads — send as regular message
+                self.send_text(&recipient, &text).await?;
+            }
+            crate::OutboundResponse::Ephemeral { text, .. } => {
+                // Signal has no ephemeral messages — send as regular text
+                self.send_text(&recipient, &text).await?;
+            }
+            crate::OutboundResponse::ScheduledMessage { text, .. } => {
+                // Signal has no scheduled messages — send immediately
+                self.send_text(&recipient, &text).await?;
+            }
+            _ => {
+                // Other response types are not supported for broadcast
+                tracing::debug!(
+                    target = %redact_identifier(target),
+                    "signal: unsupported broadcast response type, dropping"
+                );
+            }
+        }
+
+        Ok(())
+    }
+
     async fn health_check(&self) -> crate::Result<()> {
         let url = format!("{}{HEALTH_ENDPOINT}", self.http_url);
         tracing::debug!(url = %redact_url(&url), "Signal health check: GET");
