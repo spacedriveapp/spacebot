@@ -74,8 +74,9 @@ pub struct Worker {
     /// Context injection channel. Unlike `input_rx` (which drives the
     /// interactive follow-up state machine), this delivers addendum context
     /// to a running worker at the next LLM turn boundary without changing
-    /// worker state.
-    pub inject_rx: mpsc::Receiver<String>,
+    /// worker state. Wrapped in `Option` so `run()` can `.take()` it into
+    /// the hook without allocating a throwaway placeholder channel.
+    pub inject_rx: Option<mpsc::Receiver<String>>,
     /// Browser automation config.
     pub browser_config: BrowserConfig,
     /// Directory for browser screenshots.
@@ -126,7 +127,7 @@ impl Worker {
                 hook,
                 system_prompt: system_prompt.into(),
                 input_rx,
-                inject_rx,
+                inject_rx: Some(inject_rx),
                 browser_config,
                 screenshot_dir,
                 brave_search_key,
@@ -285,11 +286,9 @@ impl Worker {
     pub async fn run(mut self) -> Result<String> {
         // Wire the injection receiver into the hook so `on_completion_call`
         // can drain pending injected context before each LLM turn.
-        let inject_rx = std::mem::replace(
-            &mut self.inject_rx,
-            mpsc::channel(1).1, // placeholder; the real receiver moves into the hook
-        );
-        self.hook = self.hook.clone().with_inject_rx(inject_rx);
+        if let Some(inject_rx) = self.inject_rx.take() {
+            self.hook = self.hook.clone().with_inject_rx(inject_rx);
+        }
 
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
@@ -557,6 +556,28 @@ impl Worker {
                         .await
                     {
                         Ok(response) => break Ok(response),
+                        Err(rig::completion::PromptError::PromptCancelled {
+                            ref reason, ..
+                        }) if SpacebotHook::is_context_injection_reason(reason) => {
+                            // Context injection during a follow-up: drain
+                            // buffered messages, append to history, and
+                            // re-prompt — same as the main task loop.
+                            let injected = follow_up_hook.take_injected_messages();
+                            for message in &injected {
+                                tracing::info!(
+                                    worker_id = %self.id,
+                                    "injecting context into worker follow-up history"
+                                );
+                                history.push(rig::message::Message::user(format!(
+                                    "[Context update from the user]: {message}"
+                                )));
+                            }
+                            follow_up_prompt = "New context has been provided above. \
+                                Incorporate this information and continue working \
+                                on your task. Do not repeat completed work."
+                                .to_string();
+                            continue;
+                        }
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {

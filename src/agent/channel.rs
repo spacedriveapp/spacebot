@@ -94,6 +94,12 @@ pub struct ChannelState {
     /// Used by the route tool to deliver addendum context to running workers
     /// without requiring the worker to be interactive.
     pub worker_injections: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
+    /// Task descriptions reserved for spawn. Prevents the TOCTOU race where
+    /// two concurrent `spawn_worker` calls both pass `check_duplicate_task`
+    /// before either registers in the status block. Reservations are
+    /// claimed under a write lock before any async spawn work and released
+    /// when the worker is registered in the status block or the spawn fails.
+    pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -406,6 +412,7 @@ impl Channel {
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             worker_injections: Arc::new(RwLock::new(HashMap::new())),
+            reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
