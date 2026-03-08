@@ -137,7 +137,10 @@ async fn merge_similar_memories(
     similarity_threshold: f32,
 ) -> Result<usize> {
     if !(0.0..=1.0).contains(&similarity_threshold) {
-        return Ok(0);
+        return Err(anyhow!(
+            "merge_similarity_threshold must be within [0.0, 1.0], got {similarity_threshold}"
+        )
+        .into());
     }
 
     let rows = sqlx::query(
@@ -183,16 +186,27 @@ async fn merge_similar_memories(
             (!remaining.is_empty()).then(|| remaining.remove(0))
         {
             let mut duplicates = vec![seed_memory];
-            let mut next_remaining = Vec::new();
+            let mut cluster_queue = std::collections::VecDeque::from([seed_normalized]);
+            let mut visited_normalized = HashSet::new();
 
-            for (memory, normalized) in remaining {
-                if normalized_similarity(&seed_normalized, &normalized) >= similarity_threshold {
-                    duplicates.push(memory);
-                } else {
-                    next_remaining.push((memory, normalized));
+            while let Some(current_normalized) = cluster_queue.pop_front() {
+                if !visited_normalized.insert(current_normalized.clone()) {
+                    continue;
                 }
+
+                let mut next_remaining = Vec::new();
+                for (memory, normalized) in remaining {
+                    if normalized_similarity(&current_normalized, &normalized)
+                        >= similarity_threshold
+                    {
+                        cluster_queue.push_back(normalized.clone());
+                        duplicates.push(memory);
+                    } else {
+                        next_remaining.push((memory, normalized));
+                    }
+                }
+                remaining = next_remaining;
             }
-            remaining = next_remaining;
 
             if duplicates.len() < 2 {
                 continue;
@@ -447,6 +461,20 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn invalid_threshold_returns_error() {
+        let store = MemoryStore::connect_in_memory().await;
+        let error = merge_similar_memories(&store, 1.1)
+            .await
+            .expect_err("invalid threshold");
+        assert!(
+            error
+                .to_string()
+                .contains("merge_similarity_threshold must be within [0.0, 1.0]"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[tokio::test]
     async fn does_not_merge_identical_content_across_channels() {
         let store = MemoryStore::connect_in_memory().await;
         let first =
@@ -503,5 +531,23 @@ mod tests {
             })
             .expect("rewritten association");
         assert_eq!(preserved.weight, 0.9);
+    }
+
+    #[tokio::test]
+    async fn merges_transitive_duplicate_cluster() {
+        let store = MemoryStore::connect_in_memory().await;
+
+        let first = Memory::new("deploy worker now", MemoryType::Todo).with_importance(0.9);
+        let second = Memory::new("deploy worker right now", MemoryType::Todo).with_importance(0.7);
+        let third = Memory::new("deploy right now", MemoryType::Todo).with_importance(0.6);
+
+        store.save(&first).await.expect("save first");
+        store.save(&second).await.expect("save second");
+        store.save(&third).await.expect("save third");
+
+        let merged = merge_similar_memories(&store, 0.55).await.expect("merge");
+        assert_eq!(merged, 2);
+        assert!(store.load(&second.id).await.expect("load second").is_none());
+        assert!(store.load(&third.id).await.expect("load third").is_none());
     }
 }
