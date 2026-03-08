@@ -23,7 +23,7 @@ pub fn save_json_credentials<T: Serialize>(path: &Path, credentials: &T) -> Resu
     #[cfg(unix)]
     {
         use std::io::Write as _;
-        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        use std::os::unix::fs::OpenOptionsExt;
 
         let mut file = std::fs::OpenOptions::new()
             .create(true)
@@ -34,8 +34,6 @@ pub fn save_json_credentials<T: Serialize>(path: &Path, credentials: &T) -> Resu
             .with_context(|| format!("failed to open {}", path.display()))?;
         file.write_all(data.as_bytes())
             .with_context(|| format!("failed to write {}", path.display()))?;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
     }
 
     #[cfg(not(unix))]

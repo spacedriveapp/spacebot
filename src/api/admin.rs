@@ -152,8 +152,7 @@ pub(super) fn secret_reference_for_field(
     instance_name: Option<&str>,
     value: &str,
 ) -> Result<String, StatusCode> {
-    let trimmed_value = value.trim();
-    if trimmed_value.is_empty() {
+    if value.trim().is_empty() {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -166,12 +165,16 @@ pub(super) fn secret_reference_for_field(
     };
 
     let category = crate::secrets::store::auto_categorize(&secret_name);
-    store
-        .set(&secret_name, trimmed_value, category)
-        .map_err(|error| {
-            tracing::warn!(%error, secret_name, "failed to persist secret");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    store.set(&secret_name, value, category).map_err(|error| {
+        tracing::warn!(%error, secret_name, "failed to persist secret");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(format!("secret:{secret_name}"))
+}
+
+#[cfg(test)]
+pub(crate) fn config_resolution_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }

@@ -802,5 +802,13 @@ mod tests {
         let state = test_api_state();
         let response = export_secrets(State(state)).await.into_response();
         assert_eq!(response.status(), axum::http::StatusCode::FORBIDDEN);
+
+        let state = test_api_state();
+        state.set_api_auth_token(Some("test".to_string())).await;
+        let response = export_secrets(State(state)).await.into_response();
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        );
     }
 }

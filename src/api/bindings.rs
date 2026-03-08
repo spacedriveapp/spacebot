@@ -204,7 +204,7 @@ pub(super) async fn create_binding(
     axum::Json(request): axum::Json<CreateBindingRequest>,
 ) -> Result<Json<CreateBindingResponse>, StatusCode> {
     let store = secrets_store(&state)?;
-    let (_config_guard, config_path, mut doc) = load_config_doc(&state).await?;
+    let (config_guard, config_path, mut doc) = load_config_doc(&state).await?;
 
     let mut new_discord_token: Option<String> = None;
     let mut new_slack_tokens: Option<(String, String)> = None;
@@ -525,6 +525,9 @@ pub(super) async fn create_binding(
         }
     }
 
+    drop(config_guard);
+
+    let mut activation_warning = None;
     let manager_guard = state.messaging_manager.read().await;
     if let Some(manager) = manager_guard.as_ref() {
         if let Some(token) = new_discord_token {
@@ -552,6 +555,9 @@ pub(super) async fn create_binding(
                 crate::messaging::discord::DiscordAdapter::new("discord", &token, discord_perms);
             if let Err(error) = manager.register_and_start(adapter).await {
                 tracing::error!(%error, "failed to hot-start discord adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but discord adapter failed to start: {error}"
+                ));
             }
         }
 
@@ -592,10 +598,16 @@ pub(super) async fn create_binding(
                 Ok(adapter) => {
                     if let Err(error) = manager.register_and_start(adapter).await {
                         tracing::error!(%error, "failed to hot-start slack adapter");
+                        activation_warning = Some(format!(
+                            "binding saved, but slack adapter failed to start: {error}"
+                        ));
                     }
                 }
                 Err(error) => {
                     tracing::error!(%error, "failed to build slack adapter");
+                    activation_warning = Some(format!(
+                        "binding saved, but slack adapter failed to build: {error}"
+                    ));
                 }
             }
         }
@@ -619,6 +631,9 @@ pub(super) async fn create_binding(
             );
             if let Err(error) = manager.register_and_start(adapter).await {
                 tracing::error!(%error, "failed to hot-start telegram adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but telegram adapter failed to start: {error}"
+                ));
             }
         }
 
@@ -632,10 +647,16 @@ pub(super) async fn create_binding(
                 Ok(adapter) => {
                     if let Err(error) = manager.register_and_start(adapter).await {
                         tracing::error!(%error, "failed to hot-start email adapter");
+                        activation_warning = Some(format!(
+                            "binding saved, but email adapter failed to start: {error}"
+                        ));
                     }
                 }
                 Err(error) => {
                     tracing::error!(%error, "failed to build email adapter");
+                    activation_warning = Some(format!(
+                        "binding saved, but email adapter failed to build: {error}"
+                    ));
                 }
             }
         }
@@ -668,14 +689,20 @@ pub(super) async fn create_binding(
             );
             if let Err(error) = manager.register_and_start(adapter).await {
                 tracing::error!(%error, "failed to hot-start twitch adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but twitch adapter failed to start: {error}"
+                ));
             }
         }
     }
 
+    let restart_required = activation_warning.is_some();
+    let message = activation_warning.unwrap_or_else(|| "Binding created and active.".to_string());
+
     Ok(Json(CreateBindingResponse {
         success: true,
-        restart_required: false,
-        message: "Binding created and active.".to_string(),
+        restart_required,
+        message,
     }))
 }
 
@@ -1032,6 +1059,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_binding_moves_platform_credentials_into_secret_store() {
+        let _lock = crate::api::admin::config_resolution_test_lock()
+            .lock()
+            .await;
         let state = test_api_state();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
@@ -1044,6 +1074,7 @@ mod tests {
         let store =
             Arc::new(crate::secrets::store::SecretsStore::new(&secrets_path).expect("secrets"));
         state.set_secrets_store(store.clone());
+        crate::config::set_resolve_secrets_store(store.clone());
 
         let response = create_binding(
             State(state),

@@ -220,13 +220,13 @@ pub fn spawn_file_watcher(
                 agent_humans.store(Arc::new(config.humans.clone()));
                 tracing::info!("agent humans reloaded ({} entries)", config.humans.len());
 
-                if let Some(ref perms) = discord_permissions
-                    && let Some(discord_config) = &config.messaging.discord
-                {
-                    let new_perms =
-                        DiscordPermissions::from_config(discord_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("discord permissions reloaded");
+                if let Some(discord_config) = &config.messaging.discord {
+                    if let Some(ref perms) = discord_permissions {
+                        let new_perms =
+                            DiscordPermissions::from_config(discord_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("discord permissions reloaded");
+                    }
 
                     let registry = named_discord_permissions.read().expect("lock poisoned");
                     for instance in &discord_config.instances {
@@ -242,12 +242,13 @@ pub fn spawn_file_watcher(
                     }
                 }
 
-                if let Some(ref perms) = slack_permissions
-                    && let Some(slack_config) = &config.messaging.slack
-                {
-                    let new_perms = SlackPermissions::from_config(slack_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("slack permissions reloaded");
+                if let Some(slack_config) = &config.messaging.slack {
+                    if let Some(ref perms) = slack_permissions {
+                        let new_perms =
+                            SlackPermissions::from_config(slack_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("slack permissions reloaded");
+                    }
 
                     let registry = named_slack_permissions.read().expect("lock poisoned");
                     for instance in &slack_config.instances {
@@ -261,13 +262,13 @@ pub fn spawn_file_watcher(
                     }
                 }
 
-                if let Some(ref perms) = telegram_permissions
-                    && let Some(telegram_config) = &config.messaging.telegram
-                {
-                    let new_perms =
-                        TelegramPermissions::from_config(telegram_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("telegram permissions reloaded");
+                if let Some(telegram_config) = &config.messaging.telegram {
+                    if let Some(ref perms) = telegram_permissions {
+                        let new_perms =
+                            TelegramPermissions::from_config(telegram_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("telegram permissions reloaded");
+                    }
 
                     let registry = named_telegram_permissions.read().expect("lock poisoned");
                     for instance in &telegram_config.instances {
@@ -283,12 +284,13 @@ pub fn spawn_file_watcher(
                     }
                 }
 
-                if let Some(ref perms) = twitch_permissions
-                    && let Some(twitch_config) = &config.messaging.twitch
-                {
-                    let new_perms = TwitchPermissions::from_config(twitch_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("twitch permissions reloaded");
+                if let Some(twitch_config) = &config.messaging.twitch {
+                    if let Some(ref perms) = twitch_permissions {
+                        let new_perms =
+                            TwitchPermissions::from_config(twitch_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("twitch permissions reloaded");
+                    }
 
                     let registry = named_twitch_permissions.read().expect("lock poisoned");
                     for instance in &twitch_config.instances {
@@ -565,20 +567,8 @@ pub fn spawn_file_watcher(
                                         continue;
                                     }
 
-                                    let token_file_name = {
-                                        use std::hash::{Hash, Hasher};
-                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                        instance.name.hash(&mut hasher);
-                                        let name_hash = hasher.finish();
-                                        format!(
-                                            "twitch_token_{}_{name_hash:016x}.json",
-                                            instance
-                                                .name
-                                                .chars()
-                                                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                                                .collect::<String>()
-                                        )
-                                    };
+                                    let token_file_name =
+                                        crate::config::named_twitch_token_file_name(&instance.name);
                                     let token_path = instance_dir.join(token_file_name);
                                     let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
                                         TwitchPermissions::from_instance_config(instance, &config.bindings),

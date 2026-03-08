@@ -689,11 +689,7 @@ pub(super) async fn disconnect_platform(
     if platform == "twitch" {
         let instance_dir = state.instance_dir.load();
         if let Some(name) = adapter_name {
-            let safe_name: String = name
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                .collect();
-            let token_path = instance_dir.join(format!("twitch_token_{safe_name}.json"));
+            let token_path = instance_dir.join(crate::config::named_twitch_token_file_name(name));
             match tokio::fs::remove_file(&token_path).await {
                 Ok(()) => {
                     tracing::info!(path = %token_path.display(), "twitch token file deleted");
@@ -1058,14 +1054,8 @@ pub(super) async fn toggle_platform(
                                 "twitch",
                                 Some(instance.name.as_str()),
                             );
-                            let token_file_name = format!(
-                                "twitch_token_{}.json",
-                                instance
-                                    .name
-                                    .chars()
-                                    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                                    .collect::<String>()
-                            );
+                            let token_file_name =
+                                crate::config::named_twitch_token_file_name(&instance.name);
                             let instance_dir = state.instance_dir.load();
                             let token_path = instance_dir.join(token_file_name);
                             let perms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -1744,11 +1734,7 @@ pub(super) async fn delete_messaging_instance(
     if platform == "twitch" {
         let instance_dir = state.instance_dir.load();
         let token_path = if let Some(name) = adapter_name {
-            let safe_name: String = name
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                .collect();
-            instance_dir.join(format!("twitch_token_{safe_name}.json"))
+            instance_dir.join(crate::config::named_twitch_token_file_name(name))
         } else {
             instance_dir.join("twitch_token.json")
         };
@@ -1803,6 +1789,9 @@ mod tests {
 
     #[tokio::test]
     async fn create_messaging_instance_persists_secret_references() {
+        let _lock = crate::api::admin::config_resolution_test_lock()
+            .lock()
+            .await;
         let state = test_api_state();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
@@ -1815,6 +1804,7 @@ mod tests {
         let store =
             Arc::new(crate::secrets::store::SecretsStore::new(&secrets_path).expect("secrets"));
         state.set_secrets_store(store.clone());
+        crate::config::set_resolve_secrets_store(store.clone());
 
         let response = create_messaging_instance(
             State(state),

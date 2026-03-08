@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+type NamedPermissionsMap<T> = Arc<std::sync::RwLock<HashMap<String, Arc<ArcSwap<T>>>>>;
+
 #[derive(Parser)]
 #[command(name = "spacebot", version)]
 #[command(about = "A Rust agentic system with dedicated processes for every task")]
@@ -1506,14 +1508,14 @@ async fn run(
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
-        let named_discord_permissions =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let named_slack_permissions =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let named_telegram_permissions =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-        let named_twitch_permissions =
-            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+        let named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
         initialize_agents(
             &config,
             &llm_manager,
@@ -2211,10 +2213,14 @@ async fn run(
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
-                                let named_discord_permissions = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-                                let named_slack_permissions = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-                                let named_telegram_permissions = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
-                                let named_twitch_permissions = Arc::new(std::sync::RwLock::new(std::collections::HashMap::new()));
+                                let named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
                                 match initialize_agents(
                                     &new_config,
                                     &new_llm_manager,
@@ -2379,26 +2385,10 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
-    named_discord_permissions: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<String, Arc<ArcSwap<spacebot::config::DiscordPermissions>>>,
-        >,
-    >,
-    named_slack_permissions: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<String, Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
-        >,
-    >,
-    named_telegram_permissions: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<String, Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
-        >,
-    >,
-    named_twitch_permissions: Arc<
-        std::sync::RwLock<
-            std::collections::HashMap<String, Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
-        >,
-    >,
+    named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions>,
+    named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions>,
+    named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions>,
+    named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
@@ -3054,20 +3044,7 @@ async fn initialize_agents(
                 "twitch",
                 Some(instance.name.as_str()),
             );
-            let token_file_name = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                instance.name.hash(&mut hasher);
-                let name_hash = hasher.finish();
-                format!(
-                    "twitch_token_{}_{name_hash:016x}.json",
-                    instance
-                        .name
-                        .chars()
-                        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                        .collect::<String>()
-                )
-            };
+            let token_file_name = spacebot::config::named_twitch_token_file_name(&instance.name);
             let token_path = config.instance_dir.join(token_file_name);
             let perms = Arc::new(ArcSwap::from_pointee(
                 spacebot::config::TwitchPermissions::from_instance_config(

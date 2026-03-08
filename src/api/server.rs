@@ -331,7 +331,10 @@ async fn api_auth_middleware(
         return next.run(request).await;
     }
 
-    let expected_token = state.auth_token.read().await.clone();
+    let expected_token = state.auth_token.read().await.clone().and_then(|token| {
+        let trimmed = token.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
     let Some(expected_token) = expected_token.as_deref() else {
         let bind = *state.api_bind.read().await;
         if bind.is_some_and(|bind| !bind.ip().is_loopback()) {
@@ -373,11 +376,17 @@ fn allow_local_origin(
     };
 
     origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("https://127.0.0.1:")
         || origin.starts_with("http://localhost:")
+        || origin.starts_with("https://localhost:")
         || origin.starts_with("http://[::1]:")
+        || origin.starts_with("https://[::1]:")
         || origin == "http://127.0.0.1"
+        || origin == "https://127.0.0.1"
         || origin == "http://localhost"
+        || origin == "https://localhost"
         || origin == "http://[::1]"
+        || origin == "https://[::1]"
 }
 
 pub(crate) fn should_warn_unprotected_bind(bind: SocketAddr, auth_token: Option<&str>) -> bool {
@@ -518,6 +527,10 @@ mod tests {
         ));
         assert!(allow_local_origin(
             &HeaderValue::from_static("http://127.0.0.1:3000"),
+            &parts,
+        ));
+        assert!(allow_local_origin(
+            &HeaderValue::from_static("https://localhost:5173"),
             &parts,
         ));
         assert!(!allow_local_origin(

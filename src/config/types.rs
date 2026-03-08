@@ -1554,6 +1554,21 @@ pub fn binding_runtime_adapter_key(platform: &str, adapter: Option<&str>) -> Str
     platform.to_string()
 }
 
+/// Build the persisted token filename for a named Twitch adapter instance.
+pub fn named_twitch_token_file_name(name: &str) -> String {
+    use std::hash::{Hash, Hasher};
+
+    let safe_name: String = name
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .collect();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    name.hash(&mut hasher);
+    let name_hash = hasher.finish();
+
+    format!("twitch_token_{safe_name}_{name_hash:016x}.json")
+}
+
 /// Match a binding's adapter selector against an inbound message adapter.
 pub(super) fn binding_adapter_matches(binding: &Binding, message: &crate::InboundMessage) -> bool {
     match (&binding.adapter, message.adapter_selector()) {

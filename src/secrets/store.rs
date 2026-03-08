@@ -1371,6 +1371,10 @@ mod tests {
             auto_categorize("BRAVE_SEARCH_API_KEY"),
             SecretCategory::System
         );
+        assert_eq!(
+            auto_categorize("WEBHOOK_AUTH_TOKEN"),
+            SecretCategory::System
+        );
 
         // Case-insensitive matching:
         assert_eq!(auto_categorize("anthropic_api_key"), SecretCategory::System);
