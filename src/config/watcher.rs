@@ -5,6 +5,7 @@ use super::{
     Binding, Config, DiscordPermissions, RuntimeConfig, SlackPermissions, TelegramPermissions,
     TwitchPermissions, binding_runtime_adapter_key,
 };
+use sha2::{Digest, Sha256};
 
 /// Per-agent context needed by the file watcher: (id, prompt_dir, identity_dir,
 /// runtime_config, mcp_manager).
@@ -323,7 +324,7 @@ fn build_desired_configured_adapters(
             });
             let fingerprint = format!(
                 "token={}|dm={:?}|allow_bot_messages={}|permissions={}",
-                discord_config.token,
+                secret_fingerprint(&discord_config.token),
                 sorted_strings(discord_config.dm_allowed_users.clone()),
                 discord_config.allow_bot_messages,
                 discord_permissions_fingerprint(&permissions_snapshot)
@@ -350,7 +351,7 @@ fn build_desired_configured_adapters(
                 DiscordPermissions::from_instance_config(instance, &config.bindings);
             let fingerprint = format!(
                 "token={}|dm={:?}|allow_bot_messages={}|permissions={}",
-                instance.token,
+                secret_fingerprint(&instance.token),
                 sorted_strings(instance.dm_allowed_users.clone()),
                 instance.allow_bot_messages,
                 discord_permissions_fingerprint(&permissions_snapshot)
@@ -379,8 +380,8 @@ fn build_desired_configured_adapters(
             });
             let fingerprint = format!(
                 "bot_token={}|app_token={}|dm={:?}|commands={:?}|permissions={}",
-                slack_config.bot_token,
-                slack_config.app_token,
+                secret_fingerprint(&slack_config.bot_token),
+                secret_fingerprint(&slack_config.app_token),
                 sorted_strings(slack_config.dm_allowed_users.clone()),
                 sorted_slack_commands(slack_config.commands.clone()),
                 slack_permissions_fingerprint(&permissions_snapshot)
@@ -410,8 +411,8 @@ fn build_desired_configured_adapters(
                 SlackPermissions::from_instance_config(instance, &config.bindings);
             let fingerprint = format!(
                 "bot_token={}|app_token={}|dm={:?}|commands={:?}|permissions={}",
-                instance.bot_token,
-                instance.app_token,
+                secret_fingerprint(&instance.bot_token),
+                secret_fingerprint(&instance.app_token),
                 sorted_strings(instance.dm_allowed_users.clone()),
                 sorted_slack_commands(instance.commands.clone()),
                 slack_permissions_fingerprint(&permissions_snapshot)
@@ -443,7 +444,7 @@ fn build_desired_configured_adapters(
             });
             let fingerprint = format!(
                 "token={}|dm={:?}|permissions={}",
-                telegram_config.token,
+                secret_fingerprint(&telegram_config.token),
                 sorted_strings(telegram_config.dm_allowed_users.clone()),
                 telegram_permissions_fingerprint(&permissions_snapshot)
             );
@@ -469,7 +470,7 @@ fn build_desired_configured_adapters(
                 TelegramPermissions::from_instance_config(instance, &config.bindings);
             let fingerprint = format!(
                 "token={}|dm={:?}|permissions={}",
-                instance.token,
+                secret_fingerprint(&instance.token),
                 sorted_strings(instance.dm_allowed_users.clone()),
                 telegram_permissions_fingerprint(&permissions_snapshot)
             );
@@ -492,13 +493,13 @@ fn build_desired_configured_adapters(
                 "imap_host={};imap_port={};imap_username={};imap_password={};imap_use_tls={};smtp_host={};smtp_port={};smtp_username={};smtp_password={};smtp_use_starttls={};from_address={};from_name={:?};poll_interval_secs={};folders={:?};allowed_senders={:?};max_body_bytes={};max_attachment_bytes={}",
                 email_config.imap_host,
                 email_config.imap_port,
-                email_config.imap_username,
-                email_config.imap_password,
+                secret_fingerprint(&email_config.imap_username),
+                secret_fingerprint(&email_config.imap_password),
                 email_config.imap_use_tls,
                 email_config.smtp_host,
                 email_config.smtp_port,
-                email_config.smtp_username,
-                email_config.smtp_password,
+                secret_fingerprint(&email_config.smtp_username),
+                secret_fingerprint(&email_config.smtp_password),
                 email_config.smtp_use_starttls,
                 email_config.from_address,
                 email_config.from_name,
@@ -528,13 +529,13 @@ fn build_desired_configured_adapters(
                 instance.name,
                 instance.imap_host,
                 instance.imap_port,
-                instance.imap_username,
-                instance.imap_password,
+                secret_fingerprint(&instance.imap_username),
+                secret_fingerprint(&instance.imap_password),
                 instance.imap_use_tls,
                 instance.smtp_host,
                 instance.smtp_port,
-                instance.smtp_username,
-                instance.smtp_password,
+                secret_fingerprint(&instance.smtp_username),
+                secret_fingerprint(&instance.smtp_password),
                 instance.smtp_use_starttls,
                 instance.from_address,
                 instance.from_name,
@@ -560,7 +561,9 @@ fn build_desired_configured_adapters(
     {
         let fingerprint = format!(
             "port={};bind={};auth_token={:?}",
-            webhook_config.port, webhook_config.bind, webhook_config.auth_token
+            webhook_config.port,
+            webhook_config.bind,
+            webhook_config.auth_token.as_deref().map(secret_fingerprint)
         );
         desired.push(crate::messaging::ConfiguredAdapter::new(
             crate::messaging::webhook::WebhookAdapter::new(
@@ -585,11 +588,17 @@ fn build_desired_configured_adapters(
             });
             let fingerprint = format!(
                 "username={};oauth_token={};client_id={:?};client_secret={:?};refresh_token={:?};channels={:?};trigger_prefix={:?};permissions={}",
-                twitch_config.username,
-                twitch_config.oauth_token,
-                twitch_config.client_id,
-                twitch_config.client_secret,
-                twitch_config.refresh_token,
+                secret_fingerprint(&twitch_config.username),
+                secret_fingerprint(&twitch_config.oauth_token),
+                twitch_config.client_id.as_deref().map(secret_fingerprint),
+                twitch_config
+                    .client_secret
+                    .as_deref()
+                    .map(secret_fingerprint),
+                twitch_config
+                    .refresh_token
+                    .as_deref()
+                    .map(secret_fingerprint),
                 sorted_strings(twitch_config.channels.clone()),
                 twitch_config.trigger_prefix,
                 twitch_permissions_fingerprint(&permissions_snapshot)
@@ -624,11 +633,11 @@ fn build_desired_configured_adapters(
                 TwitchPermissions::from_instance_config(instance, &config.bindings);
             let fingerprint = format!(
                 "username={};oauth_token={};client_id={:?};client_secret={:?};refresh_token={:?};channels={:?};trigger_prefix={:?};permissions={}",
-                instance.username,
-                instance.oauth_token,
-                instance.client_id,
-                instance.client_secret,
-                instance.refresh_token,
+                secret_fingerprint(&instance.username),
+                secret_fingerprint(&instance.oauth_token),
+                instance.client_id.as_deref().map(secret_fingerprint),
+                instance.client_secret.as_deref().map(secret_fingerprint),
+                instance.refresh_token.as_deref().map(secret_fingerprint),
                 sorted_strings(instance.channels.clone()),
                 instance.trigger_prefix,
                 twitch_permissions_fingerprint(&permissions_snapshot)
@@ -723,6 +732,11 @@ fn twitch_permissions_fingerprint(permissions: &TwitchPermissions) -> String {
         permissions.channel_filter.clone().map(sorted_strings),
         sorted_strings(permissions.allowed_users.clone())
     )
+}
+
+fn secret_fingerprint(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..8])
 }
 
 fn sorted_slack_commands(

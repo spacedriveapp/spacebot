@@ -76,17 +76,16 @@ impl MessagingManager {
         let name = adapter.name().to_string();
         let adapter: Arc<dyn MessagingDyn> = Arc::new(adapter);
         tracing::info!(adapter = %name, "registered messaging adapter");
+        let started = self.started.load(Ordering::SeqCst);
         let old_adapter = self
             .adapters
             .write()
             .await
             .insert(name.clone(), Arc::clone(&adapter));
-        if self.started.load(Ordering::SeqCst) {
+        if started {
             self.stop_runtime(&name, old_adapter, false).await.ok();
         }
-        if self.started.load(Ordering::SeqCst)
-            && let Err(error) = self.start_runtime(name.clone(), adapter, false).await
-        {
+        if started && let Err(error) = self.start_runtime(name.clone(), adapter, false).await {
             tracing::warn!(adapter = %name, %error, "failed to start adapter registered after manager start");
         }
     }
@@ -96,17 +95,16 @@ impl MessagingManager {
         let name = adapter.name().to_string();
         tracing::info!(adapter = %name, "registered messaging adapter (shared)");
         let adapter: Arc<dyn MessagingDyn> = adapter;
+        let started = self.started.load(Ordering::SeqCst);
         let old_adapter = self
             .adapters
             .write()
             .await
             .insert(name.clone(), Arc::clone(&adapter));
-        if self.started.load(Ordering::SeqCst) {
+        if started {
             self.stop_runtime(&name, old_adapter, false).await.ok();
         }
-        if self.started.load(Ordering::SeqCst)
-            && let Err(error) = self.start_runtime(name.clone(), adapter, false).await
-        {
+        if started && let Err(error) = self.start_runtime(name.clone(), adapter, false).await {
             tracing::warn!(adapter = %name, %error, "failed to start shared adapter registered after manager start");
         }
     }
@@ -547,16 +545,23 @@ mod tests {
         plans: std::sync::Mutex<Vec<StartPlan>>,
         start_calls: AtomicUsize,
         shutdown_calls: AtomicUsize,
+        start_signal_tx: tokio::sync::watch::Sender<usize>,
     }
 
     impl TestAdapter {
         fn new(name: &str, plans: Vec<StartPlan>) -> Self {
+            let (start_signal_tx, _start_signal_rx) = tokio::sync::watch::channel(0);
             Self {
                 name: name.to_string(),
                 plans: std::sync::Mutex::new(plans),
                 start_calls: AtomicUsize::new(0),
                 shutdown_calls: AtomicUsize::new(0),
+                start_signal_tx,
             }
+        }
+
+        fn subscribe_start_calls(&self) -> tokio::sync::watch::Receiver<usize> {
+            self.start_signal_tx.subscribe()
         }
     }
 
@@ -566,7 +571,8 @@ mod tests {
         }
 
         async fn start(&self) -> crate::Result<InboundStream> {
-            self.start_calls.fetch_add(1, Ordering::SeqCst);
+            let start_count = self.start_calls.fetch_add(1, Ordering::SeqCst) + 1;
+            self.start_signal_tx.send_replace(start_count);
             let plan = self.plans.lock().expect("plans lock").remove(0);
             match plan {
                 StartPlan::Error(error) => Err(anyhow::anyhow!(error).into()),
@@ -621,6 +627,7 @@ mod tests {
                 StartPlan::Pending,
             ],
         ));
+        let mut start_calls = adapter.subscribe_start_calls();
         manager.register_shared(adapter.clone()).await;
         let mut stream = manager.start().await.expect("start manager");
 
@@ -641,10 +648,7 @@ mod tests {
             MessageContent::Text(text) => assert_eq!(text, "second"),
             other => panic!("unexpected message content: {other:?}"),
         }
-        assert!(
-            adapter.start_calls.load(Ordering::SeqCst) >= 3,
-            "expected retries after failure and stream end"
-        );
+        wait_for_start_calls(&mut start_calls, 3).await;
     }
 
     #[tokio::test]
@@ -659,19 +663,45 @@ mod tests {
                 StartPlan::Pending,
             ],
         ));
+        let mut start_calls = adapter.subscribe_start_calls();
         manager.register_shared(adapter.clone()).await;
         let _stream = manager.start().await.expect("start manager");
 
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
-        let before_remove = adapter.start_calls.load(Ordering::SeqCst);
+        wait_for_start_calls(&mut start_calls, 2).await;
+        let before_remove = *start_calls.borrow_and_update();
         manager
             .remove_adapter("retrying")
             .await
             .expect("remove adapter");
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        let after_remove = adapter.start_calls.load(Ordering::SeqCst);
+        let no_more_starts =
+            tokio::time::timeout(std::time::Duration::from_millis(200), start_calls.changed())
+                .await;
 
-        assert_eq!(before_remove, after_remove);
+        assert!(
+            no_more_starts.is_err(),
+            "unexpected extra start after remove"
+        );
+        assert_eq!(before_remove, adapter.start_calls.load(Ordering::SeqCst));
         assert!(adapter.shutdown_calls.load(Ordering::SeqCst) >= 1);
+    }
+
+    async fn wait_for_start_calls(
+        receiver: &mut tokio::sync::watch::Receiver<usize>,
+        expected: usize,
+    ) {
+        if *receiver.borrow() >= expected {
+            return;
+        }
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            loop {
+                receiver.changed().await.expect("start signal");
+                if *receiver.borrow() >= expected {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("timed out waiting for start calls");
     }
 }

@@ -1560,6 +1560,7 @@ pub fn named_twitch_token_file_name(name: &str) -> String {
     let safe_name: String = name
         .chars()
         .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
+        .take(64)
         .collect();
     let hash = Sha256::digest(name.as_bytes());
     let hash_prefix = hex::encode(&hash[..8]);
