@@ -1548,11 +1548,10 @@ pub(super) async fn create_messaging_instance(
     write_config_doc(&config_path, &doc).await?;
 
     // Reload config and hot-start the new adapter
-    if let Ok(new_config) = reload_runtime_configs(&state, &config_path).await {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    let bindings_guard = state.bindings.read().await;
+    if let Some(bindings_swap) = bindings_guard.as_ref() {
+        bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
     }
 
     // The file watcher will pick up the change and start the adapter.

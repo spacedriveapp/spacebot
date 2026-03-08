@@ -37,6 +37,7 @@ pub async fn start_http_server(
     state: Arc<ApiState>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    state.set_api_bind(bind).await;
     let auth_token = state.auth_token.read().await.clone();
     if should_warn_unprotected_bind(bind, auth_token.as_deref()) {
         anyhow::bail!(
@@ -325,15 +326,25 @@ async fn api_auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let expected_token = state.auth_token.read().await.clone();
-    let Some(expected_token) = expected_token.as_deref() else {
-        return next.run(request).await;
-    };
-
     let path = request.uri().path();
     if path == "/api/health" || path == "/health" {
         return next.run(request).await;
     }
+
+    let expected_token = state.auth_token.read().await.clone();
+    let Some(expected_token) = expected_token.as_deref() else {
+        let bind = *state.api_bind.read().await;
+        if bind.is_some_and(|bind| !bind.ip().is_loopback()) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({"error": "api auth token must remain configured for public listeners"}),
+                ),
+            )
+                .into_response();
+        }
+        return next.run(request).await;
+    };
 
     let is_authorized = request
         .headers()

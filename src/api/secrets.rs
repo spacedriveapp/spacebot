@@ -8,7 +8,7 @@ use super::admin::require_api_auth_token;
 use super::state::ApiState;
 use crate::config::{
     DefaultsConfig, DiscordConfig, EmailConfig, LlmConfig, SlackConfig, TelegramConfig,
-    TwitchConfig,
+    TwitchConfig, WebhookConfig,
 };
 use crate::secrets::store::{
     ExportData, SecretCategory, SecretsStore, StoreState, SystemSecrets, auto_categorize,
@@ -459,6 +459,7 @@ pub async fn migrate_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRes
     migrate_section_secrets::<TelegramConfig>(&store, &mut doc, &mut migrated);
     migrate_section_secrets::<TwitchConfig>(&store, &mut doc, &mut migrated);
     migrate_section_secrets::<EmailConfig>(&store, &mut doc, &mut migrated);
+    migrate_section_secrets::<WebhookConfig>(&store, &mut doc, &mut migrated);
 
     // Write updated config.toml if any migrations were made.
     if !migrated.is_empty()

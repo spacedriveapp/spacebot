@@ -321,7 +321,8 @@ pub(super) async fn update_global_settings(
     }
 
     write_config_doc(&config_path, &doc).await?;
-    let _ = reload_runtime_configs(&state, &config_path).await;
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    state.set_defaults_config(new_config.defaults.clone()).await;
 
     let message = if requires_restart {
         "Settings updated. API server changes require a restart to take effect.".to_string()
@@ -429,7 +430,8 @@ pub(super) async fn update_raw_config(
 
     tracing::info!("config.toml updated via raw editor");
 
-    let _ = reload_runtime_configs(&state, &config_path).await;
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    state.set_defaults_config(new_config.defaults.clone()).await;
 
     Ok(Json(RawConfigUpdateResponse {
         success: true,

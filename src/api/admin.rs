@@ -59,6 +59,10 @@ pub(super) async fn reload_runtime_configs(
     state: &Arc<ApiState>,
     config_path: &Path,
 ) -> Result<crate::config::Config, StatusCode> {
+    if let Ok(store) = secrets_store(state) {
+        crate::config::set_resolve_secrets_store(store);
+    }
+
     let config_path = config_path.to_path_buf();
     let new_config =
         tokio::task::spawn_blocking(move || crate::config::Config::load_from_path(&config_path))
