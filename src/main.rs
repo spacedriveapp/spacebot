@@ -1362,7 +1362,7 @@ async fn run(
     > = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
 
     // Start HTTP API server if enabled
-    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
+    let api_state = spacebot::api::ApiState::new_with_provider_sender(
         provider_tx,
         agent_tx,
         agent_remove_tx,

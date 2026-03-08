@@ -59,10 +59,18 @@ pub(super) async fn reload_runtime_configs(
     state: &Arc<ApiState>,
     config_path: &Path,
 ) -> Result<crate::config::Config, StatusCode> {
-    let new_config = crate::config::Config::load_from_path(config_path).map_err(|error| {
-        tracing::warn!(%error, "config.toml written but failed to reload immediately");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let config_path = config_path.to_path_buf();
+    let new_config =
+        tokio::task::spawn_blocking(move || crate::config::Config::load_from_path(&config_path))
+            .await
+            .map_err(|error| {
+                tracing::warn!(%error, "config reload task failed");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?
+            .map_err(|error| {
+                tracing::warn!(%error, "config.toml written but failed to reload immediately");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
 
     state
         .set_api_auth_token(new_config.api.auth_token.clone())
@@ -107,7 +115,10 @@ pub(super) fn secrets_store(state: &ApiState) -> Result<Arc<SecretsStore>, Statu
 
 pub(super) async fn require_api_auth_token(state: &ApiState) -> Result<(), StatusCode> {
     let auth_token = state.auth_token.read().await;
-    if auth_token.is_some() {
+    if auth_token
+        .as_deref()
+        .is_some_and(|token| !token.trim().is_empty())
+    {
         Ok(())
     } else {
         Err(StatusCode::FORBIDDEN)

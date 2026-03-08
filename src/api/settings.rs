@@ -406,7 +406,12 @@ pub(super) async fn update_raw_config(
     Json(request): Json<RawConfigUpdateRequest>,
 ) -> Result<Json<RawConfigUpdateResponse>, StatusCode> {
     require_api_auth_token(&state).await?;
-    let (_config_guard, config_path, _doc) = load_config_doc(&state).await?;
+    let _config_guard = state.config_write_mutex.lock().await;
+    let config_path = state.config_path.read().await.clone();
+    if config_path.as_os_str().is_empty() {
+        tracing::error!("config_path not set in ApiState");
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    }
 
     if let Err(error) = crate::config::Config::validate_toml(&request.content) {
         return Ok(Json(RawConfigUpdateResponse {

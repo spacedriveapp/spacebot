@@ -19,13 +19,29 @@ pub fn load_json_credentials<T: DeserializeOwned>(path: &Path) -> Result<Option<
 pub fn save_json_credentials<T: Serialize>(path: &Path, credentials: &T) -> Result<()> {
     let data = serde_json::to_string_pretty(credentials)
         .with_context(|| format!("failed to serialize {}", path.display()))?;
-    std::fs::write(path, &data).with_context(|| format!("failed to write {}", path.display()))?;
 
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
+        use std::io::Write as _;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .mode(0o600)
+            .open(path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        file.write_all(data.as_bytes())
+            .with_context(|| format!("failed to write {}", path.display()))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("failed to set permissions on {}", path.display()))?;
+    }
+
+    #[cfg(not(unix))]
+    {
+        std::fs::write(path, &data)
+            .with_context(|| format!("failed to write {}", path.display()))?;
     }
 
     Ok(())

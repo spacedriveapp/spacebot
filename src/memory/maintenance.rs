@@ -201,8 +201,8 @@ fn select_canonical_memory(memories: &[Memory]) -> Memory {
             left.importance
                 .total_cmp(&right.importance)
                 .then_with(|| left.access_count.cmp(&right.access_count))
-                .then_with(|| right.updated_at.cmp(&left.updated_at))
-                .then_with(|| right.created_at.cmp(&left.created_at))
+                .then_with(|| left.updated_at.cmp(&right.updated_at))
+                .then_with(|| left.created_at.cmp(&right.created_at))
         })
         .expect("duplicate group must be non-empty")
         .clone()

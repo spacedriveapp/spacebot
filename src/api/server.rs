@@ -370,7 +370,7 @@ fn allow_local_origin(
 }
 
 pub(crate) fn should_warn_unprotected_bind(bind: SocketAddr, auth_token: Option<&str>) -> bool {
-    auth_token.is_none() && !bind.ip().is_loopback()
+    auth_token.is_none_or(|token| token.trim().is_empty()) && !bind.ip().is_loopback()
 }
 
 #[cfg(feature = "metrics")]
