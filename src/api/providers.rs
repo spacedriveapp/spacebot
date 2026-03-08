@@ -958,6 +958,9 @@ mod tests {
 
     #[tokio::test]
     async fn update_provider_persists_secret_reference() {
+        let _lock = crate::api::admin::config_resolution_test_lock()
+            .lock()
+            .await;
         let state = test_api_state();
         let tempdir = tempfile::tempdir().expect("tempdir");
         let config_path = tempdir.path().join("config.toml");
@@ -970,6 +973,7 @@ mod tests {
         let store =
             Arc::new(crate::secrets::store::SecretsStore::new(&secrets_path).expect("secrets"));
         state.set_secrets_store(store.clone());
+        crate::config::set_resolve_secrets_store(store.clone());
 
         let response = update_provider(
             State(state),
