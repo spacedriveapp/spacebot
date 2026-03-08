@@ -4,9 +4,14 @@ use crate::error::Result;
 use crate::memory::MemoryStore;
 use crate::memory::types::{Association, Memory, MemoryType};
 
+use anyhow::anyhow;
 use sqlx::Row as _;
 
 use std::collections::{HashMap, HashSet};
+
+type MergeGroupKey = (MemoryType, Option<String>);
+type MergeCandidate = (Memory, String);
+type MergeGroups = HashMap<MergeGroupKey, Vec<MergeCandidate>>;
 
 /// Maintenance configuration.
 #[derive(Debug, Clone)]
@@ -131,7 +136,7 @@ async fn merge_similar_memories(
     memory_store: &MemoryStore,
     similarity_threshold: f32,
 ) -> Result<usize> {
-    if similarity_threshold > 1.0 {
+    if !(0.0..=1.0).contains(&similarity_threshold) {
         return Ok(0);
     }
 
@@ -147,8 +152,11 @@ async fn merge_similar_memories(
     .fetch_all(memory_store.pool())
     .await?;
 
-    let memories = rows.into_iter().map(row_to_memory).collect::<Vec<_>>();
-    let mut groups: HashMap<(MemoryType, String), Vec<Memory>> = HashMap::new();
+    let memories = rows
+        .into_iter()
+        .map(row_to_memory)
+        .collect::<Result<Vec<_>>>()?;
+    let mut groups: MergeGroups = HashMap::new();
 
     for memory in memories {
         let normalized = normalize_memory_content(&memory.content);
@@ -156,29 +164,52 @@ async fn merge_similar_memories(
             continue;
         }
 
+        let channel_key = memory
+            .channel_id
+            .as_ref()
+            .map(|channel_id| channel_id.to_string());
         groups
-            .entry((memory.memory_type, normalized))
+            .entry((memory.memory_type, channel_key))
             .or_default()
-            .push(memory);
+            .push((memory, normalized));
     }
 
     let mut merged_count = 0;
-    for duplicates in groups.into_values() {
-        if duplicates.len() < 2 {
-            continue;
-        }
+    for candidates in groups.into_values() {
+        let mut remaining = candidates;
+        remaining.sort_by(|left, right| canonical_memory_cmp(&left.0, &right.0).reverse());
 
-        let canonical = select_canonical_memory(&duplicates);
-        let mut seen_duplicates = HashSet::new();
+        while let Some((seed_memory, seed_normalized)) =
+            (!remaining.is_empty()).then(|| remaining.remove(0))
+        {
+            let mut duplicates = vec![seed_memory];
+            let mut next_remaining = Vec::new();
 
-        for duplicate in duplicates {
-            if duplicate.id == canonical.id || !seen_duplicates.insert(duplicate.id.clone()) {
+            for (memory, normalized) in remaining {
+                if normalized_similarity(&seed_normalized, &normalized) >= similarity_threshold {
+                    duplicates.push(memory);
+                } else {
+                    next_remaining.push((memory, normalized));
+                }
+            }
+            remaining = next_remaining;
+
+            if duplicates.len() < 2 {
                 continue;
             }
 
-            rewrite_associations(memory_store, &canonical, &duplicate).await?;
-            memory_store.delete(&duplicate.id).await?;
-            merged_count += 1;
+            let canonical = select_canonical_memory(&duplicates);
+            let mut seen_duplicates = HashSet::new();
+
+            for duplicate in duplicates {
+                if duplicate.id == canonical.id || !seen_duplicates.insert(duplicate.id.clone()) {
+                    continue;
+                }
+
+                rewrite_associations(memory_store, &canonical, &duplicate).await?;
+                memory_store.delete(&duplicate.id).await?;
+                merged_count += 1;
+            }
         }
     }
 
@@ -197,15 +228,55 @@ fn normalize_memory_content(content: &str) -> String {
 fn select_canonical_memory(memories: &[Memory]) -> Memory {
     memories
         .iter()
-        .max_by(|left, right| {
-            left.importance
-                .total_cmp(&right.importance)
-                .then_with(|| left.access_count.cmp(&right.access_count))
-                .then_with(|| left.updated_at.cmp(&right.updated_at))
-                .then_with(|| left.created_at.cmp(&right.created_at))
-        })
+        .max_by(|left, right| canonical_memory_cmp(left, right))
         .expect("duplicate group must be non-empty")
         .clone()
+}
+
+fn canonical_memory_cmp(left: &Memory, right: &Memory) -> std::cmp::Ordering {
+    left.importance
+        .total_cmp(&right.importance)
+        .then_with(|| left.access_count.cmp(&right.access_count))
+        .then_with(|| left.updated_at.cmp(&right.updated_at))
+        .then_with(|| left.created_at.cmp(&right.created_at))
+}
+
+fn normalized_similarity(left: &str, right: &str) -> f32 {
+    if left == right {
+        return 1.0;
+    }
+    if left.is_empty() || right.is_empty() {
+        return 0.0;
+    }
+
+    let left_bigrams = bigram_counts(left);
+    let right_bigrams = bigram_counts(right);
+    let left_total = left_bigrams.values().sum::<usize>();
+    let right_total = right_bigrams.values().sum::<usize>();
+    if left_total == 0 || right_total == 0 {
+        return 0.0;
+    }
+
+    let intersection = left_bigrams
+        .iter()
+        .map(|(bigram, count)| {
+            right_bigrams
+                .get(bigram)
+                .map_or(0_usize, |other| (*count).min(*other))
+        })
+        .sum::<usize>();
+
+    (2.0 * intersection as f32) / (left_total + right_total) as f32
+}
+
+fn bigram_counts(value: &str) -> HashMap<(char, char), usize> {
+    let chars = value.chars().collect::<Vec<_>>();
+    let mut counts = HashMap::new();
+    for bigram in chars.windows(2) {
+        let key = (bigram[0], bigram[1]);
+        *counts.entry(key).or_default() += 1;
+    }
+    counts
 }
 
 async fn rewrite_associations(
@@ -230,19 +301,56 @@ async fn rewrite_associations(
             continue;
         }
 
+        let combined_weight = existing_association_weight(
+            memory_store,
+            &source_id,
+            &target_id,
+            association.relation_type,
+        )
+        .await?
+        .map_or(association.weight, |existing_weight| {
+            existing_weight.max(association.weight)
+        });
+
         let rewritten = Association::new(source_id, target_id, association.relation_type)
-            .with_weight(association.weight);
+            .with_weight(combined_weight);
         memory_store.create_association(&rewritten).await?;
     }
 
     Ok(())
 }
 
-fn row_to_memory(row: sqlx::sqlite::SqliteRow) -> Memory {
-    Memory {
-        id: row.get("id"),
+async fn existing_association_weight(
+    memory_store: &MemoryStore,
+    source_id: &str,
+    target_id: &str,
+    relation_type: crate::memory::RelationType,
+) -> Result<Option<f32>> {
+    let row = sqlx::query(
+        r#"
+        SELECT weight
+        FROM associations
+        WHERE source_id = ? AND target_id = ? AND relation_type = ?
+        "#,
+    )
+    .bind(source_id)
+    .bind(target_id)
+    .bind(relation_type.to_string())
+    .fetch_optional(memory_store.pool())
+    .await?;
+
+    Ok(row.map(|row| row.get("weight")))
+}
+
+fn row_to_memory(row: sqlx::sqlite::SqliteRow) -> Result<Memory> {
+    let id: String = row.get("id");
+    let memory_type_raw: String = row.get("memory_type");
+
+    Ok(Memory {
+        id: id.clone(),
         content: row.get("content"),
-        memory_type: parse_memory_type(row.get::<String, _>("memory_type").as_str()),
+        memory_type: parse_memory_type(&memory_type_raw)
+            .map_err(|error| anyhow!("failed to parse memory_type for memory {id}: {error}"))?,
         importance: row.get("importance"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -251,20 +359,20 @@ fn row_to_memory(row: sqlx::sqlite::SqliteRow) -> Memory {
         source: row.get("source"),
         channel_id: row.get::<Option<String>, _>("channel_id").map(Into::into),
         forgotten: row.get("forgotten"),
-    }
+    })
 }
 
-fn parse_memory_type(memory_type: &str) -> MemoryType {
+fn parse_memory_type(memory_type: &str) -> Result<MemoryType> {
     match memory_type {
-        "fact" => MemoryType::Fact,
-        "preference" => MemoryType::Preference,
-        "decision" => MemoryType::Decision,
-        "identity" => MemoryType::Identity,
-        "event" => MemoryType::Event,
-        "observation" => MemoryType::Observation,
-        "goal" => MemoryType::Goal,
-        "todo" => MemoryType::Todo,
-        _ => MemoryType::Fact,
+        "fact" => Ok(MemoryType::Fact),
+        "preference" => Ok(MemoryType::Preference),
+        "decision" => Ok(MemoryType::Decision),
+        "identity" => Ok(MemoryType::Identity),
+        "event" => Ok(MemoryType::Event),
+        "observation" => Ok(MemoryType::Observation),
+        "goal" => Ok(MemoryType::Goal),
+        "todo" => Ok(MemoryType::Todo),
+        _ => Err(anyhow!("unknown memory type '{memory_type}'").into()),
     }
 }
 
@@ -280,6 +388,7 @@ pub struct MaintenanceReport {
 mod tests {
     use super::{MaintenanceConfig, merge_similar_memories};
     use crate::memory::{Association, Memory, MemoryStore, MemoryType, RelationType};
+    use std::sync::Arc;
 
     #[tokio::test]
     async fn merges_normalized_duplicate_memories_and_rewrites_edges() {
@@ -327,13 +436,72 @@ mod tests {
     #[tokio::test]
     async fn skips_merge_when_threshold_exceeds_exact_match() {
         let store = MemoryStore::connect_in_memory().await;
-        let first = Memory::new("same", MemoryType::Fact);
-        let second = Memory::new("same", MemoryType::Fact);
+        let first = Memory::new("deploy worker now", MemoryType::Fact);
+        let second = Memory::new("deploy workers tomorrow", MemoryType::Fact);
         store.save(&first).await.expect("save first");
         store.save(&second).await.expect("save second");
 
-        let merged = merge_similar_memories(&store, 1.1).await.expect("merge");
+        let merged = merge_similar_memories(&store, 0.95).await.expect("merge");
         assert_eq!(merged, 0);
         assert!(store.load(&second.id).await.expect("load").is_some());
+    }
+
+    #[tokio::test]
+    async fn does_not_merge_identical_content_across_channels() {
+        let store = MemoryStore::connect_in_memory().await;
+        let first =
+            Memory::new("same content", MemoryType::Fact).with_channel_id(Arc::<str>::from("a"));
+        let second =
+            Memory::new("same content", MemoryType::Fact).with_channel_id(Arc::<str>::from("b"));
+        store.save(&first).await.expect("save first");
+        store.save(&second).await.expect("save second");
+
+        let merged = merge_similar_memories(&store, 0.95).await.expect("merge");
+        assert_eq!(merged, 0);
+    }
+
+    #[tokio::test]
+    async fn preserves_stronger_existing_association_weight() {
+        let store = MemoryStore::connect_in_memory().await;
+
+        let canonical = Memory::new("shared task", MemoryType::Todo).with_importance(0.9);
+        let duplicate = Memory::new("shared  task", MemoryType::Todo).with_importance(0.5);
+        let neighbor = Memory::new("neighbor", MemoryType::Observation);
+
+        store.save(&canonical).await.expect("save canonical");
+        store.save(&duplicate).await.expect("save duplicate");
+        store.save(&neighbor).await.expect("save neighbor");
+
+        store
+            .create_association(
+                &Association::new(&neighbor.id, &canonical.id, RelationType::RelatedTo)
+                    .with_weight(0.9),
+            )
+            .await
+            .expect("canonical association");
+        store
+            .create_association(
+                &Association::new(&neighbor.id, &duplicate.id, RelationType::RelatedTo)
+                    .with_weight(0.3),
+            )
+            .await
+            .expect("duplicate association");
+
+        let merged = merge_similar_memories(&store, 0.95).await.expect("merge");
+        assert_eq!(merged, 1);
+
+        let associations = store
+            .get_associations(&canonical.id)
+            .await
+            .expect("associations");
+        let preserved = associations
+            .iter()
+            .find(|association| {
+                association.source_id == neighbor.id
+                    && association.target_id == canonical.id
+                    && association.relation_type == RelationType::RelatedTo
+            })
+            .expect("rewritten association");
+        assert_eq!(preserved.weight, 0.9);
     }
 }
