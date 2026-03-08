@@ -17,6 +17,17 @@ type WatchedAgent = (
     Arc<crate::mcp::McpManager>,
 );
 
+pub struct FileWatcherHandle {
+    shutdown_tx: std::sync::mpsc::Sender<()>,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FileWatcherHandle {
+    fn drop(&mut self) {
+        self.shutdown_tx.send(()).ok();
+    }
+}
+
 /// Watches config, prompt, identity, and skill files for changes and triggers
 /// hot reload on the corresponding RuntimeConfig.
 ///
@@ -37,11 +48,12 @@ pub fn spawn_file_watcher(
     llm_manager: Arc<crate::llm::LlmManager>,
     agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
     agent_humans: Arc<arc_swap::ArcSwap<Vec<crate::config::HumanDef>>>,
-) -> tokio::task::JoinHandle<()> {
+) -> FileWatcherHandle {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
 
-    tokio::task::spawn_blocking(move || {
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || {
         let (tx, rx) = std::sync::mpsc::channel::<Event>();
 
         let mut watcher = match notify::recommended_watcher(
@@ -117,10 +129,21 @@ pub fn spawn_file_watcher(
         // Debounce loop: collect events for 2 seconds, then reload
         let debounce = Duration::from_secs(2);
 
-        while let Ok(first) = rx.recv() {
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let first = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(first) => first,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             // Drain any additional events within the debounce window
             let mut changed_paths: Vec<PathBuf> = first.paths;
             while let Ok(event) = rx.recv_timeout(debounce) {
+                if shutdown_rx.try_recv().is_ok() {
+                    return;
+                }
                 changed_paths.extend(event.paths);
             }
 
@@ -298,7 +321,12 @@ pub fn spawn_file_watcher(
         }
 
         tracing::info!("file watcher stopped");
-    })
+    });
+
+    FileWatcherHandle {
+        shutdown_tx,
+        _task: task,
+    }
 }
 
 fn build_desired_configured_adapters(

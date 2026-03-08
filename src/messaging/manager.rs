@@ -51,6 +51,7 @@ pub struct MessagingManager {
     adapters: RwLock<HashMap<String, Arc<dyn MessagingDyn>>>,
     runtimes: RwLock<HashMap<String, AdapterRuntime>>,
     configured_fingerprints: RwLock<HashMap<String, String>>,
+    lifecycle_mutex: tokio::sync::Mutex<()>,
     /// Sender side of the fan-in channel. Cloned for each adapter's forwarding task.
     fan_in_tx: mpsc::Sender<InboundMessage>,
     /// Receiver side, taken once by `start()`.
@@ -65,6 +66,7 @@ impl MessagingManager {
             adapters: RwLock::new(HashMap::new()),
             runtimes: RwLock::new(HashMap::new()),
             configured_fingerprints: RwLock::new(HashMap::new()),
+            lifecycle_mutex: tokio::sync::Mutex::new(()),
             fan_in_tx,
             fan_in_rx: RwLock::new(Some(fan_in_rx)),
             started: AtomicBool::new(false),
@@ -73,6 +75,7 @@ impl MessagingManager {
 
     /// Register an adapter (before start). Use `register_and_start` for runtime addition.
     pub async fn register(&self, adapter: impl Messaging) {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
         let name = adapter.name().to_string();
         let adapter: Arc<dyn MessagingDyn> = Arc::new(adapter);
         tracing::info!(adapter = %name, "registered messaging adapter");
@@ -92,6 +95,7 @@ impl MessagingManager {
 
     /// Register a pre-wrapped adapter that the caller retains a handle to.
     pub async fn register_shared(&self, adapter: Arc<impl Messaging>) {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
         let name = adapter.name().to_string();
         tracing::info!(adapter = %name, "registered messaging adapter (shared)");
         let adapter: Arc<dyn MessagingDyn> = adapter;
@@ -116,6 +120,8 @@ impl MessagingManager {
     /// Adapters that fail to start (e.g. due to network not being ready) are
     /// retried in the background with exponential backoff.
     pub async fn start(&self) -> crate::Result<InboundStream> {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
+        self.started.store(true, Ordering::SeqCst);
         let adapters = self
             .adapters
             .read()
@@ -130,7 +136,6 @@ impl MessagingManager {
             .await
             .take()
             .context("start() already called")?;
-        self.started.store(true, Ordering::SeqCst);
 
         for (name, adapter) in adapters {
             self.start_runtime(name, adapter, false).await?;
@@ -147,6 +152,7 @@ impl MessagingManager {
     /// channel, so the main loop's stream receives messages without any
     /// stream replacement or restart.
     pub async fn register_and_start(&self, adapter: impl Messaging) -> crate::Result<()> {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
         let name = adapter.name().to_string();
         let adapter: Arc<dyn MessagingDyn> = Arc::new(adapter);
         let old_adapter = self
@@ -181,12 +187,13 @@ impl MessagingManager {
     }
 
     pub async fn reconcile_configured(&self, desired: Vec<ConfiguredAdapter>) -> crate::Result<()> {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
         let desired_names = desired
             .iter()
             .map(|adapter| adapter.name.clone())
             .collect::<std::collections::HashSet<_>>();
         let current_configured = self
-            .configured_fingerprints
+            .adapters
             .read()
             .await
             .keys()
@@ -261,10 +268,13 @@ impl MessagingManager {
         tokio::spawn(async move {
             let mut next_retry_delay = INITIAL_RETRY_DELAY;
             let mut initial_stream = initial_stream;
+            #[cfg(test)]
+            let healthy_stream_duration = std::time::Duration::from_millis(20);
+            #[cfg(not(test))]
+            let healthy_stream_duration = std::time::Duration::from_secs(2);
 
             loop {
                 let mut stream = if let Some(stream) = initial_stream.take() {
-                    next_retry_delay = INITIAL_RETRY_DELAY;
                     stream
                 } else {
                     let start_result = tokio::select! {
@@ -295,6 +305,8 @@ impl MessagingManager {
                     }
                 };
 
+                let started_at = std::time::Instant::now();
+                let mut observed_message = false;
                 loop {
                     tokio::select! {
                         _ = shutdown_rx.changed() => {
@@ -304,13 +316,30 @@ impl MessagingManager {
                         maybe_message = stream.next() => {
                             match maybe_message {
                                 Some(message) => {
+                                    observed_message = true;
+                                    next_retry_delay = INITIAL_RETRY_DELAY;
                                     if fan_in_tx.send(message).await.is_err() {
                                         tracing::warn!(adapter = %name, "fan-in channel closed, stopping supervisor");
                                         return;
                                     }
                                 }
                                 None => {
-                                    tracing::warn!(adapter = %name, "adapter stream ended, restarting");
+                                    if !observed_message && started_at.elapsed() < healthy_stream_duration {
+                                        let current_delay = next_retry_delay;
+                                        next_retry_delay = (next_retry_delay * 2).min(MAX_RETRY_DELAY);
+                                        tracing::warn!(
+                                            adapter = %name,
+                                            retry_delay = ?current_delay,
+                                            "adapter stream ended before becoming healthy, backing off before restart"
+                                        );
+                                        tokio::select! {
+                                            _ = shutdown_rx.changed() => return,
+                                            _ = tokio::time::sleep(current_delay) => {}
+                                        }
+                                    } else {
+                                        next_retry_delay = INITIAL_RETRY_DELAY;
+                                        tracing::warn!(adapter = %name, "adapter stream ended, restarting");
+                                    }
                                     break;
                                 }
                             }
@@ -385,13 +414,12 @@ impl MessagingManager {
             runtime.shutdown_tx.send(true).ok();
         }
 
+        let mut shutdown_error = None;
         if let Some(adapter) = adapter
             && let Err(error) = adapter.shutdown().await
         {
-            if propagate_shutdown_error {
-                return Err(error);
-            }
             tracing::warn!(adapter = %name, %error, "failed to shut down adapter");
+            shutdown_error = Some(error);
         }
 
         if let Some(runtime) = runtime {
@@ -403,6 +431,10 @@ impl MessagingManager {
                     tracing::warn!(adapter = %name, %error, "adapter supervisor join failed");
                 }
             }
+        }
+
+        if propagate_shutdown_error && let Some(error) = shutdown_error {
+            return Err(error);
         }
 
         Ok(())
@@ -474,6 +506,7 @@ impl MessagingManager {
 
     /// Remove and shut down a single adapter by name.
     pub async fn remove_adapter(&self, name: &str) -> crate::Result<()> {
+        let _lifecycle_guard = self.lifecycle_mutex.lock().await;
         let adapter = self.adapters.write().await.remove(name);
         self.configured_fingerprints.write().await.remove(name);
         self.stop_runtime(name, adapter, true).await?;
@@ -514,6 +547,20 @@ impl MessagingManager {
             if let Err(error) = self.remove_adapter(&name).await {
                 tracing::warn!(adapter = %name, %error, "failed to shut down adapter");
             }
+        }
+    }
+
+    pub async fn seed_configured_fingerprints_from_registered(&self) {
+        let names = self
+            .adapters
+            .read()
+            .await
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut fingerprints = self.configured_fingerprints.write().await;
+        for name in names {
+            fingerprints.entry(name).or_insert_with(String::new);
         }
     }
 }

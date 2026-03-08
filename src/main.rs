@@ -1495,7 +1495,7 @@ async fn run(
     let mut agents_initialized = false;
 
     // File watcher handle — started after agent init (or in setup mode with empty data)
-    let mut _file_watcher: Option<tokio::task::JoinHandle<()>>;
+    let mut _file_watcher: Option<spacebot::config::FileWatcherHandle>;
 
     // If providers are available, initialize agents immediately
     if has_providers {
@@ -2215,9 +2215,7 @@ async fn run(
                                     Ok(()) => {
                                         agents_initialized = true;
                                         // Restart file watcher with the new agent data
-                                        if let Some(old_watcher) = _file_watcher.take() {
-                                            old_watcher.abort();
-                                        }
+                                        let _old_watcher = _file_watcher.take();
                                         _file_watcher = Some(spacebot::config::spawn_file_watcher(
                                             config_path.clone(),
                                             new_config.instance_dir.clone(),
@@ -3014,6 +3012,10 @@ async fn initialize_agents(
             new_messaging_manager.register(adapter).await;
         }
     }
+
+    new_messaging_manager
+        .seed_configured_fingerprints_from_registered()
+        .await;
 
     let webchat_agent_pools = agents
         .iter()

@@ -20,7 +20,7 @@ pub use permissions::{
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
 pub use types::*;
-pub use watcher::spawn_file_watcher;
+pub use watcher::{FileWatcherHandle, spawn_file_watcher};
 
 // Re-export pub(crate) items that need crate-wide visibility.
 // (GEMINI_PROVIDER_BASE_URL is only used within config submodules, no re-export needed.)
