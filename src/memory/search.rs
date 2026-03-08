@@ -76,7 +76,10 @@ impl MemorySearch {
     ///
     /// This is primarily useful for hermetic tests that only exercise
     /// metadata-based queries and tool wiring.
-    pub fn new_without_embeddings(store: Arc<MemoryStore>, embedding_table: EmbeddingTable) -> Self {
+    pub fn new_without_embeddings(
+        store: Arc<MemoryStore>,
+        embedding_table: EmbeddingTable,
+    ) -> Self {
         Self {
             store,
             embedding_table,

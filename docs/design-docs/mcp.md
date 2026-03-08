@@ -10,6 +10,7 @@ MCP is a JSON-RPC 2.0 protocol that standardizes how AI applications connect to 
 
 - **Client only.** Spacebot connects TO MCP servers. Exposing Spacebot AS an MCP server is a separate feature.
 - **Workers only.** MCP tools are task-execution tools, workers are where tasks run. Channels delegate, they don't execute.
+- **Branch-visible retrieval stays native.** Branches may expose native tools such as `knowledge_recall`, but those tools normalize evidence through Rust adapters. Raw MCP tool names and payloads still stay worker-only.
 - **Per-agent config.** Each agent configures its own MCP servers, consistent with existing per-agent isolation.
 - **Both transports.** stdio (subprocess) for local tools, streamable HTTP for remote servers.
 - **Tools only.** MCP resources and prompts are out of scope for now.
@@ -57,6 +58,14 @@ Config (McpServerConfig)
 ```
 
 The bridge piece is `McpToolAdapter` — implements Rig's `Tool` trait by proxying `call()` to the MCP server's `tools/call` JSON-RPC method. Each MCP tool from each server becomes a separate adapter instance on the worker's `ToolServer`.
+
+This does not prevent higher-level native retrieval contracts from using MCP behind the scenes. The current example is `knowledge_recall` using a QMD adapter:
+
+- the branch sees one native tool and one normalized evidence schema
+- the adapter calls the configured `qmd` MCP server internally
+- branch responses keep provenance and degraded status, not raw protocol dumps
+
+That preserves the original boundary: workers own raw MCP surfaces, while branches own curation and user-facing retrieval conclusions.
 
 ## What we get for free
 

@@ -84,6 +84,8 @@ These serve different purposes:
 
 The bulletin doesn't replace recall — it reduces how often recall is needed. A channel that already knows the user's name, their current project, and recent decisions from the bulletin doesn't need to spawn a branch for basic context.
 
+The bulletin also does **not** fan out to live external knowledge sources in this wave. `knowledge_recall` runs on branches when a conversation needs QMD or future adapter-backed evidence. Cortex and bulletin generation stay on the durable-memory side until the retrieval plane is verified and a later design explicitly promotes stable external findings into ambient context.
+
 ## Future Responsibilities
 
 The bulletin is the cortex's first and most impactful responsibility. The following capabilities are designed but not yet implemented:

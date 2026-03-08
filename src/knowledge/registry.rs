@@ -48,7 +48,7 @@ impl KnowledgeSourceRegistry {
                     kind: KnowledgeSourceKind::GoogleWorkspace,
                     capabilities: vec![KnowledgeSourceCapability::DocumentSearch],
                     enablement: KnowledgeSourceEnablement::placeholder(
-                        "Google Workspace bridge adapters are planned but not wired yet.",
+                        "Google Workspace bridge adapter support is modeled for Drive; execution adapter is not yet wired.",
                     ),
                 },
                 KnowledgeSourceDescriptor {
@@ -57,7 +57,7 @@ impl KnowledgeSourceRegistry {
                     kind: KnowledgeSourceKind::GoogleWorkspace,
                     capabilities: vec![KnowledgeSourceCapability::EmailSearch],
                     enablement: KnowledgeSourceEnablement::placeholder(
-                        "Google Workspace bridge adapters are planned but not wired yet.",
+                        "Google Workspace bridge adapter support is modeled for Gmail; execution adapter is not yet wired.",
                     ),
                 },
                 KnowledgeSourceDescriptor {
@@ -66,7 +66,7 @@ impl KnowledgeSourceRegistry {
                     kind: KnowledgeSourceKind::GoogleWorkspace,
                     capabilities: vec![KnowledgeSourceCapability::CalendarSearch],
                     enablement: KnowledgeSourceEnablement::placeholder(
-                        "Google Workspace bridge adapters are planned but not wired yet.",
+                        "Google Workspace bridge adapter support is modeled for Calendar; execution adapter is not yet wired.",
                     ),
                 },
             ],
@@ -85,7 +85,11 @@ impl KnowledgeSourceRegistry {
         self.sources
             .iter()
             .filter(|source| {
-                source.enablement.state == super::types::KnowledgeSourceEnablementState::Enabled
+                matches!(
+                    source.enablement.state,
+                    super::types::KnowledgeSourceEnablementState::Enabled
+                        | super::types::KnowledgeSourceEnablementState::Configured
+                )
             })
             .map(|source| source.id.clone())
             .collect()
@@ -98,7 +102,7 @@ fn qmd_enablement(mcp_servers: &[McpServerConfig]) -> KnowledgeSourceEnablement 
         .any(|server| server.enabled && server.name.eq_ignore_ascii_case("qmd"))
     {
         return KnowledgeSourceEnablement::configured(
-            "QMD MCP transport is configured; the native adapter lands in F3.",
+            "QMD MCP transport is configured and available through the native retrieval adapter.",
         );
     }
 
@@ -118,7 +122,8 @@ fn qmd_enablement(mcp_servers: &[McpServerConfig]) -> KnowledgeSourceEnablement 
 mod tests {
     use super::{
         GOOGLE_WORKSPACE_CALENDAR_SOURCE_ID, GOOGLE_WORKSPACE_DRIVE_SOURCE_ID,
-        GOOGLE_WORKSPACE_GMAIL_SOURCE_ID, KnowledgeSourceRegistry, QMD_SOURCE_ID,
+        GOOGLE_WORKSPACE_GMAIL_SOURCE_ID, KnowledgeSourceRegistry, NATIVE_MEMORY_SOURCE_ID,
+        QMD_SOURCE_ID,
     };
     use crate::config::{McpServerConfig, McpTransport};
     use crate::knowledge::{
@@ -178,5 +183,52 @@ mod tests {
                 .capabilities
                 .contains(&KnowledgeSourceCapability::CalendarSearch)
         );
+    }
+
+    #[test]
+    fn registry_models_google_workspace_sources_under_one_family() {
+        let registry = KnowledgeSourceRegistry::from_mcp_servers(&[]);
+        let source_ids = [
+            GOOGLE_WORKSPACE_DRIVE_SOURCE_ID,
+            GOOGLE_WORKSPACE_GMAIL_SOURCE_ID,
+            GOOGLE_WORKSPACE_CALENDAR_SOURCE_ID,
+        ];
+
+        for source_id in source_ids {
+            let source = registry
+                .get(source_id)
+                .expect("google workspace source exists");
+            assert_eq!(source.kind, KnowledgeSourceKind::GoogleWorkspace);
+            assert!(
+                source.enablement.state
+                    == crate::knowledge::KnowledgeSourceEnablementState::Placeholder
+                    || source.enablement.state
+                        == crate::knowledge::KnowledgeSourceEnablementState::Disabled
+            );
+            assert!(
+                source
+                    .enablement
+                    .reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("bridge adapter"))
+            );
+        }
+    }
+
+    #[test]
+    fn default_source_ids_include_configured_qmd() {
+        let registry = KnowledgeSourceRegistry::from_mcp_servers(&[McpServerConfig {
+            name: "qmd".to_string(),
+            transport: McpTransport::Http {
+                url: "http://127.0.0.1:8765/mcp".to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            enabled: true,
+        }]);
+
+        let source_ids = registry.default_source_ids();
+        assert!(source_ids.contains(&NATIVE_MEMORY_SOURCE_ID.to_string()));
+        assert!(source_ids.contains(&QMD_SOURCE_ID.to_string()));
+        assert!(!source_ids.contains(&GOOGLE_WORKSPACE_DRIVE_SOURCE_ID.to_string()));
     }
 }

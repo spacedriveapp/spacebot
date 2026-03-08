@@ -239,9 +239,12 @@ async fn bootstrap_harness_inner(
 
     let prepared_server = prepare_mock_server(response_body).await?;
     let llm_manager = Arc::new(
-        spacebot::llm::LlmManager::new(test_llm_config(&format!("http://{}", prepared_server.addr)))
-            .await
-            .context("failed to init hermetic llm manager")?,
+        spacebot::llm::LlmManager::new(test_llm_config(&format!(
+            "http://{}",
+            prepared_server.addr
+        )))
+        .await
+        .context("failed to init hermetic llm manager")?,
     );
 
     let db = spacebot::db::Db::connect(&agent_config.data_dir)
@@ -435,10 +438,12 @@ async fn bootstrap_harness_failure_before_server_spawn_drops_listener() {
         panic!("expected injected pre-spawn failure");
     };
 
-    let connect_result =
-        tokio::time::timeout(Duration::from_millis(250), tokio::net::TcpStream::connect(addr))
-            .await
-            .expect("connect should not hang");
+    let connect_result = tokio::time::timeout(
+        Duration::from_millis(250),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .expect("connect should not hang");
     assert!(
         connect_result.is_err(),
         "listener should be dropped when bootstrap fails before server spawn"

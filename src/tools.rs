@@ -491,6 +491,7 @@ pub fn create_branch_tool_server(
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     runtime_config: Arc<RuntimeConfig>,
+    mcp_manager: Arc<crate::mcp::McpManager>,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
@@ -506,6 +507,7 @@ pub fn create_branch_tool_server(
         .tool(KnowledgeRecallTool::new(
             memory_search.clone(),
             runtime_config.clone(),
+            mcp_manager,
         ))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))

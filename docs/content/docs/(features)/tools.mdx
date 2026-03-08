@@ -24,6 +24,7 @@ Core tools include:
 | `react` | Add an emoji reaction to the user's message | Channel |
 | `memory_save` | Write a memory to the store | Branch, Cortex, Compactor |
 | `memory_recall` | Search memories via hybrid search | Branch |
+| `knowledge_recall` | Retrieve normalized evidence from native memory and adapter-backed external sources | Branch |
 | `channel_recall` | Retrieve transcript from another channel | Branch |
 | `spacebot_docs` | Read embedded Spacebot docs/changelog/AGENTS | Branch, Cortex Chat |
 | `email_search` | Search IMAP mailbox content directly | Branch |
@@ -73,13 +74,14 @@ Each branch gets its own isolated ToolServer, created at spawn time via `create_
 ├──────────────────────────────────────────────┤
 │   memory_save      (Arc<MemorySearch>)       │
 │   memory_recall    (Arc<MemorySearch>)       │
+│   knowledge_recall (native retrieval plane)  │
 │   spacebot_docs    (embedded docs)            │
 │   channel_recall   (ConversationLogger)      │
 │   email_search     (IMAP mailbox search)     │
 └──────────────────────────────────────────────┘
 ```
 
-Branch isolation ensures `memory_recall`, `channel_recall`, `spacebot_docs`, and `email_search` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
+Branch isolation ensures `memory_recall`, `knowledge_recall`, `channel_recall`, `spacebot_docs`, and `email_search` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
 
 ### Worker ToolServer (per-worker)
 
@@ -147,8 +149,9 @@ create_channel_tool_server() -> ToolServerHandle
 add_channel_tools(handle, channel_id, response_tx, conversation_id, event_tx)
 remove_channel_tools(handle)
 
-// Per branch spawn — creates an isolated ToolServer with memory + channel recall tools
-create_branch_tool_server(memory_search, conversation_logger) -> ToolServerHandle
+// Per branch spawn — creates an isolated ToolServer with memory, knowledge, recall,
+// task-board, and optional worker-handoff tools
+create_branch_tool_server(...) -> ToolServerHandle
 
 // Per worker spawn — creates an isolated ToolServer (browser/web_search/MCP conditionally included)
 create_worker_tool_server(agent_id, worker_id, channel_id, event_tx, browser_config, screenshot_dir) -> ToolServerHandle
@@ -164,7 +167,7 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall`, `channel_recall`, `spacebot_docs`, `email_search` on branch ToolServers. `shell`, `file`, `exec` on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `knowledge_recall`, `memory_delete`, `channel_recall`, `spacebot_docs`, `email_search`, and task-board tools on branch ToolServers. `shell`, `file`, `exec`, `set_status`, and connected MCP tools on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -181,7 +184,7 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Per-process tools (created and destroyed with the process)
 
-Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `knowledge_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
 
 ## Tool Design Patterns
 
@@ -244,6 +247,17 @@ Writes a structured memory to SQLite + generates an embedding in LanceDB. Suppor
 ### memory_recall
 
 Hybrid search across the memory store. Combines vector similarity (semantic), full-text search (keyword), and graph traversal (connected memories) via Reciprocal Rank Fusion. Records access on found memories (affects importance decay).
+
+### knowledge_recall
+
+Native retrieval entrypoint for branch-visible evidence gathering across multiple knowledge sources.
+
+- `memory_recall` remains the typed durable-memory tool.
+- `knowledge_recall` returns normalized `KnowledgeHit` results with mandatory provenance.
+- Today it supports native memory plus QMD through a native adapter contract.
+- Google Workspace family descriptors are modeled behind the same branch UX, but their bridge adapter remains normalization-only for now.
+
+Branches use `knowledge_recall` when they need document or external-source evidence. Channels still never see raw MCP output, raw QMD tool names, or bridge-specific command semantics.
 
 ### channel_recall
 

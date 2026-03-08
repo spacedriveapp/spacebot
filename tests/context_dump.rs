@@ -244,9 +244,12 @@ async fn bootstrap_harness_inner(
     }));
     let prepared_server = prepare_mock_server(response_body).await?;
     let llm_manager = Arc::new(
-        spacebot::llm::LlmManager::new(test_llm_config(&format!("http://{}", prepared_server.addr)))
-            .await
-            .context("failed to init hermetic llm manager")?,
+        spacebot::llm::LlmManager::new(test_llm_config(&format!(
+            "http://{}",
+            prepared_server.addr
+        )))
+        .await
+        .context("failed to init hermetic llm manager")?,
     );
 
     let db = spacebot::db::Db::connect(&agent_config.data_dir)
@@ -368,6 +371,7 @@ async fn get_branch_tool_defs() -> anyhow::Result<Vec<rig::completion::ToolDefin
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
+        deps.mcp_manager.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
@@ -518,10 +522,12 @@ async fn bootstrap_harness_failure_before_server_spawn_drops_listener() {
         panic!("expected injected pre-spawn failure");
     };
 
-    let connect_result =
-        tokio::time::timeout(Duration::from_millis(250), tokio::net::TcpStream::connect(addr))
-            .await
-            .expect("connect should not hang");
+    let connect_result = tokio::time::timeout(
+        Duration::from_millis(250),
+        tokio::net::TcpStream::connect(addr),
+    )
+    .await
+    .expect("connect should not hang");
     assert!(
         connect_result.is_err(),
         "listener should be dropped when bootstrap fails before server spawn"
@@ -642,6 +648,7 @@ async fn dump_branch_context() {
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
+        deps.mcp_manager.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
@@ -844,6 +851,7 @@ async fn dump_all_contexts() {
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
+        deps.mcp_manager.clone(),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,

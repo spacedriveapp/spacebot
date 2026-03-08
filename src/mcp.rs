@@ -337,6 +337,12 @@ impl McpConnection {
     ) -> Result<rmcp::model::CallToolResult> {
         #[cfg(feature = "metrics")]
         let call_start = std::time::Instant::now();
+        let serialized_arguments = arguments.to_string();
+        if crate::secrets::scrub::scan_for_leaks(&serialized_arguments).is_some() {
+            return Err(anyhow!(
+                "mcp tool arguments contained a secret; outbound call blocked"
+            ));
+        }
 
         let arguments = match arguments {
             serde_json::Value::Object(map) => Some(map),
@@ -608,6 +614,20 @@ impl McpManager {
         names
     }
 
+    pub async fn call_tool(
+        &self,
+        server_name: &str,
+        tool_name: &str,
+        arguments: serde_json::Value,
+    ) -> Result<rmcp::model::CallToolResult> {
+        let connection = self
+            .find_connection(server_name)
+            .await
+            .ok_or_else(|| anyhow!("mcp server '{}' is not connected", server_name))?;
+
+        connection.call_tool(tool_name, arguments).await
+    }
+
     pub async fn reconnect(&self, name: &str) -> Result<()> {
         let config = self
             .configs
@@ -774,6 +794,16 @@ impl McpManager {
             .or_insert_with(|| Arc::new(McpConnection::new(config)))
             .clone()
     }
+
+    async fn find_connection(&self, server_name: &str) -> Option<Arc<McpConnection>> {
+        let connections = self.connections.read().await;
+        connections.get(server_name).cloned().or_else(|| {
+            connections
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case(server_name))
+                .map(|(_, connection)| connection.clone())
+        })
+    }
 }
 
 /// Parse a Bearer token from an Authorization header value.
@@ -852,6 +882,8 @@ fn interpolate_env_placeholders(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{McpServerConfig, McpTransport};
+    use std::sync::Arc;
 
     #[test]
     fn parse_bearer_token_strips_bearer_prefix() {
@@ -913,5 +945,65 @@ mod tests {
         assert_eq!(interpolate_env_placeholders("no-vars-here"), "no-vars-here");
         assert_eq!(interpolate_env_placeholders("${"), "${");
         assert_eq!(interpolate_env_placeholders("${}"), "${}");
+    }
+
+    #[tokio::test]
+    async fn call_tool_resolves_server_name_case_insensitively() {
+        let config = McpServerConfig {
+            name: "QMD".to_string(),
+            transport: McpTransport::Http {
+                url: "http://127.0.0.1:8765/mcp".to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            enabled: true,
+        };
+        let manager = McpManager::new(vec![config.clone()]);
+        manager
+            .connections
+            .write()
+            .await
+            .insert(config.name.clone(), Arc::new(McpConnection::new(config)));
+
+        let error = manager
+            .call_tool("qmd", "query", serde_json::json!({}))
+            .await
+            .expect_err("disconnected fixture should still prove lookup");
+
+        assert!(
+            error
+                .to_string()
+                .contains("mcp server 'QMD' is not connected"),
+            "expected lookup to resolve the mixed-case configured server name, got: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn call_tool_blocks_secret_bearing_arguments_before_outbound_call() {
+        let config = McpServerConfig {
+            name: "qmd".to_string(),
+            transport: McpTransport::Http {
+                url: "http://127.0.0.1:8765/mcp".to_string(),
+                headers: std::collections::HashMap::new(),
+            },
+            enabled: true,
+        };
+        let connection = McpConnection::new(config);
+
+        let error = connection
+            .call_tool(
+                "query",
+                serde_json::json!({
+                    "query": "sk-ant-api03-abcdefghijklmnopqrstuvwx1234567890"
+                }),
+            )
+            .await
+            .expect_err("secret-bearing args should be blocked before outbound call");
+
+        assert!(
+            error
+                .to_string()
+                .contains("mcp tool arguments contained a secret; outbound call blocked"),
+            "expected preflight leak-block error, got: {error}"
+        );
     }
 }
