@@ -42,6 +42,11 @@ impl EmbeddingModel {
 
     /// Generate embedding for a single text (async, spawns blocking task).
     pub async fn embed_one(self: &Arc<Self>, text: &str) -> Result<Vec<f32>> {
+        #[cfg(feature = "metrics")]
+        let _timer = crate::telemetry::Metrics::global()
+            .memory_embedding_duration_seconds
+            .start_timer();
+
         let text = text.to_string();
         let model = self.model.clone();
         let result = tokio::task::spawn_blocking(move || {

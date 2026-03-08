@@ -192,7 +192,9 @@ jobs:
             -d '{"image_tag": "${{ needs.build-docker.outputs.version }}"}'
 
   create-release:
-    needs: build-binaries
+    needs:
+      - build-binaries
+      - merge-docker
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-24.04
     permissions:

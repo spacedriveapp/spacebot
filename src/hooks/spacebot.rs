@@ -429,9 +429,16 @@ impl SpacebotHook {
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
+            let process_label = match self.process_type {
+                crate::ProcessType::Channel => "channel",
+                crate::ProcessType::Branch => "branch",
+                crate::ProcessType::Worker => "worker",
+                crate::ProcessType::Compactor => "compactor",
+                crate::ProcessType::Cortex => "cortex",
+            };
             metrics
                 .tool_calls_total
-                .with_label_values(&[&*self.agent_id, tool_name])
+                .with_label_values(&[&*self.agent_id, tool_name, process_label])
                 .inc();
             if let Some(start) = TOOL_CALL_TIMERS
                 .lock()
@@ -440,6 +447,7 @@ impl SpacebotHook {
             {
                 metrics
                     .tool_call_duration_seconds
+                    .with_label_values(&[&*self.agent_id, tool_name, process_label])
                     .observe(start.elapsed().as_secs_f64());
             }
         }

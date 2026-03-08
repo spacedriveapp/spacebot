@@ -471,6 +471,7 @@ impl Tool for DetachedSpawnWorkerTool {
             self.deps.agent_id.clone(),
             None,
             secrets_store,
+            "builtin",
             worker.run().instrument(worker_span),
         );
 

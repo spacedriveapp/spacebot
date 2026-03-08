@@ -28,7 +28,7 @@ WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
 COPY vendor/ vendor/
 RUN mkdir src && echo "fn main() {}" > src/main.rs && touch src/lib.rs \
-    && cargo build --release \
+    && cargo build --release --features metrics \
     && rm -rf src
 
 # 2. Install frontend dependencies.
@@ -50,16 +50,19 @@ RUN cd interface && bun run build
 #    build.rs is skipped (SPACEBOT_SKIP_FRONTEND_BUILD=1) since the
 #    frontend is already built above with the OpenCode embed included.
 #    prompts/ is needed for include_str! in src/prompts/text.rs.
+#    presets/ is needed for rust-embed in src/factory/presets.rs and
+#    include_str! in src/identity/files.rs.
 #    migrations/ is needed for sqlx::migrate! in src/db.rs.
 #    docs/ is needed for rust-embed in src/self_awareness.rs.
 #    AGENTS.md, README.md, CHANGELOG.md are needed for include_str! in src/self_awareness.rs.
 COPY build.rs ./
 COPY prompts/ prompts/
+COPY presets/ presets/
 COPY migrations/ migrations/
 COPY docs/ docs/
 COPY AGENTS.md README.md CHANGELOG.md ./
 COPY src/ src/
-RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release \
+RUN SPACEBOT_SKIP_FRONTEND_BUILD=1 cargo build --release --features metrics \
     && mv /build/target/release/spacebot /usr/local/bin/spacebot \
     && cargo clean -p spacebot --release --target-dir /build/target
 
@@ -100,7 +103,7 @@ RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
 ENV SPACEBOT_DIR=/data
 ENV SPACEBOT_DEPLOYMENT=docker
-EXPOSE 19898 18789
+EXPOSE 19898 18789 9090
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:19898/api/health || exit 1
