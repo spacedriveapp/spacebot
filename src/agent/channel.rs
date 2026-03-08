@@ -1684,22 +1684,69 @@ impl Channel {
         // reply content payload, this fallback preserves a compact background
         // result record for the next user turn.
         if is_retrigger {
+            // Extract the result summaries from the metadata we attached in
+            // flush_pending_retrigger, so we record only the substance (not
+            // the retrigger instructions/template scaffolding).
+            let summary = message
+                .metadata
+                .get("retrigger_result_summary")
+                .and_then(|v| v.as_str())
+                .unwrap_or("[background work completed]");
+
             let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
             if replied && retrigger_reply_preserved {
-                tracing::debug!(
-                    channel_id = %self.id,
-                    "skipping retrigger summary injection; relay reply already preserved"
-                );
-            } else {
-                // Extract the result summaries from the metadata we attached in
-                // flush_pending_retrigger, so we record only the substance (not
-                // the retrigger instructions/template scaffolding).
-                let summary = message
-                    .metadata
-                    .get("retrigger_result_summary")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("[background work completed]");
+                // Guardrail: sometimes the model acknowledges the retrigger with a
+                // tiny teaser (e.g. "here's where we stand:") and still marks the
+                // turn as replied. If that happens, proactively relay the full
+                // summary so users don't see cut responses.
+                let last_assistant_len = {
+                    let history = self.state.history.read().await;
+                    history
+                        .iter()
+                        .rev()
+                        .find_map(|m| match m {
+                            rig::message::Message::Assistant { content, .. } => content
+                                .iter()
+                                .find_map(|c| match c {
+                                    rig::message::AssistantContent::Text(t) => {
+                                        Some(t.text.trim().chars().count())
+                                    }
+                                    _ => None,
+                                }),
+                            _ => None,
+                        })
+                        .unwrap_or(0)
+                };
 
+                if last_assistant_len < 80 && summary.chars().count() > 200 {
+                    tracing::warn!(
+                        channel_id = %self.id,
+                        last_assistant_len,
+                        summary_len = summary.chars().count(),
+                        "retrigger reply looks truncated; sending summary fallback"
+                    );
+                    self.state.conversation_logger.log_bot_message(
+                        &self.state.channel_id,
+                        summary,
+                    );
+                    if let Err(error) = self
+                        .response_tx
+                        .send(OutboundResponse::Text(summary.to_string()))
+                        .await
+                    {
+                        tracing::error!(
+                            %error,
+                            channel_id = %self.id,
+                            "failed to send retrigger truncation fallback reply"
+                        );
+                    }
+                } else {
+                    tracing::debug!(
+                        channel_id = %self.id,
+                        "skipping retrigger summary injection; relay reply already preserved"
+                    );
+                }
+            } else {
                 let record = if replied {
                     summary.to_string()
                 } else {
@@ -2697,6 +2744,77 @@ impl Channel {
         }
 
         let result_count = self.pending_results.len();
+
+        // Direct relay mode for retrigger results: send full worker/branch output
+        // without another LLM pass. This avoids teaser/truncated retrigger replies.
+        let direct_relay_text = self
+            .pending_results
+            .iter()
+            .enumerate()
+            .map(|(idx, r)| {
+                let status = if r.success { "completed" } else { "failed" };
+                if result_count == 1 {
+                    if r.success {
+                        r.result.clone()
+                    } else {
+                        format!("Background task {}.\n\n{}", status, r.result)
+                    }
+                } else {
+                    format!(
+                        "Update {} ({}, {}):\n{}",
+                        idx + 1,
+                        r.process_type,
+                        status,
+                        r.result
+                    )
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        if !direct_relay_text.trim().is_empty() {
+            tracing::info!(
+                channel_id = %self.id,
+                result_count,
+                relay_len = direct_relay_text.len(),
+                "relaying retrigger results directly without LLM"
+            );
+
+            self.state
+                .conversation_logger
+                .log_bot_message(&self.state.channel_id, &direct_relay_text);
+            if let Err(error) = self
+                .response_tx
+                .send(OutboundResponse::Text(direct_relay_text.clone()))
+                .await
+            {
+                tracing::error!(
+                    %error,
+                    channel_id = %self.id,
+                    "failed to send direct retrigger relay"
+                );
+            }
+
+            let mut history = self.state.history.write().await;
+            let replaced = pop_retrigger_bridge_message(&mut history);
+            tracing::debug!(
+                channel_id = %self.id,
+                replaced_bridge = replaced,
+                "injecting direct retrigger relay into history"
+            );
+            history.push(rig::message::Message::Assistant {
+                id: None,
+                content: OneOrMany::one(rig::message::AssistantContent::text(
+                    direct_relay_text,
+                )),
+            });
+
+            self.retrigger_count += 1;
+            self.pending_retrigger = false;
+            self.pending_retrigger_metadata.clear();
+            self.pending_results.clear();
+            return;
+        }
 
         // Build per-result summaries for the template.
         let result_items: Vec<_> = self
