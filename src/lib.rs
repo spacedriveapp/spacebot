@@ -9,6 +9,7 @@ pub mod cron;
 pub mod daemon;
 pub mod db;
 pub mod error;
+pub mod factory;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -289,6 +290,14 @@ pub enum ProcessEvent {
         text_delta: String,
         aggregated_text: String,
     },
+    /// A cortex chat auto-triggered turn completed (e.g. after a worker delivered
+    /// its result). The frontend appends this message to the cortex chat panel.
+    CortexChatUpdate {
+        agent_id: AgentId,
+        thread_id: String,
+        content: String,
+        tool_calls_json: Option<String>,
+    },
     /// A worker emitted text content (model reasoning between tool calls).
     /// Sent once per completion response, containing the full text for that turn.
     WorkerText {
@@ -385,6 +394,9 @@ pub struct AgentDeps {
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
+    /// to surface human display names, roles, and descriptions in agent prompts.
+    pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
     /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
     /// reachable via links. Used by `send_agent_message` to create tasks on
     /// target agents and by the cortex to look up delegation metadata.

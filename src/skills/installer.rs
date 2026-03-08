@@ -1,7 +1,7 @@
 //! Skill installation from skills.sh registry and GitHub repos.
 //!
 //! Supports installing skills from:
-//! - GitHub repos: `owner/repo` or `owner/repo/skill-name`
+//! - GitHub repos: `owner/repo/skill-name` (specific skill required)
 //! - .skill files (zip archives with .skill extension)
 //! - Direct URLs to skill archives
 
@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 
 /// Install a skill from a GitHub repository.
 ///
-/// Format: `owner/repo` or `owner/repo/skill-name`
+/// Format: `owner/repo/skill-name` (three-part format required).
 ///
 /// Downloads the repo as a zip, extracts the skill directory, and installs
 /// to the target directory.
@@ -126,12 +126,10 @@ async fn extract_and_install(
     // Find the root directory (GitHub zips have a single root dir like "repo-main/")
     let root = find_archive_root(temp_extract.path()).await?;
 
-    // Find skills to install
+    // Find the specific skill to install. Check direct path first, then
+    // search recursively — repos often nest skills in subdirectories
+    // (e.g. `skills-main/skills/frontend-design/SKILL.md`).
     let skills_to_install = if let Some(path) = skill_path {
-        // Install specific skill - check direct path first, then search recursively.
-        // Repos often nest skills in subdirectories (e.g. anthropics/skills has
-        // skills under a `skills/` subdirectory, so `frontend-design` lives at
-        // `skills-main/skills/frontend-design/SKILL.md`).
         let direct = root.join(path);
         if direct.join("SKILL.md").exists() {
             vec![direct]
@@ -154,8 +152,7 @@ async fn extract_and_install(
             matching
         }
     } else {
-        // Find all SKILL.md files
-        find_skills(&root).await?
+        anyhow::bail!("a specific skill name is required — bare repo installs are not supported");
     };
 
     if skills_to_install.is_empty() {
@@ -259,14 +256,19 @@ fn inject_source_repo(content: &str, repo: &str) -> String {
     format!("---{new_fm}\n---\n{body}")
 }
 
-/// Parse a GitHub spec: `owner/repo` or `owner/repo/skill-name`
+/// Parse a GitHub spec: `owner/repo/skill-name`
+///
+/// The three-part format is required — bare `owner/repo` is rejected to
+/// prevent bulk-installing every skill in a repository.
 fn parse_github_spec(spec: &str) -> Result<(String, String, Option<String>)> {
     let parts: Vec<&str> = spec.split('/').collect();
 
     match parts.len() {
         2 => {
-            // owner/repo
-            Ok((parts[0].to_string(), parts[1].to_string(), None))
+            anyhow::bail!(
+                "bare owner/repo format is not supported — specify the skill name: {}/SKILL_NAME",
+                spec
+            );
         }
         3 => {
             // owner/repo/skill-name
@@ -277,7 +279,7 @@ fn parse_github_spec(spec: &str) -> Result<(String, String, Option<String>)> {
             ))
         }
         _ => anyhow::bail!(
-            "invalid GitHub spec (expected owner/repo or owner/repo/skill-name): {}",
+            "invalid GitHub spec (expected owner/repo/skill-name): {}",
             spec
         ),
     }
@@ -363,11 +365,6 @@ mod tests {
 
     #[test]
     fn test_parse_github_spec() {
-        let (owner, repo, skill) = parse_github_spec("vercel-labs/agent-skills").unwrap();
-        assert_eq!(owner, "vercel-labs");
-        assert_eq!(repo, "agent-skills");
-        assert_eq!(skill, None);
-
         let (owner, repo, skill) = parse_github_spec("anthropics/skills/pdf").unwrap();
         assert_eq!(owner, "anthropics");
         assert_eq!(repo, "skills");
@@ -378,6 +375,8 @@ mod tests {
     fn test_parse_github_spec_invalid() {
         assert!(parse_github_spec("invalid").is_err());
         assert!(parse_github_spec("too/many/slashes/here").is_err());
+        // Bare owner/repo is no longer supported
+        assert!(parse_github_spec("vercel-labs/agent-skills").is_err());
     }
 
     #[test]

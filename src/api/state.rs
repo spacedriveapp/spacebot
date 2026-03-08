@@ -34,6 +34,10 @@ pub struct AgentInfo {
     pub display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient_start: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gradient_end: Option<String>,
     pub workspace: PathBuf,
     pub context_window: usize,
     pub max_turns: usize,
@@ -60,10 +64,18 @@ pub struct ApiState {
     pub channel_states: RwLock<HashMap<String, ChannelState>>,
     /// Per-agent cortex chat sessions.
     pub cortex_chat_sessions: arc_swap::ArcSwap<HashMap<String, Arc<CortexChatSession>>>,
-    /// Per-agent workspace paths for identity file access.
+    /// Per-agent workspace paths for file tool access.
     pub agent_workspaces: arc_swap::ArcSwap<HashMap<String, PathBuf>>,
+    /// Per-agent identity directories (agent root). Identity files live here,
+    /// outside the workspace sandbox boundary.
+    pub agent_identity_dirs: arc_swap::ArcSwap<HashMap<String, PathBuf>>,
+    /// Per-agent data directories (for avatars, logs, databases).
+    pub agent_data_dirs: arc_swap::ArcSwap<HashMap<String, PathBuf>>,
     /// Path to the instance config.toml file.
     pub config_path: RwLock<PathBuf>,
+    /// Guards read-modify-write cycles on config.toml to prevent concurrent
+    /// modifications from clobbering each other.
+    pub config_write_mutex: tokio::sync::Mutex<()>,
     /// Per-agent cron stores for cron job CRUD operations.
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
@@ -255,6 +267,14 @@ pub enum ApiEvent {
         worker_id: String,
         text: String,
     },
+    /// A cortex chat auto-triggered response (e.g. after a worker result was
+    /// delivered). The frontend appends this as a new assistant message.
+    CortexChatMessage {
+        agent_id: String,
+        thread_id: String,
+        content: String,
+        tool_calls: Option<Vec<crate::agent::cortex_chat::CortexChatToolCall>>,
+    },
 }
 
 impl ApiState {
@@ -279,7 +299,10 @@ impl ApiState {
             channel_states: RwLock::new(HashMap::new()),
             cortex_chat_sessions: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             agent_workspaces: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            agent_identity_dirs: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            agent_data_dirs: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             config_path: RwLock::new(PathBuf::new()),
+            config_write_mutex: tokio::sync::Mutex::new(()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
@@ -624,6 +647,26 @@ impl ApiState {
                                     })
                                     .ok();
                             }
+                            ProcessEvent::CortexChatUpdate {
+                                thread_id,
+                                content,
+                                tool_calls_json,
+                                ..
+                            } => {
+                                let tool_calls: Option<
+                                    Vec<crate::agent::cortex_chat::CortexChatToolCall>,
+                                > = tool_calls_json
+                                    .as_deref()
+                                    .and_then(|json| serde_json::from_str(json).ok());
+                                api_tx
+                                    .send(ApiEvent::CortexChatMessage {
+                                        agent_id: agent_id.clone(),
+                                        thread_id: thread_id.clone(),
+                                        content: content.clone(),
+                                        tool_calls,
+                                    })
+                                    .ok();
+                            }
                             _ => {}
                         }
                     }
@@ -672,6 +715,15 @@ impl ApiState {
     /// Set the workspace paths for all agents.
     pub fn set_agent_workspaces(&self, workspaces: HashMap<String, PathBuf>) {
         self.agent_workspaces.store(Arc::new(workspaces));
+    }
+
+    /// Set the identity directory paths for all agents.
+    pub fn set_agent_identity_dirs(&self, dirs: HashMap<String, PathBuf>) {
+        self.agent_identity_dirs.store(Arc::new(dirs));
+    }
+
+    pub fn set_agent_data_dirs(&self, dirs: HashMap<String, PathBuf>) {
+        self.agent_data_dirs.store(Arc::new(dirs));
     }
 
     /// Set the config.toml path.

@@ -33,7 +33,8 @@ import {
 	type LinkDirection,
 	type LinkKind,
 } from "@/api/client";
-import { Button, Input, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "@/ui";
+import { Button, Input, TextArea, Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, cx } from "@/ui";
+import { Markdown } from "@/components/Markdown";
 import { Link } from "@tanstack/react-router";
 
 // -- Colors --
@@ -97,16 +98,8 @@ function loadHandles(): SavedHandles {
 }
 
 /** Deterministic gradient from a seed string. */
-function seedGradient(seed: string): [string, string] {
-	let hash = 0;
-	for (let i = 0; i < seed.length; i++) {
-		hash = seed.charCodeAt(i) + ((hash << 5) - hash);
-		hash |= 0;
-	}
-	const hue1 = (hash >>> 0) % 360;
-	const hue2 = (hue1 + 40 + ((hash >>> 8) % 60)) % 360;
-	return [`hsl(${hue1}, 70%, 55%)`, `hsl(${hue2}, 60%, 45%)`];
-}
+// Re-export from shared module so existing references (e.g. banner gradient) still work.
+import { seedGradient, ProfileAvatar } from "@/components/ProfileAvatar";
 
 // -- Custom Node: Group --
 
@@ -158,11 +151,16 @@ const NODE_WIDTH = 240;
 function ProfileNode({ data, selected }: NodeProps) {
 	const nodeId = (data.nodeId as string) ?? "";
 	const avatarSeed = (data.avatarSeed as string) ?? nodeId;
-	const [c1, c2] = seedGradient(avatarSeed);
+	const [defaultC1, defaultC2] = seedGradient(avatarSeed);
 	const configDisplayName = data.configDisplayName as string | null;
 	const configRole = data.configRole as string | null;
 	const chosenName = data.chosenName as string | null;
 	const bio = data.bio as string | null;
+	const gradientStart = data.gradientStart as string | null;
+	const gradientEnd = data.gradientEnd as string | null;
+	const nodeAvatarUrl = data.avatarUrl as string | null;
+	const c1 = gradientStart || defaultC1;
+	const c2 = gradientEnd || defaultC2;
 	const isOnline = data.isOnline as boolean;
 	const channelCount = (data.channelCount as number) ?? 0;
 	const memoryCount = (data.memoryCount as number) ?? 0;
@@ -222,26 +220,15 @@ function ProfileNode({ data, selected }: NodeProps) {
 			{/* Avatar + badge row */}
 			<div className="relative -mt-6 px-4 pt-3 flex items-end justify-between">
 				<div className="relative inline-block">
-					<svg
-						width={48}
-						height={48}
-						viewBox="0 0 64 64"
+					<ProfileAvatar
+						seed={avatarSeed}
+						name={primaryName}
+						size={48}
 						className="rounded-full border-[3px] border-app-darkBox"
-					>
-						<defs>
-							<linearGradient
-								id={`av-${nodeId}`}
-								x1="0%"
-								y1="0%"
-								x2="100%"
-								y2="100%"
-							>
-								<stop offset="0%" stopColor={c1} />
-								<stop offset="100%" stopColor={c2} />
-							</linearGradient>
-						</defs>
-						<circle cx="32" cy="32" r="32" fill={`url(#av-${nodeId})`} />
-					</svg>
+						gradientStart={gradientStart ?? undefined}
+						gradientEnd={gradientEnd ?? undefined}
+						avatarUrl={isAgent && nodeAvatarUrl ? nodeAvatarUrl : undefined}
+					/>
 					{isAgent && (
 						<div
 							className={`absolute bottom-0 right-0 h-3.5 w-3.5 rounded-full border-[2px] border-app-darkBox ${
@@ -296,10 +283,14 @@ function ProfileNode({ data, selected }: NodeProps) {
 					</p>
 				)}
 
-				{/* Bio */}
-				{bio && (
+			{/* Bio */}
+			{bio ? (
 					<p className="mt-2 text-[11px] leading-relaxed text-ink-faint line-clamp-3">
 						{bio}
+					</p>
+				) : !isAgent && !data.description && (
+					<p className="mt-2 text-[11px] leading-relaxed text-ink-faint/60 italic">
+						This is you, add your details.
 					</p>
 				)}
 
@@ -538,10 +529,29 @@ function EdgeConfigPanel({
 // -- Human Edit Dialog --
 
 interface HumanEditDialogProps {
-	human: { id: string; display_name?: string; role?: string; bio?: string } | null;
+	human: {
+		id: string;
+		display_name?: string;
+		role?: string;
+		bio?: string;
+		description?: string;
+		discord_id?: string;
+		telegram_id?: string;
+		slack_id?: string;
+		email?: string;
+	} | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
-	onUpdate: (displayName: string, role: string, bio: string) => void;
+	onUpdate: (fields: {
+		displayName: string;
+		role: string;
+		bio: string;
+		description: string;
+		discordId: string;
+		telegramId: string;
+		slackId: string;
+		email: string;
+	}) => void;
 	onDelete: () => void;
 }
 
@@ -555,6 +565,17 @@ function HumanEditDialog({
 	const [displayName, setDisplayName] = useState("");
 	const [role, setRole] = useState("");
 	const [bio, setBio] = useState("");
+	const [description, setDescription] = useState("");
+	const [discordId, setDiscordId] = useState("");
+	const [telegramId, setTelegramId] = useState("");
+	const [slackId, setSlackId] = useState("");
+	const [email, setEmail] = useState("");
+	const [descriptionMode, setDescriptionMode] = useState<"edit" | "preview">("edit");
+
+	const { data: messagingStatus } = useQuery({
+		queryKey: ["messagingStatus"],
+		queryFn: api.messagingStatus,
+	});
 
 	// Sync state when a different human is selected
 	const prevId = useRef<string | null>(null);
@@ -563,59 +584,171 @@ function HumanEditDialog({
 		setDisplayName(human.display_name ?? "");
 		setRole(human.role ?? "");
 		setBio(human.bio ?? "");
+		setDescription(human.description ?? "");
+		setDiscordId(human.discord_id ?? "");
+		setTelegramId(human.telegram_id ?? "");
+		setSlackId(human.slack_id ?? "");
+		setEmail(human.email ?? "");
+		setDescriptionMode("edit");
 	}
 
 	if (!human) return null;
 
 	return (
 		<Dialog open={open} onOpenChange={onOpenChange}>
-			<DialogContent className="max-w-sm">
-				<DialogHeader>
-					<DialogTitle>Edit Human</DialogTitle>
-				</DialogHeader>
-				<div className="flex flex-col gap-3">
-					<div className="text-tiny text-ink-faint">{human.id}</div>
-					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Display Name</label>
-						<Input
-							size="lg"
-							value={displayName}
-							onChange={(e) => setDisplayName(e.target.value)}
-							placeholder={human.id}
-						/>
-					</div>
-					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Role</label>
-						<Input
-							size="lg"
-							value={role}
-							onChange={(e) => setRole(e.target.value)}
-							placeholder="e.g. CEO, Lead Developer"
-						/>
-					</div>
-					<div>
-						<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bio</label>
-						<textarea
-							value={bio}
-							onChange={(e) => setBio(e.target.value)}
-							placeholder="A short description..."
-							rows={3}
-							className="w-full rounded-md bg-app-input px-3 py-2 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50 resize-none"
-						/>
+			<DialogContent className="!max-w-5xl !w-[90vw] !h-[85vh] !flex !flex-col !gap-0 !p-0 overflow-hidden">
+				<div className="flex items-center justify-between border-b border-app-line/50 px-5 py-4 shrink-0">
+					<div className="flex items-baseline gap-2">
+						<DialogTitle className="text-sm font-semibold">Edit Human</DialogTitle>
+						<span className="text-tiny text-ink-faint">{human.id}</span>
 					</div>
 				</div>
-				<DialogFooter>
-					<Button variant="destructive" size="sm" onClick={onDelete}>
-						Delete
-					</Button>
-					<div className="flex-1" />
-					<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
-						Cancel
-					</Button>
-					<Button size="sm" onClick={() => onUpdate(displayName, role, bio)}>
-						Save
-					</Button>
-				</DialogFooter>
+				<div className="flex flex-1 min-h-0">
+					{/* Left column — metadata fields */}
+					<div className="w-72 shrink-0 border-r border-app-line/50 p-5 flex flex-col gap-4 overflow-y-auto">
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Display Name</label>
+							<Input
+								size="lg"
+								value={displayName}
+								onChange={(e) => setDisplayName(e.target.value)}
+								placeholder={human.id}
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Role</label>
+							<Input
+								size="lg"
+								value={role}
+								onChange={(e) => setRole(e.target.value)}
+								placeholder="e.g. CEO, Lead Developer"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Bio</label>
+							<textarea
+								value={bio}
+								onChange={(e) => setBio(e.target.value)}
+								placeholder="A short one-liner..."
+								rows={2}
+								className="w-full rounded-md bg-app-input px-3 py-2 text-sm text-ink outline-none border border-app-line/50 focus:border-accent/50 resize-none"
+							/>
+						</div>
+						{/* Platform identity fields — only shown for configured platforms */}
+						{messagingStatus && (messagingStatus.discord.configured || messagingStatus.telegram.configured || messagingStatus.slack.configured || messagingStatus.email.configured) && (
+							<div className="border-t border-app-line/50 pt-3 flex flex-col gap-3">
+								<label className="block text-xs font-medium text-ink-faint uppercase tracking-wide">Platform IDs</label>
+								{messagingStatus.discord.configured && (
+									<div>
+										<label className="mb-1 block text-sm font-medium text-ink-dull">Discord</label>
+										<Input
+											size="lg"
+											value={discordId}
+											onChange={(e) => setDiscordId(e.target.value)}
+											placeholder="Discord user ID"
+										/>
+									</div>
+								)}
+								{messagingStatus.telegram.configured && (
+									<div>
+										<label className="mb-1 block text-sm font-medium text-ink-dull">Telegram</label>
+										<Input
+											size="lg"
+											value={telegramId}
+											onChange={(e) => setTelegramId(e.target.value)}
+											placeholder="Telegram user ID"
+										/>
+									</div>
+								)}
+								{messagingStatus.slack.configured && (
+									<div>
+										<label className="mb-1 block text-sm font-medium text-ink-dull">Slack</label>
+										<Input
+											size="lg"
+											value={slackId}
+											onChange={(e) => setSlackId(e.target.value)}
+											placeholder="Slack member ID"
+										/>
+									</div>
+								)}
+								{messagingStatus.email.configured && (
+									<div>
+										<label className="mb-1 block text-sm font-medium text-ink-dull">Email</label>
+										<Input
+											size="lg"
+											value={email}
+											onChange={(e) => setEmail(e.target.value)}
+											placeholder="email@example.com"
+										/>
+									</div>
+								)}
+							</div>
+						)}
+						<div className="flex-1" />
+						<div className="flex items-center gap-2 pt-2 border-t border-app-line/50">
+							<Button variant="destructive" size="sm" onClick={onDelete}>
+								Delete
+							</Button>
+							<div className="flex-1" />
+							<Button variant="ghost" size="sm" onClick={() => onOpenChange(false)}>
+								Cancel
+							</Button>
+							<Button size="sm" onClick={() => onUpdate({ displayName, role, bio, description, discordId, telegramId, slackId, email })}>
+								Save
+							</Button>
+						</div>
+					</div>
+					{/* Right column — description markdown editor */}
+					<div className="flex-1 flex flex-col min-w-0">
+						<div className="flex items-center justify-between border-b border-app-line/50 bg-app-darkBox/20 px-5 py-2.5 shrink-0">
+							<div className="flex items-center gap-3">
+								<h3 className="text-sm font-medium text-ink">Description</h3>
+								<span className="rounded bg-app-darkBox px-1.5 py-0.5 font-mono text-tiny text-ink-faint">Markdown</span>
+							</div>
+							<div className="flex items-center gap-3">
+								<div className="flex items-center rounded border border-app-line/50 text-tiny">
+									<button
+										onClick={() => setDescriptionMode("edit")}
+										className={cx(
+											"px-2 py-0.5 rounded-l transition-colors",
+											descriptionMode === "edit" ? "bg-app-darkBox text-ink" : "text-ink-faint hover:text-ink",
+										)}
+									>
+										Edit
+									</button>
+									<button
+										onClick={() => setDescriptionMode("preview")}
+										className={cx(
+											"px-2 py-0.5 rounded-r transition-colors",
+											descriptionMode === "preview" ? "bg-app-darkBox text-ink" : "text-ink-faint hover:text-ink",
+										)}
+									>
+										Preview
+									</button>
+								</div>
+							</div>
+						</div>
+						<div className="flex-1 overflow-y-auto p-4">
+							{descriptionMode === "edit" ? (
+								<TextArea
+									value={description}
+									onChange={(e) => setDescription(e.target.value)}
+									placeholder={"Write a full description of this person...\n\nBackground, preferences, communication style, timezone, working hours, areas of expertise — anything that helps agents interact with them effectively."}
+									className="h-full w-full resize-none border-transparent bg-app-darkBox/30 px-4 py-3 font-mono leading-relaxed placeholder:text-ink-faint/40"
+									spellCheck={false}
+								/>
+							) : (
+								<div className="prose-sm px-4 py-3">
+									{description.trim() ? (
+										<Markdown>{description}</Markdown>
+									) : (
+										<span className="text-ink-faint/40 text-sm">Nothing to preview.</span>
+									)}
+								</div>
+							)}
+						</div>
+					</div>
+				</div>
 			</DialogContent>
 		</Dialog>
 	);
@@ -818,6 +951,13 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const openHumanEditRef = useRef<(humanId: string) => void>(() => {});
 	const openAgentEditRef = useRef<(agentId: string) => void>(() => {});
 
+	// Fetch agent info for gradient/appearance data
+	const { data: agentInfoData } = useQuery({
+		queryKey: ["agents"],
+		queryFn: api.agents,
+		refetchInterval: 30_000,
+	});
+
 	// Build agent profile lookup
 	const agentProfiles = useMemo(() => {
 		const map = new Map<string, AgentSummary>();
@@ -826,6 +966,15 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 		}
 		return map;
 	}, [agents]);
+
+	// Build agent info lookup (for gradient colors)
+	const agentInfoMap = useMemo(() => {
+		const map = new Map<string, { gradient_start?: string; gradient_end?: string }>();
+		for (const info of agentInfoData?.agents ?? []) {
+			map.set(info.id, { gradient_start: info.gradient_start, gradient_end: info.gradient_end });
+		}
+		return map;
+	}, [agentInfoData]);
 
 	/** Inject onEdit callbacks into profile nodes */
 	const patchEditCallbacks = useCallback((nodes: Node[]): Node[] =>
@@ -843,9 +992,9 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	// Build nodes and edges from topology data
 	const { initialNodes, initialEdges } = useMemo(() => {
 		if (!data) return { initialNodes: [], initialEdges: [] };
-		const graph = buildGraph(data, activeEdges, agentProfiles);
+		const graph = buildGraph(data, activeEdges, agentProfiles, agentInfoMap);
 		return { initialNodes: patchEditCallbacks(graph.initialNodes), initialEdges: graph.initialEdges };
-	}, [data, activeEdges, agentProfiles, patchEditCallbacks]);
+	}, [data, activeEdges, agentProfiles, agentInfoMap, patchEditCallbacks]);
 
 	const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
 	const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
@@ -861,6 +1010,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 				data,
 				activeEdges,
 				agentProfiles,
+				agentInfoMap,
 			);
 
 			// Preserve existing node positions
@@ -980,11 +1130,26 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	});
 
 	const updateHuman = useMutation({
-		mutationFn: (params: { id: string; displayName?: string; role?: string; bio?: string }) =>
+		mutationFn: (params: {
+			id: string;
+			displayName?: string;
+			role?: string;
+			bio?: string;
+			description?: string;
+			discordId?: string;
+			telegramId?: string;
+			slackId?: string;
+			email?: string;
+		}) =>
 			api.updateHuman(params.id, {
 				display_name: params.displayName,
 				role: params.role,
 				bio: params.bio,
+				description: params.description,
+				discord_id: params.discordId,
+				telegram_id: params.telegramId,
+				slack_id: params.slackId,
+				email: params.email,
 			}),
 		onSuccess: () => {
 			queryClient.invalidateQueries({ queryKey: ["topology"] });
@@ -1402,13 +1567,18 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 					setHumanDialogOpen(open);
 					if (!open) setSelectedHuman(null);
 				}}
-				onUpdate={(displayName, role, bio) => {
+				onUpdate={(fields) => {
 					if (selectedHuman) {
 						updateHuman.mutate({
 							id: selectedHuman.id,
-							displayName: displayName || undefined,
-							role: role || undefined,
-							bio: bio || undefined,
+							displayName: fields.displayName || undefined,
+							role: fields.role || undefined,
+							bio: fields.bio || undefined,
+							description: fields.description || undefined,
+							discordId: fields.discordId || undefined,
+							telegramId: fields.telegramId || undefined,
+							slackId: fields.slackId || undefined,
+							email: fields.email || undefined,
 						});
 						setHumanDialogOpen(false);
 					}
@@ -1457,6 +1627,7 @@ function buildGraph(
 	data: TopologyResponse,
 	activeEdges: Set<string>,
 	agentProfiles: Map<string, AgentSummary>,
+	agentInfoMap: Map<string, { gradient_start?: string; gradient_end?: string }>,
 ): { initialNodes: Node[]; initialEdges: Edge[] } {
 	const saved = loadPositions();
 	const savedHandles = loadHandles();
@@ -1546,6 +1717,9 @@ function buildGraph(
 					chosenName: profile?.display_name ?? null,
 					avatarSeed: profile?.avatar_seed ?? agentId,
 					bio: profile?.bio ?? null,
+					gradientStart: agentInfoMap.get(agentId)?.gradient_start ?? null,
+					gradientEnd: agentInfoMap.get(agentId)?.gradient_end ?? null,
+					avatarUrl: api.agentAvatarUrl(agentId),
 					isOnline,
 					channelCount: summary?.channel_count ?? 0,
 					memoryCount: summary?.memory_total ?? 0,
@@ -1591,6 +1765,9 @@ function buildGraph(
 				chosenName: profile?.display_name ?? null,
 				avatarSeed: profile?.avatar_seed ?? agent.id,
 				bio: profile?.bio ?? null,
+				gradientStart: agentInfoMap.get(agent.id)?.gradient_start ?? null,
+				gradientEnd: agentInfoMap.get(agent.id)?.gradient_end ?? null,
+				avatarUrl: api.agentAvatarUrl(agent.id),
 				isOnline,
 				channelCount: summary?.channel_count ?? 0,
 				memoryCount: summary?.memory_total ?? 0,
@@ -1616,6 +1793,7 @@ function buildGraph(
 				configDisplayName: human.display_name ?? null,
 				configRole: human.role ?? null,
 				bio: human.bio ?? null,
+				description: human.description ?? null,
 				avatarSeed: human.id,
 				connectedHandles: { top: false, bottom: false, left: false, right: false },
 			},

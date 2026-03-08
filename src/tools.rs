@@ -26,7 +26,7 @@
 //! - `memory_save` — registered at startup
 //!
 //! **Cortex Chat ToolServer** (interactive admin chat):
-//! - branch + worker tool superset plus `spacebot_docs` and `config_inspect`
+//! - branch + worker tool superset plus `spacebot_docs`, `config_inspect`, and `spawn_worker`
 
 pub mod attachment_recall;
 pub mod branch_tool;
@@ -37,6 +37,7 @@ pub mod config_inspect;
 pub mod cron;
 pub mod email_search;
 pub mod file;
+pub mod install_skill;
 pub mod mcp;
 pub mod memory_delete;
 pub mod memory_recall;
@@ -52,6 +53,7 @@ pub mod send_file;
 pub mod send_message_to_another_channel;
 pub mod set_status;
 pub mod shell;
+pub mod skills_search;
 pub mod skip;
 pub mod spacebot_docs;
 pub mod spawn_worker;
@@ -60,6 +62,13 @@ pub mod task_list;
 pub mod task_update;
 pub mod web_search;
 pub mod worker_inspect;
+
+pub mod factory_create_agent;
+pub mod factory_list_presets;
+pub mod factory_load_preset;
+pub mod factory_search_context;
+pub mod factory_update_config;
+pub mod factory_update_identity;
 
 pub use attachment_recall::{
     AttachmentRecallArgs, AttachmentRecallError, AttachmentRecallOutput, AttachmentRecallTool,
@@ -82,6 +91,9 @@ pub use file::{
     FileEditArgs, FileEditTool, FileEntry, FileEntryOutput, FileError, FileListArgs, FileListTool,
     FileOutput, FileReadArgs, FileReadTool, FileType, FileWriteArgs, FileWriteTool,
     register_file_tools,
+};
+pub use install_skill::{
+    InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
 };
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
@@ -110,17 +122,46 @@ pub use send_message_to_another_channel::{
 };
 pub use set_status::{SetStatusArgs, SetStatusError, SetStatusOutput, SetStatusTool, StatusKind};
 pub use shell::{EnvVar, ShellArgs, ShellError, ShellOutput, ShellResult, ShellTool};
+pub use skills_search::{
+    SkillsSearchArgs, SkillsSearchError, SkillsSearchOutput, SkillsSearchTool,
+};
 pub use skip::{SkipArgs, SkipError, SkipFlag, SkipOutput, SkipTool, new_skip_flag};
 pub use spacebot_docs::{
     SpacebotDocContent, SpacebotDocsArgs, SpacebotDocsError, SpacebotDocsOutput, SpacebotDocsTool,
 };
-pub use spawn_worker::{SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool};
+pub use spawn_worker::{
+    DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
+};
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
+};
+
+pub use factory_create_agent::{
+    FactoryCreateAgentArgs, FactoryCreateAgentError, FactoryCreateAgentOutput,
+    FactoryCreateAgentTool,
+};
+pub use factory_list_presets::{
+    FactoryListPresetsArgs, FactoryListPresetsError, FactoryListPresetsOutput,
+    FactoryListPresetsTool,
+};
+pub use factory_load_preset::{
+    FactoryLoadPresetArgs, FactoryLoadPresetError, FactoryLoadPresetOutput, FactoryLoadPresetTool,
+};
+pub use factory_search_context::{
+    FactorySearchContextArgs, FactorySearchContextError, FactorySearchContextOutput,
+    FactorySearchContextTool,
+};
+pub use factory_update_config::{
+    FactoryUpdateConfigArgs, FactoryUpdateConfigError, FactoryUpdateConfigOutput,
+    FactoryUpdateConfigTool,
+};
+pub use factory_update_identity::{
+    FactoryUpdateIdentityArgs, FactoryUpdateIdentityError, FactoryUpdateIdentityOutput,
+    FactoryUpdateIdentityTool,
 };
 
 use crate::agent::channel::ChannelState;
@@ -388,10 +429,15 @@ pub async fn add_channel_tools(
 
 fn default_delivery_target_for_conversation(conversation_id: &str) -> Option<String> {
     let parsed = crate::messaging::target::parse_delivery_target(conversation_id)?;
-    if parsed.adapter != "discord" {
-        return None;
+    match parsed.adapter.as_str() {
+        // Cron channels can't receive broadcast delivery.
+        "cron" => None,
+        // Portal conversation IDs use the "portal:" prefix but the messaging
+        // adapter is registered as "webchat". Remap so the manager can find it,
+        // and pass the full original conversation_id as the target.
+        "portal" => Some(format!("webchat:{conversation_id}")),
+        _ => Some(parsed.to_string()),
     }
-    Some(parsed.to_string())
 }
 
 /// Remove per-channel tools from a running ToolServer.
@@ -562,6 +608,7 @@ pub fn create_cortex_tool_server(
 #[allow(clippy::too_many_arguments)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
+    deps: crate::AgentDeps,
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
@@ -574,7 +621,19 @@ pub fn create_cortex_chat_tool_server(
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
     runtime_config: Arc<RuntimeConfig>,
+    api_state: Arc<crate::api::ApiState>,
+    cortex_ctx: Option<crate::tools::spawn_worker::CortexChatContext>,
 ) -> ToolServerHandle {
+    let logs_dir = workspace.join(".spacebot").join("logs");
+
+    let spawn_tool = {
+        let tool = DetachedSpawnWorkerTool::new(deps, screenshot_dir.clone(), logs_dir);
+        match cortex_ctx {
+            Some(ctx) => tool.with_cortex_context(ctx),
+            None => tool,
+        }
+    };
+
     let mut server = ToolServer::new()
         .tool(memory_save_with_events(
             memory_search.clone(),
@@ -589,7 +648,10 @@ pub fn create_cortex_chat_tool_server(
             agent_id.to_string(),
             runtime_config.clone(),
         ))
+        .tool(SkillsSearchTool::new(runtime_config.clone()))
+        .tool(InstallSkillTool::new(runtime_config.clone(), api_state))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
+        .tool(spawn_tool)
         .tool(TaskCreateTool::new(
             task_store.clone(),
             agent_id.to_string(),
@@ -610,6 +672,51 @@ pub fn create_cortex_chat_tool_server(
     }
 
     server.run()
+}
+
+/// Create a ToolServer for factory conversations (agent creation/refinement).
+///
+/// Factory tools are system-level — they receive `Arc<ApiState>` directly since
+/// they perform cross-agent mutations (creating agents, writing config, creating
+/// links). The memory search is from the main agent (the one running the factory
+/// conversation) to provide organizational context.
+pub fn create_factory_tool_server(
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> ToolServerHandle {
+    ToolServer::new()
+        .tool(FactoryListPresetsTool::new())
+        .tool(FactoryLoadPresetTool::new())
+        .tool(FactorySearchContextTool::new(memory_search))
+        .tool(FactoryCreateAgentTool::new(state.clone()))
+        .tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .tool(FactoryUpdateConfigTool::new(state))
+        .run()
+}
+
+/// Add factory tools (agent creation/refinement) to an existing tool server handle.
+///
+/// Used to augment the cortex chat tool server with factory capabilities.
+/// The `memory_search` should be from the agent running the factory conversation
+/// (typically the main agent) so `factory_search_context` queries its memories.
+pub async fn add_factory_tools(
+    handle: &ToolServerHandle,
+    state: Arc<crate::api::ApiState>,
+    memory_search: Arc<MemorySearch>,
+) -> Result<(), rig::tool::server::ToolServerError> {
+    handle.add_tool(FactoryListPresetsTool::new()).await?;
+    handle.add_tool(FactoryLoadPresetTool::new()).await?;
+    handle
+        .add_tool(FactorySearchContextTool::new(memory_search))
+        .await?;
+    handle
+        .add_tool(FactoryCreateAgentTool::new(state.clone()))
+        .await?;
+    handle
+        .add_tool(FactoryUpdateIdentityTool::new(state.clone()))
+        .await?;
+    handle.add_tool(FactoryUpdateConfigTool::new(state)).await?;
+    Ok(())
 }
 
 #[cfg(test)]

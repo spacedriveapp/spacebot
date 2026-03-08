@@ -1460,6 +1460,9 @@ async fn run(
         tracing::info!(count = config.links.len(), "loaded agent links from config");
     }
 
+    // Shared humans list (hot-reloadable via ArcSwap, same pattern as agent_links)
+    let agent_humans = Arc::new(ArcSwap::from_pointee(config.humans.clone()));
+
     // These hold the initialized subsystems. Empty until agents are initialized.
     let mut agents: HashMap<spacebot::AgentId, spacebot::Agent> = HashMap::new();
     let mut messaging_manager: Arc<spacebot::messaging::MessagingManager> =
@@ -1519,6 +1522,7 @@ async fn run(
             &mut telegram_permissions,
             &mut twitch_permissions,
             agent_links.clone(),
+            agent_humans.clone(),
             injection_tx.clone(),
             task_store_registry.clone(),
             &bootstrapped_store,
@@ -1539,6 +1543,7 @@ async fn run(
             Some(messaging_manager.clone()),
             llm_manager.clone(),
             agent_links.clone(),
+            agent_humans.clone(),
         );
     } else {
         // Start file watcher in setup mode (no agents to watch yet)
@@ -1554,6 +1559,7 @@ async fn run(
             None,
             llm_manager.clone(),
             agent_links.clone(),
+            agent_humans.clone(),
         );
     }
 
@@ -2174,6 +2180,10 @@ async fn run(
                         {
                             Ok(new_llm) => {
                                 let new_llm_manager = Arc::new(new_llm);
+                                // Update agent_humans from the reloaded config
+                                // before initialize_agents so agents see the
+                                // latest [[humans]] entries.
+                                agent_humans.store(Arc::new(new_config.humans.clone()));
                                 let mut new_watcher_agents = Vec::new();
                                 let mut new_discord_permissions = None;
                                 let mut new_slack_permissions = None;
@@ -2197,6 +2207,7 @@ async fn run(
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
                                     agent_links.clone(),
+                                    agent_humans.clone(),
                                     injection_tx.clone(),
                                     task_store_registry.clone(),
                                     &bootstrapped_store,
@@ -2216,6 +2227,7 @@ async fn run(
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
                                             agent_links.clone(),
+                                            agent_humans.clone(),
                                         );
                                         tracing::info!("agents initialized after provider setup");
                                     }
@@ -2307,7 +2319,7 @@ async fn wait_for_startup_warmup_tasks(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 async fn initialize_agents(
     config: &spacebot::config::Config,
     llm_manager: &Arc<spacebot::llm::LlmManager>,
@@ -2325,6 +2337,7 @@ async fn initialize_agents(
     watcher_agents: &mut Vec<(
         String,
         std::path::PathBuf,
+        std::path::PathBuf,
         Arc<spacebot::config::RuntimeConfig>,
         Arc<spacebot::mcp::McpManager>,
     )>,
@@ -2333,6 +2346,7 @@ async fn initialize_agents(
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
+    agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
     task_store_registry: Arc<
         ArcSwap<std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>>>,
@@ -2464,8 +2478,10 @@ async fn initialize_agents(
         let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
         mcp_manager.connect_all().await;
 
-        // Scaffold identity templates if missing, then load
-        spacebot::identity::scaffold_identity_files(&agent_config.workspace)
+        // Scaffold identity templates if missing, then load.
+        // Identity files live in the agent root (identity_dir), outside the
+        // workspace sandbox boundary.
+        spacebot::identity::scaffold_identity_files(&agent_config.identity_dir)
             .await
             .with_context(|| {
                 format!(
@@ -2473,7 +2489,7 @@ async fn initialize_agents(
                     agent_config.id
                 )
             })?;
-        let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
+        let identity = spacebot::identity::Identity::load(&agent_config.identity_dir).await;
 
         // Load skills (instance-level, then workspace overrides)
         let skills =
@@ -2510,6 +2526,7 @@ async fn initialize_agents(
         watcher_agents.push((
             agent_config.id.clone(),
             agent_config.workspace.clone(),
+            agent_config.identity_dir.clone(),
             runtime_config.clone(),
             mcp_manager.clone(),
         ));
@@ -2550,6 +2567,7 @@ async fn initialize_agents(
             sandbox,
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
+            humans: agent_humans.clone(),
             task_store_registry: task_store_registry.clone(),
             process_control_registry: Arc::new(
                 spacebot::agent::process_control::ProcessControlRegistry::new(),
@@ -2613,6 +2631,8 @@ async fn initialize_agents(
         let mut task_stores = std::collections::HashMap::new();
         let mut project_stores = std::collections::HashMap::new();
         let mut agent_workspaces = std::collections::HashMap::new();
+        let mut agent_identity_dirs = std::collections::HashMap::new();
+        let mut agent_data_dirs = std::collections::HashMap::new();
         let mut runtime_configs = std::collections::HashMap::new();
         let mut sandboxes = std::collections::HashMap::new();
         for (agent_id, agent) in agents.iter() {
@@ -2624,12 +2644,16 @@ async fn initialize_agents(
             task_stores.insert(agent_id.to_string(), agent.deps.task_store.clone());
             project_stores.insert(agent_id.to_string(), agent.deps.project_store.clone());
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());
+            agent_identity_dirs.insert(agent_id.to_string(), agent.config.identity_dir.clone());
+            agent_data_dirs.insert(agent_id.to_string(), agent.config.data_dir.clone());
             runtime_configs.insert(agent_id.to_string(), agent.deps.runtime_config.clone());
             sandboxes.insert(agent_id.to_string(), agent.deps.sandbox.clone());
             agent_configs.push(spacebot::api::AgentInfo {
                 id: agent.config.id.clone(),
                 display_name: agent.config.display_name.clone(),
                 role: agent.config.role.clone(),
+                gradient_start: agent.config.gradient_start.clone(),
+                gradient_end: agent.config.gradient_end.clone(),
                 workspace: agent.config.workspace.clone(),
                 context_window: agent.config.context_window,
                 max_turns: agent.config.max_turns,
@@ -2645,6 +2669,8 @@ async fn initialize_agents(
         api_state.set_project_stores(project_stores);
         api_state.set_runtime_configs(runtime_configs);
         api_state.set_agent_workspaces(agent_workspaces);
+        api_state.set_agent_identity_dirs(agent_identity_dirs);
+        api_state.set_agent_data_dirs(agent_data_dirs);
         api_state.set_sandboxes(sandboxes);
         // Wire the instance-level secrets store into the API state.
         if let Some(store) = &bootstrapped_store {
@@ -3006,6 +3032,7 @@ async fn initialize_agents(
     let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new(
         webchat_agent_pools,
     ));
+    webchat_adapter.set_event_tx(api_state.event_tx.clone());
     new_messaging_manager
         .register_shared(webchat_adapter.clone())
         .await;
@@ -3160,8 +3187,10 @@ async fn initialize_agents(
                 spacebot::conversation::history::ConversationLogger::new(agent.db.sqlite.clone());
             let channel_store = spacebot::conversation::ChannelStore::new(agent.db.sqlite.clone());
             let run_logger = spacebot::conversation::ProcessRunLogger::new(agent.db.sqlite.clone());
+            let cortex_ctx = spacebot::agent::cortex_chat::CortexChatSession::create_context();
             let tool_server = spacebot::tools::create_cortex_chat_tool_server(
                 agent.deps.agent_id.clone(),
+                agent.deps.clone(),
                 agent.deps.task_store.clone(),
                 agent.deps.memory_search.clone(),
                 agent.deps.memory_event_tx.clone(),
@@ -3174,14 +3203,35 @@ async fn initialize_agents(
                 agent.deps.runtime_config.workspace_dir.clone(),
                 agent.deps.sandbox.clone(),
                 agent.deps.runtime_config.clone(),
+                api_state.clone(),
+                Some(cortex_ctx.clone()),
             );
+            // Add factory tools to the cortex chat tool server
+            let factory_enabled = match spacebot::tools::add_factory_tools(
+                &tool_server,
+                api_state.clone(),
+                agent.deps.memory_search.clone(),
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(error) => {
+                    tracing::warn!(%error, agent_id = %agent_id, "failed to add factory tools to cortex chat");
+                    false
+                }
+            };
+
             let store = spacebot::agent::cortex_chat::CortexChatStore::new(agent.db.sqlite.clone());
             let session = spacebot::agent::cortex_chat::CortexChatSession::new(
                 agent.deps.clone(),
                 tool_server,
                 store,
-            );
-            sessions.insert(agent_id.to_string(), std::sync::Arc::new(session));
+                cortex_ctx,
+            )
+            .with_factory(factory_enabled);
+            let session = std::sync::Arc::new(session);
+            session.start_event_loop();
+            sessions.insert(agent_id.to_string(), session);
         }
         api_state.set_cortex_chat_sessions(sessions);
         tracing::info!("cortex chat sessions initialized");

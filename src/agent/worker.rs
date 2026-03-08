@@ -69,8 +69,14 @@ pub struct Worker {
     pub hook: SpacebotHook,
     /// System prompt loaded from prompts/WORKER.md.
     pub system_prompt: String,
-    /// Input channel for interactive workers.
+    /// Input channel for interactive workers (follow-up loop).
     pub input_rx: Option<mpsc::Receiver<String>>,
+    /// Context injection channel. Unlike `input_rx` (which drives the
+    /// interactive follow-up state machine), this delivers addendum context
+    /// to a running worker at the next LLM turn boundary without changing
+    /// worker state. Wrapped in `Option` so `run()` can `.take()` it into
+    /// the hook without allocating a throwaway placeholder channel.
+    pub inject_rx: Option<mpsc::Receiver<String>>,
     /// Browser automation config.
     pub browser_config: BrowserConfig,
     /// Directory for browser screenshots.
@@ -98,7 +104,7 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
         input_rx: Option<mpsc::Receiver<String>>,
-    ) -> Self {
+    ) -> (Self, mpsc::Sender<String>) {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Worker(id);
         let hook = SpacebotHook::new(
@@ -109,27 +115,36 @@ impl Worker {
             deps.event_tx.clone(),
         );
         let (status_tx, status_rx) = watch::channel("starting".to_string());
+        let (inject_tx, inject_rx) = mpsc::channel(8);
 
-        Self {
-            id,
-            channel_id,
-            task: task.into(),
-            state: WorkerState::Running,
-            deps,
-            hook,
-            system_prompt: system_prompt.into(),
-            input_rx,
-            browser_config,
-            screenshot_dir,
-            brave_search_key,
-            logs_dir,
-            status_tx,
-            status_rx,
-            prior_history: None,
-        }
+        (
+            Self {
+                id,
+                channel_id,
+                task: task.into(),
+                state: WorkerState::Running,
+                deps,
+                hook,
+                system_prompt: system_prompt.into(),
+                input_rx,
+                inject_rx: Some(inject_rx),
+                browser_config,
+                screenshot_dir,
+                brave_search_key,
+                logs_dir,
+                status_tx,
+                status_rx,
+                prior_history: None,
+            },
+            inject_tx,
+        )
     }
 
     /// Create a new fire-and-forget worker.
+    ///
+    /// Returns the worker and a sender for context injection. The injection
+    /// channel delivers addendum context at LLM turn boundaries without
+    /// requiring the worker to be interactive.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel_id: Option<ChannelId>,
@@ -140,7 +155,7 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
-    ) -> Self {
+    ) -> (Self, mpsc::Sender<String>) {
         Self::build(
             channel_id,
             task,
@@ -155,6 +170,10 @@ impl Worker {
     }
 
     /// Create a new interactive worker.
+    ///
+    /// Returns `(worker, input_tx, inject_tx)`. The `input_tx` drives the
+    /// interactive follow-up loop. The `inject_tx` delivers addendum context
+    /// at LLM turn boundaries independently of the follow-up state machine.
     #[allow(clippy::too_many_arguments)]
     pub fn new_interactive(
         channel_id: Option<ChannelId>,
@@ -165,9 +184,9 @@ impl Worker {
         screenshot_dir: PathBuf,
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
-    ) -> (Self, mpsc::Sender<String>) {
+    ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
-        let worker = Self::build(
+        let (worker, inject_tx) = Self::build(
             channel_id,
             task,
             system_prompt,
@@ -179,7 +198,7 @@ impl Worker {
             Some(input_rx),
         );
 
-        (worker, input_tx)
+        (worker, input_tx, inject_tx)
     }
 
     /// Resume an interactive worker that was idle at shutdown.
@@ -199,9 +218,9 @@ impl Worker {
         brave_search_key: Option<String>,
         logs_dir: PathBuf,
         prior_history: Vec<rig::message::Message>,
-    ) -> (Self, mpsc::Sender<String>) {
+    ) -> (Self, mpsc::Sender<String>, mpsc::Sender<String>) {
         let (input_tx, input_rx) = mpsc::channel(32);
-        let mut worker = Self::build(
+        let (mut worker, inject_tx) = Self::build(
             channel_id,
             task,
             system_prompt,
@@ -227,7 +246,7 @@ impl Worker {
         worker.state = WorkerState::WaitingForInput;
         // Stash the prior history so `run_follow_up_loop()` can pick it up.
         worker.prior_history = Some(prior_history);
-        (worker, input_tx)
+        (worker, input_tx, inject_tx)
     }
 
     /// Check if the worker can transition to a new state.
@@ -265,6 +284,12 @@ impl Worker {
     /// This prevents long-running workers from dying mid-task due to context
     /// exhaustion.
     pub async fn run(mut self) -> Result<String> {
+        // Wire the injection receiver into the hook so `on_completion_call`
+        // can drain pending injected context before each LLM turn.
+        if let Some(inject_rx) = self.inject_rx.take() {
+            self.hook = self.hook.clone().with_inject_rx(inject_rx);
+        }
+
         self.status_tx.send_modify(|s| *s = "running".to_string());
         self.hook.send_status("running");
 
@@ -292,6 +317,7 @@ impl Worker {
         let model_name = routing.resolve(ProcessType::Worker, None).to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")
+            .with_worker_type("builtin")
             .with_routing((**routing).clone());
 
         let agent = AgentBuilder::new(model)
@@ -531,6 +557,28 @@ impl Worker {
                         .await
                     {
                         Ok(response) => break Ok(response),
+                        Err(rig::completion::PromptError::PromptCancelled {
+                            ref reason, ..
+                        }) if SpacebotHook::is_context_injection_reason(reason) => {
+                            // Context injection during a follow-up: drain
+                            // buffered messages, append to history, and
+                            // re-prompt — same as the main task loop.
+                            let injected = follow_up_hook.take_injected_messages();
+                            for message in &injected {
+                                tracing::info!(
+                                    worker_id = %self.id,
+                                    "injecting context into worker follow-up history"
+                                );
+                                history.push(rig::message::Message::user(format!(
+                                    "[Context update from the user]: {message}"
+                                )));
+                            }
+                            follow_up_prompt = "New context has been provided above. \
+                                Incorporate this information and continue working \
+                                on your task. Do not repeat completed work."
+                                .to_string();
+                            continue;
+                        }
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
                             if follow_up_overflow_retries > MAX_OVERFLOW_RETRIES {

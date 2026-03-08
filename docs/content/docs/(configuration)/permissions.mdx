@@ -41,10 +41,12 @@ Values:
 Workspace confinement means the agent can access:
 
 ```
-~/.spacebot/agents/{agent_id}/workspace/   # identity files, prompt overrides
+~/.spacebot/agents/{agent_id}/workspace/   # working files, prompt overrides (sandbox boundary)
 ~/.spacebot/agents/{agent_id}/data/        # databases (read-only for file tool, managed by Spacebot)
 ~/.spacebot/agents/{agent_id}/archives/    # compaction archives
 ```
+
+Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) live in the agent root (`~/.spacebot/agents/{agent_id}/`), outside the workspace, and are not accessible to worker file tools.
 
 But NOT:
 

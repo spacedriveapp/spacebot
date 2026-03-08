@@ -48,7 +48,10 @@ All persistent data lives at `/data` inside the container. Mount a volume here.
 ├── embedding_cache/         # FastEmbed model cache (~100MB, downloaded on first run)
 ├── agents/
 │   └── main/
-│       ├── workspace/       # identity files (SOUL.md, IDENTITY.md, USER.md)
+│       ├── SOUL.md          # agent personality and voice
+│       ├── IDENTITY.md      # agent purpose and scope
+│       ├── ROLE.md          # agent responsibilities
+│       ├── workspace/       # working directory (sandbox boundary)
 │       ├── data/            # SQLite, LanceDB, redb databases
 │       └── archives/        # compaction transcripts
 └── logs/                    # log files (daily rotation)

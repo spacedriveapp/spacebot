@@ -1,4 +1,9 @@
 //! Spawn worker tool for creating new workers.
+//!
+//! Two variants:
+//! - `SpawnWorkerTool`: full-featured, used by channels and branches. Requires `ChannelState`.
+//! - `DetachedSpawnWorkerTool`: lightweight, used by cortex chat. Spawns workers with no
+//!   parent channel — they log directly to `worker_runs` and emit events with `channel_id: None`.
 
 use crate::WorkerId;
 use crate::agent::channel::ChannelState;
@@ -7,6 +12,9 @@ use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+use std::sync::Arc;
+use tracing::Instrument as _;
 
 /// Tool for spawning workers.
 #[derive(Debug, Clone)]
@@ -171,6 +179,27 @@ impl Tool for SpawnWorkerTool {
         let readiness = self.state.deps.runtime_config.work_readiness();
         let is_opencode = args.worker_type.as_deref() == Some("opencode");
 
+        // Reject if an active worker already has the same task. This prevents
+        // duplicate workers when the LLM emits multiple spawn_worker calls in
+        // a single response and one fails/retries.
+        //
+        // Returned as a structured result (not an error) so the LLM can
+        // recover deterministically — e.g. route to the existing worker.
+        {
+            let status = self.state.status_block.read().await;
+            if let Some(existing_id) = status.find_duplicate_worker_task(&args.task) {
+                return Ok(SpawnWorkerOutput {
+                    worker_id: existing_id,
+                    spawned: false,
+                    interactive: args.interactive,
+                    message: format!(
+                        "A worker is already running this task (worker {existing_id}). \
+                         Use route to send additional context to the running worker instead."
+                    ),
+                });
+            }
+        }
+
         // Resolve working directory from project/worktree if not explicitly set.
         let resolved_directory = resolve_directory_from_project(
             &self.state.deps,
@@ -247,6 +276,232 @@ impl Tool for SpawnWorkerTool {
             spawned: true,
             interactive: effectively_interactive,
             message: format!("{message}{readiness_note}"),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DetachedSpawnWorkerTool — lightweight variant for cortex chat
+// ---------------------------------------------------------------------------
+
+/// Shared context that links the cortex chat session to detached workers.
+/// Updated before each cortex chat turn so spawned workers know which thread
+/// to deliver results to.
+#[derive(Debug, Clone)]
+pub struct CortexChatContext {
+    /// Current thread_id for the active cortex chat conversation.
+    pub current_thread_id: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Current channel context (if cortex chat was opened on a channel page).
+    pub current_channel_context: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Workers tracked by the cortex chat event loop.
+    pub tracked_workers: Arc<
+        tokio::sync::RwLock<
+            std::collections::HashMap<crate::WorkerId, crate::agent::cortex_chat::TrackedWorker>,
+        >,
+    >,
+}
+
+/// Spawn worker tool for cortex chat sessions.
+///
+/// Unlike `SpawnWorkerTool` (which requires `ChannelState`), this creates
+/// workers with no parent channel. Workers are logged directly to `worker_runs`
+/// and emit events with `channel_id: None`.
+#[derive(Clone)]
+pub struct DetachedSpawnWorkerTool {
+    deps: crate::AgentDeps,
+    screenshot_dir: PathBuf,
+    logs_dir: PathBuf,
+    cortex_ctx: Option<CortexChatContext>,
+}
+
+impl std::fmt::Debug for DetachedSpawnWorkerTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DetachedSpawnWorkerTool")
+            .finish_non_exhaustive()
+    }
+}
+
+impl DetachedSpawnWorkerTool {
+    pub fn new(deps: crate::AgentDeps, screenshot_dir: PathBuf, logs_dir: PathBuf) -> Self {
+        Self {
+            deps,
+            screenshot_dir,
+            logs_dir,
+            cortex_ctx: None,
+        }
+    }
+
+    pub fn with_cortex_context(mut self, ctx: CortexChatContext) -> Self {
+        self.cortex_ctx = Some(ctx);
+        self
+    }
+}
+
+/// Arguments for the detached spawn worker tool.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct DetachedSpawnWorkerArgs {
+    /// Clear, specific description of what the worker should do.
+    pub task: String,
+}
+
+impl Tool for DetachedSpawnWorkerTool {
+    const NAME: &'static str = "spawn_worker";
+
+    type Error = SpawnWorkerError;
+    type Args = DetachedSpawnWorkerArgs;
+    type Output = SpawnWorkerOutput;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let rc = &self.deps.runtime_config;
+        let browser_enabled = rc.browser_config.load().enabled;
+        let web_search_enabled = rc.brave_search_key.load().is_some();
+
+        let mut tools_list = vec!["shell", "file_read", "file_write", "file_edit", "file_list"];
+        if browser_enabled {
+            tools_list.push("browser");
+        }
+        if web_search_enabled {
+            tools_list.push("web_search");
+        }
+
+        let description = format!(
+            "Spawn an independent worker process with {} tools. The worker runs \
+             autonomously and reports back when done. Use this for browser-heavy \
+             research, long shell operations, or any task that benefits from \
+             dedicated execution. The worker only sees the task description you \
+             provide — no conversation history.",
+            tools_list.join(", ")
+        );
+
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description,
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task": {
+                        "type": "string",
+                        "description": "Clear, specific description of what the worker should do. Include all context needed since the worker can't see your conversation."
+                    }
+                },
+                "required": ["task"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let rc = &self.deps.runtime_config;
+        let prompt_engine = rc.prompts.load();
+        let sandbox_enabled = self.deps.sandbox.mode_enabled();
+        let sandbox_containment_active = self.deps.sandbox.containment_active();
+        let sandbox_read_allowlist = self.deps.sandbox.prompt_read_allowlist();
+        let sandbox_write_allowlist = self.deps.sandbox.prompt_write_allowlist();
+
+        let secrets_guard = rc.secrets.load();
+        let tool_secret_names = match (*secrets_guard).as_ref() {
+            Some(store) => store.tool_secret_names(),
+            None => Vec::new(),
+        };
+
+        let browser_config = (**rc.browser_config.load()).clone();
+        let worker_system_prompt = prompt_engine
+            .render_worker_prompt(
+                &rc.instance_dir.display().to_string(),
+                &rc.workspace_dir.display().to_string(),
+                sandbox_enabled,
+                sandbox_containment_active,
+                sandbox_read_allowlist,
+                sandbox_write_allowlist,
+                &tool_secret_names,
+                browser_config.persist_session,
+            )
+            .map_err(|error| {
+                SpawnWorkerError(format!("failed to render worker prompt: {error}"))
+            })?;
+
+        let brave_search_key = (**rc.brave_search_key.load()).clone();
+
+        let worker = crate::agent::worker::Worker::new(
+            None, // no parent channel
+            &args.task,
+            worker_system_prompt,
+            self.deps.clone(),
+            browser_config,
+            self.screenshot_dir.clone(),
+            brave_search_key,
+            self.logs_dir.clone(),
+        );
+
+        let (worker, _input_tx) = worker;
+        let worker_id = worker.id;
+
+        // Emit WorkerStarted event so the UI can track it.
+        let _ = self.deps.event_tx.send(crate::ProcessEvent::WorkerStarted {
+            agent_id: self.deps.agent_id.clone(),
+            worker_id,
+            channel_id: None,
+            task: args.task.clone(),
+            worker_type: "cortex".into(),
+            interactive: false,
+            directory: None,
+        });
+
+        // Log to worker_runs directly since there's no parent channel to do it.
+        let run_logger =
+            crate::conversation::history::ProcessRunLogger::new(self.deps.sqlite_pool.clone());
+        run_logger.log_worker_started(
+            None,
+            worker_id,
+            &args.task,
+            "cortex",
+            &self.deps.agent_id,
+            false,
+            None,
+        );
+
+        let secrets_store = rc.secrets.load().as_ref().clone();
+        let worker_span = tracing::info_span!(
+            "worker.run",
+            worker_id = %worker_id,
+            spawned_by = "cortex_chat",
+        );
+        crate::agent::channel_dispatch::spawn_worker_task(
+            worker_id,
+            self.deps.event_tx.clone(),
+            self.deps.agent_id.clone(),
+            None,
+            secrets_store,
+            "builtin",
+            worker.run().instrument(worker_span),
+        );
+
+        // Register the worker with the cortex chat event loop so it can
+        // auto-trigger a follow-up turn when the worker completes.
+        if let Some(ctx) = &self.cortex_ctx {
+            let thread_id: Option<String> = ctx.current_thread_id.read().await.clone();
+            let channel_context: Option<String> = ctx.current_channel_context.read().await.clone();
+            if let Some(thread_id) = thread_id {
+                let mut workers = ctx.tracked_workers.write().await;
+                workers.insert(
+                    worker_id,
+                    crate::agent::cortex_chat::TrackedWorker {
+                        thread_id,
+                        channel_context,
+                    },
+                );
+            }
+        }
+
+        tracing::info!(worker_id = %worker_id, task = %args.task, "cortex chat spawned detached worker");
+
+        Ok(SpawnWorkerOutput {
+            worker_id,
+            spawned: true,
+            interactive: false,
+            message: format!(
+                "Worker {worker_id} spawned for: {}. It will report back when done.",
+                args.task
+            ),
         })
     }
 }

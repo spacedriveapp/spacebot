@@ -1258,7 +1258,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         ProcessEvent::OpenCodeSessionCreated { .. }
         | ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::WorkerInitialResult { .. }
-        | ProcessEvent::WorkerText { .. } => return None,
+        | ProcessEvent::WorkerText { .. }
+        | ProcessEvent::CortexChatUpdate { .. } => return None,
     })
 }
 
@@ -2444,7 +2445,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     }
 
     let brave_search_key = (**deps.runtime_config.brave_search_key.load()).clone();
-    let worker = Worker::new(
+    let (worker, inject_tx) = Worker::new(
         None,
         task_prompt,
         worker_system_prompt,
@@ -2454,6 +2455,11 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         brave_search_key,
         logs_dir,
     );
+
+    // Detached workers are not channel-owned, so injection senders are not
+    // stored in ChannelState. The inject_tx is dropped here — detached task
+    // workers don't support mid-flight context injection.
+    drop(inject_tx);
 
     let worker_id = worker.id;
     let (detached_worker_lifecycle, mut detached_cancel_rx) = register_detached_worker_for_pickup(

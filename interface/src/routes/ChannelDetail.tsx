@@ -340,6 +340,9 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 					<span className="text-ink-faint/50">/</span>
 					<span className="text-sm font-medium text-ink">
 						{channel?.display_name ?? channelId}
+						{channel?.display_name && (
+							<span className="ml-2 font-normal text-ink-faint text-tiny">{channelId}</span>
+						)}
 					</span>
 					{channel && (
 						<span className={`inline-flex items-center rounded-md px-1.5 py-0.5 text-tiny font-medium ${platformColor(channel.platform)}`}>

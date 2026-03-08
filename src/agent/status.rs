@@ -328,6 +328,22 @@ impl StatusBlock {
         self.active_workers.iter().any(|w| w.id == worker_id)
     }
 
+    /// Check if an active worker already exists with a matching task.
+    ///
+    /// The status block stores OpenCode tasks with a `[opencode] ` prefix, so
+    /// comparisons strip that prefix before matching. Returns the existing
+    /// worker's ID if found.
+    pub fn find_duplicate_worker_task(&self, task: &str) -> Option<WorkerId> {
+        let normalized = task.strip_prefix("[opencode] ").unwrap_or(task);
+        self.active_workers.iter().find_map(|worker| {
+            let existing = worker
+                .task
+                .strip_prefix("[opencode] ")
+                .unwrap_or(&worker.task);
+            (existing == normalized).then_some(worker.id)
+        })
+    }
+
     /// Get the number of active branches.
     pub fn active_branch_count(&self) -> usize {
         self.active_branches.len()
@@ -380,5 +396,58 @@ mod tests {
 
         assert!(removed);
         assert!(status.active_branches.is_empty());
+    }
+
+    #[test]
+    fn find_duplicate_exact_match() {
+        let mut status = StatusBlock::new();
+        let worker_id = Uuid::new_v4();
+        status.add_worker(worker_id, "Build a landing page", true, false);
+
+        let found = status.find_duplicate_worker_task("Build a landing page");
+        assert_eq!(found, Some(worker_id));
+    }
+
+    #[test]
+    fn find_duplicate_no_match() {
+        let mut status = StatusBlock::new();
+        let worker_id = Uuid::new_v4();
+        status.add_worker(worker_id, "Build a landing page", true, false);
+
+        let found = status.find_duplicate_worker_task("Fix the CSS bug");
+        assert_eq!(found, None);
+    }
+
+    #[test]
+    fn find_duplicate_strips_opencode_prefix() {
+        let mut status = StatusBlock::new();
+        let worker_id = Uuid::new_v4();
+        status.add_worker(worker_id, "[opencode] Build a landing page", true, false);
+
+        // Should match without the prefix
+        let found = status.find_duplicate_worker_task("Build a landing page");
+        assert_eq!(found, Some(worker_id));
+
+        // Should also match with the prefix
+        let found = status.find_duplicate_worker_task("[opencode] Build a landing page");
+        assert_eq!(found, Some(worker_id));
+    }
+
+    #[test]
+    fn find_duplicate_strips_opencode_prefix_in_query() {
+        let mut status = StatusBlock::new();
+        let worker_id = Uuid::new_v4();
+        status.add_worker(worker_id, "Build a landing page", true, false);
+
+        // Querying with prefix should still find the non-prefixed worker
+        let found = status.find_duplicate_worker_task("[opencode] Build a landing page");
+        assert_eq!(found, Some(worker_id));
+    }
+
+    #[test]
+    fn find_duplicate_empty_status_block() {
+        let status = StatusBlock::new();
+        let found = status.find_duplicate_worker_task("any task");
+        assert_eq!(found, None);
     }
 }

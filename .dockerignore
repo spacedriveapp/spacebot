@@ -11,6 +11,7 @@ interface/dist/
 # Not needed for the build
 tests/
 scripts/
+!scripts/build-opencode-embed.sh
 
 # Exclude docs except what's needed for self_awareness.rs embeds
 docs/node_modules/

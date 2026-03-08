@@ -155,23 +155,6 @@ export function AgentTasks({ agentId }: { agentId: string }) {
     );
   }
 
-  if (tasks.length === 0 && !createOpen) {
-    return (
-      <div className="flex h-full flex-col items-center justify-center gap-4 text-ink-faint">
-        <p className="text-sm">No tasks yet</p>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          Create Task
-        </Button>
-        <CreateTaskDialog
-          open={createOpen}
-          onClose={() => setCreateOpen(false)}
-          onCreate={(request) => createMutation.mutate(request)}
-          isPending={createMutation.isPending}
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="flex h-full flex-col">
       {/* Toolbar */}

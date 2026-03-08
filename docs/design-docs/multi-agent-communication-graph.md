@@ -229,13 +229,13 @@ This is a peer agent. Communication is collaborative and informational.
 
 ### ROLE.md
 
-New identity file alongside `SOUL.md`, `IDENTITY.md`, and `USER.md`. Defines what the agent is supposed to *do* — responsibilities, scope, what to handle vs what to escalate, what success looks like.
+New identity file alongside `SOUL.md` and `IDENTITY.md`. Defines what the agent is supposed to *do* — responsibilities, scope, what to handle vs what to escalate, what success looks like.
 
-`SOUL.md` is personality. `IDENTITY.md` is who the agent is. `USER.md` is context about the human. `ROLE.md` is the job: "you handle tier 1 support tickets, escalate billing issues to the finance agent, never touch production infrastructure."
+`SOUL.md` is personality. `IDENTITY.md` is who the agent is. `ROLE.md` is the job: "you handle tier 1 support tickets, escalate billing issues to the finance agent, never touch production infrastructure."
 
 In single-agent setups, `ROLE.md` separates identity from operational responsibilities. In multi-agent setups, it's what differentiates agents operationally — each agent sees its position in the hierarchy via org context, and `ROLE.md` tells it what to actually do in that position. Structure vs scope.
 
-Loaded the same way as the other identity files — from the agent's workspace directory, injected into the system prompt by `identity/files.rs`.
+Loaded the same way as the other identity files — from the agent root directory (`~/.spacebot/agents/{id}/`), injected into the system prompt by `identity/files.rs`.
 
 ### Organizational Awareness
 

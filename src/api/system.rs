@@ -100,6 +100,7 @@ pub(super) async fn events_sse(
                             ApiEvent::TaskUpdated { .. } => "task_updated",
                             ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
                             ApiEvent::WorkerText { .. } => "worker_text",
+                            ApiEvent::CortexChatMessage { .. } => "cortex_chat_message",
                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)

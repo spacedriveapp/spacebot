@@ -19,7 +19,10 @@ export const buttonStyles = cva(
 			},
 			variant: {
 				default: ["bg-accent text-white shadow", "hover:bg-accent/90"],
-				destructive: ["bg-red-600 text-white shadow-sm", "hover:bg-red-700"],
+				destructive: [
+				"border border-app-line bg-transparent text-ink-dull",
+				"hover:bg-red-600 hover:text-white hover:border-red-600",
+			],
 				outline: [
 					"border border-app-line bg-transparent",
 					"hover:bg-app-hover/40 hover:text-ink",

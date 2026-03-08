@@ -79,32 +79,109 @@ impl Tool for RouteTool {
             .parse::<WorkerId>()
             .map_err(|e| RouteError(format!("Invalid worker ID: {e}")))?;
 
-        // Look up the input sender for this worker
-        let inputs = self.state.worker_inputs.read().await;
-        let input_tx = inputs.get(&worker_id)
-            .ok_or_else(|| RouteError(format!(
-                "Worker {worker_id} not found or not interactive. Only interactive workers accept follow-up messages."
-            )))?
-            .clone();
-        drop(inputs);
+        // Check the status block to determine the worker's actual state.
+        // Using sender map presence alone is unreliable: interactive workers
+        // register both `worker_inputs` and `worker_injections` at spawn
+        // time, so the input sender is always present regardless of whether
+        // the worker is idle or running.
+        let worker_is_idle = {
+            let status = self.state.status_block.read().await;
+            status
+                .active_workers
+                .iter()
+                .find(|w| w.id == worker_id)
+                .map(|w| w.status == "idle")
+        };
 
-        // Deliver the message
-        input_tx.send(args.message).await.map_err(|_| {
-            RouteError(format!(
-                "Worker {worker_id} has stopped accepting input (channel closed)"
-            ))
-        })?;
+        match worker_is_idle {
+            // Worker is idle (WaitingForInput) — deliver as interactive follow-up.
+            Some(true) => {
+                let inputs = self.state.worker_inputs.read().await;
+                if let Some(input_tx) = inputs.get(&worker_id).cloned() {
+                    drop(inputs);
 
-        tracing::info!(
-            worker_id = %worker_id,
-            channel_id = %self.state.channel_id,
-            "message routed to worker"
-        );
+                    input_tx.send(args.message).await.map_err(|_| {
+                        RouteError(format!(
+                            "Worker {worker_id} has stopped accepting input (channel closed)"
+                        ))
+                    })?;
 
-        Ok(RouteOutput {
-            routed: true,
-            worker_id,
-            message: format!("Message delivered to worker {worker_id}."),
-        })
+                    tracing::info!(
+                        worker_id = %worker_id,
+                        channel_id = %self.state.channel_id,
+                        "message routed to interactive worker (input)"
+                    );
+
+                    return Ok(RouteOutput {
+                        routed: true,
+                        worker_id,
+                        message: format!(
+                            "Message delivered to worker {worker_id} (follow-up input)."
+                        ),
+                    });
+                }
+                drop(inputs);
+
+                // Worker is idle but has no input channel — shouldn't happen
+                // for interactive workers, but fall through to injection.
+            }
+            // Worker is running — use context injection.
+            Some(false) => {
+                let injections = self.state.worker_injections.read().await;
+                if let Some(inject_tx) = injections.get(&worker_id).cloned() {
+                    drop(injections);
+
+                    inject_tx.send(args.message).await.map_err(|_| {
+                        RouteError(format!(
+                            "Worker {worker_id} has stopped running (injection channel closed)"
+                        ))
+                    })?;
+
+                    tracing::info!(
+                        worker_id = %worker_id,
+                        channel_id = %self.state.channel_id,
+                        "context injected into running worker"
+                    );
+
+                    return Ok(RouteOutput {
+                        routed: true,
+                        worker_id,
+                        message: format!(
+                            "Context injected into running worker {worker_id}. \
+                             The worker will incorporate this at its next turn boundary."
+                        ),
+                    });
+                }
+                drop(injections);
+
+                // Worker is running but has no injection channel (e.g. OpenCode
+                // workers only support interactive follow-ups, not mid-flight
+                // injection). Return a structured result so the LLM knows to
+                // wait rather than falling through to "not found".
+                let has_input = self
+                    .state
+                    .worker_inputs
+                    .read()
+                    .await
+                    .contains_key(&worker_id);
+                if has_input {
+                    return Ok(RouteOutput {
+                        routed: false,
+                        worker_id,
+                        message: format!(
+                            "Worker {worker_id} is currently running and does not support \
+                             mid-flight context injection. Wait for it to finish or become \
+                             idle before sending follow-up input."
+                        ),
+                    });
+                }
+            }
+            // Worker not found in status block.
+            None => {}
+        }
+
+        Err(RouteError(format!(
+            "Worker {worker_id} not found. It may have already completed or been cancelled."
+        )))
     }
 }

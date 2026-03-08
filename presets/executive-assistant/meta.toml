@@ -1,0 +1,9 @@
+id = "executive-assistant"
+name = "Executive Assistant"
+description = "Email drafting, meeting preparation, information synthesis, scheduling coordination, and administrative support."
+icon = "briefcase"
+tags = ["email", "meetings", "scheduling", "admin", "synthesis"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 5

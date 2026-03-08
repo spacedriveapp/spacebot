@@ -650,15 +650,15 @@ function IdentitySection({
 	identity,
 }: {
 	agentId: string;
-	identity: { soul: string | null; identity: string | null; user: string | null };
+	identity: { soul: string | null; identity: string | null; role: string | null };
 }) {
-	const hasContent = identity.soul || identity.identity || identity.user;
+	const hasContent = identity.soul || identity.identity || identity.role;
 	if (!hasContent) return null;
 
 	const files = [
 		{ label: "SOUL.md", tab: "soul", content: identity.soul },
 		{ label: "IDENTITY.md", tab: "identity", content: identity.identity },
-		{ label: "USER.md", tab: "user", content: identity.user },
+		{ label: "ROLE.md", tab: "role", content: identity.role },
 	].filter((f) => f.content && f.content.trim().length > 0 && !f.content.startsWith("<!--"));
 
 	if (files.length === 0) return null;

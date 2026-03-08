@@ -1,0 +1,9 @@
+id = "main-agent"
+name = "Main Agent"
+description = "The primary agent and orchestrator. Handles direct conversations, delegates to specialist agents, and manages the overall system."
+icon = "bot"
+tags = ["orchestrator", "general", "delegation", "default"]
+
+[defaults]
+max_concurrent_workers = 5
+max_turns = 8

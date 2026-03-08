@@ -64,6 +64,10 @@ pub(super) struct TomlHumanDef {
     pub(super) display_name: Option<String>,
     pub(super) role: Option<String>,
     pub(super) bio: Option<String>,
+    pub(super) discord_id: Option<String>,
+    pub(super) telegram_id: Option<String>,
+    pub(super) slack_id: Option<String>,
+    pub(super) email: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -432,6 +436,8 @@ pub(super) struct TomlAgentConfig {
     pub(super) default: bool,
     pub(super) display_name: Option<String>,
     pub(super) role: Option<String>,
+    pub(super) gradient_start: Option<String>,
+    pub(super) gradient_end: Option<String>,
     pub(super) workspace: Option<String>,
     pub(super) routing: Option<TomlRoutingConfig>,
     pub(super) max_concurrent_branches: Option<usize>,

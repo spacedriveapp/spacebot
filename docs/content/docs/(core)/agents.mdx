@@ -13,7 +13,8 @@ Agents communicate through an explicit communication graph — directed links th
 
 An agent is a self-contained unit. It has:
 
-- **A workspace** — directory containing identity files (SOUL.md, IDENTITY.md, USER.md, ROLE.md) and optional prompt overrides
+- **Identity files** — `SOUL.md`, `IDENTITY.md`, and `ROLE.md` in the agent root directory (`~/.spacebot/agents/{id}/`)
+- **A workspace** — sandboxed directory (`~/.spacebot/agents/{id}/workspace/`) for working files, ingest, and prompt overrides; this is the boundary for worker file tools
 - **Its own databases** — SQLite, LanceDB, and redb, completely isolated from other agents
 - **Its own cortex** — monitoring its own processes and memory graph
 - **Its own conversations** — channels, branches, workers scoped to this agent
@@ -224,11 +225,10 @@ Returns agents, humans, links, and groups for rendering.
 │
 ├── agents/
 │   ├── research/
-│   │   ├── workspace/
-│   │   │   ├── SOUL.md                   # personality, values, boundaries
-│   │   │   ├── IDENTITY.md               # name, nature, vibe
-│   │   │   ├── USER.md                   # info about the human
-│   │   │   └── ROLE.md                   # responsibilities, scope, escalation rules
+│   │   ├── SOUL.md                       # personality, values, boundaries
+│   │   ├── IDENTITY.md                   # name, nature, vibe
+│   │   ├── ROLE.md                       # responsibilities, scope, escalation rules
+│   │   ├── workspace/                    # sandbox boundary for worker file tools
 │   │   ├── data/
 │   │   │   ├── spacebot.db              # SQLite (memories, conversations, cron jobs)
 │   │   │   ├── lancedb/                 # LanceDB (embeddings, FTS)

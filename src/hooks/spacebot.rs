@@ -49,6 +49,14 @@ pub struct SpacebotHook {
     /// Detects repetitive tool calling patterns (identical calls, identical
     /// outcomes, ping-pong cycles) and blocks them before execution.
     loop_guard: std::sync::Arc<std::sync::Mutex<LoopGuard>>,
+    /// Receiver for context injection messages. When a channel routes addendum
+    /// context to a running worker, the messages arrive on this channel and are
+    /// drained in `on_completion_call` before each LLM turn.
+    inject_rx: Option<std::sync::Arc<tokio::sync::Mutex<tokio::sync::mpsc::Receiver<String>>>>,
+    /// Buffer of injected messages drained from `inject_rx`. The
+    /// `prompt_with_tool_nudge_retry` loop reads and clears this buffer to
+    /// append the messages to history before re-prompting.
+    injected_messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 impl SpacebotHook {
@@ -58,6 +66,8 @@ impl SpacebotHook {
          before finishing.";
     /// PromptCancelled reason used internally for tool nudge retries.
     pub const TOOL_NUDGE_REASON: &str = "spacebot_tool_nudge_retry";
+    /// PromptCancelled reason used when injected context is pending.
+    pub const CONTEXT_INJECTION_REASON: &str = "spacebot_context_injection";
     /// Maximum nudge retries per prompt request.
     pub const TOOL_NUDGE_MAX_RETRIES: usize = 2;
 
@@ -84,12 +94,24 @@ impl SpacebotHook {
             loop_guard: std::sync::Arc::new(std::sync::Mutex::new(LoopGuard::new(
                 loop_guard_config,
             ))),
+            inject_rx: None,
+            injected_messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
         }
     }
 
     /// Override the default process-scoped nudge policy.
     pub fn with_tool_nudge_policy(mut self, policy: ToolNudgePolicy) -> Self {
         self.tool_nudge_policy = policy;
+        self
+    }
+
+    /// Attach a context injection receiver to this hook.
+    ///
+    /// When set, `on_completion_call` will drain pending messages from the
+    /// receiver into `injected_messages` and return `Terminate` so the retry
+    /// loop can append them to history.
+    pub fn with_inject_rx(mut self, inject_rx: tokio::sync::mpsc::Receiver<String>) -> Self {
+        self.inject_rx = Some(std::sync::Arc::new(tokio::sync::Mutex::new(inject_rx)));
         self
     }
 
@@ -127,6 +149,19 @@ impl SpacebotHook {
         reason == Self::TOOL_NUDGE_REASON
     }
 
+    /// Return true if a PromptCancelled reason indicates context injection.
+    pub fn is_context_injection_reason(reason: &str) -> bool {
+        reason == Self::CONTEXT_INJECTION_REASON
+    }
+
+    /// Drain and return all buffered injected messages.
+    pub fn take_injected_messages(&self) -> Vec<String> {
+        self.injected_messages
+            .lock()
+            .map(|mut messages| std::mem::take(&mut *messages))
+            .unwrap_or_default()
+    }
+
     /// Prompt an agent with bounded hook-driven tool nudge retries.
     ///
     /// This keeps hook usage consistent at call sites while preserving
@@ -155,6 +190,42 @@ impl SpacebotHook {
                 .await;
 
             match &result {
+                // Context injection: the hook detected pending injected
+                // messages and terminated the agent loop. Drain the buffer,
+                // append each message to history as a User message, and
+                // re-prompt with a continuation hint. This does NOT count
+                // against the nudge attempt budget.
+                Err(PromptError::PromptCancelled { reason, .. })
+                    if Self::is_context_injection_reason(reason) =>
+                {
+                    let injected = self.take_injected_messages();
+                    if injected.is_empty() {
+                        // Shouldn't happen, but guard against it.
+                        tracing::warn!(
+                            process_id = %self.process_id,
+                            "context injection termination but no buffered messages"
+                        );
+                    }
+
+                    for message in &injected {
+                        tracing::info!(
+                            process_id = %self.process_id,
+                            "injecting context into worker history"
+                        );
+                        history.push(Message::user(format!(
+                            "[Context update from the user]: {message}"
+                        )));
+                    }
+
+                    // Re-prompt asking the worker to incorporate the new context.
+                    current_prompt = std::borrow::Cow::Borrowed(
+                        "New context has been provided above. Incorporate this \
+                         information and continue working on your task. Do not \
+                         repeat completed work.",
+                    );
+                    using_tool_nudge_prompt = false;
+                    continue;
+                }
                 Err(PromptError::PromptCancelled { reason, .. })
                     if Self::is_tool_nudge_reason(reason) =>
                 {
@@ -358,9 +429,16 @@ impl SpacebotHook {
         #[cfg(feature = "metrics")]
         {
             let metrics = crate::telemetry::Metrics::global();
+            let process_label = match self.process_type {
+                crate::ProcessType::Channel => "channel",
+                crate::ProcessType::Branch => "branch",
+                crate::ProcessType::Worker => "worker",
+                crate::ProcessType::Compactor => "compactor",
+                crate::ProcessType::Cortex => "cortex",
+            };
             metrics
                 .tool_calls_total
-                .with_label_values(&[&*self.agent_id, tool_name])
+                .with_label_values(&[&*self.agent_id, tool_name, process_label])
                 .inc();
             if let Some(start) = TOOL_CALL_TIMERS
                 .lock()
@@ -369,6 +447,7 @@ impl SpacebotHook {
             {
                 metrics
                     .tool_call_duration_seconds
+                    .with_label_values(&[&*self.agent_id, tool_name, process_label])
                     .observe(start.elapsed().as_secs_f64());
             }
         }
@@ -478,6 +557,32 @@ where
         if self.tool_nudge_policy.is_enabled() {
             self.completion_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+
+        // Check for pending injected context before the LLM call.
+        // Drain all available messages from the injection channel and buffer
+        // them for the retry loop to append to history.
+        if let Some(inject_rx) = &self.inject_rx {
+            let mut drained = Vec::new();
+            if let Ok(mut receiver) = inject_rx.try_lock() {
+                while let Ok(message) = receiver.try_recv() {
+                    drained.push(message);
+                }
+            }
+            if !drained.is_empty() {
+                let count = drained.len();
+                if let Ok(mut buffer) = self.injected_messages.lock() {
+                    buffer.extend(drained);
+                }
+                tracing::info!(
+                    process_id = %self.process_id,
+                    count,
+                    "context injection: drained pending messages, terminating for re-prompt"
+                );
+                return HookAction::Terminate {
+                    reason: Self::CONTEXT_INJECTION_REASON.into(),
+                };
+            }
         }
 
         // Log the completion call but don't block it
@@ -1357,6 +1462,153 @@ mod tests {
                 if reason == SpacebotHook::TOOL_NUDGE_REASON
             ),
             "Expected nudge — reasoning-only response without outcome should be rejected"
+        );
+    }
+
+    // ---- Context injection tests ----
+
+    #[tokio::test]
+    async fn injection_terminates_on_pending_messages() {
+        let hook = make_hook();
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::channel(8);
+        let hook = hook.with_inject_rx(inject_rx);
+        let prompt = prompt_message();
+
+        // Send a message before the completion call
+        inject_tx
+            .send("additional context".to_string())
+            .await
+            .unwrap();
+
+        let action =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+
+        assert!(
+            matches!(
+                action,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::CONTEXT_INJECTION_REASON
+            ),
+            "Expected termination for context injection, got {action:?}"
+        );
+
+        // The message should be buffered for the retry loop
+        let messages = hook.take_injected_messages();
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0], "additional context");
+    }
+
+    #[tokio::test]
+    async fn injection_continues_when_no_pending_messages() {
+        let hook = make_hook();
+        let (_inject_tx, inject_rx) = tokio::sync::mpsc::channel(8);
+        let hook = hook.with_inject_rx(inject_rx);
+        let prompt = prompt_message();
+
+        let action =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+
+        assert!(
+            matches!(action, HookAction::Continue),
+            "Expected Continue when no injected messages, got {action:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn injection_drains_multiple_messages() {
+        let hook = make_hook();
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::channel(8);
+        let hook = hook.with_inject_rx(inject_rx);
+        let prompt = prompt_message();
+
+        inject_tx.send("first".to_string()).await.unwrap();
+        inject_tx.send("second".to_string()).await.unwrap();
+        inject_tx.send("third".to_string()).await.unwrap();
+
+        let action =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+
+        assert!(matches!(
+            action,
+            HookAction::Terminate { ref reason }
+            if reason == SpacebotHook::CONTEXT_INJECTION_REASON
+        ));
+
+        let messages = hook.take_injected_messages();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], "first");
+        assert_eq!(messages[1], "second");
+        assert_eq!(messages[2], "third");
+    }
+
+    #[tokio::test]
+    async fn injection_take_clears_buffer() {
+        let hook = make_hook();
+        let (inject_tx, inject_rx) = tokio::sync::mpsc::channel(8);
+        let hook = hook.with_inject_rx(inject_rx);
+        let prompt = prompt_message();
+
+        inject_tx.send("context".to_string()).await.unwrap();
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+
+        let first = hook.take_injected_messages();
+        assert_eq!(first.len(), 1);
+
+        // Second take should be empty
+        let second = hook.take_injected_messages();
+        assert!(second.is_empty(), "Buffer should be empty after take");
+    }
+
+    #[tokio::test]
+    async fn injection_reason_detection() {
+        assert!(SpacebotHook::is_context_injection_reason(
+            SpacebotHook::CONTEXT_INJECTION_REASON
+        ));
+        assert!(!SpacebotHook::is_context_injection_reason(
+            SpacebotHook::TOOL_NUDGE_REASON
+        ));
+        assert!(!SpacebotHook::is_tool_nudge_reason(
+            SpacebotHook::CONTEXT_INJECTION_REASON
+        ));
+    }
+
+    #[tokio::test]
+    async fn injection_does_not_interfere_with_nudge() {
+        // A hook with both injection and nudge enabled should handle them
+        // independently.
+        let hook = make_hook().with_tool_nudge_policy(ToolNudgePolicy::Enabled);
+        let (_inject_tx, inject_rx) = tokio::sync::mpsc::channel(8);
+        let hook = hook.with_inject_rx(inject_rx);
+        let prompt = prompt_message();
+
+        hook.reset_tool_nudge_state();
+        hook.set_tool_nudge_request_active(true);
+
+        // No injection pending, so on_completion_call should Continue
+        let action =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        assert!(matches!(action, HookAction::Continue));
+
+        // A text-only response should still trigger the nudge
+        let response = text_response("some text without outcome");
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook, &prompt, &response,
+        )
+        .await;
+        assert!(
+            matches!(
+                action,
+                HookAction::Terminate { ref reason }
+                if reason == SpacebotHook::TOOL_NUDGE_REASON
+            ),
+            "Nudge should still work when inject_rx is attached but empty"
         );
     }
 }

@@ -40,18 +40,23 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install system dependencies
-        run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
-          curl -fsSL https://deb.nodesource.com/setup_22.x | sudo bash -
-          sudo apt-get install -y nodejs
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Build OpenCode embed
+      - name: Build frontend
+        env:
+          SPACEBOT_SKIP_FRONTEND_BUILD: "1"
         run: |
-          cd interface && bun install --frozen-lockfile && cd ..
+          cd interface && rm -f bun.lock && bun install && cd ..
           ./scripts/build-opencode-embed.sh
+          cd interface && bun run build
 
       - name: Determine version tag
         id: version

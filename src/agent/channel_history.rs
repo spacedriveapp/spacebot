@@ -423,7 +423,8 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::StatusUpdate { .. }
         | ProcessEvent::TaskUpdated { .. }
-        | ProcessEvent::WorkerText { .. } => false,
+        | ProcessEvent::WorkerText { .. }
+        | ProcessEvent::CortexChatUpdate { .. } => false,
     }
 }
 

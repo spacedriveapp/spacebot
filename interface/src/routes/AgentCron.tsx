@@ -149,15 +149,25 @@ export function AgentCron({ agentId }: AgentCronProps) {
 	});
 
 	// Build delivery target options from known channels (exclude cron and link channels)
-	const EXCLUDED_PLATFORMS = new Set(["cron", "link"]);
+	const EXCLUDED_PLATFORMS = new Set(["cron"]);
 	const deliveryTargets = (channelsData?.channels ?? [])
 		.filter((ch: ChannelInfo) => !EXCLUDED_PLATFORMS.has(ch.platform))
-		.map((ch: ChannelInfo) => ({
-			value: ch.id,
-			label: ch.display_name ?? ch.id,
-			platform: ch.platform,
-			agentId: ch.agent_id,
-		}));
+		.map((ch: ChannelInfo) => {
+			// Portal channels need the "webchat:" prefix since the adapter is
+			// registered as "webchat", not "portal".
+			const value = ch.platform === "portal" ? `webchat:${ch.id}` : ch.id;
+			let label: string;
+			if (ch.platform === "portal") {
+				label = "Web Portal";
+			} else if (ch.platform === "link") {
+				// Link channels have IDs like "link:main:spacebot-engineer"
+				const parts = ch.id.split(":");
+				label = parts.length >= 3 ? parts.slice(1).join(" → ") : ch.id;
+			} else {
+				label = ch.display_name ?? ch.id;
+			}
+			return { value, label, platform: ch.platform, agentId: ch.agent_id };
+		});
 
 	const toggleMutation = useMutation({
 		mutationFn: ({ cronId, enabled }: { cronId: string; enabled: boolean }) =>
@@ -303,7 +313,7 @@ export function AgentCron({ agentId }: AgentCronProps) {
 
 			{/* Create / Edit Modal */}
 			<Dialog open={isModalOpen} onOpenChange={(open) => !open && closeModal()}>
-				<DialogContent className="max-w-4xl">
+				<DialogContent className="!max-w-4xl">
 					<DialogHeader>
 						<DialogTitle>{editingJob ? "Edit Cron Job" : "Create Cron Job"}</DialogTitle>
 					</DialogHeader>
@@ -441,7 +451,7 @@ export function AgentCron({ agentId }: AgentCronProps) {
 										{deliveryTargets.map((target) => (
 											<SelectItem key={target.value} value={target.value}>
 												<span>{target.label}</span>
-												<span className="ml-1.5 text-ink-faint">{target.agentId}</span>
+												<span className="ml-1.5 text-ink-faint">{target.value}</span>
 											</SelectItem>
 										))}
 										<SelectItem value="__custom__">Custom...</SelectItem>

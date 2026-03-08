@@ -64,9 +64,11 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "memory_persistence") => include_str!("../../prompts/en/memory_persistence.md.j2"),
         ("en", "ingestion") => include_str!("../../prompts/en/ingestion.md.j2"),
         ("en", "cortex_chat") => include_str!("../../prompts/en/cortex_chat.md.j2"),
+        ("en", "factory") => include_str!("../../prompts/en/factory.md.j2"),
 
         // Adapter-specific prompt fragments
         ("en", "adapters/email") => include_str!("../../prompts/en/adapters/email.md.j2"),
+        ("en", "adapters/cron") => include_str!("../../prompts/en/adapters/cron.md.j2"),
 
         // Fragment Templates
         ("en", "fragments/worker_capabilities") => {
@@ -147,6 +149,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
             include_str!("../../prompts/en/tools/set_status_description.md.j2")
         }
         ("en", "tools/shell") => include_str!("../../prompts/en/tools/shell_description.md.j2"),
+        ("en", "tools/install_skill") => {
+            include_str!("../../prompts/en/tools/install_skill_description.md.j2")
+        }
         ("en", "tools/file_read") => {
             include_str!("../../prompts/en/tools/file_read_description.md.j2")
         }
@@ -203,11 +208,32 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/task_update") => {
             include_str!("../../prompts/en/tools/task_update_description.md.j2")
         }
+        ("en", "tools/skills_search") => {
+            include_str!("../../prompts/en/tools/skills_search_description.md.j2")
+        }
         ("en", "tools/spacebot_docs") => {
             include_str!("../../prompts/en/tools/spacebot_docs_description.md.j2")
         }
         ("en", "tools/config_inspect") => {
             include_str!("../../prompts/en/tools/config_inspect_description.md.j2")
+        }
+        ("en", "tools/factory_list_presets") => {
+            include_str!("../../prompts/en/tools/factory_list_presets_description.md.j2")
+        }
+        ("en", "tools/factory_load_preset") => {
+            include_str!("../../prompts/en/tools/factory_load_preset_description.md.j2")
+        }
+        ("en", "tools/factory_search_context") => {
+            include_str!("../../prompts/en/tools/factory_search_context_description.md.j2")
+        }
+        ("en", "tools/factory_create_agent") => {
+            include_str!("../../prompts/en/tools/factory_create_agent_description.md.j2")
+        }
+        ("en", "tools/factory_update_identity") => {
+            include_str!("../../prompts/en/tools/factory_update_identity_description.md.j2")
+        }
+        ("en", "tools/factory_update_config") => {
+            include_str!("../../prompts/en/tools/factory_update_config_description.md.j2")
         }
         ("en", "tools/project_manage") => {
             include_str!("../../prompts/en/tools/project_manage_description.md.j2")

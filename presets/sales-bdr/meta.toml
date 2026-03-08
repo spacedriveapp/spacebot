@@ -1,0 +1,9 @@
+id = "sales-bdr"
+name = "Sales / BDR"
+description = "Lead qualification, outreach drafting, follow-up sequences, and pipeline management. Professional, persuasive, and persistent."
+icon = "handshake"
+tags = ["sales", "outreach", "leads", "email", "pipeline"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 5

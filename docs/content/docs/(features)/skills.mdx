@@ -20,6 +20,41 @@ Spacebot's skill system is fully compatible with [skills.sh](https://skills.sh) 
 - **Worker injection** — skills are injected into worker system prompts, not channels
 - **Hot-reloadable** — file watcher picks up skill changes without restart
 
+## Setting Up an Integration
+
+Most external tool integrations follow the same pattern: **add a credential, install a skill**. Here's how to set up GitHub as an example — the same pattern applies to AWS, npm, Docker, and any other CLI tool.
+
+### Example: GitHub Integration
+
+1. **Create a GitHub personal access token** at [github.com/settings/tokens](https://github.com/settings/tokens) with the scopes you need (e.g. `repo`, `read:org`).
+
+2. **Store it as a tool secret** so workers can authenticate:
+
+   ```bash
+   spacebot secrets set GH_TOKEN
+   # Paste your token when prompted
+   ```
+
+   Or use the dashboard **Secrets** panel to add `GH_TOKEN` with your token value.
+
+3. **Install a GitHub skill** that teaches workers how to use the `gh` CLI:
+
+   ```bash
+   spacebot skill add anthropics/skills/github
+   ```
+
+   Or browse the **Skills** tab in the dashboard and search for "github".
+
+4. **Done.** Workers now have `GH_TOKEN` as an environment variable and can read the GitHub skill for instructions on creating PRs, managing issues, and more.
+
+### Why This Works
+
+- **Tool secrets** with names like `GH_TOKEN`, `NPM_TOKEN`, `AWS_ACCESS_KEY_ID` are automatically categorized as "tool" secrets and injected into every worker subprocess as environment variables.
+- **Skills** provide the procedural knowledge — they tell workers *how* to use the CLI tools that those credentials unlock.
+- Workers see the secret names in their system prompt and can call `read_skill` to load full instructions on demand.
+
+This pattern works for any external tool that authenticates via environment variables. See [Secret Store](/docs/configuration/secrets) for details on credential storage and auto-categorization.
+
 ## Installation
 
 ### Via CLI

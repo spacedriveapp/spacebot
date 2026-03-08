@@ -63,7 +63,7 @@ Everything that exists today, what it does, and what happens to it.
 |------|-------|-------------|-------------|
 | `resolve_path()` method | 26-75 | Canonicalizes path, checks `starts_with(workspace)`, rejects symlinks | **Keep unchanged.** This is in-process I/O, not subprocess spawning. The sandbox doesn't apply here. |
 | `best_effort_canonicalize()` | 81-106 | Walks up to deepest existing ancestor for paths that don't fully exist yet | **Keep unchanged.** Used by `resolve_path()`. |
-| Protected identity files | 203-216 | Blocks writes to `SOUL.md`, `IDENTITY.md`, `USER.md` (case-insensitive) | **Keep unchanged.** Application-level protection, not security boundary. |
+| Protected identity files | 203-216 | Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) now live in the agent root, outside the workspace. File tool path validation naturally blocks access since they are outside the workspace boundary. | **Simplified.** Explicit blocklist no longer needed — workspace containment handles it. |
 | System-internal `file_read/write/list` | 362-404 | Bypass workspace containment, used by the system | **Keep unchanged.** |
 
 ### `send_file.rs` — SendFileTool

@@ -102,9 +102,12 @@ export function ChannelCard({
 			<div className="flex items-start justify-between p-4 pb-2">
 				<div className="min-w-0 flex-1">
 					<div className="flex items-center gap-2">
-						<h3 className="truncate font-medium text-ink">
-							{channel.display_name ?? channel.id}
-						</h3>
+					<h3 className="truncate font-medium text-ink">
+						{channel.display_name ?? channel.id}
+						{channel.display_name && (
+							<span className="ml-2 font-normal text-ink-faint text-tiny">{channel.id}</span>
+						)}
+					</h3>
 						{isTyping && (
 							<div className="flex items-center gap-1">
 								<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />

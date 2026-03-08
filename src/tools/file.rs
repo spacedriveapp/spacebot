@@ -90,26 +90,11 @@ impl FileContext {
         Ok(canonical)
     }
 
-    /// Check whether writing to a path is blocked by identity file protection.
-    /// Only applies when sandbox is enabled.
-    fn check_identity_protection(&self, path: &Path) -> Result<(), FileError> {
-        if !self.sandbox.mode_enabled() {
-            return Ok(());
-        }
-        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        const PROTECTED_FILES: &[&str] = &["SOUL.md", "IDENTITY.md", "USER.md"];
-        if PROTECTED_FILES
-            .iter()
-            .any(|f| file_name.eq_ignore_ascii_case(f))
-        {
-            return Err(FileError(
-                "ACCESS DENIED: Identity files are protected and cannot be modified \
-                 through file operations. Use the identity management API instead."
-                    .to_string(),
-            ));
-        }
-        Ok(())
-    }
+    // NOTE: Identity file protection (PROTECTED_FILES) has been removed.
+    // Identity files (SOUL.md, IDENTITY.md, ROLE.md) now live in the agent
+    // root directory, outside the workspace sandbox boundary. The sandbox
+    // path validation in `resolve_path()` naturally prevents worker file
+    // tools from accessing them — no explicit filename checks needed.
 }
 
 /// Canonicalize as much of the path as possible. For paths where the final
@@ -341,7 +326,6 @@ impl Tool for FileWriteTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let path = self.context.resolve_path(&args.path)?;
-        self.context.check_identity_protection(&path)?;
 
         // Ensure parent directory exists if requested
         if args.create_dirs
@@ -427,7 +411,6 @@ impl Tool for FileEditTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let path = self.context.resolve_path(&args.path)?;
-        self.context.check_identity_protection(&path)?;
 
         let original = tokio::fs::read_to_string(&path)
             .await
@@ -801,9 +784,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn sandbox_enabled_blocks_identity_file_write() {
+    async fn sandbox_blocks_write_outside_workspace() {
+        // Identity files now live outside the workspace (in the agent root).
+        // The sandbox path validation prevents any file access outside the
+        // workspace — no explicit identity filename checks needed.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-        let workspace = temp_dir.path().join("workspace");
+        let agent_root = temp_dir.path().join("agent");
+        let workspace = agent_root.join("workspace");
         fs::create_dir_all(&workspace).expect("failed to create workspace");
 
         let context = make_context(SandboxMode::Enabled, &workspace);
@@ -811,27 +798,27 @@ mod tests {
             context: context.clone(),
         };
 
+        // Try writing to the agent root (where identity files live) — should
+        // be blocked by sandbox path validation.
         let result = tool
             .call(FileWriteArgs {
-                path: workspace.join("SOUL.md").to_string_lossy().into_owned(),
+                path: agent_root.join("SOUL.md").to_string_lossy().into_owned(),
                 content: "overwritten".to_string(),
                 create_dirs: false,
             })
             .await;
 
         let error = result
-            .expect_err("should block identity file write")
+            .expect_err("should block write outside workspace")
             .to_string();
-        assert!(
-            error.contains("Identity files are protected"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("ACCESS DENIED"), "unexpected error: {error}");
     }
 
     #[tokio::test]
-    async fn sandbox_disabled_allows_identity_file_write() {
+    async fn sandbox_disabled_allows_write_in_workspace() {
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-        let workspace = temp_dir.path().join("workspace");
+        let agent_root = temp_dir.path().join("agent");
+        let workspace = agent_root.join("workspace");
         fs::create_dir_all(&workspace).expect("failed to create workspace");
 
         let context = make_context(SandboxMode::Disabled, &workspace);
@@ -839,17 +826,16 @@ mod tests {
 
         let result = tool
             .call(FileWriteArgs {
-                path: workspace.join("IDENTITY.md").to_string_lossy().into_owned(),
-                content: "new identity".to_string(),
+                path: workspace.join("test.md").to_string_lossy().into_owned(),
+                content: "new content".to_string(),
                 create_dirs: false,
             })
             .await
-            .expect("should allow identity file write when sandbox is disabled");
+            .expect("should allow write when sandbox is disabled");
 
         assert!(result.success);
-        let written =
-            fs::read_to_string(workspace.join("IDENTITY.md")).expect("failed to read file");
-        assert_eq!(written, "new identity");
+        let written = fs::read_to_string(workspace.join("test.md")).expect("failed to read file");
+        assert_eq!(written, "new content");
     }
 
     #[tokio::test]
@@ -965,18 +951,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn file_edit_blocks_identity_file() {
+    async fn file_edit_blocks_outside_workspace() {
+        // Identity files now live outside the workspace. Sandbox path
+        // validation prevents any edit to files outside the workspace.
         let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
-        let workspace = temp_dir.path().join("workspace");
+        let agent_root = temp_dir.path().join("agent");
+        let workspace = agent_root.join("workspace");
         fs::create_dir_all(&workspace).expect("failed to create workspace");
-        fs::write(workspace.join("SOUL.md"), "original").expect("failed to write file");
+        fs::write(agent_root.join("SOUL.md"), "original").expect("failed to write file");
 
         let context = make_context(SandboxMode::Enabled, &workspace);
         let tool = FileEditTool { context };
 
         let result = tool
             .call(FileEditArgs {
-                path: workspace.join("SOUL.md").to_string_lossy().into_owned(),
+                path: agent_root.join("SOUL.md").to_string_lossy().into_owned(),
                 old_string: "original".to_string(),
                 new_string: "hacked".to_string(),
                 replace_all: false,
@@ -984,12 +973,9 @@ mod tests {
             .await;
 
         let error = result
-            .expect_err("should block identity file edit")
+            .expect_err("should block edit outside workspace")
             .to_string();
-        assert!(
-            error.contains("Identity files are protected"),
-            "unexpected error: {error}"
-        );
+        assert!(error.contains("ACCESS DENIED"), "unexpected error: {error}");
     }
 
     #[tokio::test]

@@ -295,10 +295,17 @@ async fn spawn_branch(
     }
 
     #[cfg(feature = "metrics")]
-    crate::telemetry::Metrics::global()
-        .active_branches
-        .with_label_values(&[&*state.deps.agent_id])
-        .inc();
+    {
+        let metrics = crate::telemetry::Metrics::global();
+        metrics
+            .active_branches
+            .with_label_values(&[&*state.deps.agent_id])
+            .inc();
+        metrics
+            .branches_spawned_total
+            .with_label_values(&[&*state.deps.agent_id])
+            .inc();
+    }
 
     state
         .deps
@@ -318,10 +325,62 @@ async fn spawn_branch(
 }
 
 /// Check whether the channel has capacity for another worker.
+///
+/// Uses `worker_handles` as the source of truth for active workers, since
+/// `active_workers` (the `HashMap<WorkerId, Worker>`) is never populated —
+/// `Worker` is consumed by `.run()` inside `spawn_worker_task`.
 async fn check_worker_limit(state: &ChannelState) -> std::result::Result<(), AgentError> {
     let max_workers = **state.deps.runtime_config.max_concurrent_workers.load();
-    let active_worker_count = state.active_workers.read().await.len();
+    let active_worker_count = state.worker_handles.read().await.len();
     reserve_worker_slot_local(active_worker_count, &state.channel_id, max_workers)
+}
+
+/// Atomically check for duplicate tasks and reserve the task description.
+///
+/// This prevents the TOCTOU race where two concurrent `spawn_worker` calls
+/// both pass a read-only duplicate check before either registers in the
+/// status block. The reservation is held under a write lock on
+/// `reserved_tasks` and checked against both the status block (active
+/// workers) and existing reservations. The caller MUST call
+/// `release_task_reservation` when the worker is registered in the status
+/// block or the spawn fails.
+async fn reserve_task_if_unique(
+    state: &ChannelState,
+    task: &str,
+) -> std::result::Result<(), AgentError> {
+    // Normalize the task for comparison (strip [opencode] prefix).
+    let normalized = task.strip_prefix("[opencode] ").unwrap_or(task).to_string();
+
+    let mut reserved = state.reserved_tasks.write().await;
+
+    // Check existing reservations first (handles concurrent spawns).
+    if reserved.contains(&normalized) {
+        return Err(AgentError::DuplicateWorkerTask {
+            channel_id: state.channel_id.to_string(),
+            existing_worker_id: "pending".to_string(),
+        });
+    }
+
+    // Check the status block for already-running workers.
+    let status = state.status_block.read().await;
+    if let Some(existing_id) = status.find_duplicate_worker_task(task) {
+        return Err(AgentError::DuplicateWorkerTask {
+            channel_id: state.channel_id.to_string(),
+            existing_worker_id: existing_id.to_string(),
+        });
+    }
+    drop(status);
+
+    // Reserve the task.
+    reserved.insert(normalized);
+    Ok(())
+}
+
+/// Release a task reservation after the worker has been registered in the
+/// status block or the spawn failed.
+async fn release_task_reservation(state: &ChannelState, task: &str) {
+    let normalized = task.strip_prefix("[opencode] ").unwrap_or(task).to_string();
+    state.reserved_tasks.write().await.remove(&normalized);
 }
 
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
@@ -332,14 +391,32 @@ pub async fn spawn_worker_from_state(
     suggested_skills: &[&str],
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
-    ensure_dispatch_readiness(state, "worker");
     let task = task.into();
+    reserve_task_if_unique(state, &task).await?;
+    ensure_dispatch_readiness(state, "worker");
 
+    let result = spawn_worker_inner(state, &task, interactive, suggested_skills).await;
+
+    // Release the reservation regardless of success or failure.
+    // On success the task is now in the status block; on failure it needs cleanup.
+    release_task_reservation(state, &task).await;
+
+    result
+}
+
+/// Inner implementation of worker spawning, separated so the caller can
+/// handle task reservation cleanup in a single place.
+async fn spawn_worker_inner(
+    state: &ChannelState,
+    task: &str,
+    interactive: bool,
+    suggested_skills: &[&str],
+) -> std::result::Result<WorkerId, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let temporal_context = TemporalContext::from_runtime(rc.as_ref());
     let worker_task =
-        build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
+        build_worker_task_with_temporal_context(task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let sandbox_enabled = state.deps.sandbox.mode_enabled();
     let sandbox_containment_active = state.deps.sandbox.containment_active();
@@ -383,7 +460,7 @@ pub async fn spawn_worker_from_state(
     };
 
     let worker = if interactive {
-        let (worker, input_tx) = Worker::new_interactive(
+        let (worker, input_tx, inject_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
             &worker_task,
             &system_prompt,
@@ -399,9 +476,14 @@ pub async fn spawn_worker_from_state(
             .write()
             .await
             .insert(worker_id, input_tx);
+        state
+            .worker_injections
+            .write()
+            .await
+            .insert(worker_id, inject_tx);
         worker
     } else {
-        Worker::new(
+        let (worker, inject_tx) = Worker::new(
             Some(state.channel_id.clone()),
             &worker_task,
             &system_prompt,
@@ -410,7 +492,13 @@ pub async fn spawn_worker_from_state(
             state.screenshot_dir.clone(),
             brave_search_key,
             state.logs_dir.clone(),
-        )
+        );
+        state
+            .worker_injections
+            .write()
+            .await
+            .insert(worker.id, inject_tx);
+        worker
     };
 
     let worker_id = worker.id;
@@ -427,6 +515,7 @@ pub async fn spawn_worker_from_state(
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         secrets_store,
+        "builtin",
         worker.run().instrument(worker_span),
     );
 
@@ -434,7 +523,7 @@ pub async fn spawn_worker_from_state(
 
     {
         let mut status = state.status_block.write().await;
-        status.add_worker(worker_id, &task, false, interactive);
+        status.add_worker(worker_id, task, false, interactive);
     }
 
     state
@@ -444,7 +533,7 @@ pub async fn spawn_worker_from_state(
             agent_id: state.deps.agent_id.clone(),
             worker_id,
             channel_id: Some(state.channel_id.clone()),
-            task: task.clone(),
+            task: task.to_string(),
             worker_type: "builtin".into(),
             interactive,
             directory: None,
@@ -474,15 +563,33 @@ pub async fn spawn_opencode_worker_from_state(
     }
 
     check_worker_limit(state).await?;
-    ensure_dispatch_readiness(state, "opencode_worker");
     let task = task.into();
+    reserve_task_if_unique(state, &task).await?;
+    ensure_dispatch_readiness(state, "opencode_worker");
+
+    let result = spawn_opencode_worker_inner(state, &task, directory, interactive).await;
+
+    // Release the reservation regardless of success or failure.
+    release_task_reservation(state, &task).await;
+
+    result
+}
+
+/// Inner implementation of OpenCode worker spawning, separated so the
+/// caller can handle task reservation cleanup in a single place.
+async fn spawn_opencode_worker_inner(
+    state: &ChannelState,
+    task: &str,
+    directory: &str,
+    interactive: bool,
+) -> std::result::Result<crate::WorkerId, AgentError> {
     let directory = expand_tilde(directory);
 
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let temporal_context = TemporalContext::from_runtime(rc.as_ref());
     let worker_task =
-        build_worker_task_with_temporal_context(&task, &temporal_context, &prompt_engine)
+        build_worker_task_with_temporal_context(task, &temporal_context, &prompt_engine)
             .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let opencode_config = rc.opencode.load();
 
@@ -558,6 +665,7 @@ pub async fn spawn_opencode_worker_from_state(
         state.deps.agent_id.clone(),
         Some(state.channel_id.clone()),
         oc_secrets_store,
+        "opencode",
         async move {
             let result = worker.run().await.map_err(SpacebotError::from);
 
@@ -637,6 +745,7 @@ pub(crate) fn spawn_worker_task<F>(
     agent_id: crate::AgentId,
     channel_id: Option<ChannelId>,
     secrets_store: Option<Arc<crate::secrets::store::SecretsStore>>,
+    #[cfg_attr(not(feature = "metrics"), allow(unused_variables))] worker_type: &'static str,
     future: F,
 ) -> tokio::task::JoinHandle<()>
 where
@@ -714,7 +823,7 @@ where
                 .dec();
             metrics
                 .worker_duration_seconds
-                .with_label_values(&[&*agent_id, "builtin"])
+                .with_label_values(&[&*agent_id, worker_type])
                 .observe(worker_start.elapsed().as_secs_f64());
         }
 
@@ -809,6 +918,7 @@ pub async fn resume_idle_worker_into_state(
                 state.deps.agent_id.clone(),
                 Some(state.channel_id.clone()),
                 oc_secrets_store,
+                "opencode",
                 async move {
                     let result = worker.run().await.map_err(SpacebotError::from)?;
                     // Persist final transcript.
@@ -900,7 +1010,7 @@ pub async fn resume_idle_worker_into_state(
                 .map_err(|error| format!("failed to render worker prompt: {error}"))?;
             let brave_search_key = (**rc.brave_search_key.load()).clone();
 
-            let (worker, input_tx) = Worker::resume_interactive(
+            let (worker, input_tx, inject_tx) = Worker::resume_interactive(
                 worker_id,
                 Some(state.channel_id.clone()),
                 &idle_worker.task,
@@ -918,6 +1028,11 @@ pub async fn resume_idle_worker_into_state(
                 .write()
                 .await
                 .insert(worker_id, input_tx);
+            state
+                .worker_injections
+                .write()
+                .await
+                .insert(worker_id, inject_tx);
 
             let worker_span = tracing::info_span!(
                 "worker.resume",
@@ -931,6 +1046,7 @@ pub async fn resume_idle_worker_into_state(
                 state.deps.agent_id.clone(),
                 Some(state.channel_id.clone()),
                 secrets_store,
+                "builtin",
                 worker.run().instrument(worker_span),
             );
 
@@ -1010,6 +1126,7 @@ mod tests {
             Arc::<str>::from("agent"),
             Some(Arc::<str>::from("channel")),
             None,
+            "builtin",
             async {
                 Err::<String, crate::Error>(
                     crate::error::AgentError::Cancelled {
@@ -1055,6 +1172,7 @@ mod tests {
             Arc::<str>::from("agent"),
             Some(channel_id.clone()),
             None,
+            "builtin",
             async { Ok::<String, crate::Error>("result".to_string()) },
         );
 

@@ -205,7 +205,7 @@ Shell and exec commands run inside an OS-level sandbox (bubblewrap on Linux, san
 
 Worker subprocesses also start with a clean environment -- they never inherit the parent's environment variables. System secrets (LLM API keys, messaging tokens) are never visible to workers regardless of sandbox mode. See [Sandbox](/docs/sandbox) for full details.
 
-The `file` tool independently validates paths against the workspace boundary and rejects writes to identity files (`SOUL.md`, `IDENTITY.md`, `USER.md`). The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection regardless of sandbox state.
+The `file` tool independently validates all paths against the workspace boundary. Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) live in the agent root directory (`~/.spacebot/agents/{id}/`), outside the workspace, so they are naturally inaccessible to worker file tools. The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection regardless of sandbox state.
 
 Leak detection (via `SpacebotHook`) scans all tool output for secret patterns (API keys, tokens, PEM keys) and terminates the process if a leak is found. This includes base64-encoded, URL-encoded, and hex-encoded variants.
 

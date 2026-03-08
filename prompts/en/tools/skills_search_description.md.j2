@@ -1,0 +1,11 @@
+Search the skills.sh registry or list installed skills.
+
+Skills extend agent capabilities with domain-specific knowledge (e.g. GitHub CLI usage, AWS operations, PDF processing). Use this tool to:
+
+- **Find skills** for a user's integration needs: `action: "search"`, `query: "github"`
+- **Check what's installed**: `action: "installed"`
+
+When a user asks how to integrate with an external tool or service (GitHub, AWS, npm, Docker, etc.), search for relevant skills and guide them through:
+1. Creating the necessary API token or credential
+2. Adding it as a tool secret (via the dashboard Secrets panel or `spacebot secrets set`)
+3. Installing the matching skill from skills.sh (via the dashboard Skills tab or `spacebot skill add`)

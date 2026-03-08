@@ -187,6 +187,14 @@ pub enum AgentError {
     #[error("max concurrent workers ({max}) reached for channel {channel_id}")]
     WorkerLimitReached { channel_id: String, max: usize },
 
+    #[error(
+        "duplicate worker task on channel {channel_id}: worker {existing_worker_id} is already running this task"
+    )]
+    DuplicateWorkerTask {
+        channel_id: String,
+        existing_worker_id: String,
+    },
+
     #[error("worker state transition failed: {0}")]
     InvalidStateTransition(String),
 

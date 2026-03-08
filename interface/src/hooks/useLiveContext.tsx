@@ -254,6 +254,12 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 		bumpWorkerVersion();
 	}, [bumpWorkerVersion]);
 
+	const handleCortexChatMessage = useCallback((data: unknown) => {
+		// Forward cortex chat auto-triggered messages to any listening useCortexChat hooks
+		// via a DOM custom event. This avoids coupling useLiveContext to cortex chat state.
+		window.dispatchEvent(new CustomEvent("cortex-chat-message", { detail: data }));
+	}, []);
+
 	// Merge channel handlers with agent message + task handlers
 	const handlers = useMemo(
 		() => ({
@@ -269,8 +275,9 @@ export function LiveContextProvider({ children }: { children: ReactNode }) {
 			agent_message_sent: handleAgentMessage,
 			agent_message_received: handleAgentMessage,
 			task_updated: bumpTaskVersion,
+			cortex_chat_message: handleCortexChatMessage,
 		}),
-		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleWorkerText, handleAgentMessage, bumpTaskVersion],
+		[channelHandlers, wrappedWorkerStarted, wrappedWorkerStatus, wrappedWorkerIdle, wrappedWorkerCompleted, wrappedToolStarted, wrappedToolCompleted, handleOpenCodePartUpdated, handleWorkerText, handleAgentMessage, bumpTaskVersion, handleCortexChatMessage],
 	);
 
 	const onReconnect = useCallback(() => {

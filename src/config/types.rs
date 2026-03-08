@@ -104,6 +104,19 @@ pub struct HumanDef {
     pub role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bio: Option<String>,
+    /// Rich long-form context about this person, loaded from HUMAN.md on disk.
+    /// Not stored in config.toml — lives at `instance_dir/humans/{id}/HUMAN.md`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Platform user IDs for correlating inbound messages to this human.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub discord_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub telegram_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub slack_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
 }
 
 /// A visual group definition for the topology UI.
@@ -1029,6 +1042,10 @@ pub struct AgentConfig {
     pub display_name: Option<String>,
     /// User-defined role description (e.g. "handles tier 1 support").
     pub role: Option<String>,
+    /// Custom gradient start color (CSS color string, e.g. "hsl(260, 70%, 55%)").
+    pub gradient_start: Option<String>,
+    /// Custom gradient end color.
+    pub gradient_end: Option<String>,
     /// Custom workspace path. If None, resolved to instance_dir/agents/{id}/workspace.
     pub workspace: Option<PathBuf>,
     /// Per-agent routing overrides. None inherits from defaults.
@@ -1087,7 +1104,12 @@ pub struct ResolvedAgentConfig {
     pub id: String,
     pub display_name: Option<String>,
     pub role: Option<String>,
+    pub gradient_start: Option<String>,
+    pub gradient_end: Option<String>,
     pub workspace: PathBuf,
+    /// Agent root directory (parent of workspace). Identity files (SOUL.md,
+    /// IDENTITY.md, ROLE.md) live here — outside the workspace sandbox.
+    pub identity_dir: PathBuf,
     pub data_dir: PathBuf,
     pub archives_dir: PathBuf,
     pub routing: RoutingConfig,
@@ -1167,10 +1189,13 @@ impl AgentConfig {
             id: self.id.clone(),
             display_name: self.display_name.clone(),
             role: self.role.clone(),
+            gradient_start: self.gradient_start.clone(),
+            gradient_end: self.gradient_end.clone(),
             workspace: self
                 .workspace
                 .clone()
                 .unwrap_or_else(|| agent_root.join("workspace")),
+            identity_dir: agent_root.clone(),
             data_dir: agent_root.join("data"),
             archives_dir: agent_root.join("archives"),
             routing: self

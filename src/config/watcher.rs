@@ -6,6 +6,16 @@ use super::{
     TwitchPermissions, binding_runtime_adapter_key,
 };
 
+/// Per-agent context needed by the file watcher: (id, prompt_dir, identity_dir,
+/// runtime_config, mcp_manager).
+type WatchedAgent = (
+    String,
+    PathBuf,
+    PathBuf,
+    Arc<RuntimeConfig>,
+    Arc<crate::mcp::McpManager>,
+);
+
 /// Watches config, prompt, identity, and skill files for changes and triggers
 /// hot reload on the corresponding RuntimeConfig.
 ///
@@ -16,12 +26,7 @@ use super::{
 pub fn spawn_file_watcher(
     config_path: PathBuf,
     instance_dir: PathBuf,
-    agents: Vec<(
-        String,
-        PathBuf,
-        Arc<RuntimeConfig>,
-        Arc<crate::mcp::McpManager>,
-    )>,
+    agents: Vec<WatchedAgent>,
     discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
@@ -30,6 +35,7 @@ pub fn spawn_file_watcher(
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
     agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
+    agent_humans: Arc<arc_swap::ArcSwap<Vec<crate::config::HumanDef>>>,
 ) -> tokio::task::JoinHandle<()> {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
@@ -77,19 +83,21 @@ pub fn spawn_file_watcher(
             tracing::warn!(%error, path = %instance_skills_dir.display(), "failed to watch instance skills dir");
         }
 
-        // Watch per-agent workspace directories (skills, identity)
-        for (_, workspace, _, _) in &agents {
+        // Watch per-agent directories
+        for (_, workspace, identity_dir, _, _) in &agents {
+            // Watch workspace/skills for skill file changes
             {
                 let path = workspace.join("skills");
                 if path.is_dir()
                     && let Err(error) = watcher.watch(&path, RecursiveMode::Recursive)
                 {
-                    tracing::warn!(%error, path = %path.display(), "failed to watch agent dir");
+                    tracing::warn!(%error, path = %path.display(), "failed to watch agent skills dir");
                 }
             }
-            // Identity files are in the workspace root
-            if let Err(error) = watcher.watch(workspace, RecursiveMode::NonRecursive) {
-                tracing::warn!(%error, path = %workspace.display(), "failed to watch workspace");
+            // Watch the agent root (identity_dir) for SOUL.md/IDENTITY.md/ROLE.md changes.
+            // Identity files live outside the workspace, in the agent root directory.
+            if let Err(error) = watcher.watch(identity_dir, RecursiveMode::NonRecursive) {
+                tracing::warn!(%error, path = %identity_dir.display(), "failed to watch identity dir");
             }
         }
 
@@ -119,7 +127,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "USER.md" | "ROLE.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md")
             });
             let skills_changed = changed_paths
                 .iter()
@@ -194,6 +202,9 @@ pub fn spawn_file_watcher(
                         tracing::error!(%error, "failed to parse links from reloaded config");
                     }
                 }
+
+                agent_humans.store(Arc::new(config.humans.clone()));
+                tracing::info!("agent humans reloaded ({} entries)", config.humans.len());
 
                 if let Some(ref perms) = discord_permissions
                     && let Some(discord_config) = &config.messaging.discord
@@ -525,7 +536,7 @@ pub fn spawn_file_watcher(
             }
 
             // Apply reloads to each agent's RuntimeConfig
-            for (agent_id, workspace, runtime_config, mcp_manager) in &agents {
+            for (agent_id, workspace, identity_dir, runtime_config, mcp_manager) in &agents {
                 if let Some(config) = &new_config {
                     let rt = tokio::runtime::Handle::current();
                     rt.block_on(runtime_config.reload_config(config, agent_id, mcp_manager));
@@ -533,7 +544,7 @@ pub fn spawn_file_watcher(
 
                 if identity_changed {
                     let rt = tokio::runtime::Handle::current();
-                    let identity = rt.block_on(crate::identity::Identity::load(workspace));
+                    let identity = rt.block_on(crate::identity::Identity::load(identity_dir));
                     runtime_config.reload_identity(identity);
                 }
 

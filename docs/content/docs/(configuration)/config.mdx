@@ -284,7 +284,7 @@ A file watcher (via the `notify` crate) monitors:
 
 - `~/.spacebot/config.toml`
 - `~/.spacebot/skills/` (instance-level skills)
-- Each agent's `workspace/` (identity files: SOUL.md, IDENTITY.md, USER.md)
+- Each agent's root directory (identity files: SOUL.md, IDENTITY.md, ROLE.md)
 - Each agent's `workspace/skills/` (workspace-level skills)
 
 On file change, Spacebot re-reads the changed files and atomically swaps the new values into the live `RuntimeConfig` using `arc-swap`. All consumers (channels, branches, workers, compactors, cron jobs) read from `RuntimeConfig` on every use, so they pick up changes immediately.
@@ -315,10 +315,10 @@ System prompts (channel, branch, worker, compactor, cortex, etc.) are Jinja2 tem
 │       └── SKILL.md
 └── agents/
     └── main/
-        ├── workspace/             # agent workspace
-        │   ├── SOUL.md            # personality (hot-reloaded)
-        │   ├── IDENTITY.md        # name and nature (hot-reloaded)
-        │   ├── USER.md            # info about the human (hot-reloaded)
+        ├── SOUL.md                # personality (hot-reloaded)
+        ├── IDENTITY.md            # name and nature (hot-reloaded)
+        ├── ROLE.md                # responsibilities, scope (hot-reloaded)
+        ├── workspace/             # sandbox boundary for worker file tools
         │   ├── skills/            # workspace-level skills (hot-reloaded)
         │   └── ingest/            # drop files here for memory ingestion
         ├── data/

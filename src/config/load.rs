@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 /// - `secret:NAME` — look up from the secrets store (if available).
 /// - `env:VAR_NAME` — read from system environment variable.
 /// - Anything else — literal value.
-pub(super) fn resolve_env_value(value: &str) -> Option<String> {
+pub(crate) fn resolve_env_value(value: &str) -> Option<String> {
     if let Some(alias) = value.strip_prefix("secret:") {
         let guard = RESOLVE_SECRETS_STORE.load();
         match (*guard).as_ref() {
@@ -793,6 +793,8 @@ impl Config {
             default: true,
             display_name: None,
             role: None,
+            gradient_start: None,
+            gradient_end: None,
             workspace: None,
             routing: Some(routing),
             max_concurrent_branches: None,
@@ -828,13 +830,23 @@ impl Config {
             llm,
             defaults,
             agents,
-            links: Vec::new(),
+            links: vec![LinkDef {
+                from: "admin".into(),
+                to: "main".into(),
+                direction: "one_way".into(),
+                kind: "hierarchical".into(),
+            }],
             groups: Vec::new(),
             humans: vec![HumanDef {
                 id: "admin".into(),
                 display_name: None,
                 role: None,
                 bio: None,
+                description: load_human_md(&instance_dir.join("humans").join("admin")),
+                discord_id: None,
+                telegram_id: None,
+                slack_id: None,
+                email: None,
             }],
             messaging: MessagingConfig::default(),
             bindings: Vec::new(),
@@ -1580,6 +1592,8 @@ impl Config {
                     default: a.default,
                     display_name: a.display_name,
                     role: a.role,
+                    gradient_start: a.gradient_start,
+                    gradient_end: a.gradient_end,
                     workspace: a.workspace.map(PathBuf::from),
                     routing: agent_routing,
                     max_concurrent_branches: a.max_concurrent_branches,
@@ -1708,6 +1722,8 @@ impl Config {
                 default: true,
                 display_name: None,
                 role: None,
+                gradient_start: None,
+                gradient_end: None,
                 workspace: None,
                 routing: None,
                 max_concurrent_branches: None,
@@ -2160,7 +2176,7 @@ impl Config {
             }
         };
 
-        let links = toml
+        let mut links: Vec<LinkDef> = toml
             .links
             .into_iter()
             .map(|l| {
@@ -2189,25 +2205,53 @@ impl Config {
             })
             .collect();
 
+        let humans_dir = instance_dir.join("humans");
         let mut humans: Vec<HumanDef> = toml
             .humans
             .into_iter()
-            .map(|h| HumanDef {
-                id: h.id,
-                display_name: h.display_name,
-                role: h.role,
-                bio: h.bio,
+            .map(|h| {
+                let description = load_human_md(&humans_dir.join(&h.id));
+                HumanDef {
+                    id: h.id,
+                    display_name: h.display_name,
+                    role: h.role,
+                    bio: h.bio,
+                    description,
+                    discord_id: h.discord_id,
+                    telegram_id: h.telegram_id,
+                    slack_id: h.slack_id,
+                    email: h.email,
+                }
             })
             .collect();
 
         // Default admin human if none defined
         if humans.is_empty() {
+            let description = load_human_md(&humans_dir.join("admin"));
             humans.push(HumanDef {
                 id: "admin".into(),
                 display_name: None,
                 role: None,
                 bio: None,
+                description,
+                discord_id: None,
+                telegram_id: None,
+                slack_id: None,
+                email: None,
             });
+
+            // Link the default admin to the default agent so the agent sees
+            // the human's context in its system prompt automatically.
+            if links.is_empty()
+                && let Some(default_agent) = agents.iter().find(|a| a.default)
+            {
+                links.push(LinkDef {
+                    from: "admin".into(),
+                    to: default_agent.id.clone(),
+                    direction: "one_way".into(),
+                    kind: "hierarchical".into(),
+                });
+            }
         }
 
         Ok(Config {
@@ -2224,5 +2268,15 @@ impl Config {
             metrics,
             telemetry,
         })
+    }
+}
+
+/// Load `HUMAN.md` from a human's directory, returning `None` if the file
+/// doesn't exist or is empty/whitespace.
+fn load_human_md(human_dir: &std::path::Path) -> Option<String> {
+    let path = human_dir.join("HUMAN.md");
+    match std::fs::read_to_string(&path) {
+        Ok(content) if !content.trim().is_empty() => Some(content),
+        _ => None,
     }
 }

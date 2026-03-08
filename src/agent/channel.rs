@@ -90,6 +90,16 @@ pub struct ChannelState {
     /// Input senders for interactive workers, keyed by worker ID.
     /// Used by the route tool to deliver follow-up messages.
     pub worker_inputs: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
+    /// Injection senders for all workers, keyed by worker ID.
+    /// Used by the route tool to deliver addendum context to running workers
+    /// without requiring the worker to be interactive.
+    pub worker_injections: Arc<RwLock<HashMap<WorkerId, tokio::sync::mpsc::Sender<String>>>>,
+    /// Task descriptions reserved for spawn. Prevents the TOCTOU race where
+    /// two concurrent `spawn_worker` calls both pass `check_duplicate_task`
+    /// before either registers in the status block. Reservations are
+    /// claimed under a write lock before any async spawn work and released
+    /// when the worker is registered in the status block or the spawn fails.
+    pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -129,6 +139,7 @@ impl ChannelState {
             .await
             .remove(&worker_id)
             .is_some();
+        self.worker_injections.write().await.remove(&worker_id);
         let removed_status = self.status_block.write().await.remove_worker(worker_id);
         let should_emit = removed || handle.is_some();
 
@@ -359,6 +370,26 @@ pub struct Channel {
     control_handle: ChannelControlHandle,
 }
 
+/// RAII guard that records `message_handling_duration_seconds` when dropped,
+/// ensuring the metric is observed on every exit path (including early returns
+/// and `?` error propagation).
+#[cfg(feature = "metrics")]
+struct MessageDurationGuard {
+    agent_id: String,
+    channel_type: String,
+    start: std::time::Instant,
+}
+
+#[cfg(feature = "metrics")]
+impl Drop for MessageDurationGuard {
+    fn drop(&mut self) {
+        crate::telemetry::Metrics::global()
+            .message_handling_duration_seconds
+            .with_label_values(&[&self.agent_id, &self.channel_type])
+            .observe(self.start.elapsed().as_secs_f64());
+    }
+}
+
 impl Channel {
     /// Create a new channel.
     ///
@@ -400,6 +431,8 @@ impl Channel {
             active_workers: active_workers.clone(),
             worker_handles: Arc::new(RwLock::new(HashMap::new())),
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
+            worker_injections: Arc::new(RwLock::new(HashMap::new())),
+            reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
@@ -732,19 +765,38 @@ impl Channel {
     }
 
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
-        if let Err(error) = self
+        match self
             .response_tx
             .send(OutboundResponse::Text(text.clone()))
             .await
         {
-            tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
-            return;
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+                self.state.conversation_logger.log_bot_message_with_name(
+                    &self.state.channel_id,
+                    &text,
+                    Some(self.agent_display_name()),
+                );
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
+            }
         }
-        self.state.conversation_logger.log_bot_message_with_name(
-            &self.state.channel_id,
-            &text,
-            Some(self.agent_display_name()),
-        );
     }
 
     async fn try_handle_builtin_ops_commands(
@@ -1098,6 +1150,32 @@ impl Channel {
             "handling batched messages"
         );
 
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = messages
+            .iter()
+            .find(|m| m.source != "system")
+            .map(|m| m.source.clone())
+            .or_else(|| self.current_adapter().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(feature = "metrics")]
+        let _duration_guard = MessageDurationGuard {
+            agent_id: self.deps.agent_id.to_string(),
+            channel_type: metrics_channel_type.clone(),
+            start: std::time::Instant::now(),
+        };
+
+        // Increment messages_received_total for each non-system message in the batch
+        #[cfg(feature = "metrics")]
+        {
+            let received_count = messages.iter().filter(|m| m.source != "system").count() as u64;
+            if received_count > 0 {
+                crate::telemetry::Metrics::global()
+                    .messages_received_total
+                    .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
+                    .inc_by(received_count);
+            }
+        }
+
         // Count unique senders for the hint
         let unique_senders: std::collections::HashSet<_> =
             messages.iter().map(|m| &m.sender_id).collect();
@@ -1365,10 +1443,12 @@ impl Channel {
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let sandbox_enabled = self.deps.sandbox.containment_active();
+        let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            &mcp_tool_names,
         )?;
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
@@ -1427,6 +1507,29 @@ impl Channel {
             message_id = %message.id,
             "handling message"
         );
+
+        #[cfg(feature = "metrics")]
+        let _duration_guard = {
+            let channel_type = if message.source != "system" {
+                message.source.clone()
+            } else {
+                self.current_adapter().unwrap_or("unknown").to_string()
+            };
+            MessageDurationGuard {
+                agent_id: self.deps.agent_id.to_string(),
+                channel_type,
+                start: std::time::Instant::now(),
+            }
+        };
+
+        // Increment messages_received_total for non-system messages
+        #[cfg(feature = "metrics")]
+        if message.source != "system" {
+            crate::telemetry::Metrics::global()
+                .messages_received_total
+                .with_label_values(&[&self.deps.agent_id, &message.source])
+                .inc();
+        }
 
         // Track conversation_id for synthetic re-trigger messages
         if self.conversation_id.is_none() {
@@ -1792,6 +1895,12 @@ impl Channel {
             return None;
         }
 
+        // Build a lookup map for humans so we can surface display names,
+        // roles, and descriptions in the org context prompt.
+        let all_humans = self.deps.humans.load();
+        let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+            all_humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
         let mut superiors = Vec::new();
         let mut subordinates = Vec::new();
         let mut peers = Vec::new();
@@ -1804,18 +1913,33 @@ impl Channel {
                 &link.from_agent_id
             };
 
-            let is_human = !self.deps.agent_names.contains_key(other_id.as_str());
-            let name = self
-                .deps
-                .agent_names
-                .get(other_id.as_str())
-                .cloned()
-                .unwrap_or_else(|| other_id.clone());
+            let is_human = humans_by_id.contains_key(other_id.as_str());
+
+            let (name, role, description) = if let Some(human) = humans_by_id.get(other_id.as_str())
+            {
+                // Human node — use display_name, role, and description from HumanDef
+                let name = human
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone(), human.description.clone())
+            } else {
+                // Agent node — use agent display name, no role/description
+                let name = self
+                    .deps
+                    .agent_names
+                    .get(other_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, None, None)
+            };
 
             let info = crate::prompts::engine::LinkedAgent {
                 name,
                 id: other_id.clone(),
                 is_human,
+                role,
+                description,
             };
 
             match link.kind {
@@ -1956,10 +2080,12 @@ impl Channel {
         let web_search_enabled = rc.brave_search_key.load().is_some();
         let opencode_enabled = rc.opencode.load().enabled;
         let sandbox_enabled = self.deps.sandbox.containment_active();
+        let mcp_tool_names = self.deps.mcp_manager.get_tool_names().await;
         let worker_capabilities = prompt_engine.render_worker_capabilities(
             browser_enabled,
             web_search_enabled,
             opencode_enabled,
+            &mcp_tool_names,
         )?;
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
@@ -2158,6 +2284,33 @@ impl Channel {
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
+    /// Send outbound text and record send metrics.
+    async fn send_outbound_text(&self, text: String, error_context: &str) {
+        match self.response_tx.send(OutboundResponse::Text(text)).await {
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, "{error_context}");
+            }
+        }
+    }
+
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
     ///
     /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed
@@ -2172,6 +2325,13 @@ impl Channel {
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
     ) {
+        #[cfg(feature = "metrics")]
+        let metrics = crate::telemetry::Metrics::global();
+        #[cfg(feature = "metrics")]
+        let metrics_agent_id: &str = &self.deps.agent_id;
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = self.current_adapter().unwrap_or("unknown");
+
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -2226,13 +2386,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2244,6 +2402,11 @@ impl Channel {
                 } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
                 } else if is_retrigger {
                     // On retrigger turns the LLM should use the reply tool, but
@@ -2288,13 +2451,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2346,13 +2507,8 @@ impl Channel {
                                 &final_text,
                                 Some(self.agent_display_name()),
                             );
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundResponse::Text(final_text))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
-                            }
+                            self.send_outbound_text(final_text, "failed to send fallback reply")
+                                .await;
                         }
                     }
 
@@ -2360,16 +2516,31 @@ impl Channel {
                 }
             }
             Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "max_turns"])
+                    .inc();
                 tracing::warn!(channel_id = %self.id, "channel hit max turns");
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
                 } else {
                     tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
                 }
             }
             Err(error) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "llm_error"])
+                    .inc();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
@@ -2526,6 +2697,7 @@ impl Channel {
 
                 self.state.active_workers.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
+                self.state.worker_injections.write().await.remove(worker_id);
 
                 if *notify {
                     // Accumulate result for the next retrigger instead of

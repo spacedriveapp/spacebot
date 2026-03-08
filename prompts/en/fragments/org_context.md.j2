@@ -7,7 +7,12 @@ You are part of a multi-agent system. Here is your position:
 **Reports to:**
 {% for entry in org_context.superiors -%}
 {% if entry.is_human -%}
-- **{{ entry.name }}** (human) — your human superior. Treat their requests with highest priority.
+- **{{ entry.name }}** (human){% if entry.role %} — {{ entry.role }}{% endif %}. Your human superior. Treat their requests with highest priority.
+{% if entry.description %}
+<context name="org-description" source="{{ entry.name }}">
+{{ entry.description }}
+</context>
+{% endif -%}
 {% else -%}
 - **{{ entry.name }}** — your superior. Tasks from this agent carry organizational authority.
 {% endif -%}
@@ -18,7 +23,12 @@ You are part of a multi-agent system. Here is your position:
 **Direct reports:**
 {% for entry in org_context.subordinates -%}
 {% if entry.is_human -%}
-- **{{ entry.name }}** (human) — reports to you.
+- **{{ entry.name }}** (human){% if entry.role %} — {{ entry.role }}{% endif %}. Reports to you.
+{% if entry.description %}
+<context name="org-description" source="{{ entry.name }}">
+{{ entry.description }}
+</context>
+{% endif -%}
 {% else -%}
 - **{{ entry.name }}** — reports to you. You can delegate tasks, request status, and send directives.
 {% endif -%}
@@ -29,7 +39,12 @@ You are part of a multi-agent system. Here is your position:
 **Peers:**
 {% for entry in org_context.peers -%}
 {% if entry.is_human -%}
-- **{{ entry.name }}** (human) — human peer. Communication is collaborative.
+- **{{ entry.name }}** (human){% if entry.role %} — {{ entry.role }}{% endif %}. Communication is collaborative.
+{% if entry.description %}
+<context name="org-description" source="{{ entry.name }}">
+{{ entry.description }}
+</context>
+{% endif -%}
 {% else -%}
 - **{{ entry.name }}** — equal peer. Communication is collaborative and informational.
 {% endif -%}

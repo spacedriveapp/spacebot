@@ -121,6 +121,7 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         sandbox,
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
+        humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
             std::collections::HashMap::new(),
         )),
@@ -181,7 +182,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
     let web_search_enabled = rc.brave_search_key.load().is_some();
     let opencode_enabled = rc.opencode.load().enabled;
     let worker_capabilities = prompt_engine
-        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled)
+        .render_worker_capabilities(browser_enabled, web_search_enabled, opencode_enabled, &[])
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
@@ -233,6 +234,8 @@ async fn dump_channel_context() {
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         status_block,
         deps: deps.clone(),
         conversation_logger,
@@ -460,6 +463,8 @@ async fn dump_all_contexts() {
         worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
             spacebot::agent::status::StatusBlock::new(),
         )),
@@ -694,8 +699,8 @@ async fn dump_all_contexts() {
         }
     );
     println!(
-        "  USER.md:     {}",
-        if identity.user.is_some() {
+        "  ROLE.md:     {}",
+        if identity.role.is_some() {
             "loaded"
         } else {
             "empty"

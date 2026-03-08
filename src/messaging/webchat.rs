@@ -5,6 +5,7 @@
 //! and outbound responses are delivered through the global SSE event bus — the same
 //! path used by all other channels. No per-session SSE streams or dedup needed.
 
+use crate::api::ApiEvent;
 use crate::conversation::ConversationLogger;
 use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging};
 use crate::{InboundMessage, OutboundResponse};
@@ -13,11 +14,15 @@ use anyhow::Context as _;
 use sqlx::SqlitePool;
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Web chat adapter. Inbound arrives via `inject_message`, outbound is handled
 /// by the global SSE event bus in `main.rs`.
 pub struct WebChatAdapter {
     conversation_loggers: HashMap<String, ConversationLogger>,
+    /// SSE event bus for delivering broadcast messages (cron, etc.) to the
+    /// portal frontend. Set after construction via `set_event_tx`.
+    event_tx: std::sync::RwLock<Option<broadcast::Sender<ApiEvent>>>,
 }
 
 impl Default for WebChatAdapter {
@@ -34,7 +39,14 @@ impl WebChatAdapter {
             .collect();
         Self {
             conversation_loggers,
+            event_tx: std::sync::RwLock::new(None),
         }
+    }
+
+    /// Provide the SSE event bus sender so `broadcast` can push messages to
+    /// connected portal clients.
+    pub fn set_event_tx(&self, tx: broadcast::Sender<ApiEvent>) {
+        *self.event_tx.write().unwrap() = Some(tx);
     }
 }
 
@@ -58,6 +70,35 @@ impl Messaging for WebChatAdapter {
         // The webchat adapter itself doesn't need to do anything — the API events
         // stream already pushes outbound_message events to all connected clients,
         // and the portal chat UI consumes the same timeline as regular channels.
+        Ok(())
+    }
+
+    async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        let text = match &response {
+            OutboundResponse::Text(text) => text.clone(),
+            OutboundResponse::RichMessage { text, .. } => text.clone(),
+            _ => return Ok(()),
+        };
+
+        // Target format is the full conversation_id: "portal:chat:{agent_id}"
+        let agent_id = target
+            .strip_prefix("portal:chat:")
+            .context("webchat broadcast target must be in 'portal:chat:{agent_id}' format")?;
+
+        let tx = self
+            .event_tx
+            .read()
+            .unwrap()
+            .clone()
+            .context("webchat event_tx not configured")?;
+
+        tx.send(ApiEvent::OutboundMessage {
+            agent_id: agent_id.to_string(),
+            channel_id: target.to_string(),
+            text,
+        })
+        .ok();
+
         Ok(())
     }
 

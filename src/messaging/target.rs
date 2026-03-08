@@ -141,6 +141,8 @@ fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "telegram" => normalize_telegram_target(trimmed),
         "twitch" => normalize_twitch_target(trimmed),
         "email" => normalize_email_target(trimmed),
+        // Webchat targets are full conversation IDs (e.g. "portal:chat:main")
+        "webchat" => Some(trimmed.to_string()),
         _ => Some(trimmed.to_string()),
     }
 }

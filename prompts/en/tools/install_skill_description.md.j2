@@ -1,0 +1,8 @@
+Install a skill from skills.sh into the agent's workspace.
+
+Use `skills_search` first to find the right skill, then call this tool with the `source` field from the search results to install it. The skill becomes immediately available to workers.
+
+Example flow:
+1. `skills_search(action="search", query="github")` → finds `anthropics/skills/github`
+2. `install_skill(source="anthropics/skills/github")` → installs to workspace
+3. `skills_search(action="installed")` → verify it's there

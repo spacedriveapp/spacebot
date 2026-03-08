@@ -1,0 +1,9 @@
+id = "customer-support"
+name = "Customer Support"
+description = "Handles support tickets, triages issues, provides solutions, and escalates when needed. Patient, precise, and empathetic."
+icon = "headset"
+tags = ["support", "tickets", "helpdesk", "email", "escalation"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 6

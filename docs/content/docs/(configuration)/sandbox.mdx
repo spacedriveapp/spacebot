@@ -86,7 +86,7 @@ When the sandbox is enabled, the subprocess sees:
 | `/dev` | Read-write | Standard device nodes |
 | Agent data directory | **No access** | Masked/denied to protect databases and config |
 
-The data directory protection is important: even if the data directory overlaps with workspace-related paths, it's explicitly blocked. Workers can't read or modify databases, config files, or identity files at the kernel level.
+The data directory protection is important: even if the data directory overlaps with workspace-related paths, it's explicitly blocked. Workers can't read or modify databases or config files at the kernel level. Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) live in the agent root directory, outside the workspace entirely, so they are naturally inaccessible to workers without needing kernel-level protection.
 
 ## Environment Sanitization
 

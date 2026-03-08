@@ -412,7 +412,7 @@ src/
 
 **The compactor is not an LLM.** It's a programmatic monitor that watches a number and spawns workers. The LLM work happens in the workers it spawns.
 
-**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, USER.md, ROLE.md) are loaded from the agent's workspace directory.
+**Prompts are files.** System prompts live in `prompts/` as Jinja2 templates, not as string constants in Rust code. Identity files (SOUL.md, IDENTITY.md, ROLE.md) live in the agent root directory — outside the workspace sandbox — so worker file tools cannot access them.
 
 **Three databases, three purposes.** SQLite for relational queries, LanceDB for vector search, redb for key-value config. Each doing what it's best at.
 

@@ -92,7 +92,7 @@ Four separate tools for file operations:
 - `file_edit` — Edit a file by replacing exact text: provide `path`, `old_string`, and `new_string`. Use `file_read` first to see the exact text. Set `replace_all: true` for multiple occurrences.
 - `file_list` — List directory contents with names, types, and sizes.
 
-Path restrictions apply: you cannot write to identity files (SOUL.md, IDENTITY.md, USER.md) or memory storage paths. Use the appropriate system tools for those.
+Path restrictions apply: identity files (SOUL.md, IDENTITY.md, ROLE.md) live outside the workspace and are not accessible through file tools. Use the appropriate system tools for those.
 
 ### Browser tools (browser_*)
 

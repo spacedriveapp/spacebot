@@ -1,1 +1,11 @@
-Manage scheduled tasks (cron jobs). Use this to create, list, or delete cron jobs. **Prefer `cron_expr`** (5-field wall-clock cron) for scheduling — it gives wall-clock precision (e.g. `0 9 * * *` for daily at 09:00, `*/15 * * * *` for every 15 minutes). Use `interval_secs` only for fixed-duration cadences that 5-field cron cannot express (e.g. every 90 minutes). `interval_secs` is a legacy fallback that may drift relative to wall-clock boundaries. A cron job runs a prompt and delivers the result to a messaging channel. Use `run_once: true` for one-time reminders; otherwise jobs are recurring.
+Manage scheduled tasks (cron jobs). Actions: `create`, `list`, `delete`.
+
+**Scheduling:** Always use `cron_expr` (5-field cron syntax) for wall-clock schedules. `interval_secs` is a legacy fallback that drifts — only use it for cadences cron can't express (e.g. every 90 minutes).
+
+**Prompts:** Write the prompt as a complete instruction the agent can execute without context. The cron channel has no conversation history — each run starts fresh. Be specific: "Check the status of PR #42 on spacedrive/spacedrive and report whether CI passed" not "check on things".
+
+**Delivery:** Results are sent to a messaging channel. The `delivery_target` defaults to the current conversation. Format: `adapter:target` (e.g. `discord:123456789`, `telegram:-1001234`, `slack:C012345`).
+
+**One-shot:** Set `run_once: true` for reminders or one-time tasks. The job disables itself after the first run.
+
+**Active hours:** Use `active_start_hour`/`active_end_hour` to restrict runs to a time window (e.g. business hours only).

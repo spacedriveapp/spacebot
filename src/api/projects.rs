@@ -356,43 +356,51 @@ pub(super) async fn create_project(
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    // Auto-discover repos and worktrees if requested.
+    // Refresh sandbox allowlist with new project path.
+    refresh_sandbox(&state, &request.agent_id).await;
+
+    // Auto-discover repos, worktrees, and disk usage in the background so the
+    // API responds immediately. The UI will pick up discovered repos on its
+    // next query invalidation / refetch.
     if request.auto_discover {
         let root = std::path::PathBuf::from(&request.root_path);
         if root.is_dir() {
-            match crate::projects::git::discover_repos(&root).await {
-                Ok(discovered) => {
-                    for repo in discovered {
-                        if let Err(error) = store
-                            .create_repo(CreateRepoInput {
-                                project_id: project.id.clone(),
-                                name: repo.name,
-                                path: repo.relative_path,
-                                remote_url: repo.remote_url,
-                                default_branch: repo.default_branch,
-                                current_branch: repo.current_branch,
-                                description: String::new(),
-                            })
-                            .await
-                        {
-                            tracing::warn!(%error, "failed to register discovered repo");
+            let store = store.clone();
+            let project_id = project.id.clone();
+            tokio::spawn(async move {
+                match crate::projects::git::discover_repos(&root).await {
+                    Ok(discovered) => {
+                        for repo in discovered {
+                            if let Err(error) = store
+                                .create_repo(CreateRepoInput {
+                                    project_id: project_id.clone(),
+                                    name: repo.name,
+                                    path: repo.relative_path,
+                                    remote_url: repo.remote_url,
+                                    default_branch: repo.default_branch,
+                                    current_branch: repo.current_branch,
+                                    description: String::new(),
+                                })
+                                .await
+                            {
+                                tracing::warn!(%error, "failed to register discovered repo");
+                            }
                         }
                     }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to discover repos in project root");
+                    }
                 }
-                Err(error) => {
-                    tracing::warn!(%error, "failed to discover repos in project root");
-                }
-            }
 
-            // Discover worktrees for all registered repos.
-            discover_and_register_worktrees(store, &project.id, &root).await;
+                discover_and_register_worktrees(&store, &project_id, &root).await;
+                compute_and_cache_disk_usage(&store, &project_id, &root).await;
 
-            // Compute and cache disk usage for repos and worktrees.
-            compute_and_cache_disk_usage(store, &project.id, &root).await;
+                tracing::info!(project_id = %project_id, "background project scan complete");
+            });
         }
     }
 
-    // Reload with relations.
+    // Return the project immediately (repos/worktrees populate asynchronously).
     let full = store
         .get_project_with_relations(&request.agent_id, &project.id)
         .await
@@ -401,9 +409,6 @@ pub(super) async fn create_project(
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
-
-    // Refresh sandbox allowlist with new project path.
-    refresh_sandbox(&state, &request.agent_id).await;
 
     Ok(Json(ProjectResponse { project: full }))
 }

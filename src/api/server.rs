@@ -2,9 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, ingest, links, mcp, memories, messaging,
-    models, opencode_proxy, projects, providers, secrets, settings, skills, system, tasks, tools,
-    webchat, workers,
+    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
+    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, system,
+    tasks, tools, webchat, workers,
 };
 
 use axum::Json;
@@ -107,8 +107,19 @@ pub async fn start_http_server(
         )
         .route("/cortex/events", get(cortex::cortex_events))
         .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
+        .route("/cortex-chat/threads", get(cortex::cortex_chat_threads))
+        .route(
+            "/cortex-chat/thread",
+            delete(cortex::cortex_chat_delete_thread),
+        )
         .route("/cortex-chat/send", post(cortex::cortex_chat_send))
         .route("/agents/profile", get(agents::get_agent_profile))
+        .route(
+            "/agents/avatar",
+            get(agents::get_avatar)
+                .post(agents::upload_avatar)
+                .delete(agents::delete_avatar),
+        )
         .route(
             "/agents/identity",
             get(agents::get_identity).put(agents::update_identity),
@@ -265,11 +276,17 @@ pub async fn start_http_server(
             "/humans/{id}",
             put(links::update_human).delete(links::delete_human),
         )
+        // Factory: preset archetypes
+        .route("/factory/presets", get(factory::list_presets))
+        .route("/factory/presets/{id}", get(factory::get_preset))
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,
         ));
+
+    #[cfg(feature = "metrics")]
+    let api_routes = api_routes.layer(middleware::from_fn(metrics_middleware));
 
     let app = Router::new()
         .nest("/api", api_routes)
@@ -326,6 +343,96 @@ async fn api_auth_middleware(
         )
             .into_response()
     }
+}
+
+#[cfg(feature = "metrics")]
+async fn metrics_middleware(request: Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = normalize_api_path(request.uri().path());
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let duration = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+    let metrics = crate::telemetry::Metrics::global();
+    metrics
+        .http_requests_total
+        .with_label_values(&[&method, &path, &status])
+        .inc();
+    metrics
+        .http_request_duration_seconds
+        .with_label_values(&[&method, &path])
+        .observe(duration);
+
+    response
+}
+
+/// Normalize API path to prevent label cardinality explosion.
+///
+/// Replaces dynamic segments (UUIDs, numeric IDs, names in known positions)
+/// with placeholder tokens.
+#[cfg(feature = "metrics")]
+fn normalize_api_path(path: &str) -> String {
+    let parts: Vec<&str> = path.split('/').collect();
+    let mut normalized = Vec::with_capacity(parts.len());
+
+    for (i, part) in parts.iter().enumerate() {
+        if part.is_empty() {
+            normalized.push(*part);
+            continue;
+        }
+        // UUID pattern (8-4-4-4-12 hex)
+        if part.len() == 36 && part.chars().filter(|c| *c == '-').count() == 4 {
+            normalized.push("{id}");
+        // Purely numeric segment
+        } else if part.chars().all(|c| c.is_ascii_digit()) {
+            normalized.push("{number}");
+        // Dynamic name segments after known resource paths
+        } else if i >= 2 {
+            let parent = parts.get(i - 1).copied().unwrap_or("");
+            match parent {
+                "secrets" | "groups" | "humans" | "links" => normalized.push("{name}"),
+                "servers" | "providers" => normalized.push("{name}"),
+                "opencode" => normalized.push("{port}"),
+                "agents"
+                    if !matches!(
+                        *part,
+                        "mcp"
+                            | "warmup"
+                            | "overview"
+                            | "workers"
+                            | "memories"
+                            | "profile"
+                            | "identity"
+                            | "config"
+                            | "cron"
+                            | "tasks"
+                            | "ingest"
+                            | "skills"
+                            | "tools"
+                            | "links"
+                    ) =>
+                {
+                    normalized.push("{id}")
+                }
+                _ => {
+                    // Collapse any remaining segments after an opencode
+                    // port placeholder to avoid high-cardinality proxy
+                    // paths like /api/opencode/{port}/v1/chat/completions.
+                    if normalized.contains(&"{port}") {
+                        normalized.push("{proxy_path}");
+                        break;
+                    }
+                    normalized.push(part);
+                }
+            }
+        } else {
+            normalized.push(part);
+        }
+    }
+
+    normalized.join("/")
 }
 
 async fn static_handler(uri: Uri) -> Response {

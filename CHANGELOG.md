@@ -2,6 +2,85 @@
 
 Seeded from GitHub releases; maintained by the release bump workflow.
 
+## v0.3.0
+
+### Release Story
+
+Agents now understand the codebases they work in. Projects bring repo discovery, worktree tracking, disk usage reporting, and automatic sandbox allowlist injection — so agents have spatial awareness of what they're operating on.
+
+Browser tools were rewritten from scratch: 12 focused tools built on CDP's Accessibility API replacing DOM extraction, with persistent sessions that survive worker restarts. OpenCode is embedded directly in the worker detail view via Shadow DOM, with idle worker persistence and automatic reconnection on restart.
+
+The cortex is now a real supervisor. It monitors worker health, detects stalls, manages detached worker lifecycles, and gained self-awareness through embedded docs and live config diagnostics. Workers got an outcome gate that prevents text-only exits without signaling completion, context injection for receiving relevant conversation history, and duplicate spawn prevention.
+
+The Agent Factory adds a preset system and cortex-driven creation flow for spinning up new agents with dedicated identity files (SOUL.md, IDENTITY.md, ROLE.md) and scoped tool access. Native OpenAI SSE streaming and token-by-token webchat delivery landed alongside a full config.rs refactor into focused submodules with proper hot-reload.
+
+Other additions: listen-only mode with cross-platform invoke handling, channel attachment persistence with recall, temporal filtering for channel_recall, wall-clock cron support, theme switcher, shell/exec tool consolidation, and MCP auth header fixes with rmcp 1.1.
+
+## What's Changed
+* fix: send BranchResult on failure to prevent channel orphaning by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/279
+* fix: surface upstream provider details in proxy API errors by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/278
+* fix: resolve test isolation failures in config tests by @vsumner in https://github.com/spacedriveapp/spacebot/pull/293
+* fix: skip workspace path enforcement on file/send_file when sandbox is disabled by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/295
+* fix: stop worker secret scans from killing internal work by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/297
+* Fix ProcessType routing for Cortex and Compactor by @artlu99 in https://github.com/spacedriveapp/spacebot/pull/290
+* api: support channel archiving and channel list filters by @txchen in https://github.com/spacedriveapp/spacebot/pull/291
+* fix: block bracketed fallback and bare skip output by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/303
+* fix: hot-reload opencode settings in active agents by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/302
+* fix: warn on unrecognised top-level config keys (closes #221) by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/277
+* Fix OpenRouter app attribution: send X-Title header by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/275
+* Fix UTF-8 boundary panic in cortex_chat and discord reply truncation by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/276
+* refactor: extract config.rs into focused submodules by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/306
+* fix: harden OpenAI-compatible parsing for OpenRouter responses by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/304
+* feat: rig 0.31 upgrade, tool nudging, and invariant harness by @vsumner in https://github.com/spacedriveapp/spacebot/pull/292
+* feat(cortex): add self-awareness docs and config diagnostics by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/311
+* fix(llm): implement native OpenAI-compatible SSE streaming by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/313
+* fix(prompts): send generated files as attachments by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/321
+* fix(interface): replace crypto.randomUUID with secure-context-safe IDs by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/322
+* fix(docker): add missing files for self_awareness.rs embeds by @toanalien in https://github.com/spacedriveapp/spacebot/pull/316
+* feat: temporal filtering for channel_recall + self-channel recall by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/284
+* feat: persistent browser sessions with configurable close policy by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/309
+* fix: let workers/branches continue when secrets detected in tool output by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/323
+* fix: bump rmcp to 0.17 to fix 401 on MCP SSE streams by @islerfab in https://github.com/spacedriveapp/spacebot/pull/300
+* feat(interface): add theme switcher to settings by @toanalien in https://github.com/spacedriveapp/spacebot/pull/317
+* fix: support plaintext IMAP/SMTP for local mail bridges by @spacebot-fcc in https://github.com/spacedriveapp/spacebot/pull/299
+* feat: listen-only mode toggle + cross-platform invoke handling by @deanfluencebot in https://github.com/spacedriveapp/spacebot/pull/288
+* feat(cortex): Implement Phase 1 ("The Tick Loop") by @vsumner in https://github.com/spacedriveapp/spacebot/pull/301
+* cortex: implement phase 2 health supervision by @vsumner in https://github.com/spacedriveapp/spacebot/pull/305
+* fix(worker): gate text-only exits on explicit outcome signal by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/327
+* fix(channel): use worker_handles as guard for WorkerComplete events by @ciaranashton in https://github.com/spacedriveapp/spacebot/pull/331
+* fix(cortex): use idle time instead of lifetime for worker timeout by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/332
+* docs: sync rig usage/design docs with implementation by @vsumner in https://github.com/spacedriveapp/spacebot/pull/329
+* fix(channel): stop re-summarising worker results that were already relayed by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/333
+* feat: embed OpenCode web UI in worker detail view by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/314
+* fix: persist transcripts on idle + reconnect idle workers on restart by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/334
+* fix: prevent long text overflow in agent chat message bubbles by @toanalien in https://github.com/spacedriveapp/spacebot/pull/336
+* Embed OpenCode UI via Shadow DOM and improve worker interactivity by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/343
+* misc: UI improvements and docs updates by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/345
+* test: harden tool_nudge assertions after UBS scan by @vsumner in https://github.com/spacedriveapp/spacebot/pull/328
+* fix: browser session persistence across workers and restarts by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/348
+* feat: persist channel attachments to disk with recall tool by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/350
+* feat: Projects — workspace layout awareness for agents by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/346
+* refactor: rewrite browser tools — 12 flat tools, CDP accessibility API, secure credential entry by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/352
+* fix: browser context management — dedup snapshots, consecutive loop guard, overflow resilience by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/359
+* refactor: merge exec tool into shell, add per-command env vars by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/360
+* fix: fork before keychain access to prevent SIGBUS on macOS daemon start by @chanyeinthaw in https://github.com/spacedriveapp/spacebot/pull/353
+* feat: wall-clock cron support in UI, anchor interval crons to last execution on restart by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/361
+* feat: support single-repo projects and enhance skills UI by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/362
+* feat: worker context injection and duplicate worker spawn prevention by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/358
+* fix(mcp): fix auth header handling and bump rmcp to 1.1 for stateless HTTP support by @ciaranashton in https://github.com/spacedriveapp/spacebot/pull/330
+* feat: Agent Factory — preset system, factory tools, and cortex integration by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/315
+
+## New Contributors
+* @artlu99 made their first contribution in https://github.com/spacedriveapp/spacebot/pull/290
+* @txchen made their first contribution in https://github.com/spacedriveapp/spacebot/pull/291
+* @toanalien made their first contribution in https://github.com/spacedriveapp/spacebot/pull/316
+* @islerfab made their first contribution in https://github.com/spacedriveapp/spacebot/pull/300
+* @spacebot-fcc made their first contribution in https://github.com/spacedriveapp/spacebot/pull/299
+* @deanfluencebot made their first contribution in https://github.com/spacedriveapp/spacebot/pull/288
+* @ciaranashton made their first contribution in https://github.com/spacedriveapp/spacebot/pull/331
+* @chanyeinthaw made their first contribution in https://github.com/spacedriveapp/spacebot/pull/353
+
+**Full Changelog**: https://github.com/spacedriveapp/spacebot/compare/v0.2.2...v0.3.0
 ## v0.2.2
 
 - Tag: `v0.2.2`

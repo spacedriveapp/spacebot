@@ -394,6 +394,10 @@ pub(super) async fn update_agent_config(
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
 
+    // Acquire the config write mutex to prevent concurrent read-modify-write races
+    // with factory tools and other API handlers that also edit config.toml.
+    let _config_guard = state.config_write_mutex.lock().await;
+
     let config_content = tokio::fs::read_to_string(&config_path)
         .await
         .map_err(|error| {
@@ -453,6 +457,9 @@ pub(super) async fn update_agent_config(
             tracing::warn!(%error, "failed to write config.toml");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+
+    // Release the config write mutex — remaining work is read-only state updates.
+    drop(_config_guard);
 
     tracing::info!(agent_id = %request.agent_id, "config.toml updated via API");
 

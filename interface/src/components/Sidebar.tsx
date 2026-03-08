@@ -26,6 +26,7 @@ import { Button } from "@/ui";
 import { ArrowLeft01Icon, DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
+import { ProfileAvatar } from "@/components/ProfileAvatar";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
@@ -36,12 +37,14 @@ interface SidebarProps {
 interface SortableAgentItemProps {
 	agentId: string;
 	displayName?: string;
+	gradientStart?: string;
+	gradientEnd?: string;
 	activity?: { workers: number; branches: number };
 	isActive: boolean;
 	collapsed: boolean;
 }
 
-function SortableAgentItem({ agentId, displayName, activity, isActive, collapsed }: SortableAgentItemProps) {
+function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, activity, isActive, collapsed }: SortableAgentItemProps) {
 	const {
 		attributes,
 		listeners,
@@ -64,13 +67,11 @@ function SortableAgentItem({ agentId, displayName, activity, isActive, collapsed
 				<Link
 					to="/agents/$agentId"
 					params={{ agentId }}
-					className={`flex h-8 w-8 items-center justify-center rounded-md text-xs font-medium ${
-						isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-					}`}
+					className="flex h-8 w-8 items-center justify-center"
 					style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
 					title={displayName ?? agentId}
 				>
-					{(displayName ?? agentId).charAt(0).toUpperCase()}
+					<ProfileAvatar seed={agentId} name={displayName ?? agentId} size={28} className={`rounded-full ${isActive ? "ring-2 ring-sidebar-line" : "opacity-70 hover:opacity-100"}`} gradientStart={gradientStart} gradientEnd={gradientEnd} />
 				</Link>
 			</div>
 		);
@@ -88,6 +89,7 @@ function SortableAgentItem({ agentId, displayName, activity, isActive, collapsed
 				}`}
 				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
 			>
+				<ProfileAvatar seed={agentId} name={displayName ?? agentId} size={20} className="shrink-0 rounded-full" gradientStart={gradientStart} gradientEnd={gradientEnd} />
 				<span className="flex-1 truncate">{displayName ?? agentId}</span>
 				{activity && (activity.workers > 0 || activity.branches > 0) && (
 					<div className="flex items-center gap-1">
@@ -123,6 +125,14 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 		refetchInterval: 10_000,
 	});
 
+	const { data: providersData } = useQuery({
+		queryKey: ["providers"],
+		queryFn: api.providers,
+		staleTime: 10_000,
+	});
+
+	const hasProvider = providersData?.has_any ?? false;
+
 	const agents = agentsData?.agents ?? [];
 	const channels = channelsData?.channels ?? [];
 	
@@ -130,6 +140,11 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	const agentDisplayNames = useMemo(() => {
 		const map: Record<string, string | undefined> = {};
 		for (const a of agents) map[a.id] = a.display_name;
+		return map;
+	}, [agents]);
+	const agentGradients = useMemo(() => {
+		const map: Record<string, { start?: string; end?: string }> = {};
+		for (const a of agents) map[a.id] = { start: a.gradient_start, end: a.gradient_end };
 		return map;
 	}, [agents]);
 	const [agentOrder, setAgentOrder] = useAgentOrder(agentIds);
@@ -238,6 +253,8 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 								key={agentId}
 								agentId={agentId}
 								displayName={agentDisplayNames[agentId]}
+								gradientStart={agentGradients[agentId]?.start}
+								gradientEnd={agentGradients[agentId]?.end}
 								isActive={isActive}
 								collapsed={true}
 							/>
@@ -245,13 +262,15 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					})}
 					</SortableContext>
 				</DndContext>
-				<button
-					onClick={() => setCreateOpen(true)}
-					className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
-					title="New Agent"
-				>
-					+
-				</button>
+				{hasProvider && (
+					<button
+						onClick={() => setCreateOpen(true)}
+						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
+						title="New Agent"
+					>
+						+
+					</button>
+				)}
 				</div>
 			) : (
 				<>
@@ -305,6 +324,8 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 												key={agentId}
 												agentId={agentId}
 												displayName={agentDisplayNames[agentId]}
+												gradientStart={agentGradients[agentId]?.start}
+												gradientEnd={agentGradients[agentId]?.end}
 												activity={activity}
 												isActive={isActive}
 												collapsed={false}
@@ -315,18 +336,22 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 								</SortableContext>
 							</DndContext>
 						)}
-					<Button
-						variant="outline"
-						size="sm"
-						onClick={() => setCreateOpen(true)}
-						className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
-					>
-						+ New Agent
-					</Button>
+					{hasProvider && (
+						<Button
+							variant="outline"
+							size="sm"
+							onClick={() => setCreateOpen(true)}
+							className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
+						>
+							+ New Agent
+						</Button>
+					)}
 					</div>
 				</>
 			)}
-			<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} />
+			{agents[0] && (
+				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
+			)}
 		</motion.nav>
 	);
 }

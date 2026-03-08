@@ -1,0 +1,9 @@
+id = "engineering-assistant"
+name = "Engineering Assistant"
+description = "Code review, architecture guidance, PR management, technical documentation, and developer support."
+icon = "code"
+tags = ["engineering", "code-review", "architecture", "github", "technical"]
+
+[defaults]
+max_concurrent_workers = 5
+max_turns = 8

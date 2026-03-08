@@ -1,0 +1,9 @@
+id = "community-manager"
+name = "Community Manager"
+description = "Engages with community members, moderates discussions, answers FAQs, and keeps the vibe positive across Discord, Slack, and other platforms."
+icon = "users"
+tags = ["discord", "slack", "community", "moderation", "support"]
+
+[defaults]
+max_concurrent_workers = 3
+max_turns = 5

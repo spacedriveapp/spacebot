@@ -5,6 +5,7 @@ import { Button, Input, SettingSidebarButton, TextArea, Toggle, NumberStepper, S
 import { ModelSelect } from "@/components/ModelSelect";
 import { TagInput } from "@/components/TagInput";
 import { Markdown } from "@/components/Markdown";
+import { ProfileAvatar, seedGradient } from "@/components/ProfileAvatar";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 
@@ -15,7 +16,7 @@ function supportsAdaptiveThinking(modelId: string): boolean {
 		|| id.includes("sonnet-4-6") || id.includes("sonnet-4.6");
 }
 
-type SectionId = "general" | "soul" | "identity" | "user" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "channel" | "sandbox" | "projects";
+type SectionId = "general" | "soul" | "identity" | "role" | "routing" | "tuning" | "compaction" | "cortex" | "coalesce" | "memory" | "browser" | "channel" | "sandbox" | "projects";
 
 const SECTIONS: {
 	id: SectionId;
@@ -27,7 +28,7 @@ const SECTIONS: {
 	{ id: "general", label: "General", group: "general", description: "Agent metadata", detail: "The agent's display name and role. The display name is shown in the UI and messaging platforms. The role describes the agent's purpose (e.g. Research Assistant, Code Reviewer)." },
 	{ id: "soul", label: "Soul", group: "identity", description: "SOUL.md", detail: "Defines the agent's personality, values, communication style, and behavioral boundaries. This is the core of who the agent is." },
 	{ id: "identity", label: "Identity", group: "identity", description: "IDENTITY.md", detail: "The agent's name, nature, and purpose. How it introduces itself and what it understands its role to be." },
-	{ id: "user", label: "User", group: "identity", description: "USER.md", detail: "Information about the human this agent interacts with. Name, preferences, context, and anything that helps the agent personalize responses." },
+	{ id: "role", label: "Role", group: "identity", description: "ROLE.md", detail: "The agent's responsibilities, scope, expected outcomes, and escalation rules. Defines what the agent does and doesn't do." },
 	{ id: "routing", label: "Model Routing", group: "config", description: "Which models each process uses", detail: "Controls which LLM model is used for each process type. Channels handle user-facing conversation, branches do thinking, workers execute tasks, the compactor summarizes context, cortex observes system state, and voice transcribes audio attachments before the channel turn." },
 	{ id: "tuning", label: "Tuning", group: "config", description: "Turn limits, context window, branches", detail: "Core limits that control how much work the agent does per message. Max turns caps LLM iterations per channel message. Context window sets the token budget. Branch limits control parallel thinking." },
 	{ id: "compaction", label: "Compaction", group: "config", description: "Context compaction thresholds", detail: "Thresholds that trigger context summarization as the conversation grows. Background kicks in early, aggressive compresses harder, and emergency truncates without LLM involvement. All values are fractions of the context window." },
@@ -44,11 +45,11 @@ interface AgentConfigProps {
 	agentId: string;
 }
 
-const isIdentityField = (id: SectionId): id is "soul" | "identity" | "user" => {
-	return id === "soul" || id === "identity" || id === "user";
+const isIdentityField = (id: SectionId): id is "soul" | "identity" | "role" => {
+	return id === "soul" || id === "identity" || id === "role";
 };
 
-const getIdentityField = (data: { soul: string | null; identity: string | null; user: string | null }, field: SectionId): string | null => {
+const getIdentityField = (data: { soul: string | null; identity: string | null; role: string | null }, field: SectionId): string | null => {
 	if (isIdentityField(field)) {
 		return data[field];
 	}
@@ -98,7 +99,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	});
 
 	const agentMutation = useMutation({
-		mutationFn: (update: { display_name?: string; role?: string }) =>
+		mutationFn: (update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string }) =>
 			api.updateAgent(agentId, update),
 		onMutate: () => setSaving(true),
 		onSuccess: () => {
@@ -110,7 +111,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	});
 
 	const identityMutation = useMutation({
-		mutationFn: (update: { field: "soul" | "identity" | "user"; content: string }) =>
+		mutationFn: (update: { field: "soul" | "identity" | "role"; content: string }) =>
 			api.updateIdentity({
 				agent_id: agentId,
 				[update.field]: update.content,
@@ -220,7 +221,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 					<div className="flex flex-col gap-0.5 px-2">
 					{SECTIONS.filter((s) => s.group === "identity").map((section) => {
 						const isActive = activeSection === section.id;
-						const hasContent = !!getIdentityField(identityQuery.data ?? { soul: null, identity: null, user: null }, section.id)?.trim();
+						const hasContent = !!getIdentityField(identityQuery.data ?? { soul: null, identity: null, role: null }, section.id)?.trim();
 						return (
 							<SettingSidebarButton
 								key={section.id}
@@ -264,6 +265,8 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 				agentId={agentId}
 				displayName={currentAgent?.display_name ?? ""}
 				role={currentAgent?.role ?? ""}
+				gradientStart={currentAgent?.gradient_start ?? ""}
+				gradientEnd={currentAgent?.gradient_end ?? ""}
 				detail={active.detail}
 				onDirtyChange={setDirty}
 				saveHandlerRef={saveHandlerRef}
@@ -274,7 +277,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 				key={active.id}
 				label={active.label}
 				description={active.description}
-				content={getIdentityField(identityQuery.data ?? { soul: null, identity: null, user: null }, active.id)}
+				content={getIdentityField(identityQuery.data ?? { soul: null, identity: null, role: null }, active.id)}
 				onDirtyChange={setDirty}
 				saveHandlerRef={saveHandlerRef}
 				onSave={(content) => {
@@ -338,38 +341,101 @@ interface GeneralEditorProps {
 	agentId: string;
 	displayName: string;
 	role: string;
+	gradientStart: string;
+	gradientEnd: string;
 	detail: string;
 	onDirtyChange: (dirty: boolean) => void;
 	saveHandlerRef: React.MutableRefObject<{ save?: () => void; revert?: () => void }>;
-	onSave: (update: { display_name?: string; role?: string }) => void;
+	onSave: (update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string }) => void;
 }
 
-function GeneralEditor({ agentId, displayName, role, detail, onDirtyChange, saveHandlerRef, onSave }: GeneralEditorProps) {
+const GRADIENT_PRESETS: { label: string; start: string; end: string }[] = [
+	{ label: "Purple", start: "hsl(270, 70%, 55%)", end: "hsl(310, 60%, 45%)" },
+	{ label: "Blue", start: "hsl(220, 70%, 55%)", end: "hsl(260, 60%, 45%)" },
+	{ label: "Teal", start: "hsl(170, 70%, 45%)", end: "hsl(200, 60%, 40%)" },
+	{ label: "Green", start: "hsl(140, 60%, 45%)", end: "hsl(170, 50%, 40%)" },
+	{ label: "Orange", start: "hsl(25, 80%, 55%)", end: "hsl(45, 70%, 45%)" },
+	{ label: "Red", start: "hsl(0, 70%, 55%)", end: "hsl(20, 60%, 45%)" },
+	{ label: "Pink", start: "hsl(330, 70%, 55%)", end: "hsl(350, 60%, 45%)" },
+	{ label: "Gold", start: "hsl(45, 80%, 55%)", end: "hsl(30, 70%, 40%)" },
+	{ label: "Indigo", start: "hsl(240, 60%, 55%)", end: "hsl(280, 50%, 45%)" },
+	{ label: "Slate", start: "hsl(220, 15%, 50%)", end: "hsl(220, 10%, 35%)" },
+];
+
+function GeneralEditor({ agentId, displayName, role, gradientStart, gradientEnd, detail, onDirtyChange, saveHandlerRef, onSave }: GeneralEditorProps) {
+	const queryClient = useQueryClient();
 	const [localDisplayName, setLocalDisplayName] = useState(displayName);
 	const [localRole, setLocalRole] = useState(role);
+	const [localGradientStart, setLocalGradientStart] = useState(gradientStart);
+	const [localGradientEnd, setLocalGradientEnd] = useState(gradientEnd);
 	const [localDirty, setLocalDirty] = useState(false);
+	const [avatarPreview, setAvatarPreview] = useState<string | null>(null);
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	// Check if agent has an uploaded avatar
+	const avatarUrl = api.agentAvatarUrl(agentId);
+	const { data: avatarExists } = useQuery({
+		queryKey: ["agentAvatar", agentId],
+		queryFn: async () => {
+			try {
+				const response = await fetch(avatarUrl, { method: "HEAD" });
+				return response.ok;
+			} catch {
+				return false;
+			}
+		},
+	});
+
+	const uploadAvatarMutation = useMutation({
+		mutationFn: (file: File) => api.uploadAvatar(agentId, file),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["agentAvatar", agentId] });
+			queryClient.invalidateQueries({ queryKey: ["agents"] });
+			queryClient.invalidateQueries({ queryKey: ["topology"] });
+			setAvatarPreview(null);
+		},
+	});
+
+	const deleteAvatarMutation = useMutation({
+		mutationFn: () => api.deleteAvatar(agentId),
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["agentAvatar", agentId] });
+			queryClient.invalidateQueries({ queryKey: ["agents"] });
+			queryClient.invalidateQueries({ queryKey: ["topology"] });
+			setAvatarPreview(null);
+		},
+	});
 
 	useEffect(() => {
 		if (!localDirty) {
 			setLocalDisplayName(displayName);
 			setLocalRole(role);
+			setLocalGradientStart(gradientStart);
+			setLocalGradientEnd(gradientEnd);
 		}
-	}, [displayName, role, localDirty]);
+	}, [displayName, role, gradientStart, gradientEnd, localDirty]);
 
 	useEffect(() => {
 		onDirtyChange(localDirty);
 	}, [localDirty, onDirtyChange]);
 
 	const handleSave = useCallback(() => {
-		onSave({ display_name: localDisplayName, role: localRole });
+		onSave({
+			display_name: localDisplayName,
+			role: localRole,
+			gradient_start: localGradientStart || undefined,
+			gradient_end: localGradientEnd || undefined,
+		});
 		setLocalDirty(false);
-	}, [onSave, localDisplayName, localRole]);
+	}, [onSave, localDisplayName, localRole, localGradientStart, localGradientEnd]);
 
 	const handleRevert = useCallback(() => {
 		setLocalDisplayName(displayName);
 		setLocalRole(role);
+		setLocalGradientStart(gradientStart);
+		setLocalGradientEnd(gradientEnd);
 		setLocalDirty(false);
-	}, [displayName, role]);
+	}, [displayName, role, gradientStart, gradientEnd]);
 
 	useEffect(() => {
 		saveHandlerRef.current.save = handleSave;
@@ -379,6 +445,21 @@ function GeneralEditor({ agentId, displayName, role, detail, onDirtyChange, save
 			saveHandlerRef.current.revert = undefined;
 		};
 	}, [handleSave, handleRevert]);
+
+	const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
+		const file = event.target.files?.[0];
+		if (!file) return;
+		// Show preview immediately
+		const reader = new FileReader();
+		reader.onload = () => setAvatarPreview(reader.result as string);
+		reader.readAsDataURL(file);
+		// Upload
+		uploadAvatarMutation.mutate(file);
+	};
+
+	const [seedC1, seedC2] = seedGradient(agentId);
+	const previewC1 = localGradientStart || seedC1;
+	const previewC2 = localGradientEnd || seedC2;
 
 	return (
 		<>
@@ -424,6 +505,102 @@ function GeneralEditor({ agentId, displayName, role, detail, onDirtyChange, save
 							onChange={(e) => { setLocalRole(e.target.value); setLocalDirty(true); }}
 							placeholder="e.g. Research Assistant, Code Reviewer"
 						/>
+					</div>
+
+					{/* Avatar */}
+					<div className="flex flex-col gap-1.5">
+						<label className="text-sm font-medium text-ink">Avatar</label>
+						<p className="text-tiny text-ink-faint">Upload a custom image, or use the generated gradient avatar.</p>
+						<div className="flex items-center gap-4">
+							<ProfileAvatar
+								seed={agentId}
+								name={localDisplayName || agentId}
+								size={64}
+								className="rounded-full shrink-0"
+								gradientStart={localGradientStart || undefined}
+								gradientEnd={localGradientEnd || undefined}
+								avatarUrl={avatarPreview ?? (avatarExists ? `${avatarUrl}&t=${Date.now()}` : undefined)}
+							/>
+							<div className="flex flex-col gap-2">
+								<div className="flex items-center gap-2">
+									<Button
+										variant="outline"
+										size="sm"
+										onClick={() => fileInputRef.current?.click()}
+									>
+										{avatarExists ? "Change Image" : "Upload Image"}
+									</Button>
+									{avatarExists && (
+										<Button
+											variant="ghost"
+											size="sm"
+											onClick={() => deleteAvatarMutation.mutate()}
+											className="text-ink-faint hover:text-red-400"
+										>
+											Remove
+										</Button>
+									)}
+								</div>
+								<p className="text-tiny text-ink-faint/60">PNG, JPEG, WebP, GIF, or SVG. Max 5 MB.</p>
+							</div>
+							<input
+								ref={fileInputRef}
+								type="file"
+								accept="image/png,image/jpeg,image/gif,image/webp,image/svg+xml"
+								onChange={handleFileChange}
+								className="hidden"
+							/>
+						</div>
+					</div>
+
+					{/* Gradient Color */}
+					<div className="flex flex-col gap-1.5">
+						<label className="text-sm font-medium text-ink">Gradient</label>
+						<p className="text-tiny text-ink-faint">Choose a gradient for the avatar and banner. Only used when no image is uploaded.</p>
+						<div className="flex flex-wrap gap-2">
+							{/* Auto (seed-based) option */}
+							<button
+								onClick={() => { setLocalGradientStart(""); setLocalGradientEnd(""); setLocalDirty(true); }}
+								className={cx(
+									"flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm transition-colors",
+									!localGradientStart
+										? "border-accent bg-accent/10 text-ink"
+										: "border-app-line/50 text-ink-faint hover:border-app-line"
+								)}
+							>
+								<span
+									className="h-5 w-5 rounded-full shrink-0"
+									style={{ background: `linear-gradient(135deg, ${seedC1}, ${seedC2})` }}
+								/>
+								Auto
+							</button>
+							{GRADIENT_PRESETS.map((preset) => (
+								<button
+									key={preset.label}
+									onClick={() => { setLocalGradientStart(preset.start); setLocalGradientEnd(preset.end); setLocalDirty(true); }}
+									className={cx(
+										"flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm transition-colors",
+										localGradientStart === preset.start && localGradientEnd === preset.end
+											? "border-accent bg-accent/10 text-ink"
+											: "border-app-line/50 text-ink-faint hover:border-app-line"
+									)}
+								>
+									<span
+										className="h-5 w-5 rounded-full shrink-0"
+										style={{ background: `linear-gradient(135deg, ${preset.start}, ${preset.end})` }}
+									/>
+									{preset.label}
+								</button>
+							))}
+						</div>
+						{/* Live preview */}
+						<div className="mt-2 flex items-center gap-3">
+							<span className="text-tiny text-ink-faint">Preview:</span>
+							<span
+								className="h-6 w-20 rounded"
+								style={{ background: `linear-gradient(135deg, ${previewC1}, ${previewC2})` }}
+							/>
+						</div>
 					</div>
 				</div>
 			</div>

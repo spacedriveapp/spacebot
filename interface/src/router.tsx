@@ -8,7 +8,7 @@ import {
 import {useQuery} from "@tanstack/react-query";
 import {api, BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
-import {SetupBanner} from "@/components/SetupBanner";
+
 import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
 import {AgentDetail} from "@/routes/AgentDetail";
@@ -41,7 +41,6 @@ function RootLayout() {
 			/>
 			<div className="flex flex-1 flex-col overflow-hidden">
 				<ConnectionBanner state={connectionState} hasData={hasData} />
-				<SetupBanner />
 				<div className="flex-1 overflow-hidden">
 					<Outlet />
 				</div>

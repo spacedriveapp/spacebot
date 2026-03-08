@@ -26,12 +26,22 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
         .interact()?;
 
     if setup_method == 1 {
+        // Write a skeleton config so that subsequent read-modify-write cycles
+        // (e.g. adding a provider key via the UI) preserve the default entries.
+        let instance_dir = Config::default_instance_dir();
+        std::fs::create_dir_all(&instance_dir)
+            .with_context(|| format!("failed to create {}", instance_dir.display()))?;
+        let config_path = instance_dir.join("config.toml");
+        if !config_path.exists() {
+            write_skeleton_config(&config_path, "main")?;
+        }
+
         println!();
         println!("  Starting in setup mode. Open the UI to finish configuration:");
         println!();
         println!("    http://localhost:19898");
         println!();
-        return Ok(None);
+        return Ok(Some(config_path));
     }
 
     println!();
@@ -313,4 +323,45 @@ pub fn run_onboarding() -> anyhow::Result<Option<PathBuf>> {
     println!();
 
     Ok(Some(config_path))
+}
+
+/// Write a minimal config.toml with the default agent, admin human, and link.
+fn write_skeleton_config(config_path: &std::path::Path, agent_id: &str) -> anyhow::Result<()> {
+    #[derive(serde::Serialize)]
+    struct Skeleton<'a> {
+        agents: Vec<SkeletonAgent<'a>>,
+        humans: Vec<SkeletonHuman<'a>>,
+        links: Vec<SkeletonLink<'a>>,
+    }
+    #[derive(serde::Serialize)]
+    struct SkeletonAgent<'a> {
+        id: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct SkeletonHuman<'a> {
+        id: &'a str,
+    }
+    #[derive(serde::Serialize)]
+    struct SkeletonLink<'a> {
+        from: &'a str,
+        to: &'a str,
+        direction: &'a str,
+        kind: &'a str,
+    }
+
+    let skeleton = Skeleton {
+        agents: vec![SkeletonAgent { id: agent_id }],
+        humans: vec![SkeletonHuman { id: "admin" }],
+        links: vec![SkeletonLink {
+            from: "admin",
+            to: agent_id,
+            direction: "one_way",
+            kind: "hierarchical",
+        }],
+    };
+
+    let content =
+        toml::to_string_pretty(&skeleton).with_context(|| "failed to serialize skeleton config")?;
+    std::fs::write(config_path, content)
+        .with_context(|| format!("failed to write {}", config_path.display()))
 }

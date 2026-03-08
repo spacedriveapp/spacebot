@@ -56,10 +56,9 @@ workspace/
     screenshot.png
     diagram.png
     report_2.pdf   -- deduped name (second "report.pdf" received)
-  SOUL.md
-  IDENTITY.md
-  USER.md
 ```
+
+Note: Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) live in the agent root directory, not in the workspace.
 
 The `saved/` directory is created at startup alongside `ingest/` and `skills/`.
 

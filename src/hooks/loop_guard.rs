@@ -59,8 +59,20 @@ impl LoopGuardConfig {
                 ping_pong_min_repeats: 3,
                 max_warnings_per_call: 2,
             },
-            // Channels, compactors, cortex: minimal tool loops expected.
-            ProcessType::Channel | ProcessType::Compactor | ProcessType::Cortex => Self {
+            // Cortex chat is an interactive session with memory, docs, and
+            // worker tools — needs headroom similar to branches.
+            ProcessType::Cortex => Self {
+                warn_threshold: 3,
+                block_threshold: 5,
+                global_circuit_breaker: 40,
+                poll_multiplier: 2,
+                outcome_warn_threshold: 2,
+                outcome_block_threshold: 3,
+                ping_pong_min_repeats: 3,
+                max_warnings_per_call: 2,
+            },
+            // Channels and compactors: minimal tool loops expected.
+            ProcessType::Channel | ProcessType::Compactor => Self {
                 warn_threshold: 2,
                 block_threshold: 4,
                 global_circuit_breaker: 20,

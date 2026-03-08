@@ -2,7 +2,7 @@ use super::state::ApiState;
 
 use crate::agent::cortex::{CortexEvent, CortexLogger};
 use crate::agent::cortex_chat::{
-    CortexChatEvent, CortexChatMessage, CortexChatSendError, CortexChatStore,
+    CortexChatEvent, CortexChatMessage, CortexChatSendError, CortexChatStore, CortexChatThread,
 };
 
 use axum::Json;
@@ -160,6 +160,62 @@ pub(super) async fn cortex_chat_send(
     };
 
     Ok(Sse::new(stream))
+}
+
+// -- Thread management --
+
+#[derive(Serialize)]
+pub(super) struct CortexChatThreadsResponse {
+    threads: Vec<CortexChatThread>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CortexChatThreadsQuery {
+    agent_id: String,
+}
+
+#[derive(Deserialize)]
+pub(super) struct CortexChatDeleteThreadRequest {
+    agent_id: String,
+    thread_id: String,
+}
+
+/// List all cortex chat threads for an agent, newest first.
+pub(super) async fn cortex_chat_threads(
+    State(state): State<Arc<ApiState>>,
+    Query(query): Query<CortexChatThreadsQuery>,
+) -> Result<Json<CortexChatThreadsResponse>, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = CortexChatStore::new(pool.clone());
+
+    let threads = store.list_threads().await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %query.agent_id, "failed to list cortex chat threads");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    Ok(Json(CortexChatThreadsResponse { threads }))
+}
+
+/// Delete a cortex chat thread and all its messages.
+pub(super) async fn cortex_chat_delete_thread(
+    State(state): State<Arc<ApiState>>,
+    axum::Json(request): axum::Json<CortexChatDeleteThreadRequest>,
+) -> Result<StatusCode, StatusCode> {
+    let pools = state.agent_pools.load();
+    let pool = pools.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = CortexChatStore::new(pool.clone());
+
+    let deleted = store.delete_thread(&request.thread_id).await.map_err(|error| {
+        tracing::warn!(%error, agent_id = %request.agent_id, thread_id = %request.thread_id, "failed to delete cortex chat thread");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    if deleted == 0 {
+        return Err(StatusCode::NOT_FOUND);
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// List cortex events for an agent with optional type filter, newest first.

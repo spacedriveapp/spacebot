@@ -156,7 +156,7 @@ The agent's data directory (databases, config files) is explicitly re-mounted re
 
 Worker subprocesses also start with a **clean environment**. Workers only receive `PATH` (with `tools/bin` prepended), safe variables (`HOME`, `USER`, `LANG`, `TERM`, `TMPDIR`), tool-category secrets from the [secret store](/docs/secrets), and any explicitly configured `passthrough_env` entries. `HOME` is mode-dependent: workspace path when sandboxed, parent `HOME` in passthrough mode. System secrets like LLM API keys are hidden by default unless explicitly forwarded via `passthrough_env`. Environment sanitization applies regardless of whether the sandbox is enabled or disabled.
 
-The `file` tool validates paths against the workspace boundary and rejects writes to identity/memory paths (for example `SOUL.md`, `IDENTITY.md`, `USER.md`) with an explicit error directing the LLM to the appropriate tool. The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection.
+The `file` tool validates all paths against the workspace boundary. Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`) live in the agent root directory (`~/.spacebot/agents/{id}/`), outside the workspace, so they are naturally inaccessible to worker file tools — no special-case rejection is needed. The `exec` tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, etc.) that enable library injection.
 
 See [Sandbox](/docs/sandbox) for full details on containment, environment sanitization, leak detection, and durable binaries.
 

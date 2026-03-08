@@ -22,7 +22,7 @@ The full message-in → LLM → response-out pipeline is wired end-to-end across
 - **Model routing** — `RoutingConfig` with process-type defaults, task overrides, fallback chains
 - **Memory** — full stack: types, SQLite store (CRUD + graph), LanceDB (embeddings + vector + FTS), fastembed, hybrid search (RRF fusion). `memory_type` filter wired end-to-end through SearchConfig. `total_cmp` for safe sorting.
 - **Memory maintenance** — decay + prune implemented
-- **Identity** — `Identity` struct loads SOUL.md/IDENTITY.md/USER.md, `Prompts` with fallback chain
+- **Identity** — `Identity` struct loads SOUL.md/IDENTITY.md/ROLE.md from agent root, `Prompts` with fallback chain
 - **Agent loops** — all three process types run real Rig loops:
   - **Channel** — per-turn tool registration, status injection, `max_turns(5)`
   - **Branch** — history fork, `max_turns(10)`, memory tools, result injection
