@@ -82,6 +82,15 @@ impl SpacebotModel {
         self
     }
 
+    /// Check if this model requires reasoning_content field for tool calls.
+    fn needs_reasoning_content(&self) -> bool {
+        let lower = self.model_name.to_lowercase();
+        lower.contains("k2.5")
+            || lower.contains("k2-5")
+            || lower.contains("thinking")
+            || lower.contains("reasoning")
+    }
+
     async fn provider_config_for_current_model(&self) -> Result<ProviderConfig, CompletionError> {
         let provider_id = self
             .full_model_name
@@ -604,7 +613,11 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        let needs_reasoning = self.needs_reasoning_content();
+        messages.extend(convert_messages_to_openai(
+            &request.chat_history,
+            needs_reasoning,
+        ));
 
         let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
@@ -856,7 +869,11 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        let needs_reasoning = self.needs_reasoning_content();
+        messages.extend(convert_messages_to_openai(
+            &request.chat_history,
+            needs_reasoning,
+        ));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -948,7 +965,11 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        let needs_reasoning = self.needs_reasoning_content();
+        messages.extend(convert_messages_to_openai(
+            &request.chat_history,
+            needs_reasoning,
+        ));
 
         let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
@@ -1269,7 +1290,10 @@ pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde
         .collect()
 }
 
-fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
+fn convert_messages_to_openai(
+    messages: &OneOrMany<Message>,
+    needs_reasoning_content: bool,
+) -> Vec<serde_json::Value> {
     let mut result = Vec::new();
 
     for message in messages.iter() {
@@ -1353,6 +1377,13 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                 }
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = serde_json::json!(tool_calls);
+                    // Reasoning-capable models (e.g., kimi-k2.5, kimi-k2.5-nvfp4) require the
+                    // reasoning_content field when tool_calls are present and thinking is enabled.
+                    // Only add it when needed, and don’t overwrite it if we ever start carrying it
+                    // through in Message::Assistant.
+                    if needs_reasoning_content && msg.get("reasoning_content").is_none() {
+                        msg["reasoning_content"] = serde_json::json!(".");
+                    }
                 }
                 result.push(msg);
             }
