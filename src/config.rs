@@ -1764,4 +1764,20 @@ command = "/usr/bin/test"
         // The mcp_servers data is silently dropped — verify it's not accessible
         assert!(parsed.defaults.mcp.is_empty());
     }
+
+    #[test]
+    fn qmd_mcp_server_name_is_canonicalized_on_load() {
+        let toml = r#"
+[[defaults.mcp]]
+name = "QMD"
+transport = "http"
+url = "https://example.com/mcp"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(config.defaults.mcp.len(), 1);
+        assert_eq!(config.defaults.mcp[0].name, "qmd");
+    }
 }

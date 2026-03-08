@@ -4,6 +4,7 @@
 //! connection status.
 
 use super::state::ApiState;
+use crate::config::canonicalize_mcp_server_name;
 
 use axum::Json;
 use axum::extract::{Path, State};
@@ -87,7 +88,7 @@ pub(super) async fn list_mcp_servers(
                     .get("enabled")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                defs.push((name, transport, enabled));
+                defs.push((canonicalize_mcp_server_name(&name), transport, enabled));
             }
         }
         defs
@@ -118,6 +119,7 @@ pub(super) async fn create_mcp_server(
             message: "Server name cannot be empty".into(),
         }));
     }
+    let canonical_name = canonicalize_mcp_server_name(&request.name);
 
     let config_path = state.config_path.read().await.clone();
     let content = if config_path.exists() {
@@ -135,10 +137,16 @@ pub(super) async fn create_mcp_server(
     // Check for duplicates
     if let Some(arr) = doc.get("mcp_servers").and_then(|v| v.as_array_of_tables()) {
         for table in arr.iter() {
-            if table.get("name").and_then(|v| v.as_str()) == Some(&request.name) {
+            if table
+                .get("name")
+                .and_then(|v| v.as_str())
+                .map(canonicalize_mcp_server_name)
+                .as_deref()
+                == Some(canonical_name.as_str())
+            {
                 return Ok(Json(MutationResponse {
                     success: false,
-                    message: format!("MCP server '{}' already exists", request.name),
+                    message: format!("MCP server '{}' already exists", canonical_name),
                 }));
             }
         }
@@ -147,7 +155,7 @@ pub(super) async fn create_mcp_server(
     // Build the new table
     let mut new_table = toml_edit::Table::new();
     new_table.set_implicit(true);
-    new_table["name"] = toml_edit::value(&request.name);
+    new_table["name"] = toml_edit::value(&canonical_name);
     new_table["transport"] = toml_edit::value(&request.transport);
 
     if !request.enabled {
@@ -201,7 +209,7 @@ pub(super) async fn create_mcp_server(
 
     Ok(Json(MutationResponse {
         success: true,
-        message: format!("MCP server '{}' added", request.name),
+        message: format!("MCP server '{}' added", canonical_name),
     }))
 }
 
@@ -210,6 +218,7 @@ pub(super) async fn update_mcp_server(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateMcpServerRequest>,
 ) -> Result<Json<MutationResponse>, StatusCode> {
+    let canonical_name = canonicalize_mcp_server_name(&request.name);
     let config_path = state.config_path.read().await.clone();
     if !config_path.exists() {
         return Ok(Json(MutationResponse {
@@ -231,13 +240,20 @@ pub(super) async fn update_mcp_server(
     else {
         return Ok(Json(MutationResponse {
             success: false,
-            message: format!("MCP server '{}' not found", request.name),
+            message: format!("MCP server '{}' not found", canonical_name),
         }));
     };
 
     let mut found = false;
     for table in arr.iter_mut() {
-        if table.get("name").and_then(|v| v.as_str()) == Some(&request.name) {
+        if table
+            .get("name")
+            .and_then(|v| v.as_str())
+            .map(canonicalize_mcp_server_name)
+            .as_deref()
+            == Some(canonical_name.as_str())
+        {
+            table["name"] = toml_edit::value(&canonical_name);
             table["transport"] = toml_edit::value(&request.transport);
             if request.enabled {
                 table.remove("enabled");
@@ -271,7 +287,7 @@ pub(super) async fn update_mcp_server(
     if !found {
         return Ok(Json(MutationResponse {
             success: false,
-            message: format!("MCP server '{}' not found", request.name),
+            message: format!("MCP server '{}' not found", canonical_name),
         }));
     }
 
@@ -281,7 +297,7 @@ pub(super) async fn update_mcp_server(
 
     Ok(Json(MutationResponse {
         success: true,
-        message: format!("MCP server '{}' updated", request.name),
+        message: format!("MCP server '{}' updated", canonical_name),
     }))
 }
 
@@ -290,6 +306,7 @@ pub(super) async fn delete_mcp_server(
     State(state): State<Arc<ApiState>>,
     Path(server_name): Path<String>,
 ) -> Result<Json<MutationResponse>, StatusCode> {
+    let canonical_name = canonicalize_mcp_server_name(&server_name);
     let config_path = state.config_path.read().await.clone();
     if !config_path.exists() {
         return Ok(Json(MutationResponse {
@@ -311,7 +328,7 @@ pub(super) async fn delete_mcp_server(
     else {
         return Ok(Json(MutationResponse {
             success: false,
-            message: format!("MCP server '{}' not found", server_name),
+            message: format!("MCP server '{}' not found", canonical_name),
         }));
     };
 
@@ -322,7 +339,9 @@ pub(super) async fn delete_mcp_server(
             .get(idx)
             .and_then(|t| t.get("name"))
             .and_then(|v| v.as_str())
-            == Some(&server_name);
+            .map(canonicalize_mcp_server_name)
+            .as_deref()
+            == Some(canonical_name.as_str());
         if matches {
             arr.remove(idx);
         } else {
@@ -333,7 +352,7 @@ pub(super) async fn delete_mcp_server(
     if arr.len() == original_len {
         return Ok(Json(MutationResponse {
             success: false,
-            message: format!("MCP server '{}' not found", server_name),
+            message: format!("MCP server '{}' not found", canonical_name),
         }));
     }
 
@@ -343,7 +362,7 @@ pub(super) async fn delete_mcp_server(
 
     Ok(Json(MutationResponse {
         success: true,
-        message: format!("MCP server '{}' removed", server_name),
+        message: format!("MCP server '{}' removed", canonical_name),
     }))
 }
 

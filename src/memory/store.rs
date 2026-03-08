@@ -513,16 +513,19 @@ impl MemoryStore {
     pub async fn connect_in_memory() -> Arc<Self> {
         use sqlx::sqlite::SqliteConnectOptions;
 
+        let database_path =
+            std::env::temp_dir().join(format!("spacebot-test-{}.sqlite", uuid::Uuid::new_v4()));
         let options = SqliteConnectOptions::new()
-            .in_memory(true)
+            .filename(&database_path)
             .create_if_missing(true);
 
-        // Single-connection pool: each pool gets its own private in-memory db.
+        // Single-connection pool on a unique temp database keeps tests isolated
+        // even when multiple harnesses migrate in parallel.
         let pool = sqlx::pool::PoolOptions::<sqlx::Sqlite>::new()
             .max_connections(1)
             .connect_with(options)
             .await
-            .expect("in-memory SQLite");
+            .expect("test SQLite");
         sqlx::migrate!("./migrations")
             .run(&pool)
             .await

@@ -293,6 +293,11 @@ impl Tool for MemorySaveTool {
         let embedding = self
             .memory_search
             .embedding_model_arc()
+            .ok_or_else(|| {
+                MemorySaveError(
+                    "Failed to generate embedding: embedding model unavailable".to_string(),
+                )
+            })?
             .embed_one(&args.content)
             .await
             .map_err(|e| MemorySaveError(format!("Failed to generate embedding: {e}")))?;

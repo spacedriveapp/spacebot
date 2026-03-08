@@ -1510,15 +1510,15 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
     let mut embedding_ready = false;
 
     if warmup_config.eager_embedding_load {
-        match deps
-            .memory_search
-            .embedding_model_arc()
-            .embed_one("warmup")
-            .await
-        {
-            Ok(_) => embedding_ready = true,
-            Err(error) => {
-                errors.push(format!("embedding warmup failed: {error}"));
+        match deps.memory_search.embedding_model_arc() {
+            Some(embedding_model) => match embedding_model.embed_one("warmup").await {
+                Ok(_) => embedding_ready = true,
+                Err(error) => {
+                    errors.push(format!("embedding warmup failed: {error}"));
+                }
+            },
+            None => {
+                errors.push("embedding warmup skipped: embedding model unavailable".to_string());
             }
         }
     }

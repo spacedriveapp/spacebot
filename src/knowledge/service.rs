@@ -227,23 +227,28 @@ impl KnowledgeRetrievalService {
             .map_err(|error| KnowledgeServiceError::Message(error.to_string()))?;
 
         let curated = curate_results(&search_results, query.max_results);
-        let store = self.memory_search.store();
+        let store = self.memory_search.store().clone();
 
         let mut hits = Vec::new();
         for result in curated {
-            if let Err(error) = store.record_access(&result.memory.id).await {
-                tracing::warn!(
-                    memory_id = %result.memory.id,
-                    %error,
-                    "failed to record memory access for knowledge recall"
-                );
-            }
+            let memory_id = result.memory.id.clone();
+            let access_store = store.clone();
+            tokio::spawn(async move {
+                if let Err(error) = access_store.record_access(&memory_id).await {
+                    tracing::warn!(
+                        memory_id = %memory_id,
+                        %error,
+                        "failed to record memory access for knowledge recall"
+                    );
+                }
+            });
 
             let title = crate::summarize_first_non_empty_line(&result.memory.content, 80);
+            let snippet = crate::summarize_first_non_empty_line(&result.memory.content, 280);
             hits.push(KnowledgeHit {
                 id: result.memory.id.clone(),
                 title,
-                snippet: result.memory.content.clone(),
+                snippet,
                 content_type: format!("memory/{}", result.memory.memory_type),
                 score: result.score,
                 provenance: KnowledgeProvenance {
@@ -269,9 +274,7 @@ mod tests {
     use crate::knowledge::{KnowledgeQuery, KnowledgeSourceStatusState};
     use crate::llm::routing::RoutingConfig;
     use crate::mcp::McpManager;
-    use crate::memory::{
-        EmbeddingModel, EmbeddingTable, Memory, MemorySearch, MemoryStore, MemoryType,
-    };
+    use crate::memory::{EmbeddingTable, Memory, MemorySearch, MemoryStore, MemoryType};
 
     use serde_json::json;
 
@@ -303,7 +306,10 @@ mod tests {
             id: "test".to_string(),
             display_name: None,
             role: None,
+            gradient_start: None,
+            gradient_end: None,
             workspace: agent_root.join("workspace"),
+            identity_dir: agent_root.clone(),
             data_dir: agent_root.join("data"),
             archives_dir: agent_root.join("archives"),
             routing: RoutingConfig::default(),
@@ -355,20 +361,15 @@ mod tests {
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn)
             .await
             .expect("embedding table");
-        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).expect("embedding"));
-        let embedding = embedding_model
-            .embed_one(&memory.content)
-            .await
-            .expect("memory embedding");
         embedding_table
-            .store(&memory.id, &memory.content, &embedding)
+            .store(&memory.id, &memory.content, &vec![0.0; 384])
             .await
             .expect("store embedding");
         embedding_table
             .ensure_fts_index()
             .await
             .expect("ensure fts index");
-        let memory_search = Arc::new(MemorySearch::new(store, embedding_table, embedding_model));
+        let memory_search = Arc::new(MemorySearch::new_without_embeddings(store, embedding_table));
 
         let runtime_config = Arc::new(RuntimeConfig::new(
             &instance_dir,
@@ -589,7 +590,9 @@ mod tests {
         );
         assert_eq!(
             result.source_statuses[0].message.as_deref(),
-            Some("QMD is present in config but disabled for this agent.")
+            Some(
+                "QMD is present in config under the reserved server name 'qmd' but disabled for this agent."
+            )
         );
     }
 

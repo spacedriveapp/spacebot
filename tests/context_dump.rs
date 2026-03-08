@@ -138,7 +138,10 @@ fn resolved_agent_config(instance_dir: &std::path::Path) -> spacebot::config::Re
         id: "main".to_string(),
         display_name: None,
         role: None,
+        gradient_start: None,
+        gradient_end: None,
         workspace: agent_root.join("workspace"),
+        identity_dir: agent_root.clone(),
         data_dir: agent_root.join("data"),
         archives_dir: agent_root.join("archives"),
         routing,
@@ -371,7 +374,7 @@ async fn get_branch_tool_defs() -> anyhow::Result<Vec<rig::completion::ToolDefin
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
-        deps.mcp_manager.clone(),
+        Some(deps.mcp_manager.clone()),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
@@ -397,6 +400,8 @@ async fn get_channel_tool_defs() -> anyhow::Result<Vec<rig::completion::ToolDefi
         active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_task_presets: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
             spacebot::agent::status::StatusBlock::new(),
         )),
@@ -648,7 +653,7 @@ async fn dump_branch_context() {
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
-        deps.mcp_manager.clone(),
+        Some(deps.mcp_manager.clone()),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
@@ -662,13 +667,16 @@ async fn dump_branch_context() {
 
     let tools_text = format_tool_defs(&tool_defs);
     print_section(
-        &format!("BRANCH TOOLS ({} tools)", tool_defs.len()),
+        &format!("DETACHED BRANCH TOOLS ({} tools)", tool_defs.len()),
         &tools_text,
     );
     print_stats("Tool definitions", &tools_text);
 
     let total = branch_prompt.len() + tools_text.len();
-    println!("\n--- TOTAL BRANCH CONTEXT: ~{} tokens ---", total / 4);
+    println!(
+        "\n--- TOTAL DETACHED BRANCH CONTEXT: ~{} tokens ---",
+        total / 4
+    );
 
     let routing = rc.routing.load();
     println!(
@@ -676,7 +684,7 @@ async fn dump_branch_context() {
         routing.resolve(spacebot::ProcessType::Branch, None)
     );
     println!("Max turns: {}", **rc.branch_max_turns.load());
-    println!("History: cloned from channel at fork time (full conversation context)");
+    println!("History: detached branch fixture (no spawn_worker registration)");
 
     assert!(!branch_prompt.is_empty());
     assert!(!tool_defs.is_empty());
@@ -851,7 +859,7 @@ async fn dump_all_contexts() {
         deps.task_store.clone(),
         deps.memory_search.clone(),
         deps.runtime_config.clone(),
-        deps.mcp_manager.clone(),
+        Some(deps.mcp_manager.clone()),
         deps.memory_event_tx.clone(),
         conversation_logger,
         channel_store,
@@ -863,12 +871,15 @@ async fn dump_all_contexts() {
     print_section("BRANCH SYSTEM PROMPT", &branch_prompt);
     print_stats("System prompt", &branch_prompt);
     print_section(
-        &format!("BRANCH TOOLS ({} tools)", branch_tool_defs.len()),
+        &format!("DETACHED BRANCH TOOLS ({} tools)", branch_tool_defs.len()),
         &branch_tools_text,
     );
     print_stats("Tool definitions", &branch_tools_text);
     let branch_total = branch_prompt.len() + branch_tools_text.len();
-    println!("--- TOTAL BRANCH: ~{} tokens ---", branch_total / 4);
+    println!(
+        "--- TOTAL DETACHED BRANCH: ~{} tokens ---",
+        branch_total / 4
+    );
 
     // ── Worker ──
     let browser_config = (**rc.browser_config.load()).clone();

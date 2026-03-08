@@ -29,6 +29,7 @@ use rig::message::UserContent;
 use rig::one_or_many::OneOrMany;
 use rig::tool::server::ToolServer;
 use serde::Deserialize;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::{Arc, Weak};
@@ -360,6 +361,24 @@ fn mediate_worker_result_for_retrigger(
     }
 }
 
+fn normalize_retrieval_payload(result: &str) -> Cow<'_, str> {
+    let trimmed = result.trim();
+    let Some(fenced) = trimmed
+        .strip_prefix("```")
+        .and_then(|value| value.strip_suffix("```"))
+    else {
+        return Cow::Borrowed(trimmed);
+    };
+
+    let fenced = fenced.trim();
+    let normalized = match fenced.split_once('\n') {
+        Some((first_line, rest)) if first_line.trim().eq_ignore_ascii_case("json") => rest,
+        _ => fenced,
+    };
+
+    Cow::Owned(normalized.trim().to_string())
+}
+
 fn mediate_retrieval_result_for_retrigger(result: &str, process_succeeded: bool) -> (String, bool) {
     let trimmed = result.trim();
 
@@ -381,7 +400,8 @@ fn mediate_retrieval_result_for_retrigger(result: &str, process_succeeded: bool)
         );
     }
 
-    let payload: RetrievalWorkerPayload = match serde_json::from_str(trimmed) {
+    let normalized = normalize_retrieval_payload(trimmed);
+    let payload: RetrievalWorkerPayload = match serde_json::from_str(&normalized) {
         Ok(payload) => payload,
         Err(_) => {
             return (
@@ -2877,13 +2897,6 @@ impl Channel {
                     .await
                     .remove(worker_id)
                     .unwrap_or(WorkerTaskPreset::Default);
-                let worker_task_preset = self
-                    .state
-                    .worker_task_presets
-                    .write()
-                    .await
-                    .remove(worker_id)
-                    .unwrap_or(WorkerTaskPreset::Default);
 
                 if *notify {
                     let (result, success) =
@@ -3416,5 +3429,18 @@ mod tests {
                 || relayed.contains("no supporting evidence")
         );
         assert!(!crate::tools::should_block_user_visible_text(&relayed));
+    }
+
+    #[test]
+    fn retrieval_result_mediation_accepts_fenced_json_payload() {
+        let (relayed, success) = mediate_worker_result_for_retrigger(
+            "```json\n{\n  \"status\": \"success\",\n  \"summary\": \"Found it.\",\n  \"sources\": [{\n    \"source\": \"qmd\",\n    \"tool\": \"qmd_search\",\n    \"retrieval_mode\": \"keyword\",\n    \"locator\": \"notes/found.md\",\n    \"title\": \"Found\",\n    \"snippet\": \"Evidence\",\n    \"why_it_matters\": \"It answers the request.\"\n  }],\n  \"gaps\": []\n}\n```",
+            WorkerTaskPreset::Retrieval,
+            true,
+        );
+
+        assert!(success);
+        assert!(relayed.contains("Found it."));
+        assert!(relayed.contains("Supporting evidence:"));
     }
 }

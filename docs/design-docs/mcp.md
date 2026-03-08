@@ -63,6 +63,7 @@ This does not prevent higher-level native retrieval contracts from using MCP beh
 
 - the branch sees one native tool and one normalized evidence schema
 - the adapter calls the configured `qmd` MCP server internally
+- `qmd` is a reserved MCP server name for the native QMD retrieval path; configure `name = "qmd"` if you want branch-visible QMD retrieval
 - branch responses keep provenance and degraded status, not raw protocol dumps
 
 That preserves the original boundary: workers own raw MCP surfaces, while branches own curation and user-facing retrieval conclusions.

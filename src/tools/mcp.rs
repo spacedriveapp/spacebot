@@ -48,7 +48,7 @@ impl McpToolAdapter {
     }
 
     fn collect_result_text(result: &rmcp::model::CallToolResult) -> String {
-        let mut blocks = result
+        let blocks = result
             .content
             .iter()
             .map(|content| match &content.raw {
@@ -65,14 +65,53 @@ impl McpToolAdapter {
             })
             .collect::<Vec<_>>();
 
-        if let Some(structured_content) = &result.structured_content {
-            blocks.push(structured_content.to_string());
-        }
-
         if blocks.is_empty() {
-            String::new()
+            result
+                .structured_content
+                .as_ref()
+                .map(Value::to_string)
+                .unwrap_or_default()
         } else {
             blocks.join("\n")
+        }
+    }
+
+    fn bounded_structured_content(result: &rmcp::model::CallToolResult) -> Option<Value> {
+        let structured_content = result.structured_content.as_ref()?;
+        let serialized = structured_content.to_string();
+        if serialized.len() > crate::tools::MAX_TOOL_OUTPUT_BYTES {
+            return None;
+        }
+
+        Some(structured_content.clone())
+    }
+
+    fn format_output(
+        server_name: &str,
+        tool_name: &str,
+        result: &rmcp::model::CallToolResult,
+    ) -> McpToolOutput {
+        let output_text = Self::collect_result_text(result);
+        let output_text = truncate_output(&output_text, crate::tools::MAX_TOOL_OUTPUT_BYTES);
+        let is_error = result.is_error.unwrap_or(false);
+        let structured_content = Self::bounded_structured_content(result);
+
+        let result_text = if output_text.is_empty() {
+            if is_error {
+                format!("MCP server '{server_name}' reported an error while calling '{tool_name}'")
+            } else {
+                "[tool returned no content]".to_string()
+            }
+        } else {
+            output_text
+        };
+
+        McpToolOutput {
+            server: server_name.to_string(),
+            tool: tool_name.to_string(),
+            result: result_text,
+            structured_content,
+            is_error,
         }
     }
 }
@@ -87,6 +126,7 @@ pub struct McpToolOutput {
     pub tool: String,
     pub result: String,
     pub structured_content: Option<Value>,
+    pub is_error: bool,
 }
 
 impl Tool for McpToolAdapter {
@@ -120,37 +160,11 @@ impl Tool for McpToolAdapter {
                 ))
             })?;
 
-        let output_text = Self::collect_result_text(&result);
-        let output_text = truncate_output(&output_text, crate::tools::MAX_TOOL_OUTPUT_BYTES);
-        let structured_content = result.structured_content.clone();
-
-        if result.is_error.unwrap_or(false) {
-            let message = if output_text.is_empty() {
-                format!(
-                    "MCP server '{}' reported an error while calling '{}'",
-                    self.server_name, self.tool_name
-                )
-            } else {
-                output_text
-            };
-            return Err(McpToolError(message));
-        }
-
-        if output_text.is_empty() {
-            return Ok(McpToolOutput {
-                server: self.server_name.clone(),
-                tool: self.tool_name.clone(),
-                result: "[tool returned no content]".to_string(),
-                structured_content,
-            });
-        }
-
-        Ok(McpToolOutput {
-            server: self.server_name.clone(),
-            tool: self.tool_name.clone(),
-            result: output_text,
-            structured_content,
-        })
+        Ok(Self::format_output(
+            &self.server_name,
+            &self.tool_name,
+            &result,
+        ))
     }
 }
 
@@ -194,5 +208,43 @@ impl EmptyStringExt for String {
         } else {
             self
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::McpToolAdapter;
+    use rmcp::model::{CallToolResult, Content};
+    use serde_json::json;
+
+    #[test]
+    fn collect_result_text_uses_structured_content_only_once_when_content_is_empty() {
+        let mut result = CallToolResult::structured(json!({ "status": "ok" }));
+        result.content = vec![];
+
+        let text = McpToolAdapter::collect_result_text(&result);
+        assert_eq!(text, "{\"status\":\"ok\"}");
+    }
+
+    #[test]
+    fn format_output_keeps_mcp_declared_errors_in_structured_result() {
+        let result = CallToolResult::error(vec![Content::text("remote failed")]);
+
+        let output = McpToolAdapter::format_output("demo", "search", &result);
+        assert!(output.is_error);
+        assert_eq!(output.result, "remote failed");
+    }
+
+    #[test]
+    fn format_output_drops_oversized_structured_content() {
+        let mut result = CallToolResult::structured(json!({
+            "payload": "x".repeat(crate::tools::MAX_TOOL_OUTPUT_BYTES)
+        }));
+        result.content = vec![Content::text("small")];
+
+        let output = McpToolAdapter::format_output("demo", "search", &result);
+        assert!(output.structured_content.is_none());
+        assert!(!output.is_error);
+        assert_eq!(output.result, "small");
     }
 }

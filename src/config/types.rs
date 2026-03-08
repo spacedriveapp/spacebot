@@ -12,6 +12,16 @@ use std::path::{Path, PathBuf};
 
 pub(super) const CRON_TIMEZONE_ENV_VAR: &str = "SPACEBOT_CRON_TIMEZONE";
 pub(super) const USER_TIMEZONE_ENV_VAR: &str = "SPACEBOT_USER_TIMEZONE";
+pub(crate) const QMD_MCP_SERVER_NAME: &str = "qmd";
+
+/// Canonicalize MCP server names that have reserved semantics in native adapters.
+pub(crate) fn canonicalize_mcp_server_name(name: &str) -> String {
+    if name.eq_ignore_ascii_case(QMD_MCP_SERVER_NAME) {
+        QMD_MCP_SERVER_NAME.to_string()
+    } else {
+        name.to_string()
+    }
+}
 
 /// OpenTelemetry export configuration.
 ///

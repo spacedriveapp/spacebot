@@ -16,11 +16,11 @@ pub fn reciprocal_rank_fuse(
     hit_lists: &[Vec<KnowledgeHit>],
     max_results: usize,
 ) -> Vec<KnowledgeHit> {
-    let mut fused_hits = HashMap::<String, FusedHit>::new();
+    let mut fused_hits = HashMap::<(String, String), FusedHit>::new();
 
     for hits in hit_lists {
         for (rank, hit) in hits.iter().enumerate() {
-            let key = format!("{}::{}", hit.provenance.source_id, hit.id);
+            let key = (hit.provenance.source_id.clone(), hit.id.clone());
             let rank_score = 1.0 / (DEFAULT_RRF_K + rank as f32 + 1.0);
             fused_hits
                 .entry(key)
@@ -120,5 +120,32 @@ mod tests {
                 .iter()
                 .any(|entry| entry.provenance.source_id == "qmd")
         );
+    }
+
+    #[test]
+    fn reciprocal_rank_fuse_keeps_distinct_hits_when_ids_contain_separator_text() {
+        let fused = reciprocal_rank_fuse(
+            &[
+                vec![hit(
+                    "alpha::beta",
+                    "First",
+                    0.91,
+                    "qmd",
+                    KnowledgeSourceKind::Qmd,
+                )],
+                vec![hit(
+                    "beta",
+                    "Second",
+                    0.83,
+                    "qmd::alpha",
+                    KnowledgeSourceKind::Qmd,
+                )],
+            ],
+            10,
+        );
+
+        assert_eq!(fused.len(), 2);
+        assert!(fused.iter().any(|entry| entry.title == "First"));
+        assert!(fused.iter().any(|entry| entry.title == "Second"));
     }
 }

@@ -95,6 +95,7 @@ pub use file::{
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
+};
 pub use knowledge_recall::{
     KnowledgeRecallArgs, KnowledgeRecallError, KnowledgeRecallOutput, KnowledgeRecallTool,
 };
@@ -491,7 +492,7 @@ pub fn create_branch_tool_server(
     task_store: Arc<TaskStore>,
     memory_search: Arc<MemorySearch>,
     runtime_config: Arc<RuntimeConfig>,
-    mcp_manager: Arc<crate::mcp::McpManager>,
+    mcp_manager: Option<Arc<crate::mcp::McpManager>>,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
     conversation_logger: crate::conversation::history::ConversationLogger,
     channel_store: crate::conversation::ChannelStore,
@@ -504,15 +505,10 @@ pub fn create_branch_tool_server(
             memory_event_tx.clone(),
         ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
-        .tool(KnowledgeRecallTool::new(
-            memory_search.clone(),
-            runtime_config.clone(),
-            mcp_manager,
-        ))
-        .tool(MemoryDeleteTool::new(memory_search))
+        .tool(MemoryDeleteTool::new(memory_search.clone()))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
-        .tool(EmailSearchTool::new(runtime_config))
+        .tool(EmailSearchTool::new(runtime_config.clone()))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
             task_store.clone(),
@@ -521,6 +517,14 @@ pub fn create_branch_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+
+    if let Some(mcp_manager) = mcp_manager {
+        server = server.tool(KnowledgeRecallTool::new(
+            memory_search,
+            runtime_config.clone(),
+            mcp_manager,
+        ));
+    }
 
     if let Some(state) = state {
         server = server.tool(SpawnWorkerTool::new(state));

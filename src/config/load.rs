@@ -16,8 +16,8 @@ use super::{
     LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
     MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
     SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    TwitchInstanceConfig, WarmupConfig, WebhookConfig, canonicalize_mcp_server_name,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -262,7 +262,7 @@ fn parse_mcp_server_config(raw: TomlMcpServerConfig) -> Result<McpServerConfig> 
     };
 
     Ok(McpServerConfig {
-        name: raw.name,
+        name: canonicalize_mcp_server_name(&raw.name),
         transport,
         enabled: raw.enabled,
     })

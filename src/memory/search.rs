@@ -88,7 +88,7 @@ impl MemorySearch {
     }
 
     /// Get a reference to the memory store.
-    pub fn store(&self) -> &MemoryStore {
+    pub fn store(&self) -> &Arc<MemoryStore> {
         &self.store
     }
 
@@ -98,17 +98,13 @@ impl MemorySearch {
     }
 
     /// Get a reference to the embedding model.
-    pub fn embedding_model(&self) -> &EmbeddingModel {
-        self.embedding_model
-            .as_deref()
-            .expect("embedding model unavailable")
+    pub fn embedding_model(&self) -> Option<&EmbeddingModel> {
+        self.embedding_model.as_deref()
     }
 
     /// Get a shared handle to the embedding model (for async embed_one).
-    pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
-        self.embedding_model
-            .as_ref()
-            .expect("embedding model unavailable")
+    pub fn embedding_model_arc(&self) -> Option<&Arc<EmbeddingModel>> {
+        self.embedding_model.as_ref()
     }
 
     /// Unified search entry point. Dispatches to the appropriate strategy
@@ -237,7 +233,7 @@ impl MemorySearch {
                 Err(error) => {
                     tracing::debug!(
                         %error,
-                        "vector search unavailable, falling back to graph only"
+                        "vector search unavailable, using FTS and graph results only"
                     );
                 }
             }

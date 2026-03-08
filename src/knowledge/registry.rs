@@ -99,23 +99,25 @@ impl KnowledgeSourceRegistry {
 fn qmd_enablement(mcp_servers: &[McpServerConfig]) -> KnowledgeSourceEnablement {
     if mcp_servers
         .iter()
-        .any(|server| server.enabled && server.name.eq_ignore_ascii_case("qmd"))
+        .any(|server| server.enabled && server.name == QMD_SOURCE_ID)
     {
         return KnowledgeSourceEnablement::configured(
-            "QMD MCP transport is configured and available through the native retrieval adapter.",
+            "QMD MCP transport is configured under the reserved server name 'qmd' and available through the native retrieval adapter.",
         );
     }
 
     if mcp_servers
         .iter()
-        .any(|server| !server.enabled && server.name.eq_ignore_ascii_case("qmd"))
+        .any(|server| !server.enabled && server.name == QMD_SOURCE_ID)
     {
         return KnowledgeSourceEnablement::disabled(
-            "QMD is present in config but disabled for this agent.",
+            "QMD is present in config under the reserved server name 'qmd' but disabled for this agent.",
         );
     }
 
-    KnowledgeSourceEnablement::disabled("No QMD MCP server is configured for this agent.")
+    KnowledgeSourceEnablement::disabled(
+        "No MCP server named 'qmd' is configured for this agent, so native QMD retrieval is unavailable.",
+    )
 }
 
 #[cfg(test)]

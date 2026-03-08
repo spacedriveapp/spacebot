@@ -140,7 +140,7 @@ impl Tool for SpawnWorkerTool {
                 "type": "string",
                 "enum": ["default", "retrieval"],
                 "default": "default",
-                "description": "Optional task wrapper. Use \"retrieval\" when the worker should search external knowledge tools (for example QMD via MCP) and return evidence with provenance in a structured final response."
+                "description": "Optional task wrapper. Use \"retrieval\" when the builtin worker should search external knowledge tools and return evidence with provenance in a structured final response. Do not use \"retrieval\" when worker_type is \"opencode\"."
             }
         });
 
@@ -212,7 +212,6 @@ impl Tool for SpawnWorkerTool {
                 });
             }
         }
-        validate_worker_request(is_opencode, args.task_preset)?;
         validate_worker_request(is_opencode, args.task_preset)?;
 
         // Resolve working directory from project/worktree if not explicitly set.
@@ -473,6 +472,7 @@ impl Tool for DetachedSpawnWorkerTool {
             &self.deps.agent_id,
             false,
             None,
+            WorkerTaskPreset::Default,
         );
 
         let secrets_store = rc.secrets.load().as_ref().clone();

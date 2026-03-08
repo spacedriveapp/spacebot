@@ -67,6 +67,7 @@ The channel has no memory tools. It delegates memory work to branches. Channel-s
 ### Branch ToolServer (per-branch)
 
 Each branch gets its own isolated ToolServer, created at spawn time via `create_branch_tool_server()`.
+(The list below is illustrative, not exhaustive; see `create_branch_tool_server()` for the live branch surface.)
 
 ```
 ┌──────────────────────────────────────────────┐
@@ -75,13 +76,15 @@ Each branch gets its own isolated ToolServer, created at spawn time via `create_
 │   memory_save      (Arc<MemorySearch>)       │
 │   memory_recall    (Arc<MemorySearch>)       │
 │   knowledge_recall (native retrieval plane)  │
+│   memory_delete    (Arc<MemorySearch>)       │
 │   spacebot_docs    (embedded docs)            │
 │   channel_recall   (ConversationLogger)      │
 │   email_search     (IMAP mailbox search)     │
+│   worker_inspect   (run logger)              │
 └──────────────────────────────────────────────┘
 ```
 
-Branch isolation ensures `memory_recall`, `knowledge_recall`, `channel_recall`, `spacebot_docs`, and `email_search` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
+Branch isolation ensures `memory_recall`, `knowledge_recall`, `memory_delete`, `channel_recall`, `spacebot_docs`, `email_search`, and `worker_inspect` are never visible to the channel. All tools are registered at creation and live for the lifetime of the branch.
 
 ### Worker ToolServer (per-worker)
 
@@ -167,7 +170,7 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Static tools (registered at creation)
 
-`memory_save`, `memory_recall`, `knowledge_recall`, `memory_delete`, `channel_recall`, `spacebot_docs`, `email_search`, and task-board tools on branch ToolServers. `shell`, `file`, `exec`, `set_status`, and connected MCP tools on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
+`memory_save`, `memory_recall`, `knowledge_recall`, `memory_delete`, `channel_recall`, `spacebot_docs`, `email_search`, `worker_inspect`, and task-board tools on branch ToolServers. `shell`, `file`, `exec`, `set_status`, and connected MCP tools on worker ToolServers. `memory_save` on cortex and compactor ToolServers. These are registered before `.run()` via the builder pattern and live for the lifetime of the ToolServer.
 
 ### Dynamic tools (added/removed at runtime)
 
@@ -184,7 +187,7 @@ create_cortex_chat_tool_server(...) -> ToolServerHandle
 
 ### Per-process tools (created and destroyed with the process)
 
-Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `knowledge_recall` + `channel_recall` + `spacebot_docs` + `email_search` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
+Branch and worker ToolServers are created when the process spawns and dropped when it finishes. Each branch gets `memory_save` + `memory_recall` + `knowledge_recall` + `memory_delete` + `channel_recall` + `spacebot_docs` + `email_search` + `worker_inspect` (plus task board tools). Each worker gets `shell`, `file`, `exec`, `set_status` (bound to that worker's ID), and optionally `browser`, `web_search`, and connected `mcp_*` tools.
 
 ## Tool Design Patterns
 
@@ -255,6 +258,7 @@ Native retrieval entrypoint for branch-visible evidence gathering across multipl
 - `memory_recall` remains the typed durable-memory tool.
 - `knowledge_recall` returns normalized `KnowledgeHit` results with mandatory provenance.
 - Today it supports native memory plus QMD through a native adapter contract.
+- Native QMD retrieval expects an MCP server configured with the reserved name `qmd`.
 - Google Workspace family descriptors are modeled behind the same branch UX, but their bridge adapter remains normalization-only for now.
 
 Branches use `knowledge_recall` when they need document or external-source evidence. Channels still never see raw MCP output, raw QMD tool names, or bridge-specific command semantics.

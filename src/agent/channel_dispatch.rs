@@ -269,7 +269,7 @@ async fn spawn_branch(
         state.deps.task_store.clone(),
         state.deps.memory_search.clone(),
         state.deps.runtime_config.clone(),
-        state.deps.mcp_manager.clone(),
+        Some(state.deps.mcp_manager.clone()),
         state.deps.memory_event_tx.clone(),
         state.conversation_logger.clone(),
         state.channel_store.clone(),
@@ -441,7 +441,6 @@ pub async fn spawn_worker_from_state(
     let task = task.into();
     reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "worker");
-    let preset_task = apply_worker_task_preset(&task, task_preset);
 
     let result = spawn_worker_inner(state, &task, interactive, suggested_skills, task_preset).await;
 

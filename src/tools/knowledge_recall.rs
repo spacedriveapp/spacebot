@@ -197,9 +197,7 @@ mod tests {
     use crate::knowledge::{KnowledgeRetrievalService, QmdAdapter, QmdToolResponse};
     use crate::llm::routing::RoutingConfig;
     use crate::mcp::McpManager;
-    use crate::memory::{
-        EmbeddingModel, EmbeddingTable, Memory, MemorySearch, MemoryStore, MemoryType,
-    };
+    use crate::memory::{EmbeddingTable, Memory, MemorySearch, MemoryStore, MemoryType};
 
     use rig::tool::Tool as _;
     use serde_json::json;
@@ -218,7 +216,10 @@ mod tests {
             id: "test".to_string(),
             display_name: None,
             role: None,
+            gradient_start: None,
+            gradient_end: None,
             workspace: agent_root.join("workspace"),
+            identity_dir: agent_root.clone(),
             data_dir: agent_root.join("data"),
             archives_dir: agent_root.join("archives"),
             routing: RoutingConfig::default(),
@@ -273,20 +274,15 @@ mod tests {
         let embedding_table = EmbeddingTable::open_or_create(&lance_conn)
             .await
             .expect("embedding table");
-        let embedding_model = Arc::new(EmbeddingModel::new(lance_dir.path()).expect("embedding"));
-        let embedding = embedding_model
-            .embed_one(&memory.content)
-            .await
-            .expect("memory embedding");
         embedding_table
-            .store(&memory.id, &memory.content, &embedding)
+            .store(&memory.id, &memory.content, &vec![0.0; 384])
             .await
             .expect("store embedding");
         embedding_table
             .ensure_fts_index()
             .await
             .expect("ensure fts index");
-        let memory_search = Arc::new(MemorySearch::new(store, embedding_table, embedding_model));
+        let memory_search = Arc::new(MemorySearch::new_without_embeddings(store, embedding_table));
 
         let runtime_config = Arc::new(RuntimeConfig::new(
             &instance_dir,

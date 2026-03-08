@@ -239,14 +239,7 @@ pub fn status_message_for_source(
     };
 
     let auth_prefix = match auth_status {
-        Some(status) if status.authenticated => {
-            let principal = status
-                .principal
-                .as_deref()
-                .map(|value| format!(" [{value}]"))
-                .unwrap_or_else(String::new);
-            format!("credentials present{principal}")
-        }
+        Some(status) if status.authenticated => "credentials present".to_string(),
         Some(status) => format!(
             "not yet authenticated via {} ({})",
             status.auth_method, status.raw_status
