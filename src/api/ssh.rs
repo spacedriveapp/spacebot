@@ -24,6 +24,9 @@ const SSHD_PORT: u16 = 2222;
 /// Host key algorithms to generate if missing.
 const HOST_KEY_TYPES: &[&str] = &["rsa", "ecdsa", "ed25519"];
 
+/// Path to the sshd PID file used for lifecycle management.
+const PID_FILE: &str = "/run/spacebot-sshd.pid";
+
 #[derive(Deserialize)]
 pub(super) struct AuthorizedKeyRequest {
     public_key: String,
@@ -48,14 +51,14 @@ pub(super) async fn set_authorized_key(
     Json(request): Json<AuthorizedKeyRequest>,
 ) -> Result<Json<AuthorizedKeyResponse>, StatusCode> {
     let key = request.public_key.trim();
-    if key.is_empty() {
+    if key.is_empty() || key.contains('\n') || key.contains('\r') {
         return Ok(Json(AuthorizedKeyResponse {
             success: false,
-            message: "public_key is empty".into(),
+            message: "public_key must be a single non-empty line".into(),
         }));
     }
 
-    let ssh_dir = ssh_data_dir(&state).await;
+    let ssh_dir = ssh_data_dir(&state);
     if let Err(error) = tokio::fs::create_dir_all(&ssh_dir).await {
         tracing::error!(%error, "failed to create SSH data directory");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -66,6 +69,12 @@ pub(super) async fn set_authorized_key(
         tracing::error!(%error, "failed to write authorized_keys");
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
+    set_permissions(&authorized_keys_path, 0o600)
+        .await
+        .map_err(|error| {
+            tracing::error!(%error, "failed to set permissions on authorized_keys");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     // Also write to the system location so sshd can find it.
     if let Err(error) = install_authorized_keys(&authorized_keys_path).await {
@@ -84,8 +93,10 @@ pub(super) async fn set_authorized_key(
 pub(super) async fn ssh_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SshStatusResponse>, StatusCode> {
-    let ssh_dir = ssh_data_dir(&state).await;
-    let has_key = ssh_dir.join("authorized_keys").exists();
+    let ssh_dir = ssh_data_dir(&state);
+    let has_key = tokio::fs::try_exists(ssh_dir.join("authorized_keys"))
+        .await
+        .unwrap_or(false);
     let enabled = is_sshd_running().await;
 
     Ok(Json(SshStatusResponse {
@@ -97,7 +108,7 @@ pub(super) async fn ssh_status(
 
 /// Enable SSH: generate host keys if needed, install authorized_keys, start sshd.
 pub async fn enable(state: &ApiState) -> Result<(), String> {
-    let ssh_dir = ssh_data_dir(state).await;
+    let ssh_dir = ssh_data_dir(state);
     tokio::fs::create_dir_all(&ssh_dir)
         .await
         .map_err(|e| format!("failed to create SSH dir: {e}"))?;
@@ -113,9 +124,12 @@ pub async fn enable(state: &ApiState) -> Result<(), String> {
         .map_err(|e| format!("failed to install host keys: {e}"))?;
 
     // Install authorized_keys to /root/.ssh/ if we have one.
-    let ak_path = ssh_dir.join("authorized_keys");
-    if ak_path.exists() {
-        install_authorized_keys(&ak_path)
+    let authorized_keys_path = ssh_dir.join("authorized_keys");
+    if tokio::fs::try_exists(&authorized_keys_path)
+        .await
+        .unwrap_or(false)
+    {
+        install_authorized_keys(&authorized_keys_path)
             .await
             .map_err(|e| format!("failed to install authorized_keys: {e}"))?;
     }
@@ -138,6 +152,8 @@ pub async fn enable(state: &ApiState) -> Result<(), String> {
             "PermitRootLogin=prohibit-password",
             "-o",
             "PasswordAuthentication=no",
+            "-o",
+            &format!("PidFile={PID_FILE}"),
             "-p",
             &SSHD_PORT.to_string(),
         ])
@@ -154,20 +170,29 @@ pub async fn enable(state: &ApiState) -> Result<(), String> {
     Ok(())
 }
 
-/// Disable SSH: kill sshd.
+/// Disable SSH: stop sshd via its PID file.
 pub async fn disable() -> Result<(), String> {
-    let output = Command::new("pkill")
-        .args(["-f", &format!("/usr/sbin/sshd.*-p {SSHD_PORT}")])
+    let pid = match tokio::fs::read_to_string(PID_FILE).await {
+        Ok(content) => content.trim().to_string(),
+        Err(_) => {
+            tracing::info!("sshd not running (no PID file)");
+            return Ok(());
+        }
+    };
+
+    let output = Command::new("kill")
+        .arg(&pid)
         .output()
         .await
-        .map_err(|e| format!("failed to kill sshd: {e}"))?;
+        .map_err(|e| format!("failed to kill sshd (pid {pid}): {e}"))?;
 
-    // pkill returns 1 if no processes matched — that's fine.
-    if !output.status.success() && output.status.code() != Some(1) {
+    if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("pkill failed: {stderr}"));
+        // Process may already be gone.
+        tracing::warn!(pid, %stderr, "kill sshd returned non-zero");
     }
 
+    let _ = tokio::fs::remove_file(PID_FILE).await;
     tracing::info!("sshd stopped");
     Ok(())
 }
@@ -175,15 +200,21 @@ pub async fn disable() -> Result<(), String> {
 // -- Internal helpers --
 
 /// Persistent SSH directory on the data volume.
-async fn ssh_data_dir(state: &ApiState) -> PathBuf {
+fn ssh_data_dir(state: &ApiState) -> PathBuf {
     let instance_dir = state.instance_dir.load();
     instance_dir.join("ssh")
 }
 
-/// Check if sshd is running by looking for its PID file or process.
+/// Check if sshd is running via its PID file.
 async fn is_sshd_running() -> bool {
-    Command::new("pgrep")
-        .args(["-f", &format!("/usr/sbin/sshd.*-p {SSHD_PORT}")])
+    let pid = match tokio::fs::read_to_string(PID_FILE).await {
+        Ok(content) => content.trim().to_string(),
+        Err(_) => return false,
+    };
+
+    // Verify the process is actually alive.
+    Command::new("kill")
+        .args(["-0", &pid])
         .output()
         .await
         .map(|o| o.status.success())
@@ -194,7 +225,7 @@ async fn is_sshd_running() -> bool {
 async fn generate_host_keys(ssh_dir: &Path) -> Result<(), std::io::Error> {
     for key_type in HOST_KEY_TYPES {
         let key_path = ssh_dir.join(format!("ssh_host_{key_type}_key"));
-        if key_path.exists() {
+        if tokio::fs::try_exists(&key_path).await.unwrap_or(false) {
             continue;
         }
 
@@ -213,7 +244,9 @@ async fn generate_host_keys(ssh_dir: &Path) -> Result<(), std::io::Error> {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            tracing::warn!(key_type, %stderr, "ssh-keygen failed");
+            return Err(std::io::Error::other(format!(
+                "ssh-keygen ({key_type}) failed: {stderr}",
+            )));
         }
     }
     Ok(())
@@ -227,12 +260,12 @@ async fn install_host_keys(ssh_dir: &Path) -> Result<(), std::io::Error> {
         let dst = PathBuf::from(format!("/etc/ssh/ssh_host_{key_type}_key"));
         let dst_pub = PathBuf::from(format!("/etc/ssh/ssh_host_{key_type}_key.pub"));
 
-        if src.exists() {
+        if tokio::fs::try_exists(&src).await.unwrap_or(false) {
             tokio::fs::copy(&src, &dst).await?;
             // Host keys must be 0600 or sshd refuses them.
             set_permissions(&dst, 0o600).await?;
         }
-        if src_pub.exists() {
+        if tokio::fs::try_exists(&src_pub).await.unwrap_or(false) {
             tokio::fs::copy(&src_pub, &dst_pub).await?;
             set_permissions(&dst_pub, 0o644).await?;
         }

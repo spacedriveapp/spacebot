@@ -22,9 +22,19 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             runner: ubuntu-24.04
             archive: tar.gz
+            os: linux
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
             archive: tar.gz
+            os: linux
+          - target: aarch64-apple-darwin
+            runner: macos-14
+            archive: tar.gz
+            os: macos
+          - target: x86_64-apple-darwin
+            runner: macos-13
+            archive: tar.gz
+            os: macos
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: write
@@ -39,8 +49,13 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
-      - name: Install system dependencies
+      - name: Install system dependencies (Linux)
+        if: matrix.os == 'linux'
         run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Install system dependencies (macOS)
+        if: matrix.os == 'macos'
+        run: brew install protobuf
 
       - name: Install Node
         uses: actions/setup-node@v4
@@ -214,6 +229,7 @@ jobs:
         run: |
           mkdir -p release-assets
           find binaries -name "*.tar.gz" -exec cp {} release-assets/ \;
+          find binaries -name "*.zip" -exec cp {} release-assets/ \;
           ls -la release-assets/
 
       - name: Create GitHub Release
@@ -222,3 +238,93 @@ jobs:
           tag_name: ${{ needs.build-binaries.outputs.version }}
           generate_release_notes: true
           files: release-assets/*
+
+  update-homebrew:
+    needs:
+      - build-binaries
+      - create-release
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          pattern: spacebot-*
+          merge-multiple: false
+
+      - name: Compute SHA256 checksums
+        id: sha
+        run: |
+          for arch in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-gnu x86_64-unknown-linux-gnu; do
+            FILE=$(find binaries -name "*${arch}*" | head -1)
+            KEY=$(echo "$arch" | tr '-' '_')
+            echo "${KEY}=$(shasum -a 256 "$FILE" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Update formula in tap repo
+        env:
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          VERSION="${{ needs.build-binaries.outputs.version }}"
+          VERSION_NUM="${VERSION#v}"
+          REPO="${{ github.repository }}"
+          BASE="https://github.com/${REPO}/releases/download/${VERSION}"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/spacedriveapp/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+
+          SHA_ARM_MAC="${{ steps.sha.outputs.aarch64_apple_darwin }}"
+          SHA_X86_MAC="${{ steps.sha.outputs.x86_64_apple_darwin }}"
+          SHA_ARM_LINUX="${{ steps.sha.outputs.aarch64_unknown_linux_gnu }}"
+          SHA_X86_LINUX="${{ steps.sha.outputs.x86_64_unknown_linux_gnu }}"
+
+          # Write formula (sed strips 10 leading spaces from the YAML indentation)
+          sed 's/^          //' > tap/Formula/spacebot.rb <<RUBY
+          class Spacebot < Formula
+            desc "Agentic LLM system with specialized processes"
+            homepage "https://github.com/${REPO}"
+            version "${VERSION_NUM}"
+            license "FSL-1.1-ALv2"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "${BASE}/spacebot-${VERSION}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM_MAC}"
+              else
+                url "${BASE}/spacebot-${VERSION}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86_MAC}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "${BASE}/spacebot-${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_ARM_LINUX}"
+              else
+                url "${BASE}/spacebot-${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+                sha256 "${SHA_X86_LINUX}"
+              end
+            end
+
+            def install
+              bin.install "spacebot"
+            end
+
+            test do
+              assert_match "spacebot", shell_output("#{bin}/spacebot --version")
+            end
+          end
+          RUBY
+
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/spacebot.rb
+          git commit -m "spacebot ${VERSION}" || echo "No changes to commit"
+          git push
