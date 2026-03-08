@@ -1,97 +1,280 @@
 //! Context composition inspection test.
 //!
-//! Bootstraps from the real ~/.spacebot data directory and dumps the full
-//! context each process type sees — system prompt + tool definitions (names,
-//! descriptions, parameter schemas). This is the complete picture of what
-//! gets sent to the LLM on every turn.
+//! Bootstraps a hermetic temp instance and dumps the full context each process
+//! type sees — system prompt plus tool definitions. This is the complete
+//! picture of what gets sent to the LLM on every turn, without depending on a
+//! real `~/.spacebot` instance.
 //!
 //! Run with: cargo test --test context_dump -- --nocapture
 
 use anyhow::Context as _;
-use std::sync::Arc;
+use axum::Json;
+use axum::extract::State;
+use axum::routing::post;
+use serde_json::Value;
 
-/// Set up the secrets store thread-local so `secret:` references in config.toml
-/// resolve correctly. Mirrors the bootstrap logic in main.rs.
-fn bootstrap_secrets_for_config() {
-    let instance_dir = spacebot::config::Config::default_instance_dir();
-    let secrets_path = instance_dir.join("data").join("secrets.redb");
-    if !secrets_path.exists() {
-        return;
-    }
-    if let Ok(store) = spacebot::secrets::store::SecretsStore::new(&secrets_path) {
-        let store = Arc::new(store);
-        if store.is_encrypted() {
-            let keystore = spacebot::secrets::keystore::platform_keystore();
-            if let Some(key) = keystore.load_key("instance").ok().flatten() {
-                let _ = store.unlock(&key);
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::Arc;
+use std::time::Duration;
+
+const TEST_CORTEX_MODEL: &str = "test/mock-context-dump";
+const TEST_BULLETIN_TEXT: &str = "Victor is the user behind this hermetic test instance. The branch surface exposes knowledge_recall before worker-only retrieval fallback, the channel stays lean, and bulletin synthesis must stay local to the test harness. Native memory remains the seeded source of truth here so context-dump inspections can prove tool visibility and prompt assembly without touching any personal machine state.";
+
+#[derive(Clone)]
+struct MockResponsesState {
+    response_body: Arc<Value>,
+}
+
+struct ContextDumpHarness {
+    _instance_dir: tempfile::TempDir,
+    deps: spacebot::AgentDeps,
+    server_task: tokio::task::JoinHandle<()>,
+}
+
+struct PreparedMockServer {
+    app: axum::Router,
+    listener: tokio::net::TcpListener,
+    addr: SocketAddr,
+}
+
+impl PreparedMockServer {
+    fn spawn(self) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            if let Err(error) = axum::serve(self.listener, self.app).await {
+                tracing::debug!(%error, "mock responses server stopped");
             }
-        }
-        spacebot::config::set_resolve_secrets_store(store);
+        })
     }
 }
 
-/// Bootstrap AgentDeps from the real ~/.spacebot config (same as bulletin test).
-async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::config::Config)> {
-    bootstrap_secrets_for_config();
-    let config =
-        spacebot::config::Config::load().context("failed to load ~/.spacebot/config.toml")?;
+#[derive(Debug, thiserror::Error)]
+enum ContextDumpBootstrapError {
+    #[error(transparent)]
+    Other(#[from] anyhow::Error),
+    #[error("injected bootstrap failure before server spawn ({addr})")]
+    InjectedBeforeServerSpawn { addr: SocketAddr },
+}
 
+impl Drop for ContextDumpHarness {
+    fn drop(&mut self) {
+        self.server_task.abort();
+    }
+}
+
+async fn mock_responses_handler(
+    State(state): State<MockResponsesState>,
+    Json(_request): Json<Value>,
+) -> Json<Value> {
+    Json((*state.response_body).clone())
+}
+
+async fn prepare_mock_server(response_body: Arc<Value>) -> anyhow::Result<PreparedMockServer> {
+    let app = axum::Router::new()
+        .route("/v1/responses", post(mock_responses_handler))
+        .with_state(MockResponsesState { response_body });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .context("failed to bind mock responses server")?;
+    let addr = listener
+        .local_addr()
+        .context("failed to read mock responses server address")?;
+
+    Ok(PreparedMockServer {
+        app,
+        listener,
+        addr,
+    })
+}
+
+fn test_llm_config(base_url: &str) -> spacebot::config::LlmConfig {
+    let mut providers = HashMap::new();
+    providers.insert(
+        "test".to_string(),
+        spacebot::config::ProviderConfig {
+            api_type: spacebot::config::ApiType::OpenAiResponses,
+            base_url: base_url.to_string(),
+            api_key: "test-key".to_string(),
+            name: Some("Hermetic Test Provider".to_string()),
+            use_bearer_auth: false,
+            extra_headers: Vec::new(),
+        },
+    );
+
+    spacebot::config::LlmConfig {
+        anthropic_key: None,
+        openai_key: None,
+        openrouter_key: None,
+        kilo_key: None,
+        zhipu_key: None,
+        groq_key: None,
+        together_key: None,
+        fireworks_key: None,
+        deepseek_key: None,
+        xai_key: None,
+        mistral_key: None,
+        gemini_key: None,
+        ollama_key: None,
+        ollama_base_url: None,
+        opencode_zen_key: None,
+        opencode_go_key: None,
+        nvidia_key: None,
+        minimax_key: None,
+        minimax_cn_key: None,
+        moonshot_key: None,
+        zai_coding_plan_key: None,
+        providers,
+    }
+}
+
+fn resolved_agent_config(instance_dir: &std::path::Path) -> spacebot::config::ResolvedAgentConfig {
+    let agent_root = instance_dir.join("agents").join("main");
+    let routing = spacebot::llm::routing::RoutingConfig {
+        cortex: TEST_CORTEX_MODEL.to_string(),
+        ..Default::default()
+    };
+
+    spacebot::config::ResolvedAgentConfig {
+        id: "main".to_string(),
+        display_name: None,
+        role: None,
+        workspace: agent_root.join("workspace"),
+        data_dir: agent_root.join("data"),
+        archives_dir: agent_root.join("archives"),
+        routing,
+        max_concurrent_branches: 2,
+        max_concurrent_workers: 2,
+        max_turns: 5,
+        branch_max_turns: 10,
+        context_window: 128_000,
+        compaction: spacebot::config::CompactionConfig::default(),
+        memory_persistence: spacebot::config::MemoryPersistenceConfig::default(),
+        coalesce: spacebot::config::CoalesceConfig::default(),
+        ingestion: spacebot::config::IngestionConfig::default(),
+        cortex: spacebot::config::CortexConfig::default(),
+        warmup: spacebot::config::WarmupConfig::default(),
+        browser: spacebot::config::BrowserConfig::default(),
+        channel: spacebot::config::ChannelConfig::default(),
+        mcp: Vec::new(),
+        brave_search_key: None,
+        cron_timezone: None,
+        user_timezone: None,
+        sandbox: spacebot::sandbox::SandboxConfig::default(),
+        projects: spacebot::config::ProjectsConfig::default(),
+        history_backfill_count: 50,
+        cron: Vec::new(),
+    }
+}
+
+async fn save_memory_fixture(
+    memory_store: &spacebot::memory::MemoryStore,
+    memory: spacebot::memory::Memory,
+) -> anyhow::Result<()> {
+    memory_store.save(&memory).await?;
+    Ok(())
+}
+
+async fn seed_memory_fixtures(memory_store: &spacebot::memory::MemoryStore) -> anyhow::Result<()> {
+    let memories = vec![
+        spacebot::memory::Memory::new(
+            "Victor is the user and expects direct engineering answers with minimal fluff.",
+            spacebot::memory::MemoryType::Identity,
+        ),
+        spacebot::memory::Memory::new(
+            "Branches should prefer knowledge_recall before falling back to worker-only retrieval.",
+            spacebot::memory::MemoryType::Decision,
+        ),
+        spacebot::memory::Memory::new(
+            "Hermetic tests are preferred over any fixture that depends on ~/.spacebot.",
+            spacebot::memory::MemoryType::Preference,
+        ),
+        spacebot::memory::Memory::new(
+            "The active goal is to inspect context assembly without personal machine state.",
+            spacebot::memory::MemoryType::Goal,
+        ),
+        spacebot::memory::Memory::new(
+            "Verification found that context_dump used the real default instance and had to be isolated.",
+            spacebot::memory::MemoryType::Event,
+        ),
+        spacebot::memory::Memory::new(
+            "Native memory plus a mock bulletin response are enough to verify prompt assembly here.",
+            spacebot::memory::MemoryType::Observation,
+        ),
+        spacebot::memory::Memory::new(
+            "Victor keeps design notes in the knowledge plane and expects provenance-aware retrieval.",
+            spacebot::memory::MemoryType::Fact,
+        )
+        .with_importance(0.9),
+    ];
+
+    for memory in memories {
+        save_memory_fixture(memory_store, memory).await?;
+    }
+
+    Ok(())
+}
+
+async fn bootstrap_harness_inner(
+    inject_failure_before_server_spawn: bool,
+) -> Result<ContextDumpHarness, ContextDumpBootstrapError> {
+    let instance_dir = tempfile::tempdir().context("failed to create temp instance dir")?;
+    let agent_config = resolved_agent_config(instance_dir.path());
+    std::fs::create_dir_all(&agent_config.workspace).context("failed to create workspace dir")?;
+    std::fs::create_dir_all(&agent_config.data_dir).context("failed to create data dir")?;
+
+    let response_body = Arc::new(serde_json::json!({
+        "output": [
+            {
+                "type": "message",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": TEST_BULLETIN_TEXT
+                    }
+                ]
+            }
+        ],
+        "usage": {
+            "input_tokens": 128,
+            "output_tokens": 64,
+            "input_tokens_details": {
+                "cached_tokens": 0
+            }
+        }
+    }));
+    let prepared_server = prepare_mock_server(response_body).await?;
     let llm_manager = Arc::new(
-        spacebot::llm::LlmManager::new(config.llm.clone())
+        spacebot::llm::LlmManager::new(test_llm_config(&format!("http://{}", prepared_server.addr)))
             .await
-            .context("failed to init LLM manager")?,
+            .context("failed to init hermetic llm manager")?,
     );
-
-    let embedding_cache_dir = config.instance_dir.join("embedding_cache");
-    let embedding_model = Arc::new(
-        spacebot::memory::EmbeddingModel::new(&embedding_cache_dir)
-            .context("failed to init embedding model")?,
-    );
-
-    let resolved_agents = config.resolve_agents();
-    let agent_config = resolved_agents.first().context("no agents configured")?;
 
     let db = spacebot::db::Db::connect(&agent_config.data_dir)
         .await
-        .context("failed to connect databases")?;
-
+        .context("failed to connect hermetic databases")?;
     let memory_store = spacebot::memory::MemoryStore::new(db.sqlite.clone());
-
     let embedding_table = spacebot::memory::EmbeddingTable::open_or_create(&db.lance)
         .await
         .context("failed to init embedding table")?;
 
-    if let Err(error) = embedding_table.ensure_fts_index().await {
-        eprintln!("warning: FTS index creation failed: {error}");
-    }
+    seed_memory_fixtures(&memory_store).await?;
 
-    let memory_search = Arc::new(spacebot::memory::MemorySearch::new(
+    let memory_search = Arc::new(spacebot::memory::MemorySearch::new_without_embeddings(
         memory_store,
         embedding_table,
-        embedding_model,
     ));
     let task_store = Arc::new(spacebot::tasks::TaskStore::new(db.sqlite.clone()));
-
-    let identity = spacebot::identity::Identity::load(&agent_config.workspace).await;
-    let prompts =
-        spacebot::prompts::PromptEngine::new("en").context("failed to init prompt engine")?;
-    let skills =
-        spacebot::skills::SkillSet::load(&config.skills_dir(), &agent_config.skills_dir()).await;
-
+    let defaults = spacebot::config::DefaultsConfig::default();
     let runtime_config = Arc::new(spacebot::config::RuntimeConfig::new(
-        &config.instance_dir,
-        agent_config,
-        &config.defaults,
-        prompts,
-        identity,
-        skills,
+        instance_dir.path(),
+        &agent_config,
+        &defaults,
+        spacebot::prompts::PromptEngine::new("en").context("failed to init prompt engine")?,
+        spacebot::identity::Identity::default(),
+        spacebot::skills::SkillSet::default(),
     ));
 
     let (event_tx, memory_event_tx) = spacebot::create_process_event_buses_with_capacity(16, 32);
-
-    let agent_id: spacebot::AgentId = Arc::from(agent_config.id.as_str());
-    let mcp_manager = Arc::new(spacebot::mcp::McpManager::new(agent_config.mcp.clone()));
-
     let sandbox_config = Arc::new(arc_swap::ArcSwap::from_pointee(
         agent_config.sandbox.clone(),
     ));
@@ -99,17 +282,17 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         spacebot::sandbox::Sandbox::new(
             sandbox_config,
             agent_config.workspace.clone(),
-            &config.instance_dir,
+            instance_dir.path(),
             agent_config.data_dir.clone(),
         )
         .await,
     );
 
     let deps = spacebot::AgentDeps {
-        agent_id,
+        agent_id: Arc::from(agent_config.id.as_str()),
         memory_search,
         llm_manager,
-        mcp_manager,
+        mcp_manager: Arc::new(spacebot::mcp::McpManager::new(Vec::new())),
         task_store,
         project_store: Arc::new(spacebot::projects::ProjectStore::new(db.sqlite.clone())),
         cron_tool: None,
@@ -131,7 +314,23 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         injection_tx: tokio::sync::mpsc::channel(1).0,
     };
 
-    Ok((deps, config))
+    if inject_failure_before_server_spawn {
+        return Err(ContextDumpBootstrapError::InjectedBeforeServerSpawn {
+            addr: prepared_server.addr,
+        });
+    }
+
+    let server_task = prepared_server.spawn();
+
+    Ok(ContextDumpHarness {
+        _instance_dir: instance_dir,
+        deps,
+        server_task,
+    })
+}
+
+async fn bootstrap_harness() -> anyhow::Result<ContextDumpHarness> {
+    bootstrap_harness_inner(false).await.map_err(Into::into)
 }
 
 /// Print a labeled section with a separator.
@@ -149,6 +348,86 @@ fn print_stats(label: &str, content: &str) {
     let words = content.split_whitespace().count();
     let estimated_tokens = chars / 4;
     println!("--- {label}: {chars} chars, {words} words, ~{estimated_tokens} tokens ---");
+}
+
+fn has_tool_named(defs: &[rig::completion::ToolDefinition], name: &str) -> bool {
+    defs.iter().any(|tool| tool.name == name)
+}
+
+async fn get_branch_tool_defs() -> anyhow::Result<Vec<rig::completion::ToolDefinition>> {
+    let harness = bootstrap_harness().await?;
+    let deps = &harness.deps;
+    let conversation_logger =
+        spacebot::conversation::ConversationLogger::new(deps.sqlite_pool.clone());
+    let channel_store = spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone());
+    let run_logger = spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone());
+
+    let branch_tool_server = spacebot::tools::create_branch_tool_server(
+        None,
+        deps.agent_id.clone(),
+        deps.task_store.clone(),
+        deps.memory_search.clone(),
+        deps.runtime_config.clone(),
+        deps.memory_event_tx.clone(),
+        conversation_logger,
+        channel_store,
+        run_logger,
+    );
+
+    branch_tool_server
+        .get_tool_defs(None)
+        .await
+        .context("failed to get branch tool defs")
+}
+
+async fn get_channel_tool_defs() -> anyhow::Result<Vec<rig::completion::ToolDefinition>> {
+    let harness = bootstrap_harness().await?;
+    let deps = &harness.deps;
+    let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
+    let channel_id: spacebot::ChannelId = Arc::from("test-channel");
+    let state = spacebot::agent::channel::ChannelState {
+        channel_id,
+        history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        active_branches: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_handles: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        active_workers: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_task_presets: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        status_block: Arc::new(tokio::sync::RwLock::new(
+            spacebot::agent::status::StatusBlock::new(),
+        )),
+        deps: deps.clone(),
+        conversation_logger: spacebot::conversation::ConversationLogger::new(
+            deps.sqlite_pool.clone(),
+        ),
+        process_run_logger: spacebot::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
+        channel_store: spacebot::conversation::ChannelStore::new(deps.sqlite_pool.clone()),
+        screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
+        logs_dir: std::path::PathBuf::from("/tmp/logs"),
+        reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
+    };
+
+    let tool_server = rig::tool::server::ToolServer::new().run();
+    let skip_flag = spacebot::tools::new_skip_flag();
+    let replied_flag = spacebot::tools::new_replied_flag();
+    spacebot::tools::add_channel_tools(
+        &tool_server,
+        state,
+        response_tx,
+        "test",
+        skip_flag,
+        replied_flag,
+        None,
+        None,
+        true,
+    )
+    .await
+    .context("failed to add channel tools")?;
+
+    tool_server
+        .get_tool_defs(None)
+        .await
+        .context("failed to get channel tool defs")
 }
 
 /// Format tool definitions as the LLM sees them.
@@ -206,11 +485,55 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
         .expect("failed to render channel prompt")
 }
 
+#[tokio::test]
+async fn branch_tool_defs_include_knowledge_recall() {
+    let tool_defs = get_branch_tool_defs()
+        .await
+        .expect("failed to build branch tool defs");
+    assert!(
+        has_tool_named(&tool_defs, "knowledge_recall"),
+        "branch tool defs should include knowledge_recall"
+    );
+}
+
+#[tokio::test]
+async fn channel_tool_defs_do_not_include_knowledge_recall() {
+    let tool_defs = get_channel_tool_defs()
+        .await
+        .expect("failed to build channel tool defs");
+    assert!(
+        !has_tool_named(&tool_defs, "knowledge_recall"),
+        "channel tool defs should not include knowledge_recall"
+    );
+}
+
+#[tokio::test]
+async fn bootstrap_harness_failure_before_server_spawn_drops_listener() {
+    let error = match bootstrap_harness_inner(true).await {
+        Ok(_) => panic!("bootstrap should fail before server spawn"),
+        Err(error) => error,
+    };
+
+    let ContextDumpBootstrapError::InjectedBeforeServerSpawn { addr } = error else {
+        panic!("expected injected pre-spawn failure");
+    };
+
+    let connect_result =
+        tokio::time::timeout(Duration::from_millis(250), tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connect should not hang");
+    assert!(
+        connect_result.is_err(),
+        "listener should be dropped when bootstrap fails before server spawn"
+    );
+}
+
 // ─── Channel Context ─────────────────────────────────────────────────────────
 
 #[tokio::test]
 async fn dump_channel_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let harness = bootstrap_harness().await.expect("failed to bootstrap");
+    let deps = &harness.deps;
     let rc = &deps.runtime_config;
 
     let prompt = build_channel_system_prompt(rc);
@@ -295,7 +618,8 @@ async fn dump_channel_context() {
 
 #[tokio::test]
 async fn dump_branch_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let harness = bootstrap_harness().await.expect("failed to bootstrap");
+    let deps = &harness.deps;
     let rc = &deps.runtime_config;
 
     let prompt_engine = rc.prompts.load();
@@ -355,7 +679,8 @@ async fn dump_branch_context() {
 
 #[tokio::test]
 async fn dump_worker_context() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let harness = bootstrap_harness().await.expect("failed to bootstrap");
+    let deps = &harness.deps;
     let rc = &deps.runtime_config;
 
     let prompt_engine = rc.prompts.load();
@@ -429,7 +754,8 @@ async fn dump_worker_context() {
 
 #[tokio::test]
 async fn dump_all_contexts() {
-    let (deps, _config) = bootstrap_deps().await.expect("failed to bootstrap");
+    let harness = bootstrap_harness().await.expect("failed to bootstrap");
+    let deps = &harness.deps;
     let rc = &deps.runtime_config;
     let prompt_engine = rc.prompts.load();
     let instance_dir = rc.instance_dir.to_string_lossy();
@@ -437,7 +763,7 @@ async fn dump_all_contexts() {
 
     // Generate bulletin so channel context is complete
     let logger = spacebot::agent::cortex::CortexLogger::new(deps.sqlite_pool.clone());
-    let bulletin_success = spacebot::agent::cortex::generate_bulletin(&deps, &logger).await;
+    let bulletin_success = spacebot::agent::cortex::generate_bulletin(deps, &logger).await;
     if bulletin_success {
         let bulletin = rc.memory_bulletin.load();
         println!(

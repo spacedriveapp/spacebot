@@ -12,7 +12,7 @@
 //! - No memory tools — the channel delegates memory work to branches.
 //!
 //! **Branch ToolServer** (one per branch, isolated):
-//! - `memory_save` + `memory_recall` + `memory_delete` + `channel_recall`
+//! - `memory_save` + `memory_recall` + `knowledge_recall` + `memory_delete` + `channel_recall`
 //! - `spacebot_docs` for embedded self-documentation lookup
 //! - `task_create` + `task_list` + `task_update`
 //! - `spawn_worker` is included for channel-originated branches only
@@ -38,6 +38,7 @@ pub mod cron;
 pub mod email_search;
 pub mod file;
 pub mod install_skill;
+pub mod knowledge_recall;
 pub mod mcp;
 pub mod memory_delete;
 pub mod memory_recall;
@@ -94,6 +95,8 @@ pub use file::{
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
+pub use knowledge_recall::{
+    KnowledgeRecallArgs, KnowledgeRecallError, KnowledgeRecallOutput, KnowledgeRecallTool,
 };
 pub use mcp::{McpToolAdapter, McpToolError, McpToolOutput};
 pub use memory_delete::{
@@ -500,6 +503,10 @@ pub fn create_branch_tool_server(
             memory_event_tx.clone(),
         ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
+        .tool(KnowledgeRecallTool::new(
+            memory_search.clone(),
+            runtime_config.clone(),
+        ))
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())

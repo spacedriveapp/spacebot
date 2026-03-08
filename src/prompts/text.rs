@@ -174,6 +174,9 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/memory_recall") => {
             include_str!("../../prompts/en/tools/memory_recall_description.md.j2")
         }
+        ("en", "tools/knowledge_recall") => {
+            include_str!("../../prompts/en/tools/knowledge_recall_description.md.j2")
+        }
         ("en", "tools/memory_delete") => {
             include_str!("../../prompts/en/tools/memory_delete_description.md.j2")
         }

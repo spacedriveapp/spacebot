@@ -1,0 +1,3 @@
+Search and retrieve knowledge from supported sources with normalized results suitable for branch reasoning. Use this for documented notes and indexed knowledge lookups that are available directly in branch before falling back to worker-only sources. Results include normalized hits with mandatory `provenance` plus `source_statuses` that explain which requested sources were used or unavailable.
+
+If a requested source is unavailable, unknown, or not yet wired, it should appear in `source_statuses` with a structured reason instead of failing the whole lookup.

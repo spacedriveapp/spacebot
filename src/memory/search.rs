@@ -37,7 +37,7 @@ pub enum SearchSort {
 pub struct MemorySearch {
     store: Arc<MemoryStore>,
     embedding_table: EmbeddingTable,
-    embedding_model: Arc<EmbeddingModel>,
+    embedding_model: Option<Arc<EmbeddingModel>>,
 }
 
 impl Clone for MemorySearch {
@@ -45,7 +45,7 @@ impl Clone for MemorySearch {
         Self {
             store: Arc::clone(&self.store),
             embedding_table: self.embedding_table.clone(),
-            embedding_model: Arc::clone(&self.embedding_model),
+            embedding_model: self.embedding_model.clone(),
         }
     }
 }
@@ -68,7 +68,19 @@ impl MemorySearch {
         Self {
             store,
             embedding_table,
-            embedding_model,
+            embedding_model: Some(embedding_model),
+        }
+    }
+
+    /// Create a MemorySearch instance without vector embeddings.
+    ///
+    /// This is primarily useful for hermetic tests that only exercise
+    /// metadata-based queries and tool wiring.
+    pub fn new_without_embeddings(store: Arc<MemoryStore>, embedding_table: EmbeddingTable) -> Self {
+        Self {
+            store,
+            embedding_table,
+            embedding_model: None,
         }
     }
 
@@ -84,12 +96,16 @@ impl MemorySearch {
 
     /// Get a reference to the embedding model.
     pub fn embedding_model(&self) -> &EmbeddingModel {
-        &self.embedding_model
+        self.embedding_model
+            .as_deref()
+            .expect("embedding model unavailable")
     }
 
     /// Get a shared handle to the embedding model (for async embed_one).
     pub fn embedding_model_arc(&self) -> &Arc<EmbeddingModel> {
-        &self.embedding_model
+        self.embedding_model
+            .as_ref()
+            .expect("embedding model unavailable")
     }
 
     /// Unified search entry point. Dispatches to the appropriate strategy
@@ -195,28 +211,35 @@ impl MemorySearch {
         }
 
         // 2. Vector similarity search via LanceDB
-        let query_embedding = self.embedding_model.embed_one(query).await?;
-        match self
-            .embedding_table
-            .vector_search(&query_embedding, config.max_results_per_source)
-            .await
-        {
-            Ok(vector_matches) => {
-                for (memory_id, distance) in vector_matches {
-                    let similarity = 1.0 - distance;
-                    if let Some(memory) = self.store.load(&memory_id).await?
-                        && !memory.forgotten
-                    {
-                        vector_results.push(ScoredMemory {
-                            memory,
-                            score: similarity as f64,
-                        });
+        if let Some(embedding_model) = &self.embedding_model {
+            let query_embedding = embedding_model.embed_one(query).await?;
+            match self
+                .embedding_table
+                .vector_search(&query_embedding, config.max_results_per_source)
+                .await
+            {
+                Ok(vector_matches) => {
+                    for (memory_id, distance) in vector_matches {
+                        let similarity = 1.0 - distance;
+                        if let Some(memory) = self.store.load(&memory_id).await?
+                            && !memory.forgotten
+                        {
+                            vector_results.push(ScoredMemory {
+                                memory,
+                                score: similarity as f64,
+                            });
+                        }
                     }
                 }
+                Err(error) => {
+                    tracing::debug!(
+                        %error,
+                        "vector search unavailable, falling back to graph only"
+                    );
+                }
             }
-            Err(error) => {
-                tracing::debug!(%error, "vector search unavailable, falling back to graph only");
-            }
+        } else {
+            tracing::debug!("embedding model unavailable, skipping vector search");
         }
 
         // 3. Graph traversal from high-importance memories

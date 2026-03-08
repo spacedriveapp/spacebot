@@ -12,6 +12,7 @@ pub mod error;
 pub mod factory;
 pub mod hooks;
 pub mod identity;
+pub mod knowledge;
 pub mod links;
 pub mod llm;
 pub mod mcp;
