@@ -1353,6 +1353,9 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                 }
                 if !tool_calls.is_empty() {
                     msg["tool_calls"] = serde_json::json!(tool_calls);
+                    // Moonshot AI requires reasoning_content field when thinking is enabled
+                    // and tool_calls are present. Add empty string to satisfy API requirement.
+                    msg["reasoning_content"] = serde_json::json!("");
                 }
                 result.push(msg);
             }
