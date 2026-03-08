@@ -21,6 +21,7 @@ use arc_swap::ArcSwap;
 use serde::Serialize;
 
 use std::collections::HashMap;
+use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
@@ -48,7 +49,8 @@ pub struct AgentInfo {
 /// State shared across all API handlers.
 pub struct ApiState {
     pub started_at: Instant,
-    pub auth_token: Option<String>,
+    pub auth_token: tokio::sync::RwLock<Option<String>>,
+    pub api_bind: RwLock<Option<SocketAddr>>,
     /// Aggregated event stream from all agents. SSE clients subscribe here.
     pub event_tx: broadcast::Sender<ApiEvent>,
     /// Per-agent SQLite pools for querying channel/conversation data.
@@ -290,7 +292,8 @@ impl ApiState {
         let (event_tx, _) = broadcast::channel(512);
         Self {
             started_at: Instant::now(),
-            auth_token: None,
+            auth_token: tokio::sync::RwLock::new(None),
+            api_bind: RwLock::new(None),
             event_tx,
             agent_pools: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             agent_configs: arc_swap::ArcSwap::from_pointee(Vec::new()),
@@ -790,6 +793,23 @@ impl ApiState {
     /// Share the messaging manager for runtime adapter addition from API handlers.
     pub async fn set_messaging_manager(&self, manager: Arc<MessagingManager>) {
         *self.messaging_manager.write().await = Some(manager);
+    }
+
+    /// Set the live API auth token used by the HTTP middleware.
+    pub async fn set_api_auth_token(&self, auth_token: Option<String>) {
+        *self.auth_token.write().await = auth_token.and_then(|token| {
+            let trimmed = token.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+    }
+
+    /// Set the bound HTTP API listener address for runtime auth checks.
+    pub async fn set_api_bind(&self, bind: SocketAddr) {
+        *self.api_bind.write().await = Some(bind);
     }
 
     /// Set the instance directory path.

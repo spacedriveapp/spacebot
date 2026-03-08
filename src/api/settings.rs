@@ -1,3 +1,6 @@
+use super::admin::{
+    load_config_doc, reload_runtime_configs, require_api_auth_token, write_config_doc,
+};
 use super::state::ApiState;
 
 use axum::Json;
@@ -226,19 +229,7 @@ pub(super) async fn update_global_settings(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<GlobalSettingsUpdate>,
 ) -> Result<Json<GlobalSettingsUpdateResponse>, StatusCode> {
-    let config_path = state.config_path.read().await.clone();
-
-    let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml_edit::DocumentMut = content
-        .parse()
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (_config_guard, config_path, mut doc) = load_config_doc(&state).await?;
 
     let mut requires_restart = false;
 
@@ -329,45 +320,9 @@ pub(super) async fn update_global_settings(
         }
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let reload_path = config_path.clone();
-    match tokio::task::spawn_blocking(move || crate::config::Config::load_from_path(&reload_path))
-        .await
-    {
-        Ok(Ok(new_config)) => {
-            let runtime_configs = state.runtime_configs.load();
-            let mcp_managers = state.mcp_managers.load();
-            let reload_targets = runtime_configs
-                .iter()
-                .filter_map(|(agent_id, runtime_config)| {
-                    mcp_managers.get(agent_id).map(|mcp_manager| {
-                        (
-                            agent_id.clone(),
-                            runtime_config.clone(),
-                            mcp_manager.clone(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            drop(runtime_configs);
-            drop(mcp_managers);
-
-            for (agent_id, runtime_config, mcp_manager) in reload_targets {
-                runtime_config
-                    .reload_config(&new_config, &agent_id, &mcp_manager)
-                    .await;
-            }
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(%error, "settings written but failed to reload config immediately");
-        }
-        Err(error) => {
-            tracing::warn!(%error, "settings written but config reload task failed");
-        }
-    }
+    write_config_doc(&config_path, &doc).await?;
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    state.set_defaults_config(new_config.defaults.clone()).await;
 
     let message = if requires_restart {
         "Settings updated. API server changes require a restart to take effect.".to_string()
@@ -425,6 +380,8 @@ pub(super) async fn update_apply(
 pub(super) async fn get_raw_config(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<RawConfigResponse>, StatusCode> {
+    require_api_auth_token(&state).await?;
+
     let config_path = state.config_path.read().await.clone();
     if config_path.as_os_str().is_empty() {
         tracing::error!("config_path not set in ApiState");
@@ -449,6 +406,8 @@ pub(super) async fn update_raw_config(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<RawConfigUpdateRequest>,
 ) -> Result<Json<RawConfigUpdateResponse>, StatusCode> {
+    require_api_auth_token(&state).await?;
+    let _config_guard = state.config_write_mutex.lock().await;
     let config_path = state.config_path.read().await.clone();
     if config_path.as_os_str().is_empty() {
         tracing::error!("config_path not set in ApiState");
@@ -471,38 +430,56 @@ pub(super) async fn update_raw_config(
 
     tracing::info!("config.toml updated via raw editor");
 
-    match crate::config::Config::load_from_path(&config_path) {
-        Ok(new_config) => {
-            let runtime_configs = state.runtime_configs.load();
-            let mcp_managers = state.mcp_managers.load();
-            let reload_targets = runtime_configs
-                .iter()
-                .filter_map(|(agent_id, runtime_config)| {
-                    mcp_managers.get(agent_id).map(|mcp_manager| {
-                        (
-                            agent_id.clone(),
-                            runtime_config.clone(),
-                            mcp_manager.clone(),
-                        )
-                    })
-                })
-                .collect::<Vec<_>>();
-            drop(runtime_configs);
-            drop(mcp_managers);
-
-            for (agent_id, runtime_config, mcp_manager) in reload_targets {
-                runtime_config
-                    .reload_config(&new_config, &agent_id, &mcp_manager)
-                    .await;
-            }
-        }
-        Err(error) => {
-            tracing::warn!(%error, "config.toml written but failed to reload immediately");
-        }
-    }
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    state.set_defaults_config(new_config.defaults.clone()).await;
 
     Ok(Json(RawConfigUpdateResponse {
         success: true,
         message: "Config saved and reloaded.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RawConfigUpdateRequest, get_raw_config, update_raw_config};
+    use crate::api::ApiState;
+    use axum::Json;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use std::sync::Arc;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
+
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+            task_store_registry,
+        ))
+    }
+
+    #[tokio::test]
+    async fn raw_config_endpoints_require_api_auth() {
+        let state = test_api_state();
+
+        let get_result = get_raw_config(State(state.clone())).await;
+        assert!(matches!(get_result, Err(StatusCode::FORBIDDEN)));
+
+        let update_result = update_raw_config(
+            State(state),
+            Json(RawConfigUpdateRequest {
+                content: String::new(),
+            }),
+        )
+        .await;
+        assert!(matches!(update_result, Err(StatusCode::FORBIDDEN)));
+    }
 }

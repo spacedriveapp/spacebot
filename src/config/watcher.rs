@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -16,6 +17,15 @@ type WatchedAgent = (
     Arc<crate::mcp::McpManager>,
 );
 
+type NamedDiscordPermissions =
+    Arc<std::sync::RwLock<HashMap<String, Arc<arc_swap::ArcSwap<DiscordPermissions>>>>>;
+type NamedSlackPermissions =
+    Arc<std::sync::RwLock<HashMap<String, Arc<arc_swap::ArcSwap<SlackPermissions>>>>>;
+type NamedTelegramPermissions =
+    Arc<std::sync::RwLock<HashMap<String, Arc<arc_swap::ArcSwap<TelegramPermissions>>>>>;
+type NamedTwitchPermissions =
+    Arc<std::sync::RwLock<HashMap<String, Arc<arc_swap::ArcSwap<TwitchPermissions>>>>>;
+
 /// Watches config, prompt, identity, and skill files for changes and triggers
 /// hot reload on the corresponding RuntimeConfig.
 ///
@@ -31,6 +41,10 @@ pub fn spawn_file_watcher(
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
     twitch_permissions: Option<Arc<arc_swap::ArcSwap<TwitchPermissions>>>,
+    named_discord_permissions: NamedDiscordPermissions,
+    named_slack_permissions: NamedSlackPermissions,
+    named_telegram_permissions: NamedTelegramPermissions,
+    named_twitch_permissions: NamedTwitchPermissions,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
@@ -206,38 +220,88 @@ pub fn spawn_file_watcher(
                 agent_humans.store(Arc::new(config.humans.clone()));
                 tracing::info!("agent humans reloaded ({} entries)", config.humans.len());
 
-                if let Some(ref perms) = discord_permissions
-                    && let Some(discord_config) = &config.messaging.discord
-                {
-                    let new_perms =
-                        DiscordPermissions::from_config(discord_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("discord permissions reloaded");
+                if let Some(discord_config) = &config.messaging.discord {
+                    if let Some(ref perms) = discord_permissions {
+                        let new_perms =
+                            DiscordPermissions::from_config(discord_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("discord permissions reloaded");
+                    }
+
+                    let registry = named_discord_permissions.read().expect("lock poisoned");
+                    for instance in &discord_config.instances {
+                        let runtime_key =
+                            binding_runtime_adapter_key("discord", Some(instance.name.as_str()));
+                        if let Some(perms) = registry.get(&runtime_key) {
+                            let new_perms = DiscordPermissions::from_instance_config(
+                                instance,
+                                &config.bindings,
+                            );
+                            perms.store(Arc::new(new_perms));
+                        }
+                    }
                 }
 
-                if let Some(ref perms) = slack_permissions
-                    && let Some(slack_config) = &config.messaging.slack
-                {
-                    let new_perms = SlackPermissions::from_config(slack_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("slack permissions reloaded");
+                if let Some(slack_config) = &config.messaging.slack {
+                    if let Some(ref perms) = slack_permissions {
+                        let new_perms =
+                            SlackPermissions::from_config(slack_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("slack permissions reloaded");
+                    }
+
+                    let registry = named_slack_permissions.read().expect("lock poisoned");
+                    for instance in &slack_config.instances {
+                        let runtime_key =
+                            binding_runtime_adapter_key("slack", Some(instance.name.as_str()));
+                        if let Some(perms) = registry.get(&runtime_key) {
+                            let new_perms =
+                                SlackPermissions::from_instance_config(instance, &config.bindings);
+                            perms.store(Arc::new(new_perms));
+                        }
+                    }
                 }
 
-                if let Some(ref perms) = telegram_permissions
-                    && let Some(telegram_config) = &config.messaging.telegram
-                {
-                    let new_perms =
-                        TelegramPermissions::from_config(telegram_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("telegram permissions reloaded");
+                if let Some(telegram_config) = &config.messaging.telegram {
+                    if let Some(ref perms) = telegram_permissions {
+                        let new_perms =
+                            TelegramPermissions::from_config(telegram_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("telegram permissions reloaded");
+                    }
+
+                    let registry = named_telegram_permissions.read().expect("lock poisoned");
+                    for instance in &telegram_config.instances {
+                        let runtime_key =
+                            binding_runtime_adapter_key("telegram", Some(instance.name.as_str()));
+                        if let Some(perms) = registry.get(&runtime_key) {
+                            let new_perms = TelegramPermissions::from_instance_config(
+                                instance,
+                                &config.bindings,
+                            );
+                            perms.store(Arc::new(new_perms));
+                        }
+                    }
                 }
 
-                if let Some(ref perms) = twitch_permissions
-                    && let Some(twitch_config) = &config.messaging.twitch
-                {
-                    let new_perms = TwitchPermissions::from_config(twitch_config, &config.bindings);
-                    perms.store(Arc::new(new_perms));
-                    tracing::info!("twitch permissions reloaded");
+                if let Some(twitch_config) = &config.messaging.twitch {
+                    if let Some(ref perms) = twitch_permissions {
+                        let new_perms =
+                            TwitchPermissions::from_config(twitch_config, &config.bindings);
+                        perms.store(Arc::new(new_perms));
+                        tracing::info!("twitch permissions reloaded");
+                    }
+
+                    let registry = named_twitch_permissions.read().expect("lock poisoned");
+                    for instance in &twitch_config.instances {
+                        let runtime_key =
+                            binding_runtime_adapter_key("twitch", Some(instance.name.as_str()));
+                        if let Some(perms) = registry.get(&runtime_key) {
+                            let new_perms =
+                                TwitchPermissions::from_instance_config(instance, &config.bindings);
+                            perms.store(Arc::new(new_perms));
+                        }
+                    }
                 }
 
                 // Hot-start adapters that are newly enabled in the config
@@ -249,6 +313,10 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let named_discord_permissions = named_discord_permissions.clone();
+                    let named_slack_permissions = named_slack_permissions.clone();
+                    let named_telegram_permissions = named_telegram_permissions.clone();
+                    let named_twitch_permissions = named_twitch_permissions.clone();
                     let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
@@ -279,18 +347,16 @@ pub fn spawn_file_watcher(
                                         Some(instance.name.as_str()),
                                     );
                                     if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions are not hot-updated on
-                                        // config reload because each instance owns its own
-                                        // Arc<ArcSwap> with no external handle. Fixing this
-                                        // requires either a permission-update method on the
-                                        // Messaging trait or a shared handle registry. Permissions
-                                        // will be correct after a full restart.
                                         continue;
                                     }
 
                                     let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
                                         DiscordPermissions::from_instance_config(instance, &config.bindings),
                                     ));
+                                    named_discord_permissions
+                                        .write()
+                                        .expect("lock poisoned")
+                                        .insert(runtime_key.clone(), permissions.clone());
                                     let adapter = crate::messaging::discord::DiscordAdapter::new(
                                         runtime_key,
                                         &instance.token,
@@ -340,13 +406,16 @@ pub fn spawn_file_watcher(
                                         Some(instance.name.as_str()),
                                     );
                                     if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
                                         continue;
                                     }
 
                                     let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
                                         SlackPermissions::from_instance_config(instance, &config.bindings),
                                     ));
+                                    named_slack_permissions
+                                        .write()
+                                        .expect("lock poisoned")
+                                        .insert(runtime_key.clone(), permissions.clone());
                                     match crate::messaging::slack::SlackAdapter::new(
                                         runtime_key,
                                         &instance.bot_token,
@@ -395,13 +464,16 @@ pub fn spawn_file_watcher(
                                         Some(instance.name.as_str()),
                                     );
                                     if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
                                         continue;
                                     }
 
                                     let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
                                         TelegramPermissions::from_instance_config(instance, &config.bindings),
                                     ));
+                                    named_telegram_permissions
+                                        .write()
+                                        .expect("lock poisoned")
+                                        .insert(runtime_key.clone(), permissions.clone());
                                     let adapter = crate::messaging::telegram::TelegramAdapter::new(
                                         runtime_key,
                                         &instance.token,
@@ -492,28 +564,19 @@ pub fn spawn_file_watcher(
                                         Some(instance.name.as_str()),
                                     );
                                     if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
                                         continue;
                                     }
 
-                                    let token_file_name = {
-                                        use std::hash::{Hash, Hasher};
-                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                        instance.name.hash(&mut hasher);
-                                        let name_hash = hasher.finish();
-                                        format!(
-                                            "twitch_token_{}_{name_hash:016x}.json",
-                                            instance
-                                                .name
-                                                .chars()
-                                                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                                                .collect::<String>()
-                                        )
-                                    };
+                                    let token_file_name =
+                                        crate::config::named_twitch_token_file_name(&instance.name);
                                     let token_path = instance_dir.join(token_file_name);
                                     let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
                                         TwitchPermissions::from_instance_config(instance, &config.bindings),
                                     ));
+                                    named_twitch_permissions
+                                        .write()
+                                        .expect("lock poisoned")
+                                        .insert(runtime_key.clone(), permissions.clone());
                                     let adapter = crate::messaging::twitch::TwitchAdapter::new(
                                         runtime_key,
                                         &instance.username,

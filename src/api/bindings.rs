@@ -1,4 +1,8 @@
+use super::admin::{
+    load_config_doc, reload_runtime_configs, secret_reference, secrets_store, write_config_doc,
+};
 use super::state::ApiState;
+use crate::config::{DiscordConfig, EmailConfig, SlackConfig, TelegramConfig, TwitchConfig};
 
 use axum::Json;
 use axum::extract::{Query, State};
@@ -199,26 +203,8 @@ pub(super) async fn create_binding(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<CreateBindingRequest>,
 ) -> Result<Json<CreateBindingResponse>, StatusCode> {
-    let config_path = state.config_path.read().await.clone();
-    if config_path.as_os_str().is_empty() {
-        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-    }
-
-    let content = if config_path.exists() {
-        tokio::fs::read_to_string(&config_path)
-            .await
-            .map_err(|error| {
-                tracing::warn!(%error, "failed to read config.toml");
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-    } else {
-        String::new()
-    };
-
-    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-        tracing::warn!(%error, "failed to parse config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let store = secrets_store(&state)?;
+    let (config_guard, config_path, mut doc) = load_config_doc(&state).await?;
 
     let mut new_discord_token: Option<String> = None;
     let mut new_slack_tokens: Option<(String, String)> = None;
@@ -243,7 +229,9 @@ pub(super) async fn create_binding(
                 .as_table_mut()
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
             discord["enabled"] = toml_edit::value(true);
-            discord["token"] = toml_edit::value(token.as_str());
+            discord["token"] = toml_edit::value(secret_reference::<DiscordConfig>(
+                &store, "token", None, token,
+            )?);
             new_discord_token = Some(token.clone());
         }
         if let Some(bot_token) = &credentials.slack_bot_token {
@@ -262,8 +250,18 @@ pub(super) async fn create_binding(
                     .as_table_mut()
                     .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 slack["enabled"] = toml_edit::value(true);
-                slack["bot_token"] = toml_edit::value(bot_token.as_str());
-                slack["app_token"] = toml_edit::value(app_token);
+                slack["bot_token"] = toml_edit::value(secret_reference::<SlackConfig>(
+                    &store,
+                    "bot_token",
+                    None,
+                    bot_token,
+                )?);
+                slack["app_token"] = toml_edit::value(secret_reference::<SlackConfig>(
+                    &store,
+                    "app_token",
+                    None,
+                    app_token,
+                )?);
                 new_slack_tokens = Some((bot_token.clone(), app_token.to_string()));
             }
         }
@@ -283,7 +281,9 @@ pub(super) async fn create_binding(
                 .as_table_mut()
                 .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
             telegram["enabled"] = toml_edit::value(true);
-            telegram["token"] = toml_edit::value(token.as_str());
+            telegram["token"] = toml_edit::value(secret_reference::<TelegramConfig>(
+                &store, "token", None, token,
+            )?);
             new_telegram_token = Some(token.clone());
         }
 
@@ -352,13 +352,33 @@ pub(super) async fn create_binding(
             email["imap_host"] = toml_edit::value(email_imap_host);
             email["imap_port"] =
                 toml_edit::value(i64::from(credentials.email_imap_port.unwrap_or(993)));
-            email["imap_username"] = toml_edit::value(email_imap_username);
-            email["imap_password"] = toml_edit::value(email_imap_password);
+            email["imap_username"] = toml_edit::value(secret_reference::<EmailConfig>(
+                &store,
+                "imap_username",
+                None,
+                &email_imap_username,
+            )?);
+            email["imap_password"] = toml_edit::value(secret_reference::<EmailConfig>(
+                &store,
+                "imap_password",
+                None,
+                &email_imap_password,
+            )?);
             email["smtp_host"] = toml_edit::value(email_smtp_host);
             email["smtp_port"] =
                 toml_edit::value(i64::from(credentials.email_smtp_port.unwrap_or(587)));
-            email["smtp_username"] = toml_edit::value(email_smtp_username);
-            email["smtp_password"] = toml_edit::value(email_smtp_password);
+            email["smtp_username"] = toml_edit::value(secret_reference::<EmailConfig>(
+                &store,
+                "smtp_username",
+                None,
+                &email_smtp_username,
+            )?);
+            email["smtp_password"] = toml_edit::value(secret_reference::<EmailConfig>(
+                &store,
+                "smtp_password",
+                None,
+                &email_smtp_password,
+            )?);
             email["from_address"] = toml_edit::value(email_from_address);
 
             if let Some(from_name) = &credentials.email_from_name {
@@ -391,15 +411,35 @@ pub(super) async fn create_binding(
                     .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
                 twitch["enabled"] = toml_edit::value(true);
                 twitch["username"] = toml_edit::value(username.as_str());
-                twitch["oauth_token"] = toml_edit::value(oauth_token);
+                twitch["oauth_token"] = toml_edit::value(secret_reference::<TwitchConfig>(
+                    &store,
+                    "oauth_token",
+                    None,
+                    oauth_token,
+                )?);
                 if !client_id.is_empty() {
-                    twitch["client_id"] = toml_edit::value(client_id);
+                    twitch["client_id"] = toml_edit::value(secret_reference::<TwitchConfig>(
+                        &store,
+                        "client_id",
+                        None,
+                        client_id,
+                    )?);
                 }
                 if !client_secret.is_empty() {
-                    twitch["client_secret"] = toml_edit::value(client_secret);
+                    twitch["client_secret"] = toml_edit::value(secret_reference::<TwitchConfig>(
+                        &store,
+                        "client_secret",
+                        None,
+                        client_secret,
+                    )?);
                 }
                 if !refresh_token.is_empty() {
-                    twitch["refresh_token"] = toml_edit::value(refresh_token);
+                    twitch["refresh_token"] = toml_edit::value(secret_reference::<TwitchConfig>(
+                        &store,
+                        "refresh_token",
+                        None,
+                        refresh_token,
+                    )?);
                 }
                 new_twitch_creds = Some((username.clone(), oauth_token.to_string()));
             }
@@ -452,12 +492,7 @@ pub(super) async fn create_binding(
     }
     bindings_array.push(binding_table);
 
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    write_config_doc(&config_path, &doc).await?;
 
     tracing::info!(
         agent_id = %request.agent_id,
@@ -465,194 +500,209 @@ pub(super) async fn create_binding(
         "binding created via API"
     );
 
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
-        drop(bindings_guard);
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    let bindings_guard = state.bindings.read().await;
+    if let Some(bindings_swap) = bindings_guard.as_ref() {
+        bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
+    }
+    drop(bindings_guard);
 
-        if let Some(discord_config) = &new_config.messaging.discord {
-            let new_perms = crate::config::DiscordPermissions::from_config(
-                discord_config,
-                &new_config.bindings,
+    if let Some(discord_config) = &new_config.messaging.discord {
+        let new_perms =
+            crate::config::DiscordPermissions::from_config(discord_config, &new_config.bindings);
+        let perms = state.discord_permissions.read().await;
+        if let Some(arc_swap) = perms.as_ref() {
+            arc_swap.store(std::sync::Arc::new(new_perms));
+        }
+    }
+
+    if let Some(slack_config) = &new_config.messaging.slack {
+        let new_perms =
+            crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings);
+        let perms = state.slack_permissions.read().await;
+        if let Some(arc_swap) = perms.as_ref() {
+            arc_swap.store(std::sync::Arc::new(new_perms));
+        }
+    }
+
+    drop(config_guard);
+
+    let mut activation_warning = None;
+    let manager_guard = state.messaging_manager.read().await;
+    if let Some(manager) = manager_guard.as_ref() {
+        if let Some(token) = new_discord_token {
+            let discord_perms = {
+                let perms_guard = state.discord_permissions.read().await;
+                match perms_guard.as_ref() {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        drop(perms_guard);
+                        let Some(discord_config) = new_config.messaging.discord.as_ref() else {
+                            tracing::error!("discord config missing despite token being provided");
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        };
+                        let perms = crate::config::DiscordPermissions::from_config(
+                            discord_config,
+                            &new_config.bindings,
+                        );
+                        let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                        state.set_discord_permissions(arc_swap.clone()).await;
+                        arc_swap
+                    }
+                }
+            };
+            let adapter =
+                crate::messaging::discord::DiscordAdapter::new("discord", &token, discord_perms);
+            if let Err(error) = manager.register_and_start(adapter).await {
+                tracing::error!(%error, "failed to hot-start discord adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but discord adapter failed to start: {error}"
+                ));
+            }
+        }
+
+        if let Some((bot_token, app_token)) = new_slack_tokens {
+            let slack_perms = {
+                let perms_guard = state.slack_permissions.read().await;
+                match perms_guard.as_ref() {
+                    Some(existing) => existing.clone(),
+                    None => {
+                        drop(perms_guard);
+                        let Some(slack_config) = new_config.messaging.slack.as_ref() else {
+                            tracing::error!("slack config missing despite tokens being provided");
+                            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                        };
+                        let perms = crate::config::SlackPermissions::from_config(
+                            slack_config,
+                            &new_config.bindings,
+                        );
+                        let arc_swap = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
+                        state.set_slack_permissions(arc_swap.clone()).await;
+                        arc_swap
+                    }
+                }
+            };
+            let slack_commands = new_config
+                .messaging
+                .slack
+                .as_ref()
+                .map(|s| s.commands.clone())
+                .unwrap_or_default();
+            match crate::messaging::slack::SlackAdapter::new(
+                "slack",
+                &bot_token,
+                &app_token,
+                slack_perms,
+                slack_commands,
+            ) {
+                Ok(adapter) => {
+                    if let Err(error) = manager.register_and_start(adapter).await {
+                        tracing::error!(%error, "failed to hot-start slack adapter");
+                        activation_warning = Some(format!(
+                            "binding saved, but slack adapter failed to start: {error}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build slack adapter");
+                    activation_warning = Some(format!(
+                        "binding saved, but slack adapter failed to build: {error}"
+                    ));
+                }
+            }
+        }
+
+        if let Some(token) = new_telegram_token {
+            let telegram_perms = {
+                let Some(telegram_config) = new_config.messaging.telegram.as_ref() else {
+                    tracing::error!("telegram config missing despite token being provided");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                };
+                let perms = crate::config::TelegramPermissions::from_config(
+                    telegram_config,
+                    &new_config.bindings,
+                );
+                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+            };
+            let adapter = crate::messaging::telegram::TelegramAdapter::new(
+                "telegram",
+                &token,
+                telegram_perms,
             );
-            let perms = state.discord_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
+            if let Err(error) = manager.register_and_start(adapter).await {
+                tracing::error!(%error, "failed to hot-start telegram adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but telegram adapter failed to start: {error}"
+                ));
             }
         }
 
-        if let Some(slack_config) = &new_config.messaging.slack {
-            let new_perms =
-                crate::config::SlackPermissions::from_config(slack_config, &new_config.bindings);
-            let perms = state.slack_permissions.read().await;
-            if let Some(arc_swap) = perms.as_ref() {
-                arc_swap.store(std::sync::Arc::new(new_perms));
+        if new_email_configured {
+            let Some(email_config) = new_config.messaging.email.as_ref() else {
+                tracing::error!("email config missing despite credentials being provided");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            };
+
+            match crate::messaging::email::EmailAdapter::from_config(email_config) {
+                Ok(adapter) => {
+                    if let Err(error) = manager.register_and_start(adapter).await {
+                        tracing::error!(%error, "failed to hot-start email adapter");
+                        activation_warning = Some(format!(
+                            "binding saved, but email adapter failed to start: {error}"
+                        ));
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to build email adapter");
+                    activation_warning = Some(format!(
+                        "binding saved, but email adapter failed to build: {error}"
+                    ));
+                }
             }
         }
 
-        let manager_guard = state.messaging_manager.read().await;
-        if let Some(manager) = manager_guard.as_ref() {
-            if let Some(token) = new_discord_token {
-                let discord_perms = {
-                    let perms_guard = state.discord_permissions.read().await;
-                    match perms_guard.as_ref() {
-                        Some(existing) => existing.clone(),
-                        None => {
-                            drop(perms_guard);
-                            let Some(discord_config) = new_config.messaging.discord.as_ref() else {
-                                tracing::error!(
-                                    "discord config missing despite token being provided"
-                                );
-                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                            };
-                            let perms = crate::config::DiscordPermissions::from_config(
-                                discord_config,
-                                &new_config.bindings,
-                            );
-                            let arc_swap =
-                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                            state.set_discord_permissions(arc_swap.clone()).await;
-                            arc_swap
-                        }
-                    }
-                };
-                let adapter = crate::messaging::discord::DiscordAdapter::new(
-                    "discord",
-                    &token,
-                    discord_perms,
+        if let Some((username, oauth_token)) = new_twitch_creds {
+            let Some(twitch_config) = new_config.messaging.twitch.as_ref() else {
+                tracing::error!("twitch config missing despite credentials being provided");
+                return Err(StatusCode::INTERNAL_SERVER_ERROR);
+            };
+            let twitch_perms = {
+                let perms = crate::config::TwitchPermissions::from_config(
+                    twitch_config,
+                    &new_config.bindings,
                 );
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start discord adapter");
-                }
-            }
-
-            if let Some((bot_token, app_token)) = new_slack_tokens {
-                let slack_perms = {
-                    let perms_guard = state.slack_permissions.read().await;
-                    match perms_guard.as_ref() {
-                        Some(existing) => existing.clone(),
-                        None => {
-                            drop(perms_guard);
-                            let Some(slack_config) = new_config.messaging.slack.as_ref() else {
-                                tracing::error!(
-                                    "slack config missing despite tokens being provided"
-                                );
-                                return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                            };
-                            let perms = crate::config::SlackPermissions::from_config(
-                                slack_config,
-                                &new_config.bindings,
-                            );
-                            let arc_swap =
-                                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms));
-                            state.set_slack_permissions(arc_swap.clone()).await;
-                            arc_swap
-                        }
-                    }
-                };
-                let slack_commands = new_config
-                    .messaging
-                    .slack
-                    .as_ref()
-                    .map(|s| s.commands.clone())
-                    .unwrap_or_default();
-                match crate::messaging::slack::SlackAdapter::new(
-                    "slack",
-                    &bot_token,
-                    &app_token,
-                    slack_perms,
-                    slack_commands,
-                ) {
-                    Ok(adapter) => {
-                        if let Err(error) = manager.register_and_start(adapter).await {
-                            tracing::error!(%error, "failed to hot-start slack adapter");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "failed to build slack adapter");
-                    }
-                }
-            }
-
-            if let Some(token) = new_telegram_token {
-                let telegram_perms = {
-                    let Some(telegram_config) = new_config.messaging.telegram.as_ref() else {
-                        tracing::error!("telegram config missing despite token being provided");
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    };
-                    let perms = crate::config::TelegramPermissions::from_config(
-                        telegram_config,
-                        &new_config.bindings,
-                    );
-                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                };
-                let adapter = crate::messaging::telegram::TelegramAdapter::new(
-                    "telegram",
-                    &token,
-                    telegram_perms,
-                );
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start telegram adapter");
-                }
-            }
-
-            if new_email_configured {
-                let Some(email_config) = new_config.messaging.email.as_ref() else {
-                    tracing::error!("email config missing despite credentials being provided");
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                };
-
-                match crate::messaging::email::EmailAdapter::from_config(email_config) {
-                    Ok(adapter) => {
-                        if let Err(error) = manager.register_and_start(adapter).await {
-                            tracing::error!(%error, "failed to hot-start email adapter");
-                        }
-                    }
-                    Err(error) => {
-                        tracing::error!(%error, "failed to build email adapter");
-                    }
-                }
-            }
-
-            if let Some((username, oauth_token)) = new_twitch_creds {
-                let Some(twitch_config) = new_config.messaging.twitch.as_ref() else {
-                    tracing::error!("twitch config missing despite credentials being provided");
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                };
-                let twitch_perms = {
-                    let perms = crate::config::TwitchPermissions::from_config(
-                        twitch_config,
-                        &new_config.bindings,
-                    );
-                    std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
-                };
-                let instance_dir = state.instance_dir.load();
-                let token_path = instance_dir.join("twitch_token.json");
-                let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                    "twitch",
-                    &username,
-                    &oauth_token,
-                    twitch_config.client_id.clone(),
-                    twitch_config.client_secret.clone(),
-                    twitch_config.refresh_token.clone(),
-                    Some(token_path),
-                    twitch_config.channels.clone(),
-                    twitch_config.trigger_prefix.clone(),
-                    twitch_perms,
-                );
-                if let Err(error) = manager.register_and_start(adapter).await {
-                    tracing::error!(%error, "failed to hot-start twitch adapter");
-                }
+                std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(perms))
+            };
+            let instance_dir = state.instance_dir.load();
+            let token_path = instance_dir.join("twitch_token.json");
+            let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                "twitch",
+                &username,
+                &oauth_token,
+                twitch_config.client_id.clone(),
+                twitch_config.client_secret.clone(),
+                twitch_config.refresh_token.clone(),
+                Some(token_path),
+                twitch_config.channels.clone(),
+                twitch_config.trigger_prefix.clone(),
+                twitch_perms,
+            );
+            if let Err(error) = manager.register_and_start(adapter).await {
+                tracing::error!(%error, "failed to hot-start twitch adapter");
+                activation_warning = Some(format!(
+                    "binding saved, but twitch adapter failed to start: {error}"
+                ));
             }
         }
     }
 
+    let restart_required = activation_warning.is_some();
+    let message = activation_warning.unwrap_or_else(|| "Binding created and active.".to_string());
+
     Ok(Json(CreateBindingResponse {
         success: true,
-        restart_required: false,
-        message: "Binding created and active.".to_string(),
+        restart_required,
+        message,
     }))
 }
 
@@ -980,4 +1030,102 @@ pub(super) async fn delete_binding(
         success: true,
         message: "Binding deleted.".to_string(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateBindingRequest, PlatformCredentials, create_binding};
+    use crate::api::ApiState;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
+
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+            task_store_registry,
+        ))
+    }
+
+    #[tokio::test]
+    async fn create_binding_moves_platform_credentials_into_secret_store() {
+        let _lock = crate::api::admin::config_resolution_test_lock()
+            .lock()
+            .await;
+        let state = test_api_state();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("config.toml");
+        tokio::fs::write(&config_path, "\n")
+            .await
+            .expect("write config");
+        *state.config_path.write().await = config_path.clone();
+
+        let secrets_path = tempdir.path().join("secrets.redb");
+        let store =
+            Arc::new(crate::secrets::store::SecretsStore::new(&secrets_path).expect("secrets"));
+        state.set_secrets_store(store.clone());
+        crate::config::set_resolve_secrets_store(store.clone());
+
+        let response = create_binding(
+            State(state),
+            axum::Json(CreateBindingRequest {
+                agent_id: "alpha".to_string(),
+                channel: "discord".to_string(),
+                adapter: None,
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                channel_ids: Vec::new(),
+                require_mention: false,
+                dm_allowed_users: Vec::new(),
+                platform_credentials: Some(PlatformCredentials {
+                    discord_token: Some("discord-secret".to_string()),
+                    slack_bot_token: None,
+                    slack_app_token: None,
+                    telegram_token: None,
+                    email_imap_host: None,
+                    email_imap_port: None,
+                    email_imap_username: None,
+                    email_imap_password: None,
+                    email_smtp_host: None,
+                    email_smtp_port: None,
+                    email_smtp_username: None,
+                    email_smtp_password: None,
+                    email_from_address: None,
+                    email_from_name: None,
+                    twitch_username: None,
+                    twitch_oauth_token: None,
+                    twitch_client_id: None,
+                    twitch_client_secret: None,
+                    twitch_refresh_token: None,
+                }),
+            }),
+        )
+        .await
+        .expect("create binding");
+
+        assert!(response.0.success);
+
+        let config = tokio::fs::read_to_string(&config_path)
+            .await
+            .expect("read config");
+        assert!(config.contains("secret:DISCORD_BOT_TOKEN"));
+        assert_eq!(
+            store
+                .get("DISCORD_BOT_TOKEN")
+                .expect("secret stored")
+                .expose(),
+            "discord-secret"
+        );
+    }
 }

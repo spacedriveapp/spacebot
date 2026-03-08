@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
+type NamedPermissionsMap<T> = Arc<std::sync::RwLock<HashMap<String, Arc<ArcSwap<T>>>>>;
+
 #[derive(Parser)]
 #[command(name = "spacebot", version)]
 #[command(about = "A Rust agentic system with dedicated processes for every task")]
@@ -1362,14 +1364,16 @@ async fn run(
     > = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
 
     // Start HTTP API server if enabled
-    let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
+    let api_state = spacebot::api::ApiState::new_with_provider_sender(
         provider_tx,
         agent_tx,
         agent_remove_tx,
         injection_tx.clone(),
         task_store_registry.clone(),
     );
-    api_state.auth_token = config.api.auth_token.clone();
+    api_state
+        .set_api_auth_token(config.api.auth_token.clone())
+        .await;
     let api_state = Arc::new(api_state);
 
     // Start background update checker
@@ -1504,6 +1508,14 @@ async fn run(
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
+        let named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
+        let named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions> =
+            Arc::new(std::sync::RwLock::new(HashMap::new()));
         initialize_agents(
             &config,
             &llm_manager,
@@ -1521,6 +1533,10 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            named_discord_permissions.clone(),
+            named_slack_permissions.clone(),
+            named_telegram_permissions.clone(),
+            named_twitch_permissions.clone(),
             agent_links.clone(),
             agent_humans.clone(),
             injection_tx.clone(),
@@ -1539,6 +1555,10 @@ async fn run(
             slack_permissions,
             telegram_permissions,
             twitch_permissions,
+            named_discord_permissions,
+            named_slack_permissions,
+            named_telegram_permissions,
+            named_twitch_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
@@ -1555,6 +1575,10 @@ async fn run(
             None,
             None,
             None,
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
+            Arc::new(std::sync::RwLock::new(std::collections::HashMap::new())),
             bindings.clone(),
             None,
             llm_manager.clone(),
@@ -2189,6 +2213,14 @@ async fn run(
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
+                                let named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
+                                let named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions> =
+                                    Arc::new(std::sync::RwLock::new(HashMap::new()));
                                 match initialize_agents(
                                     &new_config,
                                     &new_llm_manager,
@@ -2206,6 +2238,10 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    named_discord_permissions.clone(),
+                                    named_slack_permissions.clone(),
+                                    named_telegram_permissions.clone(),
+                                    named_twitch_permissions.clone(),
                                     agent_links.clone(),
                                     agent_humans.clone(),
                                     injection_tx.clone(),
@@ -2223,6 +2259,10 @@ async fn run(
                                             new_slack_permissions,
                                             new_telegram_permissions,
                                             new_twitch_permissions,
+                                            named_discord_permissions,
+                                            named_slack_permissions,
+                                            named_telegram_permissions,
+                                            named_twitch_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
@@ -2345,6 +2385,10 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    named_discord_permissions: NamedPermissionsMap<spacebot::config::DiscordPermissions>,
+    named_slack_permissions: NamedPermissionsMap<spacebot::config::SlackPermissions>,
+    named_telegram_permissions: NamedPermissionsMap<spacebot::config::TelegramPermissions>,
+    named_twitch_permissions: NamedPermissionsMap<spacebot::config::TwitchPermissions>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
@@ -2769,6 +2813,10 @@ async fn initialize_agents(
                     &config.bindings,
                 ),
             ));
+            named_discord_permissions
+                .write()
+                .expect("lock poisoned")
+                .insert(runtime_key.clone(), perms.clone());
             let adapter = spacebot::messaging::discord::DiscordAdapter::new(
                 runtime_key,
                 &instance.token,
@@ -2828,6 +2876,10 @@ async fn initialize_agents(
                     &config.bindings,
                 ),
             ));
+            named_slack_permissions
+                .write()
+                .expect("lock poisoned")
+                .insert(runtime_key.clone(), perms.clone());
             match spacebot::messaging::slack::SlackAdapter::new(
                 runtime_key,
                 &instance.bot_token,
@@ -2885,6 +2937,10 @@ async fn initialize_agents(
                     &config.bindings,
                 ),
             ));
+            named_telegram_permissions
+                .write()
+                .expect("lock poisoned")
+                .insert(runtime_key.clone(), perms.clone());
             let adapter = spacebot::messaging::telegram::TelegramAdapter::new(
                 runtime_key,
                 &instance.token,
@@ -2988,20 +3044,7 @@ async fn initialize_agents(
                 "twitch",
                 Some(instance.name.as_str()),
             );
-            let token_file_name = {
-                use std::hash::{Hash, Hasher};
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                instance.name.hash(&mut hasher);
-                let name_hash = hasher.finish();
-                format!(
-                    "twitch_token_{}_{name_hash:016x}.json",
-                    instance
-                        .name
-                        .chars()
-                        .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                        .collect::<String>()
-                )
-            };
+            let token_file_name = spacebot::config::named_twitch_token_file_name(&instance.name);
             let token_path = config.instance_dir.join(token_file_name);
             let perms = Arc::new(ArcSwap::from_pointee(
                 spacebot::config::TwitchPermissions::from_instance_config(
@@ -3009,6 +3052,10 @@ async fn initialize_agents(
                     &config.bindings,
                 ),
             ));
+            named_twitch_permissions
+                .write()
+                .expect("lock poisoned")
+                .insert(runtime_key.clone(), perms.clone());
             let adapter = spacebot::messaging::twitch::TwitchAdapter::new(
                 runtime_key,
                 &instance.username,

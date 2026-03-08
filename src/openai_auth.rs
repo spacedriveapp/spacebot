@@ -365,37 +365,17 @@ pub async fn exchange_device_code(
 
 /// Path to OpenAI OAuth credentials within the instance directory.
 pub fn credentials_path(instance_dir: &Path) -> PathBuf {
-    instance_dir.join("openai_chatgpt_oauth.json")
+    crate::oauth_storage::json_credentials_path(instance_dir, "openai_chatgpt_oauth.json")
 }
 
 /// Load OpenAI OAuth credentials from disk.
 pub fn load_credentials(instance_dir: &Path) -> Result<Option<OAuthCredentials>> {
     let path = credentials_path(instance_dir);
-    if !path.exists() {
-        return Ok(None);
-    }
-
-    let data = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {}", path.display()))?;
-    let creds: OAuthCredentials =
-        serde_json::from_str(&data).context("failed to parse OpenAI OAuth credentials")?;
-    Ok(Some(creds))
+    crate::oauth_storage::load_json_credentials(&path)
 }
 
 /// Save OpenAI OAuth credentials to disk with restricted permissions (0600).
 pub fn save_credentials(instance_dir: &Path, creds: &OAuthCredentials) -> Result<()> {
     let path = credentials_path(instance_dir);
-    let data = serde_json::to_string_pretty(creds)
-        .context("failed to serialize OpenAI OAuth credentials")?;
-
-    std::fs::write(&path, &data).with_context(|| format!("failed to write {}", path.display()))?;
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("failed to set permissions on {}", path.display()))?;
-    }
-
-    Ok(())
+    crate::oauth_storage::save_json_credentials(&path, creds)
 }

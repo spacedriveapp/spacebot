@@ -4,6 +4,7 @@
 //! managing agents, viewing status, and interacting with the system.
 //! Includes an SSE endpoint for realtime event streaming.
 
+mod admin;
 pub mod agents;
 mod bindings;
 mod channels;

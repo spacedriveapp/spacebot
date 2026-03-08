@@ -1102,7 +1102,7 @@ pub trait SystemSecrets {
 pub fn system_secret_registry() -> Vec<&'static SecretField> {
     use crate::config::{
         DefaultsConfig, DiscordConfig, EmailConfig, LlmConfig, SlackConfig, TelegramConfig,
-        TwitchConfig,
+        TwitchConfig, WebhookConfig,
     };
 
     let mut fields = Vec::new();
@@ -1116,6 +1116,7 @@ pub fn system_secret_registry() -> Vec<&'static SecretField> {
     fields.extend(TelegramConfig::secret_fields());
     fields.extend(TwitchConfig::secret_fields());
     fields.extend(EmailConfig::secret_fields());
+    fields.extend(WebhookConfig::secret_fields());
     fields
 }
 
@@ -1368,6 +1369,10 @@ mod tests {
         // Search integrations:
         assert_eq!(
             auto_categorize("BRAVE_SEARCH_API_KEY"),
+            SecretCategory::System
+        );
+        assert_eq!(
+            auto_categorize("WEBHOOK_AUTH_TOKEN"),
             SecretCategory::System
         );
 

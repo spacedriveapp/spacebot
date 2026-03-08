@@ -37,8 +37,16 @@ pub async fn start_http_server(
     state: Arc<ApiState>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    state.set_api_bind(bind).await;
+    let auth_token = state.auth_token.read().await.clone();
+    if should_warn_unprotected_bind(bind, auth_token.as_deref()) {
+        anyhow::bail!(
+            "refusing to start HTTP API on {bind} without api.auth_token; use a loopback bind or configure authentication"
+        );
+    }
+
     let cors = CorsLayer::new()
-        .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
+        .allow_origin(tower_http::cors::AllowOrigin::predicate(allow_local_origin))
         .allow_methods([
             axum::http::Method::GET,
             axum::http::Method::POST,
@@ -318,14 +326,28 @@ async fn api_auth_middleware(
     request: Request,
     next: Next,
 ) -> Response {
-    let Some(expected_token) = state.auth_token.as_deref() else {
-        return next.run(request).await;
-    };
-
     let path = request.uri().path();
     if path == "/api/health" || path == "/health" {
         return next.run(request).await;
     }
+
+    let expected_token = state.auth_token.read().await.clone().and_then(|token| {
+        let trimmed = token.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    });
+    let Some(expected_token) = expected_token.as_deref() else {
+        let bind = *state.api_bind.read().await;
+        if bind.is_some_and(|bind| !bind.ip().is_loopback()) {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(
+                    json!({"error": "api auth token must remain configured for public listeners"}),
+                ),
+            )
+                .into_response();
+        }
+        return next.run(request).await;
+    };
 
     let is_authorized = request
         .headers()
@@ -343,6 +365,32 @@ async fn api_auth_middleware(
         )
             .into_response()
     }
+}
+
+fn allow_local_origin(
+    origin: &header::HeaderValue,
+    _request_parts: &axum::http::request::Parts,
+) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+
+    origin.starts_with("http://127.0.0.1:")
+        || origin.starts_with("https://127.0.0.1:")
+        || origin.starts_with("http://localhost:")
+        || origin.starts_with("https://localhost:")
+        || origin.starts_with("http://[::1]:")
+        || origin.starts_with("https://[::1]:")
+        || origin == "http://127.0.0.1"
+        || origin == "https://127.0.0.1"
+        || origin == "http://localhost"
+        || origin == "https://localhost"
+        || origin == "http://[::1]"
+        || origin == "https://[::1]"
+}
+
+pub(crate) fn should_warn_unprotected_bind(bind: SocketAddr, auth_token: Option<&str>) -> bool {
+    auth_token.is_none_or(|token| token.trim().is_empty()) && !bind.ip().is_loopback()
 }
 
 #[cfg(feature = "metrics")]
@@ -453,4 +501,41 @@ async fn static_handler(uri: Uri) -> Response {
     }
 
     (StatusCode::NOT_FOUND, "not found").into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{allow_local_origin, should_warn_unprotected_bind};
+    use axum::http::{HeaderValue, Request};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn warns_for_non_loopback_bind_without_auth() {
+        let bind = SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 19898);
+        assert!(should_warn_unprotected_bind(bind, None));
+        assert!(!should_warn_unprotected_bind(bind, Some("token")));
+    }
+
+    #[test]
+    fn local_origin_predicate_accepts_localhost_only() {
+        let request = Request::builder().uri("/").body(()).expect("request");
+        let parts = request.into_parts().0;
+
+        assert!(allow_local_origin(
+            &HeaderValue::from_static("http://localhost:5173"),
+            &parts,
+        ));
+        assert!(allow_local_origin(
+            &HeaderValue::from_static("http://127.0.0.1:3000"),
+            &parts,
+        ));
+        assert!(allow_local_origin(
+            &HeaderValue::from_static("https://localhost:5173"),
+            &parts,
+        ));
+        assert!(!allow_local_origin(
+            &HeaderValue::from_static("https://evil.example"),
+            &parts,
+        ));
+    }
 }

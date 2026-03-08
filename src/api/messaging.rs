@@ -1,4 +1,10 @@
+use super::admin::{
+    load_config_doc, reload_runtime_configs, secret_reference, secrets_store, write_config_doc,
+};
 use super::state::ApiState;
+use crate::config::{
+    DiscordConfig, EmailConfig, SlackConfig, TelegramConfig, TwitchConfig, WebhookConfig,
+};
 
 use axum::Json;
 use axum::extract::State;
@@ -683,11 +689,7 @@ pub(super) async fn disconnect_platform(
     if platform == "twitch" {
         let instance_dir = state.instance_dir.load();
         if let Some(name) = adapter_name {
-            let safe_name: String = name
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                .collect();
-            let token_path = instance_dir.join(format!("twitch_token_{safe_name}.json"));
+            let token_path = instance_dir.join(crate::config::named_twitch_token_file_name(name));
             match tokio::fs::remove_file(&token_path).await {
                 Ok(()) => {
                     tracing::info!(path = %token_path.display(), "twitch token file deleted");
@@ -1052,14 +1054,8 @@ pub(super) async fn toggle_platform(
                                 "twitch",
                                 Some(instance.name.as_str()),
                             );
-                            let token_file_name = format!(
-                                "twitch_token_{}.json",
-                                instance
-                                    .name
-                                    .chars()
-                                    .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                                    .collect::<String>()
-                            );
+                            let token_file_name =
+                                crate::config::named_twitch_token_file_name(&instance.name);
                             let instance_dir = state.instance_dir.load();
                             let token_path = instance_dir.join(token_file_name);
                             let perms = std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
@@ -1153,17 +1149,8 @@ pub(super) async fn create_messaging_instance(
         }
     }
 
-    let config_path = state.config_path.read().await.clone();
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to read config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-    let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
-        tracing::warn!(%error, "failed to parse config.toml");
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+    let store = secrets_store(&state)?;
+    let (_config_guard, config_path, mut doc) = load_config_doc(&state).await?;
 
     // Ensure [messaging] and [messaging.<platform>] tables exist
     if doc.get("messaging").is_none() {
@@ -1196,20 +1183,38 @@ pub(super) async fn create_messaging_instance(
             match platform.as_str() {
                 "discord" => {
                     if let Some(token) = &credentials.discord_token {
-                        platform_table["token"] = toml_edit::value(token.as_str());
+                        platform_table["token"] =
+                            toml_edit::value(secret_reference::<DiscordConfig>(
+                                &store, "token", None, token,
+                            )?);
                     }
                 }
                 "slack" => {
                     if let Some(token) = &credentials.slack_bot_token {
-                        platform_table["bot_token"] = toml_edit::value(token.as_str());
+                        platform_table["bot_token"] =
+                            toml_edit::value(secret_reference::<SlackConfig>(
+                                &store,
+                                "bot_token",
+                                None,
+                                token,
+                            )?);
                     }
                     if let Some(token) = &credentials.slack_app_token {
-                        platform_table["app_token"] = toml_edit::value(token.as_str());
+                        platform_table["app_token"] =
+                            toml_edit::value(secret_reference::<SlackConfig>(
+                                &store,
+                                "app_token",
+                                None,
+                                token,
+                            )?);
                     }
                 }
                 "telegram" => {
                     if let Some(token) = &credentials.telegram_token {
-                        platform_table["token"] = toml_edit::value(token.as_str());
+                        platform_table["token"] =
+                            toml_edit::value(secret_reference::<TelegramConfig>(
+                                &store, "token", None, token,
+                            )?);
                     }
                 }
                 "twitch" => {
@@ -1217,16 +1222,40 @@ pub(super) async fn create_messaging_instance(
                         platform_table["username"] = toml_edit::value(username.as_str());
                     }
                     if let Some(token) = &credentials.twitch_oauth_token {
-                        platform_table["oauth_token"] = toml_edit::value(token.as_str());
+                        platform_table["oauth_token"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "oauth_token",
+                                None,
+                                token,
+                            )?);
                     }
                     if let Some(client_id) = &credentials.twitch_client_id {
-                        platform_table["client_id"] = toml_edit::value(client_id.as_str());
+                        platform_table["client_id"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "client_id",
+                                None,
+                                client_id,
+                            )?);
                     }
                     if let Some(client_secret) = &credentials.twitch_client_secret {
-                        platform_table["client_secret"] = toml_edit::value(client_secret.as_str());
+                        platform_table["client_secret"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "client_secret",
+                                None,
+                                client_secret,
+                            )?);
                     }
                     if let Some(refresh) = &credentials.twitch_refresh_token {
-                        platform_table["refresh_token"] = toml_edit::value(refresh.as_str());
+                        platform_table["refresh_token"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "refresh_token",
+                                None,
+                                refresh,
+                            )?);
                     }
                 }
                 "email" => {
@@ -1237,10 +1266,22 @@ pub(super) async fn create_messaging_instance(
                         platform_table["imap_port"] = toml_edit::value(i64::from(port));
                     }
                     if let Some(username) = &credentials.email_imap_username {
-                        platform_table["imap_username"] = toml_edit::value(username.as_str());
+                        platform_table["imap_username"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "imap_username",
+                                None,
+                                username,
+                            )?);
                     }
                     if let Some(password) = &credentials.email_imap_password {
-                        platform_table["imap_password"] = toml_edit::value(password.as_str());
+                        platform_table["imap_password"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "imap_password",
+                                None,
+                                password,
+                            )?);
                     }
                     if let Some(host) = &credentials.email_smtp_host {
                         platform_table["smtp_host"] = toml_edit::value(host.as_str());
@@ -1249,10 +1290,22 @@ pub(super) async fn create_messaging_instance(
                         platform_table["smtp_port"] = toml_edit::value(i64::from(port));
                     }
                     if let Some(username) = &credentials.email_smtp_username {
-                        platform_table["smtp_username"] = toml_edit::value(username.as_str());
+                        platform_table["smtp_username"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "smtp_username",
+                                None,
+                                username,
+                            )?);
                     }
                     if let Some(password) = &credentials.email_smtp_password {
-                        platform_table["smtp_password"] = toml_edit::value(password.as_str());
+                        platform_table["smtp_password"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "smtp_password",
+                                None,
+                                password,
+                            )?);
                     }
                     if let Some(from) = &credentials.email_from_address {
                         platform_table["from_address"] = toml_edit::value(from.as_str());
@@ -1266,7 +1319,13 @@ pub(super) async fn create_messaging_instance(
                         platform_table["bind"] = toml_edit::value(bind.as_str());
                     }
                     if let Some(token) = &credentials.webhook_auth_token {
-                        platform_table["auth_token"] = toml_edit::value(token.as_str());
+                        platform_table["auth_token"] =
+                            toml_edit::value(secret_reference::<WebhookConfig>(
+                                &store,
+                                "auth_token",
+                                None,
+                                token,
+                            )?);
                     }
                 }
                 _ => {}
@@ -1305,20 +1364,44 @@ pub(super) async fn create_messaging_instance(
             match platform.as_str() {
                 "discord" => {
                     if let Some(token) = &credentials.discord_token {
-                        instance_table["token"] = toml_edit::value(token.as_str());
+                        instance_table["token"] =
+                            toml_edit::value(secret_reference::<DiscordConfig>(
+                                &store,
+                                "token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                 }
                 "slack" => {
                     if let Some(token) = &credentials.slack_bot_token {
-                        instance_table["bot_token"] = toml_edit::value(token.as_str());
+                        instance_table["bot_token"] =
+                            toml_edit::value(secret_reference::<SlackConfig>(
+                                &store,
+                                "bot_token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                     if let Some(token) = &credentials.slack_app_token {
-                        instance_table["app_token"] = toml_edit::value(token.as_str());
+                        instance_table["app_token"] =
+                            toml_edit::value(secret_reference::<SlackConfig>(
+                                &store,
+                                "app_token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                 }
                 "telegram" => {
                     if let Some(token) = &credentials.telegram_token {
-                        instance_table["token"] = toml_edit::value(token.as_str());
+                        instance_table["token"] =
+                            toml_edit::value(secret_reference::<TelegramConfig>(
+                                &store,
+                                "token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                 }
                 "twitch" => {
@@ -1326,16 +1409,40 @@ pub(super) async fn create_messaging_instance(
                         instance_table["username"] = toml_edit::value(username.as_str());
                     }
                     if let Some(token) = &credentials.twitch_oauth_token {
-                        instance_table["oauth_token"] = toml_edit::value(token.as_str());
+                        instance_table["oauth_token"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "oauth_token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                     if let Some(client_id) = &credentials.twitch_client_id {
-                        instance_table["client_id"] = toml_edit::value(client_id.as_str());
+                        instance_table["client_id"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "client_id",
+                                Some(&instance_name),
+                                client_id,
+                            )?);
                     }
                     if let Some(client_secret) = &credentials.twitch_client_secret {
-                        instance_table["client_secret"] = toml_edit::value(client_secret.as_str());
+                        instance_table["client_secret"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "client_secret",
+                                Some(&instance_name),
+                                client_secret,
+                            )?);
                     }
                     if let Some(refresh) = &credentials.twitch_refresh_token {
-                        instance_table["refresh_token"] = toml_edit::value(refresh.as_str());
+                        instance_table["refresh_token"] =
+                            toml_edit::value(secret_reference::<TwitchConfig>(
+                                &store,
+                                "refresh_token",
+                                Some(&instance_name),
+                                refresh,
+                            )?);
                     }
                 }
                 "email" => {
@@ -1346,10 +1453,22 @@ pub(super) async fn create_messaging_instance(
                         instance_table["imap_port"] = toml_edit::value(i64::from(port));
                     }
                     if let Some(username) = &credentials.email_imap_username {
-                        instance_table["imap_username"] = toml_edit::value(username.as_str());
+                        instance_table["imap_username"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "imap_username",
+                                Some(&instance_name),
+                                username,
+                            )?);
                     }
                     if let Some(password) = &credentials.email_imap_password {
-                        instance_table["imap_password"] = toml_edit::value(password.as_str());
+                        instance_table["imap_password"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "imap_password",
+                                Some(&instance_name),
+                                password,
+                            )?);
                     }
                     if let Some(host) = &credentials.email_smtp_host {
                         instance_table["smtp_host"] = toml_edit::value(host.as_str());
@@ -1358,10 +1477,22 @@ pub(super) async fn create_messaging_instance(
                         instance_table["smtp_port"] = toml_edit::value(i64::from(port));
                     }
                     if let Some(username) = &credentials.email_smtp_username {
-                        instance_table["smtp_username"] = toml_edit::value(username.as_str());
+                        instance_table["smtp_username"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "smtp_username",
+                                Some(&instance_name),
+                                username,
+                            )?);
                     }
                     if let Some(password) = &credentials.email_smtp_password {
-                        instance_table["smtp_password"] = toml_edit::value(password.as_str());
+                        instance_table["smtp_password"] =
+                            toml_edit::value(secret_reference::<EmailConfig>(
+                                &store,
+                                "smtp_password",
+                                Some(&instance_name),
+                                password,
+                            )?);
                     }
                     if let Some(from) = &credentials.email_from_address {
                         instance_table["from_address"] = toml_edit::value(from.as_str());
@@ -1375,7 +1506,13 @@ pub(super) async fn create_messaging_instance(
                         instance_table["bind"] = toml_edit::value(bind.as_str());
                     }
                     if let Some(token) = &credentials.webhook_auth_token {
-                        instance_table["auth_token"] = toml_edit::value(token.as_str());
+                        instance_table["auth_token"] =
+                            toml_edit::value(secret_reference::<WebhookConfig>(
+                                &store,
+                                "auth_token",
+                                Some(&instance_name),
+                                token,
+                            )?);
                     }
                 }
                 _ => {}
@@ -1398,19 +1535,13 @@ pub(super) async fn create_messaging_instance(
     }
 
     // Write updated config
-    tokio::fs::write(&config_path, doc.to_string())
-        .await
-        .map_err(|error| {
-            tracing::warn!(%error, "failed to write config.toml");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    write_config_doc(&config_path, &doc).await?;
 
     // Reload config and hot-start the new adapter
-    if let Ok(new_config) = crate::config::Config::load_from_path(&config_path) {
-        let bindings_guard = state.bindings.read().await;
-        if let Some(bindings_swap) = bindings_guard.as_ref() {
-            bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
-        }
+    let new_config = reload_runtime_configs(&state, &config_path).await?;
+    let bindings_guard = state.bindings.read().await;
+    if let Some(bindings_swap) = bindings_guard.as_ref() {
+        bindings_swap.store(std::sync::Arc::new(new_config.bindings.clone()));
     }
 
     // The file watcher will pick up the change and start the adapter.
@@ -1603,11 +1734,7 @@ pub(super) async fn delete_messaging_instance(
     if platform == "twitch" {
         let instance_dir = state.instance_dir.load();
         let token_path = if let Some(name) = adapter_name {
-            let safe_name: String = name
-                .chars()
-                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                .collect();
-            instance_dir.join(format!("twitch_token_{safe_name}.json"))
+            instance_dir.join(crate::config::named_twitch_token_file_name(name))
         } else {
             instance_dir.join("twitch_token.json")
         };
@@ -1632,4 +1759,89 @@ pub(super) async fn delete_messaging_instance(
         success: true,
         message: format!("{runtime_key} instance deleted"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CreateMessagingInstanceRequest, InstanceCredentials, create_messaging_instance};
+    use crate::api::ApiState;
+    use axum::Json;
+    use axum::extract::State;
+    use std::sync::Arc;
+
+    fn test_api_state() -> Arc<ApiState> {
+        let (provider_setup_tx, _provider_setup_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_tx, _agent_rx) = tokio::sync::mpsc::channel(1);
+        let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
+        let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
+        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
+            std::collections::HashMap::new(),
+        ));
+
+        Arc::new(ApiState::new_with_provider_sender(
+            provider_setup_tx,
+            agent_tx,
+            agent_remove_tx,
+            injection_tx,
+            task_store_registry,
+        ))
+    }
+
+    #[tokio::test]
+    async fn create_messaging_instance_persists_secret_references() {
+        let _lock = crate::api::admin::config_resolution_test_lock()
+            .lock()
+            .await;
+        let state = test_api_state();
+        let tempdir = tempfile::tempdir().expect("tempdir");
+        let config_path = tempdir.path().join("config.toml");
+        tokio::fs::write(&config_path, "\n")
+            .await
+            .expect("write config");
+        *state.config_path.write().await = config_path.clone();
+
+        let secrets_path = tempdir.path().join("secrets.redb");
+        let store =
+            Arc::new(crate::secrets::store::SecretsStore::new(&secrets_path).expect("secrets"));
+        state.set_secrets_store(store.clone());
+        crate::config::set_resolve_secrets_store(store.clone());
+
+        let response = create_messaging_instance(
+            State(state),
+            Json(CreateMessagingInstanceRequest {
+                platform: "slack".to_string(),
+                name: Some("alerts".to_string()),
+                enabled: Some(true),
+                credentials: InstanceCredentials {
+                    slack_bot_token: Some("xoxb-secret".to_string()),
+                    slack_app_token: Some("xapp-secret".to_string()),
+                    ..Default::default()
+                },
+            }),
+        )
+        .await
+        .expect("create messaging instance");
+
+        assert!(response.0.success);
+
+        let config = tokio::fs::read_to_string(&config_path)
+            .await
+            .expect("read config");
+        assert!(config.contains("secret:SLACK_ALERTS_BOT_TOKEN"));
+        assert!(config.contains("secret:SLACK_ALERTS_APP_TOKEN"));
+        assert_eq!(
+            store
+                .get("SLACK_ALERTS_BOT_TOKEN")
+                .expect("bot token stored")
+                .expose(),
+            "xoxb-secret"
+        );
+        assert_eq!(
+            store
+                .get("SLACK_ALERTS_APP_TOKEN")
+                .expect("app token stored")
+                .expose(),
+            "xapp-secret"
+        );
+    }
 }
