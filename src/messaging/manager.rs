@@ -8,7 +8,7 @@ use futures::StreamExt as _;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::{RwLock, mpsc, watch};
+use tokio::sync::{RwLock, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 #[cfg(test)]
@@ -85,8 +85,8 @@ impl MessagingManager {
             .write()
             .await
             .insert(name.clone(), Arc::clone(&adapter));
-        if started {
-            self.stop_runtime(&name, old_adapter, false).await.ok();
+        if started && let Err(error) = self.stop_runtime(&name, old_adapter, false).await {
+            tracing::warn!(adapter = %name, %error, "failed to stop old runtime during register");
         }
         if started && let Err(error) = self.start_runtime(name.clone(), adapter, false).await {
             tracing::warn!(adapter = %name, %error, "failed to start adapter registered after manager start");
@@ -105,8 +105,8 @@ impl MessagingManager {
             .write()
             .await
             .insert(name.clone(), Arc::clone(&adapter));
-        if started {
-            self.stop_runtime(&name, old_adapter, false).await.ok();
+        if started && let Err(error) = self.stop_runtime(&name, old_adapter, false).await {
+            tracing::warn!(adapter = %name, %error, "failed to stop old runtime during shared register");
         }
         if started && let Err(error) = self.start_runtime(name.clone(), adapter, false).await {
             tracing::warn!(adapter = %name, %error, "failed to start shared adapter registered after manager start");
@@ -160,7 +160,9 @@ impl MessagingManager {
             .write()
             .await
             .insert(name.clone(), Arc::clone(&adapter));
-        self.stop_runtime(&name, old_adapter, false).await.ok();
+        if let Err(error) = self.stop_runtime(&name, old_adapter, false).await {
+            tracing::warn!(adapter = %name, %error, "failed to stop old runtime during register_and_start");
+        }
         self.start_runtime(name.clone(), adapter, true).await?;
         tracing::info!(adapter = %name, "adapter registered and started at runtime");
         Ok(())
@@ -225,9 +227,16 @@ impl MessagingManager {
                 desired_adapter.name.clone(),
                 Arc::clone(&desired_adapter.adapter),
             );
-            self.stop_runtime(&desired_adapter.name, old_adapter, false)
+            if let Err(error) = self
+                .stop_runtime(&desired_adapter.name, old_adapter, false)
                 .await
-                .ok();
+            {
+                tracing::warn!(
+                    adapter = %desired_adapter.name,
+                    %error,
+                    "failed to stop old runtime during reconciliation"
+                );
+            }
             let replace_result = self
                 .start_runtime(
                     desired_adapter.name.clone(),
@@ -263,44 +272,45 @@ impl MessagingManager {
         adapter: Arc<dyn MessagingDyn>,
         fan_in_tx: mpsc::Sender<InboundMessage>,
         mut shutdown_rx: watch::Receiver<bool>,
-        initial_stream: Option<InboundStream>,
+        first_start_result_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     ) -> JoinHandle<()> {
         tokio::spawn(async move {
             let mut next_retry_delay = INITIAL_RETRY_DELAY;
-            let mut initial_stream = initial_stream;
+            let mut first_start_result_tx = first_start_result_tx;
             #[cfg(test)]
             let healthy_stream_duration = std::time::Duration::from_millis(20);
             #[cfg(not(test))]
             let healthy_stream_duration = std::time::Duration::from_secs(2);
 
             loop {
-                let mut stream = if let Some(stream) = initial_stream.take() {
-                    stream
-                } else {
-                    let start_result = tokio::select! {
-                        _ = shutdown_rx.changed() => break,
-                        result = adapter.start() => result,
-                    };
+                let start_result = tokio::select! {
+                    _ = shutdown_rx.changed() => break,
+                    result = adapter.start() => result,
+                };
 
-                    match start_result {
-                        Ok(stream) => {
-                            tracing::info!(adapter = %name, "adapter started successfully");
-                            next_retry_delay = INITIAL_RETRY_DELAY;
-                            stream
+                let mut stream = match start_result {
+                    Ok(stream) => {
+                        tracing::info!(adapter = %name, "adapter started successfully");
+                        if let Some(tx) = first_start_result_tx.take() {
+                            let _ = tx.send(Ok(()));
                         }
-                        Err(error) => {
-                            tracing::warn!(
-                                adapter = %name,
-                                %error,
-                                retry_delay = ?next_retry_delay,
-                                "adapter start failed, retrying in background"
-                            );
-                            let current_delay = next_retry_delay;
-                            next_retry_delay = (next_retry_delay * 2).min(MAX_RETRY_DELAY);
-                            tokio::select! {
-                                _ = shutdown_rx.changed() => break,
-                                _ = tokio::time::sleep(current_delay) => continue,
-                            }
+                        stream
+                    }
+                    Err(error) => {
+                        if let Some(tx) = first_start_result_tx.take() {
+                            let _ = tx.send(Err(error.to_string()));
+                        }
+                        tracing::warn!(
+                            adapter = %name,
+                            %error,
+                            retry_delay = ?next_retry_delay,
+                            "adapter start failed, retrying in background"
+                        );
+                        let current_delay = next_retry_delay;
+                        next_retry_delay = (next_retry_delay * 2).min(MAX_RETRY_DELAY);
+                        tokio::select! {
+                            _ = shutdown_rx.changed() => break,
+                            _ = tokio::time::sleep(current_delay) => continue,
                         }
                     }
                 };
@@ -360,22 +370,36 @@ impl MessagingManager {
             return Ok(());
         }
 
-        let start_result = adapter.start().await;
-        let initial_stream = match start_result {
-            Ok(stream) => stream,
-            Err(error) => {
-                self.install_supervisor(name.clone(), Arc::clone(&adapter), None)
-                    .await;
-                tracing::warn!(adapter = %name, "scheduled background retry for failed adapter start");
-                if surface_start_error {
-                    return Err(anyhow::anyhow!("failed to start adapter '{name}': {error}").into());
-                }
-                return Ok(());
-            }
+        let first_start_result_rx = if surface_start_error {
+            let (tx, rx) = oneshot::channel();
+            self.install_supervisor(name.clone(), adapter, Some(tx))
+                .await;
+            Some(rx)
+        } else {
+            self.install_supervisor(name.clone(), adapter, None).await;
+            None
         };
 
-        self.install_supervisor(name, adapter, Some(initial_stream))
-            .await;
+        if let Some(rx) = first_start_result_rx {
+            match rx.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    return Err(anyhow::anyhow!("failed to start adapter '{name}': {error}").into());
+                }
+                Err(error) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to receive initial start result for '{name}': {error}"
+                    )
+                    .into());
+                }
+            }
+        }
+
+        self.configured_fingerprints
+            .write()
+            .await
+            .entry(name)
+            .or_insert_with(String::new);
         Ok(())
     }
 
@@ -383,7 +407,7 @@ impl MessagingManager {
         &self,
         name: String,
         adapter: Arc<dyn MessagingDyn>,
-        initial_stream: Option<InboundStream>,
+        first_start_result_tx: Option<oneshot::Sender<std::result::Result<(), String>>>,
     ) -> watch::Sender<bool> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let task = Self::spawn_supervisor(
@@ -391,7 +415,7 @@ impl MessagingManager {
             adapter,
             self.fan_in_tx.clone(),
             shutdown_rx,
-            initial_stream,
+            first_start_result_tx,
         );
         self.runtimes.write().await.insert(
             name,

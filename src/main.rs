@@ -2180,6 +2180,7 @@ async fn run(
                         {
                             Ok(new_llm) => {
                                 let new_llm_manager = Arc::new(new_llm);
+                                api_state.set_llm_manager(new_llm_manager.clone()).await;
                                 // Update agent_humans from the reloaded config
                                 // before initialize_agents so agents see the
                                 // latest [[humans]] entries.
