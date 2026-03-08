@@ -195,7 +195,7 @@ impl MessagingManager {
             .map(|adapter| adapter.name.clone())
             .collect::<std::collections::HashSet<_>>();
         let current_configured = self
-            .adapters
+            .configured_fingerprints
             .read()
             .await
             .keys()
@@ -205,7 +205,7 @@ impl MessagingManager {
         let mut first_error = None;
         for name in current_configured {
             if !desired_names.contains(&name)
-                && let Err(error) = self.remove_adapter(&name).await
+                && let Err(error) = self.remove_adapter_inner(&name, true).await
             {
                 tracing::warn!(adapter = %name, %error, "failed to remove stale adapter during reconciliation");
                 if first_error.is_none() {
@@ -531,9 +531,18 @@ impl MessagingManager {
     /// Remove and shut down a single adapter by name.
     pub async fn remove_adapter(&self, name: &str) -> crate::Result<()> {
         let _lifecycle_guard = self.lifecycle_mutex.lock().await;
+        self.remove_adapter_inner(name, true).await
+    }
+
+    async fn remove_adapter_inner(
+        &self,
+        name: &str,
+        propagate_shutdown_error: bool,
+    ) -> crate::Result<()> {
         let adapter = self.adapters.write().await.remove(name);
         self.configured_fingerprints.write().await.remove(name);
-        self.stop_runtime(name, adapter, true).await?;
+        self.stop_runtime(name, adapter, propagate_shutdown_error)
+            .await?;
         tracing::info!(adapter = %name, "adapter removed and shut down");
         Ok(())
     }
