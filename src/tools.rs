@@ -37,6 +37,7 @@ pub mod config_inspect;
 pub mod cron;
 pub mod email_search;
 pub mod file;
+pub mod google_calendar;
 pub mod install_skill;
 pub mod mcp;
 pub mod memory_delete;
@@ -91,6 +92,11 @@ pub use file::{
     FileEditArgs, FileEditTool, FileEntry, FileEntryOutput, FileError, FileListArgs, FileListTool,
     FileOutput, FileReadArgs, FileReadTool, FileType, FileWriteArgs, FileWriteTool,
     register_file_tools,
+};
+pub use google_calendar::{
+    GoogleCalendarCreateEventTool, GoogleCalendarDeleteEventTool, GoogleCalendarFreeTimeTool,
+    GoogleCalendarListCalendarsTool, GoogleCalendarListEventsTool, GoogleCalendarRespondEventTool,
+    GoogleCalendarUpdateEventTool,
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
@@ -503,7 +509,7 @@ pub fn create_branch_tool_server(
         .tool(MemoryDeleteTool::new(memory_search))
         .tool(ChannelRecallTool::new(conversation_logger, channel_store))
         .tool(SpacebotDocsTool::new())
-        .tool(EmailSearchTool::new(runtime_config))
+        .tool(EmailSearchTool::new(runtime_config.clone()))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(TaskCreateTool::new(
             task_store.clone(),
@@ -512,6 +518,14 @@ pub fn create_branch_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+
+    if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
+        let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
+        server = server
+            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()));
+    }
 
     if let Some(state) = state {
         server = server.tool(SpawnWorkerTool::new(state));
@@ -571,6 +585,18 @@ pub fn create_worker_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
+        let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
+        server = server
+            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarCreateEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarUpdateEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarDeleteEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()))
+            .tool(GoogleCalendarRespondEventTool::new(cal_client.clone()));
     }
 
     for mcp_tool in mcp_tools {
@@ -669,6 +695,18 @@ pub fn create_cortex_chat_tool_server(
 
     if let Some(key) = brave_search_key {
         server = server.tool(WebSearchTool::new(key));
+    }
+
+    if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
+        let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
+        server = server
+            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarCreateEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarUpdateEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarDeleteEventTool::new(cal_client.clone()))
+            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
+            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()))
+            .tool(GoogleCalendarRespondEventTool::new(cal_client.clone()));
     }
 
     server.run()

@@ -528,6 +528,8 @@ pub struct DefaultsConfig {
     pub mcp: Vec<McpServerConfig>,
     /// Brave Search API key for web search tool. Supports "env:VAR_NAME" references.
     pub brave_search_key: Option<String>,
+    /// Google Calendar API configuration for calendar tools.
+    pub google_calendar: Option<GoogleCalendarConfig>,
     /// Default timezone used when evaluating cron active hours.
     pub cron_timezone: Option<String>,
     /// Default timezone for channel/worker temporal context.
@@ -563,6 +565,10 @@ impl std::fmt::Debug for DefaultsConfig {
                 "brave_search_key",
                 &self.brave_search_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "google_calendar",
+                &self.google_calendar.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("cron_timezone", &self.cron_timezone)
             .field("user_timezone", &self.user_timezone)
             .field("history_backfill_count", &self.history_backfill_count)
@@ -580,11 +586,28 @@ impl SystemSecrets for DefaultsConfig {
     }
 
     fn secret_fields() -> &'static [SecretField] {
-        &[SecretField {
-            toml_key: "brave_search_key",
-            secret_name: "BRAVE_SEARCH_API_KEY",
-            instance_pattern: None,
-        }]
+        &[
+            SecretField {
+                toml_key: "brave_search_key",
+                secret_name: "BRAVE_SEARCH_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "google_calendar.client_id",
+                secret_name: "GOOGLE_CALENDAR_CLIENT_ID",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "google_calendar.client_secret",
+                secret_name: "GOOGLE_CALENDAR_CLIENT_SECRET",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "google_calendar.refresh_token",
+                secret_name: "GOOGLE_CALENDAR_REFRESH_TOKEN",
+                instance_pattern: None,
+            },
+        ]
     }
 }
 
@@ -617,6 +640,15 @@ impl McpTransport {
             McpTransport::Http { .. } => "http",
         }
     }
+}
+
+/// Google Calendar API configuration.
+#[derive(Debug, Clone)]
+pub struct GoogleCalendarConfig {
+    pub client_id: String,
+    pub client_secret: String,
+    pub refresh_token: String,
+    pub default_calendar_id: String,
 }
 
 /// Compaction threshold configuration.
@@ -1066,6 +1098,8 @@ pub struct AgentConfig {
     pub mcp: Option<Vec<McpServerConfig>>,
     /// Per-agent Brave Search API key override. None inherits from defaults.
     pub brave_search_key: Option<String>,
+    /// Per-agent Google Calendar API configuration override.
+    pub google_calendar: Option<GoogleCalendarConfig>,
     /// Optional timezone override for cron active-hours evaluation.
     pub cron_timezone: Option<String>,
     /// Optional timezone override for channel/worker temporal context.
@@ -1128,6 +1162,7 @@ pub struct ResolvedAgentConfig {
     pub channel: ChannelConfig,
     pub mcp: Vec<McpServerConfig>,
     pub brave_search_key: Option<String>,
+    pub google_calendar: Option<GoogleCalendarConfig>,
     pub cron_timezone: Option<String>,
     pub user_timezone: Option<String>,
     /// Sandbox configuration for process containment.
@@ -1158,6 +1193,7 @@ impl Default for DefaultsConfig {
             channel: ChannelConfig::default(),
             mcp: Vec::new(),
             brave_search_key: None,
+            google_calendar: None,
             cron_timezone: None,
             user_timezone: None,
             history_backfill_count: 50,
@@ -1229,6 +1265,10 @@ impl AgentConfig {
                 .brave_search_key
                 .clone()
                 .or_else(|| defaults.brave_search_key.clone()),
+            google_calendar: self
+                .google_calendar
+                .clone()
+                .or_else(|| defaults.google_calendar.clone()),
             cron_timezone: resolved_cron_timezone,
             user_timezone: resolved_user_timezone,
             sandbox: self.sandbox.clone().unwrap_or_default(),

@@ -237,6 +237,27 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "tools/attachment_recall") => {
             include_str!("../../prompts/en/tools/attachment_recall_description.md.j2")
         }
+        ("en", "tools/google_calendar_list_events") => {
+            include_str!("../../prompts/en/tools/google_calendar_list_events_description.md.j2")
+        }
+        ("en", "tools/google_calendar_create_event") => {
+            include_str!("../../prompts/en/tools/google_calendar_create_event_description.md.j2")
+        }
+        ("en", "tools/google_calendar_update_event") => {
+            include_str!("../../prompts/en/tools/google_calendar_update_event_description.md.j2")
+        }
+        ("en", "tools/google_calendar_delete_event") => {
+            include_str!("../../prompts/en/tools/google_calendar_delete_event_description.md.j2")
+        }
+        ("en", "tools/google_calendar_list_calendars") => {
+            include_str!("../../prompts/en/tools/google_calendar_list_calendars_description.md.j2")
+        }
+        ("en", "tools/google_calendar_find_free_time") => {
+            include_str!("../../prompts/en/tools/google_calendar_find_free_time_description.md.j2")
+        }
+        ("en", "tools/google_calendar_respond_event") => {
+            include_str!("../../prompts/en/tools/google_calendar_respond_event_description.md.j2")
+        }
 
         // Fallback: unknown language or key -> try English
         (lang, key) if lang != "en" => {

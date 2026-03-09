@@ -12,12 +12,12 @@ use super::toml_schema::*;
 use super::{
     AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
-    DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
-    LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GoogleCalendarConfig, GroupDef,
+    HumanDef, IngestionConfig, LinkDef, LlmConfig, McpServerConfig, McpTransport,
+    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
+    ProviderConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
+    TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
+    WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -812,6 +812,7 @@ impl Config {
             channel: None,
             mcp: None,
             brave_search_key: None,
+            google_calendar: None,
             cron_timezone: None,
             user_timezone: None,
             sandbox: None,
@@ -1483,6 +1484,57 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok()),
+            google_calendar: {
+                let gc = &toml.defaults.google_calendar;
+                match gc {
+                    Some(gc_config) => {
+                        let client_id = gc_config
+                            .client_id
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok());
+                        let client_secret = gc_config
+                            .client_secret
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok());
+                        let refresh_token = gc_config
+                            .refresh_token
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .or_else(|| std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok());
+                        let default_calendar_id = gc_config
+                            .default_calendar_id
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| "primary".to_string());
+                        match (client_id, client_secret, refresh_token) {
+                            (Some(id), Some(secret), Some(token)) => Some(GoogleCalendarConfig {
+                                client_id: id,
+                                client_secret: secret,
+                                refresh_token: token,
+                                default_calendar_id,
+                            }),
+                            _ => None,
+                        }
+                    }
+                    None => {
+                        // Try env vars directly
+                        let client_id = std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok();
+                        let client_secret = std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok();
+                        let refresh_token = std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok();
+                        match (client_id, client_secret, refresh_token) {
+                            (Some(id), Some(secret), Some(token)) => Some(GoogleCalendarConfig {
+                                client_id: id,
+                                client_secret: secret,
+                                refresh_token: token,
+                                default_calendar_id: "primary".to_string(),
+                            }),
+                            _ => None,
+                        }
+                    }
+                }
+            },
             cron_timezone: toml
                 .defaults
                 .cron_timezone
@@ -1687,6 +1739,31 @@ impl Config {
                         None => None,
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
+                    google_calendar: a.google_calendar.as_ref().and_then(|gc_config| {
+                        let client_id = gc_config.client_id.as_deref().and_then(resolve_env_value);
+                        let client_secret = gc_config
+                            .client_secret
+                            .as_deref()
+                            .and_then(resolve_env_value);
+                        let refresh_token = gc_config
+                            .refresh_token
+                            .as_deref()
+                            .and_then(resolve_env_value);
+                        let default_calendar_id = gc_config
+                            .default_calendar_id
+                            .as_deref()
+                            .and_then(resolve_env_value)
+                            .unwrap_or_else(|| "primary".to_string());
+                        match (client_id, client_secret, refresh_token) {
+                            (Some(id), Some(secret), Some(token)) => Some(GoogleCalendarConfig {
+                                client_id: id,
+                                client_secret: secret,
+                                refresh_token: token,
+                                default_calendar_id,
+                            }),
+                            _ => None,
+                        }
+                    }),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
                     user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
@@ -1741,6 +1818,7 @@ impl Config {
                 channel: None,
                 mcp: None,
                 brave_search_key: None,
+                google_calendar: None,
                 cron_timezone: None,
                 user_timezone: None,
                 sandbox: None,

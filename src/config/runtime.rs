@@ -5,8 +5,9 @@ use arc_swap::ArcSwap;
 
 use super::{
     BrowserConfig, ChannelConfig, CoalesceConfig, CompactionConfig, Config, CortexConfig,
-    DefaultsConfig, IngestionConfig, McpServerConfig, MemoryPersistenceConfig, OpenCodeConfig,
-    ResolvedAgentConfig, WarmupConfig, WarmupStatus, WorkReadiness, evaluate_work_readiness,
+    DefaultsConfig, GoogleCalendarConfig, IngestionConfig, McpServerConfig,
+    MemoryPersistenceConfig, OpenCodeConfig, ResolvedAgentConfig, WarmupConfig, WarmupStatus,
+    WorkReadiness, evaluate_work_readiness,
 };
 use crate::llm::routing::RoutingConfig;
 use crate::tools::browser::SharedBrowserHandle;
@@ -40,6 +41,7 @@ pub struct RuntimeConfig {
     pub mcp: ArcSwap<Vec<McpServerConfig>>,
     pub history_backfill_count: ArcSwap<usize>,
     pub brave_search_key: ArcSwap<Option<String>>,
+    pub google_calendar: ArcSwap<Option<GoogleCalendarConfig>>,
     pub cron_timezone: ArcSwap<Option<String>>,
     pub user_timezone: ArcSwap<Option<String>>,
     pub cortex: ArcSwap<CortexConfig>,
@@ -121,6 +123,7 @@ impl RuntimeConfig {
             mcp: ArcSwap::from_pointee(agent_config.mcp.clone()),
             history_backfill_count: ArcSwap::from_pointee(agent_config.history_backfill_count),
             brave_search_key: ArcSwap::from_pointee(agent_config.brave_search_key.clone()),
+            google_calendar: ArcSwap::from_pointee(agent_config.google_calendar.clone()),
             cron_timezone: ArcSwap::from_pointee(agent_config.cron_timezone.clone()),
             user_timezone: ArcSwap::from_pointee(agent_config.user_timezone.clone()),
             cortex: ArcSwap::from_pointee(agent_config.cortex),
@@ -283,6 +286,8 @@ impl RuntimeConfig {
             .store(Arc::new(resolved.history_backfill_count));
         self.brave_search_key
             .store(Arc::new(resolved.brave_search_key));
+        self.google_calendar
+            .store(Arc::new(resolved.google_calendar.clone()));
         self.cron_timezone.store(Arc::new(resolved.cron_timezone));
         self.user_timezone.store(Arc::new(resolved.user_timezone));
         self.cortex.store(Arc::new(resolved.cortex));

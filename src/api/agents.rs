@@ -619,6 +619,7 @@ pub async fn create_agent_internal(
         channel: None,
         mcp: None,
         brave_search_key: None,
+        google_calendar: None,
         cron_timezone: None,
         user_timezone: None,
         sandbox: None,

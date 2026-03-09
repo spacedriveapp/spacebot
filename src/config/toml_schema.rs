@@ -285,6 +285,7 @@ pub(super) struct TomlDefaultsConfig {
     #[serde(default)]
     pub(super) mcp: Vec<TomlMcpServerConfig>,
     pub(super) brave_search_key: Option<String>,
+    pub(super) google_calendar: Option<TomlGoogleCalendarConfig>,
     pub(super) cron_timezone: Option<String>,
     pub(super) user_timezone: Option<String>,
     pub(super) opencode: Option<TomlOpenCodeConfig>,
@@ -409,6 +410,14 @@ pub(super) struct TomlProjectsConfig {
     pub(super) disk_usage_warning_threshold: Option<u64>,
 }
 
+#[derive(Deserialize)]
+pub(super) struct TomlGoogleCalendarConfig {
+    pub(super) client_id: Option<String>,
+    pub(super) client_secret: Option<String>,
+    pub(super) refresh_token: Option<String>,
+    pub(super) default_calendar_id: Option<String>,
+}
+
 #[derive(Deserialize, Clone)]
 pub(super) struct TomlMcpServerConfig {
     pub(super) name: String,
@@ -455,6 +464,7 @@ pub(super) struct TomlAgentConfig {
     pub(super) channel: Option<TomlChannelConfig>,
     pub(super) mcp: Option<Vec<TomlMcpServerConfig>>,
     pub(super) brave_search_key: Option<String>,
+    pub(super) google_calendar: Option<TomlGoogleCalendarConfig>,
     pub(super) cron_timezone: Option<String>,
     pub(super) user_timezone: Option<String>,
     pub(super) sandbox: Option<crate::sandbox::SandboxConfig>,
