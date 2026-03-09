@@ -875,6 +875,7 @@ impl Config {
 
         let mut defaults = DefaultsConfig::default();
         defaults.browser.chrome_cache_dir = instance_dir.join("chrome_cache");
+        defaults.google_calendar = resolve_google_calendar_config(None);
 
         Ok(Self {
             instance_dir: instance_dir.to_path_buf(),

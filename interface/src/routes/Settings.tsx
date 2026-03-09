@@ -1657,12 +1657,13 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	};
 
 	const handleSaveGCalCredentials = () => {
+		const calId = gCalDefaultCalendarId.trim();
 		updateMutation.mutate({
 			google_calendar: {
 				client_id: gCalClientId.trim(),
 				client_secret: gCalClientSecret.trim(),
 				refresh_token: gCalRefreshToken.trim(),
-				default_calendar_id: gCalDefaultCalendarId.trim() || "primary",
+				...(calId ? { default_calendar_id: calId } : {}),
 			},
 		});
 	};
@@ -1831,7 +1832,7 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 						<DialogTitle>{settings?.google_calendar_configured ? "Update" : "Configure"} Google Calendar</DialogTitle>
 						<DialogDescription>
 							Enter your Google OAuth credentials. See the{" "}
-							<a href="/docs/google-calendar" target="_blank" className="text-accent underline">setup guide</a>{" "}
+							<a href="/docs/google-calendar" target="_blank" rel="noopener noreferrer" className="text-accent underline">setup guide</a>{" "}
 							for instructions.
 						</DialogDescription>
 					</DialogHeader>

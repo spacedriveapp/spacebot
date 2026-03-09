@@ -24,8 +24,8 @@ impl GoogleCalendarListEventsTool {
 pub struct ListEventsArgs {
     /// Calendar ID to list events from. Defaults to the configured primary calendar.
     pub calendar_id: Option<String>,
-    /// Lower bound (inclusive) for event start time, as an RFC 3339 timestamp
-    /// (e.g. "2026-03-01T00:00:00Z").
+    /// Exclusive lower bound on event end time (events whose end time is after this are returned),
+    /// as an RFC 3339 timestamp (e.g. "2026-03-01T00:00:00Z").
     pub time_min: Option<String>,
     /// Upper bound (exclusive) for event start time, as an RFC 3339 timestamp.
     pub time_max: Option<String>,
@@ -74,7 +74,7 @@ impl Tool for GoogleCalendarListEventsTool {
                     },
                     "time_min": {
                         "type": "string",
-                        "description": "Lower bound (inclusive) for event start time, as an RFC 3339 timestamp (e.g. \"2026-03-01T00:00:00Z\")."
+                        "description": "Exclusive lower bound on event end time (events whose end time is after this are returned), as an RFC 3339 timestamp (e.g. \"2026-03-01T00:00:00Z\")."
                     },
                     "time_max": {
                         "type": "string",

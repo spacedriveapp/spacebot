@@ -122,7 +122,10 @@ default_calendar_id = "primary"
 You can override Google Calendar credentials for a specific agent:
 
 ```toml
-[agents.personal-assistant.google_calendar]
+[[agents]]
+id = "personal-assistant"
+
+[agents.google_calendar]
 client_id = "DIFFERENT_CLIENT_ID.apps.googleusercontent.com"
 client_secret = "GOCSPX-DIFFERENT_SECRET"
 refresh_token = "1//DIFFERENT_REFRESH_TOKEN"
