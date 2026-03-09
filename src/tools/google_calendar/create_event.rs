@@ -112,11 +112,11 @@ impl Tool for GoogleCalendarCreateEventTool {
             "end": { "dateTime": args.end },
         });
 
-        if let Some(desc) = &args.description {
-            body["description"] = serde_json::json!(desc);
+        if let Some(description) = &args.description {
+            body["description"] = serde_json::json!(description);
         }
-        if let Some(loc) = &args.location {
-            body["location"] = serde_json::json!(loc);
+        if let Some(location) = &args.location {
+            body["location"] = serde_json::json!(location);
         }
         if let Some(attendees) = &args.attendees {
             body["attendees"] = serde_json::json!(

@@ -5,13 +5,13 @@ description: Native Google Calendar integration for listing, creating, and manag
 
 # Google Calendar
 
-Native Google Calendar integration that gives workers and channels access to calendar tools — list events, create meetings, find free time, and more. No MCP server needed; credentials are configured directly in Spacebot.
+Native Google Calendar integration that gives workers and branches access to calendar tools — list events, create meetings, find free time, and more. No MCP server needed; credentials are configured directly in Spacebot.
 
 ## Overview
 
 When configured, Spacebot registers calendar tools on the appropriate process types:
 
-| Tool | Channels | Workers |
+| Tool | Branches | Workers |
 |------|----------|---------|
 | `google_calendar_list_events` | read-only | read-only |
 | `google_calendar_list_calendars` | read-only | read-only |
@@ -21,7 +21,7 @@ When configured, Spacebot registers calendar tools on the appropriate process ty
 | `google_calendar_delete_event` | — | write |
 | `google_calendar_respond_event` | — | write |
 
-Channels get read-only tools. Workers get both read and write tools. This follows the delegation model — channels can check your schedule, but only workers modify it.
+Branches get read-only tools. Workers get both read and write tools. This follows the delegation model — when you ask the channel to check your schedule, it spawns a branch to do the lookup, and only workers can modify calendar data.
 
 ## Prerequisites
 

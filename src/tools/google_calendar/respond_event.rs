@@ -94,12 +94,20 @@ impl Tool for GoogleCalendarRespondEventTool {
             .map_err(|e| GoogleCalendarError::InvalidResponse(e.to_string()))?;
 
         // Update the self attendee's response status.
+        let mut self_attendee_found = false;
         if let Some(attendees) = &mut event.attendees {
             for attendee in attendees.iter_mut() {
                 if attendee.is_self {
                     attendee.response_status = Some(args.response.clone());
+                    self_attendee_found = true;
                 }
             }
+        }
+
+        if !self_attendee_found {
+            return Err(GoogleCalendarError::RequestFailed(
+                "You are not listed as an attendee for this event.".to_string(),
+            ));
         }
 
         // PATCH back with updated attendees.

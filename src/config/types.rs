@@ -643,12 +643,23 @@ impl McpTransport {
 }
 
 /// Google Calendar API configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct GoogleCalendarConfig {
     pub client_id: String,
     pub client_secret: String,
     pub refresh_token: String,
     pub default_calendar_id: String,
+}
+
+impl std::fmt::Debug for GoogleCalendarConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("GoogleCalendarConfig")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"[REDACTED]")
+            .field("refresh_token", &"[REDACTED]")
+            .field("default_calendar_id", &self.default_calendar_id)
+            .finish()
+    }
 }
 
 /// Compaction threshold configuration.

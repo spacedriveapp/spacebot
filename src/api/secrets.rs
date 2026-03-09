@@ -640,10 +640,18 @@ fn migrate_section_secrets<T: SystemSecrets>(
 
     // Migrate default (top-level) fields.
     for field in fields {
+        // Split dot-separated toml_key segments (e.g. "google_calendar.client_id"
+        // becomes ["google_calendar", "client_id"]) so nested tables are traversed
+        // correctly rather than treated as a single literal key.
+        let key_segments: Vec<&str> = field.toml_key.split('.').collect();
         let path: Vec<&str> = if is_adapter {
-            vec!["messaging", section, field.toml_key]
+            let mut p = vec!["messaging", section];
+            p.extend_from_slice(&key_segments);
+            p
         } else {
-            vec![section, field.toml_key]
+            let mut p = vec![section];
+            p.extend_from_slice(&key_segments);
+            p
         };
         try_migrate_field(store, doc, &path, field.secret_name, migrated);
     }

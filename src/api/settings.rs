@@ -129,16 +129,16 @@ pub(super) async fn get_global_settings(
                 }
             });
 
-        let gcal_table = doc.get("defaults").and_then(|d| d.get("google_calendar"));
-        let google_calendar_configured = gcal_table
+        let google_calendar_table = doc.get("defaults").and_then(|d| d.get("google_calendar"));
+        let google_calendar_configured = google_calendar_table
             .and_then(|g| g.get("client_id"))
             .and_then(|v| v.as_str())
             .is_some_and(|s| !s.is_empty())
-            && gcal_table
+            && google_calendar_table
                 .and_then(|g| g.get("client_secret"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty())
-            && gcal_table
+            && google_calendar_table
                 .and_then(|g| g.get("refresh_token"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty());
@@ -301,10 +301,19 @@ pub(super) async fn update_global_settings(
         }
     }
 
-    if let Some(gcal) = request.google_calendar {
-        let all_empty = gcal.client_id.as_deref().is_some_and(|s| s.is_empty())
-            && gcal.client_secret.as_deref().is_some_and(|s| s.is_empty())
-            && gcal.refresh_token.as_deref().is_some_and(|s| s.is_empty());
+    if let Some(google_calendar) = request.google_calendar {
+        let all_empty = google_calendar
+            .client_id
+            .as_deref()
+            .is_some_and(|s| s.is_empty())
+            && google_calendar
+                .client_secret
+                .as_deref()
+                .is_some_and(|s| s.is_empty())
+            && google_calendar
+                .refresh_token
+                .as_deref()
+                .is_some_and(|s| s.is_empty());
 
         if all_empty {
             // Remove the entire section.
@@ -319,17 +328,20 @@ pub(super) async fn update_global_settings(
                 doc["defaults"]["google_calendar"] =
                     toml_edit::Item::Table(toml_edit::Table::new());
             }
-            if let Some(v) = gcal.client_id {
-                doc["defaults"]["google_calendar"]["client_id"] = toml_edit::value(v);
+            if let Some(client_id) = google_calendar.client_id {
+                doc["defaults"]["google_calendar"]["client_id"] = toml_edit::value(client_id);
             }
-            if let Some(v) = gcal.client_secret {
-                doc["defaults"]["google_calendar"]["client_secret"] = toml_edit::value(v);
+            if let Some(client_secret) = google_calendar.client_secret {
+                doc["defaults"]["google_calendar"]["client_secret"] =
+                    toml_edit::value(client_secret);
             }
-            if let Some(v) = gcal.refresh_token {
-                doc["defaults"]["google_calendar"]["refresh_token"] = toml_edit::value(v);
+            if let Some(refresh_token) = google_calendar.refresh_token {
+                doc["defaults"]["google_calendar"]["refresh_token"] =
+                    toml_edit::value(refresh_token);
             }
-            if let Some(v) = gcal.default_calendar_id {
-                doc["defaults"]["google_calendar"]["default_calendar_id"] = toml_edit::value(v);
+            if let Some(default_calendar_id) = google_calendar.default_calendar_id {
+                doc["defaults"]["google_calendar"]["default_calendar_id"] =
+                    toml_edit::value(default_calendar_id);
             }
         }
     }

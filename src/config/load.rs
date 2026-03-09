@@ -31,34 +31,39 @@ use std::path::{Path, PathBuf};
 /// Resolves each credential via `resolve_env_value`, then falls back to direct
 /// environment variables. Returns `None` when any required credential is missing.
 fn resolve_google_calendar_config(
-    gc_config: Option<&TomlGoogleCalendarConfig>,
+    google_calendar_config: Option<&TomlGoogleCalendarConfig>,
 ) -> Option<GoogleCalendarConfig> {
-    let (client_id, client_secret, refresh_token, default_calendar_id) = match gc_config {
-        Some(gc) => (
-            gc.client_id
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok()),
-            gc.client_secret
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok()),
-            gc.refresh_token
-                .as_deref()
-                .and_then(resolve_env_value)
-                .or_else(|| std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok()),
-            gc.default_calendar_id
-                .as_deref()
-                .and_then(resolve_env_value)
-                .unwrap_or_else(|| "primary".to_string()),
-        ),
-        None => (
-            std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok(),
-            std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok(),
-            std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok(),
-            "primary".to_string(),
-        ),
-    };
+    let (client_id, client_secret, refresh_token, default_calendar_id) =
+        match google_calendar_config {
+            Some(google_calendar) => (
+                google_calendar
+                    .client_id
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok()),
+                google_calendar
+                    .client_secret
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok()),
+                google_calendar
+                    .refresh_token
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .or_else(|| std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok()),
+                google_calendar
+                    .default_calendar_id
+                    .as_deref()
+                    .and_then(resolve_env_value)
+                    .unwrap_or_else(|| "primary".to_string()),
+            ),
+            None => (
+                std::env::var("GOOGLE_CALENDAR_CLIENT_ID").ok(),
+                std::env::var("GOOGLE_CALENDAR_CLIENT_SECRET").ok(),
+                std::env::var("GOOGLE_CALENDAR_REFRESH_TOKEN").ok(),
+                "primary".to_string(),
+            ),
+        };
 
     match (client_id, client_secret, refresh_token) {
         (Some(id), Some(secret), Some(token)) => Some(GoogleCalendarConfig {

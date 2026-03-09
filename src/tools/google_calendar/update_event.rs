@@ -116,8 +116,8 @@ impl Tool for GoogleCalendarUpdateEventTool {
         if let Some(summary) = &args.summary {
             body.insert("summary".into(), serde_json::json!(summary));
         }
-        if let Some(desc) = &args.description {
-            body.insert("description".into(), serde_json::json!(desc));
+        if let Some(description) = &args.description {
+            body.insert("description".into(), serde_json::json!(description));
         }
         if let Some(start) = &args.start {
             body.insert("start".into(), serde_json::json!({"dateTime": start}));
@@ -125,8 +125,8 @@ impl Tool for GoogleCalendarUpdateEventTool {
         if let Some(end) = &args.end {
             body.insert("end".into(), serde_json::json!({"dateTime": end}));
         }
-        if let Some(loc) = &args.location {
-            body.insert("location".into(), serde_json::json!(loc));
+        if let Some(location) = &args.location {
+            body.insert("location".into(), serde_json::json!(location));
         }
         if let Some(attendees) = &args.attendees {
             body.insert(

@@ -16,17 +16,22 @@
 //! - `spacebot_docs` for embedded self-documentation lookup
 //! - `task_create` + `task_list` + `task_update`
 //! - `spawn_worker` is included for channel-originated branches only
+//! - Google Calendar read-only tools (`list_calendars`, `list_events`, `get_event`,
+//!   `find_free_time`, `find_meeting_times`)
 //!
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
 //! - `task_update` — scoped to the worker's assigned task
 //! - `set_status` — per-worker instance, registered at creation
+//! - Full Google Calendar tools (read + write: `create_event`, `update_event`, `delete_event`,
+//!   `respond_to_event`, plus all read tools)
 //!
 //! **Cortex ToolServer** (one per agent):
 //! - `memory_save` — registered at startup
 //!
 //! **Cortex Chat ToolServer** (interactive admin chat):
 //! - branch + worker tool superset plus `spacebot_docs`, `config_inspect`, and `spawn_worker`
+//! - Full Google Calendar tools (read + write)
 
 pub mod attachment_recall;
 pub mod branch_tool;
