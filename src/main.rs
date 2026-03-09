@@ -187,6 +187,89 @@ struct ActiveChannel {
     _outbound_handle: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct BackfillTranscriptEntry {
+    role: String,
+    author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_utc: Option<String>,
+    content: String,
+}
+
+fn serialize_backfill_transcript(entries: Vec<BackfillTranscriptEntry>) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    match serde_json::to_string_pretty(&entries) {
+        Ok(serialized) => Some(serialized),
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize backfill transcript");
+            None
+        }
+    }
+}
+
+fn render_platform_history_backfill(
+    history_messages: &[spacebot::messaging::traits::HistoryMessage],
+) -> Option<String> {
+    let entries = history_messages
+        .iter()
+        .map(|entry| BackfillTranscriptEntry {
+            role: if entry.is_bot {
+                "assistant".to_string()
+            } else {
+                "user".to_string()
+            },
+            author: if entry.is_bot {
+                "(you)".to_string()
+            } else {
+                entry.author.clone()
+            },
+            timestamp_utc: entry
+                .timestamp
+                .as_ref()
+                .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            content: entry.content.clone(),
+        })
+        .collect();
+
+    serialize_backfill_transcript(entries)
+}
+
+fn render_conversation_history_backfill(
+    history_messages: &[spacebot::conversation::history::ConversationMessage],
+) -> Option<String> {
+    let entries = history_messages
+        .iter()
+        .filter(|entry| entry.role == "user" || entry.role == "assistant")
+        .map(|entry| {
+            let author = if entry.role == "assistant" {
+                "(you)".to_string()
+            } else {
+                entry
+                    .sender_name
+                    .clone()
+                    .or_else(|| entry.sender_id.clone())
+                    .unwrap_or_else(|| "user".to_string())
+            };
+
+            BackfillTranscriptEntry {
+                role: entry.role.clone(),
+                author,
+                timestamp_utc: Some(
+                    entry
+                        .created_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ),
+                content: entry.content.clone(),
+            }
+        })
+        .collect();
+
+    serialize_backfill_transcript(entries)
+}
+
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -1670,7 +1753,7 @@ async fn run(
                         .load()
                         .as_ref()
                         .clone();
-                    let (channel, channel_tx) = spacebot::agent::channel::Channel::new(
+                    let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
                         response_tx,
@@ -1693,6 +1776,38 @@ async fn run(
                     api_state
                         .register_channel_state(conversation_id.clone(), channel.state.clone())
                         .await;
+
+                    let backfill_count = agent.config.history_backfill_count();
+                    if backfill_count > 0 {
+                        let backfill_limit =
+                            std::cmp::min(backfill_count, i64::MAX as usize) as i64;
+                        match channel
+                            .state
+                            .conversation_logger
+                            .load_recent(&channel.id, backfill_limit)
+                            .await
+                        {
+                            Ok(history_messages) => {
+                                if let Some(transcript) =
+                                    render_conversation_history_backfill(&history_messages)
+                                {
+                                    channel.set_backfill_transcript(transcript);
+                                    tracing::info!(
+                                        conversation_id = %conversation_id,
+                                        message_count = history_messages.len(),
+                                        "backfilled resumed channel history from conversation log"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    conversation_id = %conversation_id,
+                                    %error,
+                                    "failed to backfill resumed channel history from conversation log"
+                                );
+                            }
+                        }
+                    }
 
                     // Resume workers into the channel state before spawning the event loop.
                     let mut any_resumed = false;
@@ -1918,8 +2033,14 @@ async fn run(
 
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
-                    let snapshot_store = agent.deps.runtime_config.prompt_snapshots.load().as_ref().clone();
-                    let (channel, channel_tx) = spacebot::agent::channel::Channel::new(
+                    let snapshot_store = agent
+                        .deps
+                        .runtime_config
+                        .prompt_snapshots
+                        .load()
+                        .as_ref()
+                        .clone();
+                    let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
                         response_tx,
@@ -1946,36 +2067,29 @@ async fn run(
                         channel.state.clone(),
                     ).await;
 
-                    // Backfill recent message history from the platform
+                    // Backfill recent message history from the platform.
+                    // The transcript is injected into the system prompt (not chat
+                    // history) so the LLM treats it as read-only system context
+                    // rather than actionable user messages.
                     let backfill_count = agent.config.history_backfill_count();
                     if backfill_count > 0 {
                         match messaging_manager.fetch_history(&message, backfill_count).await {
-                            Ok(history_messages) if !history_messages.is_empty() => {
-                                let mut transcript = String::new();
-                                for entry in &history_messages {
-                                    let label = if entry.is_bot { "(you)" } else { &entry.author };
-                                    transcript.push_str(&format!("{}: {}\n", label, entry.content));
+                            Ok(history_messages) => {
+                                if let Some(transcript) =
+                                    render_platform_history_backfill(&history_messages)
+                                {
+                                    channel.set_backfill_transcript(transcript);
+
+                                    tracing::info!(
+                                        conversation_id = %conversation_id,
+                                        message_count = history_messages.len(),
+                                        "backfilled channel history into system prompt"
+                                    );
                                 }
-
-                                let prompt_engine = agent.deps.runtime_config.prompts.load();
-                                let backfill_text = prompt_engine
-                                    .render_system_history_backfill(transcript.trim_end())
-                                    .unwrap_or(transcript);
-
-                                let mut history = channel.state.history.write().await;
-                                history.push(rig::message::Message::from(backfill_text));
-                                drop(history);
-
-                                tracing::info!(
-                                    conversation_id = %conversation_id,
-                                    message_count = history_messages.len(),
-                                    "backfilled channel history"
-                                );
                             }
                             Err(error) => {
                                 tracing::warn!(%error, "failed to backfill channel history");
                             }
-                            _ => {}
                         }
                     }
 

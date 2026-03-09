@@ -462,6 +462,7 @@ impl PromptEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -567,6 +568,7 @@ impl PromptEngine {
         org_context: Option<String>,
         adapter_prompt: Option<String>,
         project_context: Option<String>,
+        backfill_transcript: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -583,6 +585,7 @@ impl PromptEngine {
                 org_context => org_context,
                 adapter_prompt => adapter_prompt,
                 project_context => project_context,
+                backfill_transcript => backfill_transcript,
             },
         )
     }

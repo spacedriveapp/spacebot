@@ -484,6 +484,7 @@ pub(super) async fn inspect_prompt(
             None, // org_context — not available from API layer
             None, // adapter_prompt — not available from API layer
             None, // project_context — not available from API layer
+            None, // backfill_transcript — not available from API layer
         )
         .unwrap_or_default();
 

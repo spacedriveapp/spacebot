@@ -363,6 +363,10 @@ pub struct Channel {
     pending_results: Vec<PendingResult>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
+    /// Backfilled conversation history rendered as a system-prompt fragment.
+    /// Injected into the system prompt (not into chat history) so the LLM
+    /// treats it as read-only context rather than actionable user messages.
+    backfill_transcript: Option<String>,
     /// Channel-local reply mode toggle.
     /// When true, suppress unsolicited replies unless explicitly invoked.
     listen_only_mode: bool,
@@ -497,12 +501,18 @@ impl Channel {
             retrigger_deadline: None,
             pending_results: Vec::new(),
             send_agent_message_tool,
+            backfill_transcript: None,
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
             control_handle,
         };
 
         (channel, message_tx)
+    }
+
+    /// Set the backfill transcript for injection into the system prompt.
+    pub fn set_backfill_transcript(&mut self, transcript: String) {
+        self.backfill_transcript = Some(transcript);
     }
 
     /// Get the agent's display name (falls back to agent ID).
@@ -1494,6 +1504,7 @@ impl Channel {
             org_context,
             adapter_prompt,
             project_context,
+            self.backfill_transcript.clone(),
         )
     }
 
@@ -2144,6 +2155,7 @@ impl Channel {
             org_context,
             adapter_prompt,
             project_context,
+            self.backfill_transcript.clone(),
         )
     }
 
