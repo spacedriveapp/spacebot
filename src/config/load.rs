@@ -1529,9 +1529,7 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("BRAVE_SEARCH_API_KEY").ok()),
-            google_calendar: resolve_google_calendar_config(
-                toml.defaults.google_calendar.as_ref(),
-            ),
+            google_calendar: resolve_google_calendar_config(toml.defaults.google_calendar.as_ref()),
             cron_timezone: toml
                 .defaults
                 .cron_timezone
@@ -1736,9 +1734,7 @@ impl Config {
                         None => None,
                     },
                     brave_search_key: a.brave_search_key.as_deref().and_then(resolve_env_value),
-                    google_calendar: resolve_google_calendar_config(
-                        a.google_calendar.as_ref(),
-                    ),
+                    google_calendar: resolve_google_calendar_config(a.google_calendar.as_ref()),
                     cron_timezone: a.cron_timezone.as_deref().and_then(resolve_env_value),
                     user_timezone: a.user_timezone.as_deref().and_then(resolve_env_value),
                     sandbox: a.sandbox,
