@@ -14,6 +14,7 @@ pub const WORKER_LOG_MODE_KEY: &str = "worker_log_mode";
 /// Key for channel listen-only mode setting.
 pub const CHANNEL_LISTEN_ONLY_MODE_KEY: &str = "channel_listen_only_mode";
 const CHANNEL_LISTEN_ONLY_MODE_PREFIX: &str = "channel_listen_only_mode:";
+const PROMPT_CAPTURE_PREFIX: &str = "prompt_capture:";
 
 /// How worker execution logs are stored.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -215,6 +216,18 @@ impl SettingsStore {
     /// Persist listen-only mode for a specific channel.
     pub fn set_channel_listen_only_mode_for(&self, channel_id: &str, enabled: bool) -> Result<()> {
         let key = Self::channel_listen_only_mode_key(channel_id);
+        self.set_raw(&key, if enabled { "true" } else { "false" })
+    }
+
+    /// Check whether prompt capture is enabled for a specific channel.
+    pub fn prompt_capture_enabled(&self, channel_id: &str) -> bool {
+        let key = format!("{PROMPT_CAPTURE_PREFIX}{channel_id}");
+        matches!(self.get_raw(&key), Ok(v) if v == "true")
+    }
+
+    /// Enable or disable prompt capture for a specific channel.
+    pub fn set_prompt_capture(&self, channel_id: &str, enabled: bool) -> Result<()> {
+        let key = format!("{PROMPT_CAPTURE_PREFIX}{channel_id}");
         self.set_raw(&key, if enabled { "true" } else { "false" })
     }
 }

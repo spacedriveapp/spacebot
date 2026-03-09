@@ -1428,8 +1428,9 @@ impl Binding {
         self.adapter.is_none()
     }
 
-    /// Check if this binding matches an inbound message.
-    fn matches(&self, message: &crate::InboundMessage) -> bool {
+    /// Check if this binding matches on routing criteria (platform, guild,
+    /// channel IDs, adapter, etc.) — everything *except* `require_mention`.
+    fn matches_route(&self, message: &crate::InboundMessage) -> bool {
         if self.channel != message.source {
             return false;
         }
@@ -1510,24 +1511,6 @@ impl Binding {
             }
         }
 
-        if self.channel == "discord" && self.require_mention {
-            let is_guild_message = message
-                .metadata
-                .get("discord_guild_id")
-                .and_then(|v| v.as_u64())
-                .is_some();
-            if is_guild_message {
-                let mentions_or_replies_to_bot = message
-                    .metadata
-                    .get("discord_mentions_or_replies_to_bot")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !mentions_or_replies_to_bot {
-                    return false;
-                }
-            }
-        }
-
         if let Some(chat_id) = &self.chat_id {
             let message_chat = message.metadata.get("telegram_chat_id").and_then(|value| {
                 value
@@ -1541,6 +1524,57 @@ impl Binding {
         }
 
         true
+    }
+
+    /// Check whether a message that already matched on routing criteria also
+    /// passes the `require_mention` filter. Returns `true` when
+    /// `require_mention` is disabled or the message includes a mention/reply.
+    ///
+    /// Works for all platforms by checking the platform-specific
+    /// `*_mentions_or_replies_to_bot` metadata key that every adapter sets.
+    /// DMs are always allowed through (they are inherently directed at the bot).
+    fn passes_require_mention(&self, message: &crate::InboundMessage) -> bool {
+        if !self.require_mention {
+            return true;
+        }
+
+        // DMs are inherently directed at the bot — always pass.
+        let is_dm = match message.source.as_str() {
+            "discord" => message
+                .metadata
+                .get("discord_guild_id")
+                .and_then(|v| v.as_u64())
+                .is_none(),
+            "telegram" => {
+                message
+                    .metadata
+                    .get("telegram_chat_type")
+                    .and_then(|v| v.as_str())
+                    == Some("private")
+            }
+            _ => false,
+        };
+        if is_dm {
+            return true;
+        }
+
+        // Each adapter sets a `<platform>_mentions_or_replies_to_bot` metadata
+        // key. Check the one that corresponds to the message source.
+        let mention_key = match message.source.as_str() {
+            "discord" => "discord_mentions_or_replies_to_bot",
+            "slack" => "slack_mentions_or_replies_to_bot",
+            "twitch" => "twitch_mentions_or_replies_to_bot",
+            "telegram" => "telegram_mentions_or_replies_to_bot",
+            // Unknown platforms: if require_mention is set, default to
+            // requiring a mention (safe default).
+            _ => return false,
+        };
+
+        message
+            .metadata
+            .get(mention_key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 }
 
@@ -1814,19 +1848,32 @@ fn validate_runtime_keys(
 
 /// Resolve which agent should handle an inbound message.
 ///
-/// Checks bindings in order. First match wins. Falls back to the default
-/// agent if no binding matches.
+/// Checks bindings in order. First routing match wins. Falls back to the
+/// default agent if no binding matches on routing criteria.
+///
+/// Returns `None` when a binding matched on routing but the message was
+/// suppressed by `require_mention` — the caller should drop the message.
 pub fn resolve_agent_for_message(
     bindings: &[Binding],
     message: &crate::InboundMessage,
     default_agent_id: &str,
-) -> crate::AgentId {
+) -> Option<crate::AgentId> {
     for binding in bindings {
-        if binding.matches(message) {
-            return std::sync::Arc::from(binding.agent_id.as_str());
+        if binding.matches_route(message) {
+            if binding.passes_require_mention(message) {
+                return Some(std::sync::Arc::from(binding.agent_id.as_str()));
+            }
+            // Binding owns this message but require_mention blocked it.
+            // Drop instead of falling through to the default agent.
+            tracing::debug!(
+                agent_id = %binding.agent_id,
+                source = %message.source,
+                "message suppressed by require_mention"
+            );
+            return None;
         }
     }
-    std::sync::Arc::from(default_agent_id)
+    Some(std::sync::Arc::from(default_agent_id))
 }
 
 // ---------------------------------------------------------------------------

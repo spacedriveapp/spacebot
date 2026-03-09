@@ -15,7 +15,26 @@ env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/spacebot
 
 jobs:
+  verify-version:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify Cargo.toml version matches tag
+        run: |
+          TAG="${GITHUB_REF#refs/tags/v}"
+          CARGO_VERSION=$(grep '^version' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          echo "Git tag version:    $TAG"
+          echo "Cargo.toml version: $CARGO_VERSION"
+          if [ "$TAG" != "$CARGO_VERSION" ]; then
+            echo "::error::Version mismatch! Git tag is v${TAG} but Cargo.toml has version ${CARGO_VERSION}. Bump the version in Cargo.toml before tagging."
+            exit 1
+          fi
+
   build-binaries:
+    needs: [verify-version]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
     strategy:
       matrix:
         include:
@@ -103,6 +122,8 @@ jobs:
           retention-days: 1
 
   build-docker:
+    needs: [verify-version]
+    if: always() && (needs.verify-version.result == 'success' || needs.verify-version.result == 'skipped')
     strategy:
       matrix:
         include:

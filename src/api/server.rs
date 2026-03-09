@@ -90,6 +90,19 @@ pub async fn start_http_server(
         .route("/channels/archive", put(channels::set_channel_archive))
         .route("/channels/messages", get(channels::channel_messages))
         .route("/channels/status", get(channels::channel_status))
+        .route("/channels/inspect", get(channels::inspect_prompt))
+        .route(
+            "/channels/inspect/capture",
+            post(channels::set_prompt_capture),
+        )
+        .route(
+            "/channels/inspect/snapshots",
+            get(channels::list_prompt_snapshots),
+        )
+        .route(
+            "/channels/inspect/snapshot",
+            get(channels::get_prompt_snapshot),
+        )
         .route("/agents/workers", get(workers::list_workers))
         .route("/agents/workers/detail", get(workers::worker_detail))
         .route(

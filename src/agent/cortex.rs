@@ -2401,6 +2401,15 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     };
 
     let browser_config = (**deps.runtime_config.browser_config.load()).clone();
+
+    // Build worker status text (time + model) for the system prompt.
+    let system_info =
+        crate::agent::status::SystemInfo::from_runtime_config(&deps.runtime_config, &deps.sandbox);
+    let temporal_context =
+        crate::agent::channel_prompt::TemporalContext::from_runtime(&deps.runtime_config);
+    let current_time_line = temporal_context.current_time_line();
+    let worker_status_text = Some(system_info.render_for_worker(&current_time_line));
+
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &deps.runtime_config.instance_dir.display().to_string(),
@@ -2411,6 +2420,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             sandbox_write_allowlist,
             &tool_secret_names,
             browser_config.persist_session,
+            worker_status_text,
         )
         .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
 

@@ -13,7 +13,7 @@ use crate::agent::channel_prompt::{
 };
 use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
-use crate::agent::status::StatusBlock;
+use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
@@ -109,6 +109,8 @@ pub struct ChannelState {
     pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
+    /// Prompt snapshot store for debugging prompt construction.
+    pub prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
 }
 
 impl ChannelState {
@@ -407,6 +409,7 @@ impl Channel {
         event_rx: broadcast::Receiver<ProcessEvent>,
         screenshot_dir: std::path::PathBuf,
         logs_dir: std::path::PathBuf,
+        prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -445,6 +448,7 @@ impl Channel {
             channel_store: channel_store.clone(),
             screenshot_dir,
             logs_dir,
+            prompt_snapshot_store,
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -1463,9 +1467,10 @@ impl Channel {
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render_with_time_context(Some(&current_time_line))
+            status.render_full(&current_time_line, &system_info)
         };
 
         // Render coalesce hint
@@ -2077,6 +2082,24 @@ impl Channel {
         }
     }
 
+    /// Build a snapshot of the system configuration for status block injection.
+    async fn build_system_info(&self) -> SystemInfo {
+        let runtime_config = &self.deps.runtime_config;
+        let mut info = SystemInfo::from_runtime_config(runtime_config, &self.deps.sandbox);
+
+        // Add async-only fields that the base constructor can't populate
+        let cron_job_count = {
+            let scheduler_guard = runtime_config.cron_scheduler.load();
+            match scheduler_guard.as_ref() {
+                Some(scheduler) => Some(scheduler.job_count().await),
+                None => None,
+            }
+        };
+        info.cron_job_count = cron_job_count;
+
+        info
+    }
+
     /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> crate::error::Result<String> {
         let rc = &self.deps.runtime_config;
@@ -2101,9 +2124,10 @@ impl Channel {
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render_with_time_context(Some(&current_time_line))
+            status.render_full(&current_time_line, &system_info)
         };
 
         let available_channels = self.build_available_channels().await;
@@ -2245,6 +2269,9 @@ impl Channel {
             guard.clone()
         };
         let history_len_before = history.len();
+
+        // ── Prompt snapshot capture (fire-and-forget) ──
+        self.maybe_capture_snapshot(system_prompt, user_text, &history);
 
         let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
 
@@ -2543,6 +2570,8 @@ impl Channel {
                         .with_label_values(&[metrics_agent_id, metrics_channel_type])
                         .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
+                } else if reason == "skip" {
+                    tracing::debug!(channel_id = %self.id, "channel turn skipped via tool");
                 } else {
                     tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
                 }
@@ -2973,8 +3002,9 @@ impl Channel {
     pub async fn get_status(&self) -> String {
         let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status = self.state.status_block.read().await;
-        status.render_with_time_context(Some(&current_time_line))
+        status.render_full(&current_time_line, &system_info)
     }
 
     /// Check if a memory persistence branch should be spawned based on message count.
@@ -3009,6 +3039,72 @@ impl Channel {
                 );
             }
         }
+    }
+
+    /// If prompt capture is enabled for this channel, snapshot the current
+    /// system prompt sections and conversation history. The save is
+    /// fire-and-forget so it never blocks the agentic loop.
+    fn maybe_capture_snapshot(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+        history: &[rig::message::Message],
+    ) {
+        // 1. Check if we have a snapshot store.
+        let snapshot_store = match self.state.prompt_snapshot_store.as_ref() {
+            Some(store) => store.clone(),
+            None => return,
+        };
+
+        // 2. Check if capture is enabled via settings.
+        let rc = &self.deps.runtime_config;
+        let capture_enabled = rc
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .map(|settings| settings.prompt_capture_enabled(&self.id))
+            .unwrap_or(false);
+        if !capture_enabled {
+            return;
+        }
+
+        // 3. Serialize history and build the snapshot.
+        let history_json = match serde_json::to_value(history) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to serialize prompt history; skipping snapshot capture"
+                );
+                return;
+            }
+        };
+        let history_length = history.len();
+        let system_prompt_chars = system_prompt.chars().count();
+
+        let snapshot = crate::agent::prompt_snapshot::PromptSnapshot {
+            channel_id: self.id.to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            user_message: user_message.to_string(),
+            system_prompt: system_prompt.to_string(),
+            system_prompt_chars,
+            history: history_json,
+            history_length,
+        };
+
+        // 5. Fire-and-forget save.
+        let channel_id = self.id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = snapshot_store.save(&snapshot) {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    %error,
+                    "failed to save prompt snapshot"
+                );
+            }
+        });
     }
 }
 

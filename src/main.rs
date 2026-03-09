@@ -1746,6 +1746,13 @@ async fn run(
                     let event_rx = agent.deps.event_tx.subscribe();
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
+                    let snapshot_store = agent
+                        .deps
+                        .runtime_config
+                        .prompt_snapshots
+                        .load()
+                        .as_ref()
+                        .clone();
                     let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
@@ -1753,6 +1760,7 @@ async fn run(
                         event_rx,
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
+                        snapshot_store,
                     );
                     agent
                         .deps
@@ -1992,11 +2000,14 @@ async fn run(
                     existing.clone()
                 } else {
                     let current_bindings = bindings.load();
-                    let resolved = spacebot::config::resolve_agent_for_message(
+                    let Some(resolved) = spacebot::config::resolve_agent_for_message(
                         &current_bindings,
                         &message,
                         &default_agent_id,
-                    );
+                    ) else {
+                        // Message suppressed by require_mention — drop it.
+                        continue;
+                    };
                     message.agent_id = Some(resolved.clone());
                     resolved
                 };
@@ -2022,6 +2033,13 @@ async fn run(
 
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
+                    let snapshot_store = agent
+                        .deps
+                        .runtime_config
+                        .prompt_snapshots
+                        .load()
+                        .as_ref()
+                        .clone();
                     let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
@@ -2029,6 +2047,7 @@ async fn run(
                         event_rx,
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
+                        snapshot_store,
                     );
                     agent
                         .deps
@@ -2557,6 +2576,23 @@ async fn initialize_agents(
             })?,
         );
 
+        // Per-agent prompt snapshot store (separate redb, easy to delete).
+        // Non-fatal: a corrupt/unwritable DB disables snapshotting for this agent.
+        let snapshot_path = agent_config.data_dir.join("prompt_snapshots.redb");
+        let prompt_snapshot_store =
+            match spacebot::agent::prompt_snapshot::PromptSnapshotStore::new(&snapshot_path) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %agent_config.id,
+                        path = %snapshot_path.display(),
+                        %error,
+                        "failed to initialize prompt snapshot store; prompt snapshots disabled"
+                    );
+                    None
+                }
+            };
+
         // Per-agent memory system
         let memory_store =
             spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
@@ -2621,6 +2657,9 @@ async fn initialize_agents(
             .find(|agent| agent.id == agent_config.id)
             .and_then(|agent| agent.channel.map(|channel| channel.listen_only_mode));
         runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
+        runtime_config
+            .prompt_snapshots
+            .store(Arc::new(prompt_snapshot_store.clone()));
         if let Err(error) = settings_store.set_worker_log_mode(config.defaults.worker_log_mode) {
             tracing::warn!(%error, agent = %agent_config.id, "failed to set worker_log_mode from config");
         }
