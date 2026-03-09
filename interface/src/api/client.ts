@@ -1339,6 +1339,10 @@ export interface OpenCodeSettingsUpdate {
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
 	google_calendar_configured: boolean;
+	google_calendar_client_id: string | null;
+	google_calendar_client_secret: string | null;
+	google_calendar_refresh_token: string | null;
+	google_calendar_default_calendar_id: string | null;
 	api_enabled: boolean;
 	api_port: number;
 	api_bind: string;

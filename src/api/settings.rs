@@ -10,6 +10,10 @@ use std::sync::Arc;
 pub(super) struct GlobalSettingsResponse {
     brave_search_key: Option<String>,
     google_calendar_configured: bool,
+    google_calendar_client_id: Option<String>,
+    google_calendar_client_secret: Option<String>,
+    google_calendar_refresh_token: Option<String>,
+    google_calendar_default_calendar_id: Option<String>,
     api_enabled: bool,
     api_port: u16,
     api_bind: String,
@@ -100,13 +104,7 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let google_calendar_configured = state
-        .runtime_configs
-        .load()
-        .values()
-        .any(|rc| rc.google_calendar.load().is_some());
-
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
+    let (brave_search_key, google_calendar_configured, gcal_client_id, gcal_client_secret, gcal_refresh_token, gcal_default_calendar_id, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
         if config_path.exists() {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
@@ -126,6 +124,31 @@ pub(super) async fn get_global_settings(
                         Some(s.to_string())
                     }
                 });
+
+            let gcal_read = |g: &toml_edit::Item| {
+                let client_id = g.get("client_id").and_then(|v| v.as_str()).map(str::to_owned);
+                let client_secret = g.get("client_secret").and_then(|v| v.as_str()).map(str::to_owned);
+                let refresh_token = g.get("refresh_token").and_then(|v| v.as_str()).map(str::to_owned);
+                let default_calendar_id = g.get("default_calendar_id").and_then(|v| v.as_str()).map(str::to_owned);
+                (client_id, client_secret, refresh_token, default_calendar_id)
+            };
+            let (gcal_client_id, gcal_client_secret, gcal_refresh_token, gcal_default_calendar_id) = doc
+                .get("defaults")
+                .and_then(|d| d.get("google_calendar"))
+                .map(gcal_read)
+                .or_else(|| {
+                    doc.get("agents")
+                        .and_then(|a| a.as_array_of_tables())
+                        .and_then(|agents| {
+                            agents.iter().find_map(|agent| {
+                                agent.get("google_calendar").map(gcal_read)
+                            })
+                        })
+                })
+                .unwrap_or((None, None, None, None));
+            let google_calendar_configured = gcal_client_id.as_deref().is_some_and(|s| !s.is_empty())
+                && gcal_client_secret.as_deref().is_some_and(|s| !s.is_empty())
+                && gcal_refresh_token.as_deref().is_some_and(|s| !s.is_empty());
 
             let api_enabled = doc
                 .get("api")
@@ -208,6 +231,11 @@ pub(super) async fn get_global_settings(
 
             (
                 brave_search,
+                google_calendar_configured,
+                gcal_client_id,
+                gcal_client_secret,
+                gcal_refresh_token,
+                gcal_default_calendar_id,
                 api_enabled,
                 api_port,
                 api_bind,
@@ -217,6 +245,11 @@ pub(super) async fn get_global_settings(
             )
         } else {
             (
+                None,
+                false,
+                None,
+                None,
+                None,
                 None,
                 true,
                 19898,
@@ -241,6 +274,10 @@ pub(super) async fn get_global_settings(
     Ok(Json(GlobalSettingsResponse {
         brave_search_key,
         google_calendar_configured,
+        google_calendar_client_id: gcal_client_id,
+        google_calendar_client_secret: gcal_client_secret,
+        google_calendar_refresh_token: gcal_refresh_token,
+        google_calendar_default_calendar_id: gcal_default_calendar_id,
         api_enabled,
         api_port,
         api_bind,

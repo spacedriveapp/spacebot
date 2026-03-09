@@ -1753,10 +1753,10 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 								<Button
 									onClick={() => {
 										setEditingGCalCredentials(true);
-										setGCalClientId("");
-										setGCalClientSecret("");
-										setGCalRefreshToken("");
-										setGCalDefaultCalendarId("");
+										setGCalClientId(settings?.google_calendar_client_id || "");
+										setGCalClientSecret(settings?.google_calendar_client_secret || "");
+										setGCalRefreshToken(settings?.google_calendar_refresh_token || "");
+										setGCalDefaultCalendarId(settings?.google_calendar_default_calendar_id || "");
 										setMessage(null);
 									}}
 									variant="outline"
