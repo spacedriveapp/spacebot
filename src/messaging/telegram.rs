@@ -1016,10 +1016,26 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
+        // Find split point: prefer newline, then space, then hard-cut.
+        // When hard-cutting, ensure we don't split mid-character (UTF-8 safety).
         let split_at = remaining[..max_len]
             .rfind('\n')
             .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .unwrap_or_else(|| {
+                // Hard-cut: find the last valid char boundary before max_len
+                let mut pos = max_len;
+                while pos > 0 && !remaining.is_char_boundary(pos) {
+                    pos -= 1;
+                }
+                pos
+            });
+
+        // Avoid empty chunks if split_at is 0 (e.g., first char is multi-byte)
+        let split_at = if split_at == 0 {
+            remaining.char_indices().nth(1).map(|(i, _)| i).unwrap_or(remaining.len())
+        } else {
+            split_at
+        };
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start();
