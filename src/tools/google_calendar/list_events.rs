@@ -45,8 +45,6 @@ fn default_max_results() -> u32 {
 pub struct ListEventsOutput {
     /// The matching calendar events.
     pub events: Vec<CalendarEvent>,
-    /// Number of events returned.
-    pub count: usize,
 }
 
 /// Private response shape for the Google Calendar events list endpoint.
@@ -133,11 +131,8 @@ impl Tool for GoogleCalendarListEventsTool {
             .await
             .map_err(|e| GoogleCalendarError::InvalidResponse(e.to_string()))?;
 
-        let count = api_response.items.len();
-
         Ok(ListEventsOutput {
             events: api_response.items,
-            count,
         })
     }
 }

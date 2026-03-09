@@ -173,7 +173,14 @@ impl TokenManager {
             }
         }
 
-        // Slow path: refresh the token.
+        // Slow path: acquire write lock and re-check before refreshing.
+        let mut cached = self.cached.write().await;
+        if !cached.access_token.is_empty()
+            && cached.expires_at > std::time::Instant::now() + std::time::Duration::from_secs(60)
+        {
+            return Ok(cached.access_token.clone());
+        }
+
         let response = client
             .post("https://oauth2.googleapis.com/token")
             .form(&[
@@ -207,12 +214,9 @@ impl TokenManager {
 
         let access_token = token_response.access_token.clone();
 
-        // Update the cache.
-        {
-            let mut cached = self.cached.write().await;
-            cached.access_token = token_response.access_token;
-            cached.expires_at = expires_at;
-        }
+        // Update the cache (write lock already held from above).
+        cached.access_token = token_response.access_token;
+        cached.expires_at = expires_at;
 
         Ok(access_token)
     }

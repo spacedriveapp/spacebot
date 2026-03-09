@@ -474,6 +474,29 @@ pub async fn remove_channel_tools(
     Ok(())
 }
 
+/// Register read-only Google Calendar tools (list events, list calendars, free/busy).
+fn register_google_calendar_readonly_tools(
+    server: ToolServer,
+    cal_client: Arc<google_calendar::GoogleCalendarClient>,
+) -> ToolServer {
+    server
+        .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
+        .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
+        .tool(GoogleCalendarFreeTimeTool::new(cal_client))
+}
+
+/// Register all Google Calendar tools (read + write).
+fn register_google_calendar_tools(
+    server: ToolServer,
+    cal_client: Arc<google_calendar::GoogleCalendarClient>,
+) -> ToolServer {
+    register_google_calendar_readonly_tools(server, cal_client.clone())
+        .tool(GoogleCalendarCreateEventTool::new(cal_client.clone()))
+        .tool(GoogleCalendarUpdateEventTool::new(cal_client.clone()))
+        .tool(GoogleCalendarDeleteEventTool::new(cal_client.clone()))
+        .tool(GoogleCalendarRespondEventTool::new(cal_client))
+}
+
 fn memory_save_with_events(
     memory_search: Arc<MemorySearch>,
     agent_id: AgentId,
@@ -521,10 +544,7 @@ pub fn create_branch_tool_server(
 
     if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
         let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
-        server = server
-            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()));
+        server = register_google_calendar_readonly_tools(server, cal_client);
     }
 
     if let Some(state) = state {
@@ -589,14 +609,7 @@ pub fn create_worker_tool_server(
 
     if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
         let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
-        server = server
-            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarCreateEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarUpdateEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarDeleteEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()))
-            .tool(GoogleCalendarRespondEventTool::new(cal_client.clone()));
+        server = register_google_calendar_tools(server, cal_client);
     }
 
     for mcp_tool in mcp_tools {
@@ -699,14 +712,7 @@ pub fn create_cortex_chat_tool_server(
 
     if let Some(cal_config) = runtime_config.google_calendar.load().as_ref().as_ref() {
         let cal_client = Arc::new(google_calendar::GoogleCalendarClient::new(cal_config));
-        server = server
-            .tool(GoogleCalendarListEventsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarCreateEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarUpdateEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarDeleteEventTool::new(cal_client.clone()))
-            .tool(GoogleCalendarListCalendarsTool::new(cal_client.clone()))
-            .tool(GoogleCalendarFreeTimeTool::new(cal_client.clone()))
-            .tool(GoogleCalendarRespondEventTool::new(cal_client.clone()));
+        server = register_google_calendar_tools(server, cal_client);
     }
 
     server.run()
