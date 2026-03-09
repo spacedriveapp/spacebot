@@ -38,6 +38,8 @@ pub struct UpdateEventArgs {
     pub location: Option<String>,
     /// New list of attendee email addresses (replaces existing attendees).
     pub attendees: Option<Vec<String>>,
+    /// Event color ID (1=Lavender, 2=Sage, 3=Grape, 4=Flamingo, 5=Banana, 6=Tangerine, 7=Peacock, 8=Graphite, 9=Blueberry, 10=Basil, 11=Tomato).
+    pub color_id: Option<String>,
 }
 
 impl Tool for GoogleCalendarUpdateEventTool {
@@ -87,6 +89,10 @@ impl Tool for GoogleCalendarUpdateEventTool {
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "New list of attendee email addresses (replaces existing attendees)."
+                    },
+                    "color_id": {
+                        "type": "string",
+                        "description": "Event color ID: 1=Lavender, 2=Sage, 3=Grape, 4=Flamingo, 5=Banana, 6=Tangerine, 7=Peacock, 8=Graphite, 9=Blueberry, 10=Basil, 11=Tomato."
                     }
                 },
                 "required": ["event_id"]
@@ -132,6 +138,9 @@ impl Tool for GoogleCalendarUpdateEventTool {
                         .collect::<Vec<_>>()
                 ),
             );
+        }
+        if let Some(color_id) = &args.color_id {
+            body.insert("colorId".into(), serde_json::json!(color_id));
         }
 
         let request = self
