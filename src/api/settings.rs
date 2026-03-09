@@ -100,153 +100,161 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, google_calendar_configured, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
-        if config_path.exists() {
-            let content = tokio::fs::read_to_string(&config_path)
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-            let doc: toml_edit::DocumentMut = content
-                .parse()
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let (
+        brave_search_key,
+        google_calendar_configured,
+        api_enabled,
+        api_port,
+        api_bind,
+        worker_log_mode,
+        opencode,
+        ssh_enabled,
+    ) = if config_path.exists() {
+        let content = tokio::fs::read_to_string(&config_path)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        let doc: toml_edit::DocumentMut = content
+            .parse()
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-            let brave_search = doc
-                .get("defaults")
-                .and_then(|d| d.get("brave_search_key"))
-                .and_then(|v| v.as_str())
-                .and_then(|s| {
-                    if let Some(var) = s.strip_prefix("env:") {
-                        std::env::var(var).ok()
-                    } else {
-                        Some(s.to_string())
-                    }
-                });
+        let brave_search = doc
+            .get("defaults")
+            .and_then(|d| d.get("brave_search_key"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| {
+                if let Some(var) = s.strip_prefix("env:") {
+                    std::env::var(var).ok()
+                } else {
+                    Some(s.to_string())
+                }
+            });
 
-            let gcal_table = doc.get("defaults").and_then(|d| d.get("google_calendar"));
-            let google_calendar_configured = gcal_table
-                .and_then(|g| g.get("client_id"))
+        let gcal_table = doc.get("defaults").and_then(|d| d.get("google_calendar"));
+        let google_calendar_configured = gcal_table
+            .and_then(|g| g.get("client_id"))
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.is_empty())
+            && gcal_table
+                .and_then(|g| g.get("client_secret"))
                 .and_then(|v| v.as_str())
                 .is_some_and(|s| !s.is_empty())
-                && gcal_table
-                    .and_then(|g| g.get("client_secret"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty())
-                && gcal_table
-                    .and_then(|g| g.get("refresh_token"))
-                    .and_then(|v| v.as_str())
-                    .is_some_and(|s| !s.is_empty());
+            && gcal_table
+                .and_then(|g| g.get("refresh_token"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
 
-            let api_enabled = doc
-                .get("api")
-                .and_then(|a| a.get("enabled"))
+        let api_enabled = doc
+            .get("api")
+            .and_then(|a| a.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+
+        let api_port = doc
+            .get("api")
+            .and_then(|a| a.get("port"))
+            .and_then(|v| v.as_integer())
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(19898);
+
+        let api_bind = doc
+            .get("api")
+            .and_then(|a| a.get("bind"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("127.0.0.1")
+            .to_string();
+
+        let worker_log_mode = doc
+            .get("defaults")
+            .and_then(|d| d.get("worker_log_mode"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("errors_only")
+            .to_string();
+
+        let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
+        let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
+        let opencode = OpenCodeSettingsResponse {
+            enabled: opencode_table
+                .and_then(|o| o.get("enabled"))
                 .and_then(|v| v.as_bool())
-                .unwrap_or(true);
-
-            let api_port = doc
-                .get("api")
-                .and_then(|a| a.get("port"))
+                .unwrap_or(false),
+            path: opencode_table
+                .and_then(|o| o.get("path"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("opencode")
+                .to_string(),
+            max_servers: opencode_table
+                .and_then(|o| o.get("max_servers"))
                 .and_then(|v| v.as_integer())
-                .and_then(|i| u16::try_from(i).ok())
-                .unwrap_or(19898);
-
-            let api_bind = doc
-                .get("api")
-                .and_then(|a| a.get("bind"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("127.0.0.1")
-                .to_string();
-
-            let worker_log_mode = doc
-                .get("defaults")
-                .and_then(|d| d.get("worker_log_mode"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("errors_only")
-                .to_string();
-
-            let opencode_table = doc.get("defaults").and_then(|d| d.get("opencode"));
-            let opencode_perms = opencode_table.and_then(|o| o.get("permissions"));
-            let opencode = OpenCodeSettingsResponse {
-                enabled: opencode_table
-                    .and_then(|o| o.get("enabled"))
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
-                path: opencode_table
-                    .and_then(|o| o.get("path"))
+                .and_then(|i| usize::try_from(i).ok())
+                .unwrap_or(5),
+            server_startup_timeout_secs: opencode_table
+                .and_then(|o| o.get("server_startup_timeout_secs"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u64::try_from(i).ok())
+                .unwrap_or(30),
+            max_restart_retries: opencode_table
+                .and_then(|o| o.get("max_restart_retries"))
+                .and_then(|v| v.as_integer())
+                .and_then(|i| u32::try_from(i).ok())
+                .unwrap_or(5),
+            permissions: OpenCodePermissionsResponse {
+                edit: opencode_perms
+                    .and_then(|p| p.get("edit"))
                     .and_then(|v| v.as_str())
-                    .unwrap_or("opencode")
+                    .unwrap_or("allow")
                     .to_string(),
-                max_servers: opencode_table
-                    .and_then(|o| o.get("max_servers"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| usize::try_from(i).ok())
-                    .unwrap_or(5),
-                server_startup_timeout_secs: opencode_table
-                    .and_then(|o| o.get("server_startup_timeout_secs"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u64::try_from(i).ok())
-                    .unwrap_or(30),
-                max_restart_retries: opencode_table
-                    .and_then(|o| o.get("max_restart_retries"))
-                    .and_then(|v| v.as_integer())
-                    .and_then(|i| u32::try_from(i).ok())
-                    .unwrap_or(5),
-                permissions: OpenCodePermissionsResponse {
-                    edit: opencode_perms
-                        .and_then(|p| p.get("edit"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    bash: opencode_perms
-                        .and_then(|p| p.get("bash"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                    webfetch: opencode_perms
-                        .and_then(|p| p.get("webfetch"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("allow")
-                        .to_string(),
-                },
-            };
-
-            let ssh_enabled = doc
-                .get("ssh")
-                .and_then(|s| s.get("enabled"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-
-            (
-                brave_search,
-                google_calendar_configured,
-                api_enabled,
-                api_port,
-                api_bind,
-                worker_log_mode,
-                opencode,
-                ssh_enabled,
-            )
-        } else {
-            (
-                None,
-                false,
-                true,
-                19898,
-                "127.0.0.1".to_string(),
-                "errors_only".to_string(),
-                OpenCodeSettingsResponse {
-                    enabled: false,
-                    path: "opencode".to_string(),
-                    max_servers: 5,
-                    server_startup_timeout_secs: 30,
-                    max_restart_retries: 5,
-                    permissions: OpenCodePermissionsResponse {
-                        edit: "allow".to_string(),
-                        bash: "allow".to_string(),
-                        webfetch: "allow".to_string(),
-                    },
-                },
-                false,
-            )
+                bash: opencode_perms
+                    .and_then(|p| p.get("bash"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+                webfetch: opencode_perms
+                    .and_then(|p| p.get("webfetch"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("allow")
+                    .to_string(),
+            },
         };
+
+        let ssh_enabled = doc
+            .get("ssh")
+            .and_then(|s| s.get("enabled"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+
+        (
+            brave_search,
+            google_calendar_configured,
+            api_enabled,
+            api_port,
+            api_bind,
+            worker_log_mode,
+            opencode,
+            ssh_enabled,
+        )
+    } else {
+        (
+            None,
+            false,
+            true,
+            19898,
+            "127.0.0.1".to_string(),
+            "errors_only".to_string(),
+            OpenCodeSettingsResponse {
+                enabled: false,
+                path: "opencode".to_string(),
+                max_servers: 5,
+                server_startup_timeout_secs: 30,
+                max_restart_retries: 5,
+                permissions: OpenCodePermissionsResponse {
+                    edit: "allow".to_string(),
+                    bash: "allow".to_string(),
+                    webfetch: "allow".to_string(),
+                },
+            },
+            false,
+        )
+    };
 
     Ok(Json(GlobalSettingsResponse {
         brave_search_key,
@@ -294,18 +302,9 @@ pub(super) async fn update_global_settings(
     }
 
     if let Some(gcal) = request.google_calendar {
-        let all_empty = gcal
-            .client_id
-            .as_deref()
-            .is_some_and(|s| s.is_empty())
-            && gcal
-                .client_secret
-                .as_deref()
-                .is_some_and(|s| s.is_empty())
-            && gcal
-                .refresh_token
-                .as_deref()
-                .is_some_and(|s| s.is_empty());
+        let all_empty = gcal.client_id.as_deref().is_some_and(|s| s.is_empty())
+            && gcal.client_secret.as_deref().is_some_and(|s| s.is_empty())
+            && gcal.refresh_token.as_deref().is_some_and(|s| s.is_empty());
 
         if all_empty {
             // Remove the entire section.
