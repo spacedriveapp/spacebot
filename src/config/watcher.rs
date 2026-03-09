@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::{
     Binding, Config, DiscordPermissions, RuntimeConfig, SlackPermissions, TelegramPermissions,
     TwitchPermissions, binding_runtime_adapter_key,
 };
+use sha2::{Digest, Sha256};
 
 /// Per-agent context needed by the file watcher: (id, prompt_dir, identity_dir,
 /// runtime_config, mcp_manager).
@@ -15,6 +16,17 @@ type WatchedAgent = (
     Arc<RuntimeConfig>,
     Arc<crate::mcp::McpManager>,
 );
+
+pub struct FileWatcherHandle {
+    shutdown_tx: std::sync::mpsc::Sender<()>,
+    _task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for FileWatcherHandle {
+    fn drop(&mut self) {
+        self.shutdown_tx.send(()).ok();
+    }
+}
 
 /// Watches config, prompt, identity, and skill files for changes and triggers
 /// hot reload on the corresponding RuntimeConfig.
@@ -36,11 +48,12 @@ pub fn spawn_file_watcher(
     llm_manager: Arc<crate::llm::LlmManager>,
     agent_links: Arc<arc_swap::ArcSwap<Vec<crate::links::AgentLink>>>,
     agent_humans: Arc<arc_swap::ArcSwap<Vec<crate::config::HumanDef>>>,
-) -> tokio::task::JoinHandle<()> {
+) -> FileWatcherHandle {
     use notify::{Event, RecursiveMode, Watcher};
     use std::time::Duration;
 
-    tokio::task::spawn_blocking(move || {
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+    let task = tokio::task::spawn_blocking(move || {
         let (tx, rx) = std::sync::mpsc::channel::<Event>();
 
         let mut watcher = match notify::recommended_watcher(
@@ -116,10 +129,21 @@ pub fn spawn_file_watcher(
         // Debounce loop: collect events for 2 seconds, then reload
         let debounce = Duration::from_secs(2);
 
-        while let Ok(first) = rx.recv() {
+        loop {
+            if shutdown_rx.try_recv().is_ok() {
+                break;
+            }
+            let first = match rx.recv_timeout(Duration::from_millis(250)) {
+                Ok(first) => first,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             // Drain any additional events within the debounce window
             let mut changed_paths: Vec<PathBuf> = first.paths;
             while let Ok(event) = rx.recv_timeout(debounce) {
+                if shutdown_rx.try_recv().is_ok() {
+                    return;
+                }
                 changed_paths.extend(event.paths);
             }
 
@@ -240,7 +264,6 @@ pub fn spawn_file_watcher(
                     tracing::info!("twitch permissions reloaded");
                 }
 
-                // Hot-start adapters that are newly enabled in the config
                 if let Some(ref manager) = messaging_manager {
                     let rt = tokio::runtime::Handle::current();
                     let manager = manager.clone();
@@ -252,285 +275,23 @@ pub fn spawn_file_watcher(
                     let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
-                        // Discord: start default + named instances that are enabled and not already running.
-                        if let Some(discord_config) = &config.messaging.discord
-                            && discord_config.enabled {
-                                if !discord_config.token.is_empty() && !manager.has_adapter("discord").await {
-                                    let permissions = match discord_permissions {
-                                        Some(ref existing) => existing.clone(),
-                                        None => {
-                                            let permissions = DiscordPermissions::from_config(discord_config, &config.bindings);
-                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
-                                        }
-                                    };
-                                    let adapter = crate::messaging::discord::DiscordAdapter::new(
-                                        "discord",
-                                        &discord_config.token,
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, "failed to hot-start discord adapter from config change");
-                                    }
-                                }
-
-                                for instance in discord_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "discord",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions are not hot-updated on
-                                        // config reload because each instance owns its own
-                                        // Arc<ArcSwap> with no external handle. Fixing this
-                                        // requires either a permission-update method on the
-                                        // Messaging trait or a shared handle registry. Permissions
-                                        // will be correct after a full restart.
-                                        continue;
-                                    }
-
-                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        DiscordPermissions::from_instance_config(instance, &config.bindings),
-                                    ));
-                                    let adapter = crate::messaging::discord::DiscordAdapter::new(
-                                        runtime_key,
-                                        &instance.token,
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named discord adapter from config change");
-                                    }
+                        match build_desired_configured_adapters(
+                            &config,
+                            &instance_dir,
+                            discord_permissions,
+                            slack_permissions,
+                            telegram_permissions,
+                            twitch_permissions,
+                        ) {
+                            Ok(desired) => {
+                                if let Err(error) = manager.reconcile_configured(desired).await {
+                                    tracing::warn!(%error, "messaging adapter reconciliation encountered errors");
                                 }
                             }
-
-                        // Slack: start default + named instances that are enabled and not already running.
-                        if let Some(slack_config) = &config.messaging.slack
-                            && slack_config.enabled {
-                                if !slack_config.bot_token.is_empty()
-                                    && !slack_config.app_token.is_empty()
-                                    && !manager.has_adapter("slack").await
-                                {
-                                    let permissions = match slack_permissions {
-                                        Some(ref existing) => existing.clone(),
-                                        None => {
-                                            let permissions = SlackPermissions::from_config(slack_config, &config.bindings);
-                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
-                                        }
-                                    };
-                                    match crate::messaging::slack::SlackAdapter::new(
-                                        "slack",
-                                        &slack_config.bot_token,
-                                        &slack_config.app_token,
-                                        permissions,
-                                        slack_config.commands.clone(),
-                                    ) {
-                                        Ok(adapter) => {
-                                            if let Err(error) = manager.register_and_start(adapter).await {
-                                                tracing::error!(%error, "failed to hot-start slack adapter from config change");
-                                            }
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(%error, "failed to build slack adapter from config change");
-                                        }
-                                    }
-                                }
-
-                                for instance in slack_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "slack",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
-                                        continue;
-                                    }
-
-                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        SlackPermissions::from_instance_config(instance, &config.bindings),
-                                    ));
-                                    match crate::messaging::slack::SlackAdapter::new(
-                                        runtime_key,
-                                        &instance.bot_token,
-                                        &instance.app_token,
-                                        permissions,
-                                        instance.commands.clone(),
-                                    ) {
-                                        Ok(adapter) => {
-                                            if let Err(error) = manager.register_and_start(adapter).await {
-                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named slack adapter from config change");
-                                            }
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(%error, adapter = %instance.name, "failed to build named slack adapter from config change");
-                                        }
-                                    }
-                                }
+                            Err(error) => {
+                                tracing::error!(%error, "failed to build desired messaging adapters from config change");
                             }
-
-                        // Telegram: start default + named instances that are enabled and not already running.
-                        if let Some(telegram_config) = &config.messaging.telegram
-                            && telegram_config.enabled {
-                                if !telegram_config.token.is_empty()
-                                    && !manager.has_adapter("telegram").await
-                                {
-                                    let permissions = match telegram_permissions {
-                                        Some(ref existing) => existing.clone(),
-                                        None => {
-                                            let permissions = TelegramPermissions::from_config(telegram_config, &config.bindings);
-                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
-                                        }
-                                    };
-                                    let adapter = crate::messaging::telegram::TelegramAdapter::new(
-                                        "telegram",
-                                        &telegram_config.token,
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, "failed to hot-start telegram adapter from config change");
-                                    }
-                                }
-
-                                for instance in telegram_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "telegram",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
-                                        continue;
-                                    }
-
-                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        TelegramPermissions::from_instance_config(instance, &config.bindings),
-                                    ));
-                                    let adapter = crate::messaging::telegram::TelegramAdapter::new(
-                                        runtime_key,
-                                        &instance.token,
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named telegram adapter from config change");
-                                    }
-                                }
-                            }
-
-                        // Email: start default + named instances that are enabled and not already running.
-                        if let Some(email_config) = &config.messaging.email
-                            && email_config.enabled {
-                                if !email_config.imap_host.is_empty() && !manager.has_adapter("email").await {
-                                    match crate::messaging::email::EmailAdapter::from_config(email_config) {
-                                        Ok(adapter) => {
-                                            if let Err(error) = manager.register_and_start(adapter).await {
-                                                tracing::error!(%error, "failed to hot-start email adapter from config change");
-                                            }
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(%error, "failed to build email adapter from config change");
-                                        }
-                                    }
-                                }
-
-                                for instance in email_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "email",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        continue;
-                                    }
-
-                                    match crate::messaging::email::EmailAdapter::from_instance_config(
-                                        runtime_key.as_str(),
-                                        instance,
-                                    ) {
-                                        Ok(adapter) => {
-                                            if let Err(error) = manager.register_and_start(adapter).await {
-                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named email adapter from config change");
-                                            }
-                                        }
-                                        Err(error) => {
-                                            tracing::error!(%error, adapter = %instance.name, "failed to build named email adapter from config change");
-                                        }
-                                    }
-                                }
-                            }
-
-                        // Twitch: start default + named instances that are enabled and not already running.
-                        if let Some(twitch_config) = &config.messaging.twitch
-                            && twitch_config.enabled {
-                                if !twitch_config.username.is_empty()
-                                    && !twitch_config.oauth_token.is_empty()
-                                    && !manager.has_adapter("twitch").await
-                                {
-                                    let permissions = match twitch_permissions {
-                                        Some(ref existing) => existing.clone(),
-                                        None => {
-                                            let permissions = TwitchPermissions::from_config(twitch_config, &config.bindings);
-                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
-                                        }
-                                    };
-                                    let token_path = instance_dir.join("twitch_token.json");
-                                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                                        "twitch",
-                                        &twitch_config.username,
-                                        &twitch_config.oauth_token,
-                                        twitch_config.client_id.clone(),
-                                        twitch_config.client_secret.clone(),
-                                        twitch_config.refresh_token.clone(),
-                                        Some(token_path),
-                                        twitch_config.channels.clone(),
-                                        twitch_config.trigger_prefix.clone(),
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, "failed to hot-start twitch adapter from config change");
-                                    }
-                                }
-
-                                for instance in twitch_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "twitch",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
-                                        continue;
-                                    }
-
-                                    let token_file_name = {
-                                        use std::hash::{Hash, Hasher};
-                                        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                                        instance.name.hash(&mut hasher);
-                                        let name_hash = hasher.finish();
-                                        format!(
-                                            "twitch_token_{}_{name_hash:016x}.json",
-                                            instance
-                                                .name
-                                                .chars()
-                                                .map(|ch| if ch.is_ascii_alphanumeric() { ch } else { '_' })
-                                                .collect::<String>()
-                                        )
-                                    };
-                                    let token_path = instance_dir.join(token_file_name);
-                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        TwitchPermissions::from_instance_config(instance, &config.bindings),
-                                    ));
-                                    let adapter = crate::messaging::twitch::TwitchAdapter::new(
-                                        runtime_key,
-                                        &instance.username,
-                                        &instance.oauth_token,
-                                        instance.client_id.clone(),
-                                        instance.client_secret.clone(),
-                                        instance.refresh_token.clone(),
-                                        Some(token_path),
-                                        instance.channels.clone(),
-                                        instance.trigger_prefix.clone(),
-                                        permissions,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named twitch adapter from config change");
-                                    }
-                                }
-                            }
+                        }
                     });
                 }
             }
@@ -560,5 +321,459 @@ pub fn spawn_file_watcher(
         }
 
         tracing::info!("file watcher stopped");
-    })
+    });
+
+    FileWatcherHandle {
+        shutdown_tx,
+        _task: task,
+    }
+}
+
+fn build_desired_configured_adapters(
+    config: &Config,
+    instance_dir: &Path,
+    discord_permissions: Option<Arc<arc_swap::ArcSwap<DiscordPermissions>>>,
+    slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
+    telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
+    twitch_permissions: Option<Arc<arc_swap::ArcSwap<TwitchPermissions>>>,
+) -> anyhow::Result<Vec<crate::messaging::ConfiguredAdapter>> {
+    let mut desired = Vec::new();
+
+    if let Some(discord_config) = &config.messaging.discord
+        && discord_config.enabled
+    {
+        if !discord_config.token.is_empty() {
+            let permissions_snapshot =
+                DiscordPermissions::from_config(discord_config, &config.bindings);
+            let permissions = discord_permissions.unwrap_or_else(|| {
+                Arc::new(arc_swap::ArcSwap::from_pointee(
+                    permissions_snapshot.clone(),
+                ))
+            });
+            let fingerprint = format!(
+                "token={}|dm={:?}|allow_bot_messages={}|permissions={}",
+                secret_fingerprint(&discord_config.token),
+                sorted_strings(discord_config.dm_allowed_users.clone()),
+                discord_config.allow_bot_messages,
+                discord_permissions_fingerprint(&permissions_snapshot)
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                crate::messaging::discord::DiscordAdapter::new(
+                    "discord",
+                    &discord_config.token,
+                    permissions,
+                ),
+                fingerprint,
+            ));
+        }
+
+        for instance in discord_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.token.is_empty() {
+                continue;
+            }
+            let permissions_snapshot =
+                DiscordPermissions::from_instance_config(instance, &config.bindings);
+            let fingerprint = format!(
+                "token={}|dm={:?}|allow_bot_messages={}|permissions={}",
+                secret_fingerprint(&instance.token),
+                sorted_strings(instance.dm_allowed_users.clone()),
+                instance.allow_bot_messages,
+                discord_permissions_fingerprint(&permissions_snapshot)
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                crate::messaging::discord::DiscordAdapter::new(
+                    binding_runtime_adapter_key("discord", Some(instance.name.as_str())),
+                    &instance.token,
+                    Arc::new(arc_swap::ArcSwap::from_pointee(permissions_snapshot)),
+                ),
+                fingerprint,
+            ));
+        }
+    }
+
+    if let Some(slack_config) = &config.messaging.slack
+        && slack_config.enabled
+    {
+        if !slack_config.bot_token.is_empty() && !slack_config.app_token.is_empty() {
+            let permissions_snapshot =
+                SlackPermissions::from_config(slack_config, &config.bindings);
+            let permissions = slack_permissions.unwrap_or_else(|| {
+                Arc::new(arc_swap::ArcSwap::from_pointee(
+                    permissions_snapshot.clone(),
+                ))
+            });
+            let fingerprint = format!(
+                "bot_token={}|app_token={}|dm={:?}|commands={:?}|permissions={}",
+                secret_fingerprint(&slack_config.bot_token),
+                secret_fingerprint(&slack_config.app_token),
+                sorted_strings(slack_config.dm_allowed_users.clone()),
+                sorted_slack_commands(slack_config.commands.clone()),
+                slack_permissions_fingerprint(&permissions_snapshot)
+            );
+            let adapter = crate::messaging::slack::SlackAdapter::new(
+                "slack",
+                &slack_config.bot_token,
+                &slack_config.app_token,
+                permissions,
+                slack_config.commands.clone(),
+            )?;
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+
+        for instance in slack_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.bot_token.is_empty() || instance.app_token.is_empty() {
+                continue;
+            }
+            let permissions_snapshot =
+                SlackPermissions::from_instance_config(instance, &config.bindings);
+            let fingerprint = format!(
+                "bot_token={}|app_token={}|dm={:?}|commands={:?}|permissions={}",
+                secret_fingerprint(&instance.bot_token),
+                secret_fingerprint(&instance.app_token),
+                sorted_strings(instance.dm_allowed_users.clone()),
+                sorted_slack_commands(instance.commands.clone()),
+                slack_permissions_fingerprint(&permissions_snapshot)
+            );
+            let adapter = crate::messaging::slack::SlackAdapter::new(
+                binding_runtime_adapter_key("slack", Some(instance.name.as_str())),
+                &instance.bot_token,
+                &instance.app_token,
+                Arc::new(arc_swap::ArcSwap::from_pointee(permissions_snapshot)),
+                instance.commands.clone(),
+            )?;
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+    }
+
+    if let Some(telegram_config) = &config.messaging.telegram
+        && telegram_config.enabled
+    {
+        if !telegram_config.token.is_empty() {
+            let permissions_snapshot =
+                TelegramPermissions::from_config(telegram_config, &config.bindings);
+            let permissions = telegram_permissions.unwrap_or_else(|| {
+                Arc::new(arc_swap::ArcSwap::from_pointee(
+                    permissions_snapshot.clone(),
+                ))
+            });
+            let fingerprint = format!(
+                "token={}|dm={:?}|permissions={}",
+                secret_fingerprint(&telegram_config.token),
+                sorted_strings(telegram_config.dm_allowed_users.clone()),
+                telegram_permissions_fingerprint(&permissions_snapshot)
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                crate::messaging::telegram::TelegramAdapter::new(
+                    "telegram",
+                    &telegram_config.token,
+                    permissions,
+                ),
+                fingerprint,
+            ));
+        }
+
+        for instance in telegram_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.token.is_empty() {
+                continue;
+            }
+            let permissions_snapshot =
+                TelegramPermissions::from_instance_config(instance, &config.bindings);
+            let fingerprint = format!(
+                "token={}|dm={:?}|permissions={}",
+                secret_fingerprint(&instance.token),
+                sorted_strings(instance.dm_allowed_users.clone()),
+                telegram_permissions_fingerprint(&permissions_snapshot)
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                crate::messaging::telegram::TelegramAdapter::new(
+                    binding_runtime_adapter_key("telegram", Some(instance.name.as_str())),
+                    &instance.token,
+                    Arc::new(arc_swap::ArcSwap::from_pointee(permissions_snapshot)),
+                ),
+                fingerprint,
+            ));
+        }
+    }
+
+    if let Some(email_config) = &config.messaging.email
+        && email_config.enabled
+    {
+        if !email_config.imap_host.is_empty() {
+            let fingerprint = format!(
+                "imap_host={};imap_port={};imap_username={};imap_password={};imap_use_tls={};smtp_host={};smtp_port={};smtp_username={};smtp_password={};smtp_use_starttls={};from_address={};from_name={:?};poll_interval_secs={};folders={:?};allowed_senders={:?};max_body_bytes={};max_attachment_bytes={}",
+                email_config.imap_host,
+                email_config.imap_port,
+                secret_fingerprint(&email_config.imap_username),
+                secret_fingerprint(&email_config.imap_password),
+                email_config.imap_use_tls,
+                email_config.smtp_host,
+                email_config.smtp_port,
+                secret_fingerprint(&email_config.smtp_username),
+                secret_fingerprint(&email_config.smtp_password),
+                email_config.smtp_use_starttls,
+                email_config.from_address,
+                email_config.from_name,
+                email_config.poll_interval_secs,
+                sorted_strings(email_config.folders.clone()),
+                sorted_strings(email_config.allowed_senders.clone()),
+                email_config.max_body_bytes,
+                email_config.max_attachment_bytes
+            );
+            let adapter = crate::messaging::email::EmailAdapter::from_config(email_config)?;
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+
+        for instance in email_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.imap_host.is_empty() {
+                continue;
+            }
+            let fingerprint = format!(
+                "name={};imap_host={};imap_port={};imap_username={};imap_password={};imap_use_tls={};smtp_host={};smtp_port={};smtp_username={};smtp_password={};smtp_use_starttls={};from_address={};from_name={:?};poll_interval_secs={};folders={:?};allowed_senders={:?};max_body_bytes={};max_attachment_bytes={}",
+                instance.name,
+                instance.imap_host,
+                instance.imap_port,
+                secret_fingerprint(&instance.imap_username),
+                secret_fingerprint(&instance.imap_password),
+                instance.imap_use_tls,
+                instance.smtp_host,
+                instance.smtp_port,
+                secret_fingerprint(&instance.smtp_username),
+                secret_fingerprint(&instance.smtp_password),
+                instance.smtp_use_starttls,
+                instance.from_address,
+                instance.from_name,
+                instance.poll_interval_secs,
+                sorted_strings(instance.folders.clone()),
+                sorted_strings(instance.allowed_senders.clone()),
+                instance.max_body_bytes,
+                instance.max_attachment_bytes
+            );
+            let adapter = crate::messaging::email::EmailAdapter::from_instance_config(
+                binding_runtime_adapter_key("email", Some(instance.name.as_str())),
+                instance,
+            )?;
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+    }
+
+    if let Some(webhook_config) = &config.messaging.webhook
+        && webhook_config.enabled
+    {
+        let fingerprint = format!(
+            "port={};bind={};auth_token={:?}",
+            webhook_config.port,
+            webhook_config.bind,
+            webhook_config.auth_token.as_deref().map(secret_fingerprint)
+        );
+        desired.push(crate::messaging::ConfiguredAdapter::new(
+            crate::messaging::webhook::WebhookAdapter::new(
+                webhook_config.port,
+                &webhook_config.bind,
+                webhook_config.auth_token.clone(),
+            ),
+            fingerprint,
+        ));
+    }
+
+    if let Some(twitch_config) = &config.messaging.twitch
+        && twitch_config.enabled
+    {
+        if !twitch_config.username.is_empty() && !twitch_config.oauth_token.is_empty() {
+            let permissions_snapshot =
+                TwitchPermissions::from_config(twitch_config, &config.bindings);
+            let permissions = twitch_permissions.unwrap_or_else(|| {
+                Arc::new(arc_swap::ArcSwap::from_pointee(
+                    permissions_snapshot.clone(),
+                ))
+            });
+            let fingerprint = format!(
+                "username={};oauth_token={};client_id={:?};client_secret={:?};refresh_token={:?};channels={:?};trigger_prefix={:?};permissions={}",
+                secret_fingerprint(&twitch_config.username),
+                secret_fingerprint(&twitch_config.oauth_token),
+                twitch_config.client_id.as_deref().map(secret_fingerprint),
+                twitch_config
+                    .client_secret
+                    .as_deref()
+                    .map(secret_fingerprint),
+                twitch_config
+                    .refresh_token
+                    .as_deref()
+                    .map(secret_fingerprint),
+                sorted_strings(twitch_config.channels.clone()),
+                twitch_config.trigger_prefix,
+                twitch_permissions_fingerprint(&permissions_snapshot)
+            );
+            let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                "twitch",
+                &twitch_config.username,
+                &twitch_config.oauth_token,
+                twitch_config.client_id.clone(),
+                twitch_config.client_secret.clone(),
+                twitch_config.refresh_token.clone(),
+                Some(instance_dir.join("twitch_token.json")),
+                twitch_config.channels.clone(),
+                twitch_config.trigger_prefix.clone(),
+                permissions,
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+
+        for instance in twitch_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.username.is_empty() || instance.oauth_token.is_empty() {
+                continue;
+            }
+            let permissions_snapshot =
+                TwitchPermissions::from_instance_config(instance, &config.bindings);
+            let fingerprint = format!(
+                "username={};oauth_token={};client_id={:?};client_secret={:?};refresh_token={:?};channels={:?};trigger_prefix={:?};permissions={}",
+                secret_fingerprint(&instance.username),
+                secret_fingerprint(&instance.oauth_token),
+                instance.client_id.as_deref().map(secret_fingerprint),
+                instance.client_secret.as_deref().map(secret_fingerprint),
+                instance.refresh_token.as_deref().map(secret_fingerprint),
+                sorted_strings(instance.channels.clone()),
+                instance.trigger_prefix,
+                twitch_permissions_fingerprint(&permissions_snapshot)
+            );
+            let token_path =
+                instance_dir.join(crate::config::named_twitch_token_file_name(&instance.name));
+            let adapter = crate::messaging::twitch::TwitchAdapter::new(
+                binding_runtime_adapter_key("twitch", Some(instance.name.as_str())),
+                &instance.username,
+                &instance.oauth_token,
+                instance.client_id.clone(),
+                instance.client_secret.clone(),
+                instance.refresh_token.clone(),
+                Some(token_path),
+                instance.channels.clone(),
+                instance.trigger_prefix.clone(),
+                Arc::new(arc_swap::ArcSwap::from_pointee(permissions_snapshot)),
+            );
+            desired.push(crate::messaging::ConfiguredAdapter::new(
+                adapter,
+                fingerprint,
+            ));
+        }
+    }
+
+    Ok(desired)
+}
+
+fn sorted_strings(mut values: Vec<String>) -> Vec<String> {
+    values.sort();
+    values
+}
+
+fn sorted_u64s(mut values: Vec<u64>) -> Vec<u64> {
+    values.sort_unstable();
+    values
+}
+
+fn sorted_i64s(mut values: Vec<i64>) -> Vec<i64> {
+    values.sort_unstable();
+    values
+}
+
+fn format_u64_map(map: &std::collections::HashMap<u64, Vec<u64>>) -> String {
+    let mut entries = map
+        .iter()
+        .map(|(key, values)| (*key, sorted_u64s(values.clone())))
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|(key, _)| *key);
+    format!("{entries:?}")
+}
+
+fn format_string_map(map: &std::collections::HashMap<String, Vec<String>>) -> String {
+    let mut entries = map
+        .iter()
+        .map(|(key, values)| (key.clone(), sorted_strings(values.clone())))
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    format!("{entries:?}")
+}
+
+fn discord_permissions_fingerprint(permissions: &DiscordPermissions) -> String {
+    format!(
+        "guild_filter={:?};channel_filter={};dm_allowed_users={:?};allow_bot_messages={}",
+        permissions.guild_filter.clone().map(sorted_u64s),
+        format_u64_map(&permissions.channel_filter),
+        sorted_u64s(permissions.dm_allowed_users.clone()),
+        permissions.allow_bot_messages
+    )
+}
+
+fn slack_permissions_fingerprint(permissions: &SlackPermissions) -> String {
+    format!(
+        "workspace_filter={:?};channel_filter={};dm_allowed_users={:?}",
+        permissions.workspace_filter.clone().map(sorted_strings),
+        format_string_map(&permissions.channel_filter),
+        sorted_strings(permissions.dm_allowed_users.clone())
+    )
+}
+
+fn telegram_permissions_fingerprint(permissions: &TelegramPermissions) -> String {
+    format!(
+        "chat_filter={:?};dm_allowed_users={:?}",
+        permissions.chat_filter.clone().map(sorted_i64s),
+        sorted_i64s(permissions.dm_allowed_users.clone())
+    )
+}
+
+fn twitch_permissions_fingerprint(permissions: &TwitchPermissions) -> String {
+    format!(
+        "channel_filter={:?};allowed_users={:?}",
+        permissions.channel_filter.clone().map(sorted_strings),
+        sorted_strings(permissions.allowed_users.clone())
+    )
+}
+
+fn secret_fingerprint(value: &str) -> String {
+    let digest = Sha256::digest(value.as_bytes());
+    hex::encode(&digest[..8])
+}
+
+fn sorted_slack_commands(
+    mut commands: Vec<crate::config::SlackCommandConfig>,
+) -> Vec<(String, String, Option<String>)> {
+    let mut normalized = commands
+        .drain(..)
+        .map(|command| (command.command, command.agent_id, command.description))
+        .collect::<Vec<_>>();
+    normalized.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+    normalized
 }

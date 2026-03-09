@@ -11,6 +11,6 @@ pub mod twitch;
 pub mod webchat;
 pub mod webhook;
 
-pub use manager::MessagingManager;
+pub use manager::{ConfiguredAdapter, MessagingManager};
 pub use traits::Messaging;
 pub use traits::apply_runtime_adapter_to_conversation_id;

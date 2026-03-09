@@ -266,14 +266,13 @@ Most config values are hot-reloaded when their files change. Spacebot watches `c
 | Identity files (SOUL.md, etc.) | Yes | Next channel message renders new identity |
 | Skills (SKILL.md files) | Yes | Next message / worker spawn sees new skills |
 | Bindings | Yes | Next message routes using new bindings |
-| Discord/Slack permissions | Yes | Next message checks new permission rules |
+| Messaging adapters (Discord/Slack/Telegram/Twitch/Email/Webhook) | Yes | Adapter runtime is reconciled live; changed instances are restarted or removed without a full process restart |
 
 ### What Needs Restart
 
 | Setting | Why |
 |---------|-----|
 | LLM API keys | Provider clients are initialized once (applies to `secret:`, `env:`, and literal values) |
-| Messaging adapters (Discord token, webhook bind/port) | Adapter connections are long-lived |
 | Agent topology (adding/removing `[[agents]]`) | Databases and event buses are per-agent |
 | Database paths | Connections are opened once at startup |
 | System prompts | Compiled into the binary via `include_str!` |
