@@ -1,0 +1,151 @@
+---
+title: Google Calendar
+description: Native Google Calendar integration for listing, creating, and managing events.
+---
+
+# Google Calendar
+
+Native Google Calendar integration that gives workers and channels access to calendar tools — list events, create meetings, find free time, and more. No MCP server needed; credentials are configured directly in Spacebot.
+
+## Overview
+
+When configured, Spacebot registers calendar tools on the appropriate process types:
+
+| Tool | Channels | Workers |
+|------|----------|---------|
+| `google_calendar_list_events` | read-only | read-only |
+| `google_calendar_list_calendars` | read-only | read-only |
+| `google_calendar_find_free_time` | read-only | read-only |
+| `google_calendar_create_event` | — | write |
+| `google_calendar_update_event` | — | write |
+| `google_calendar_delete_event` | — | write |
+| `google_calendar_respond_event` | — | write |
+
+Channels get read-only tools. Workers get both read and write tools. This follows the delegation model — channels can check your schedule, but only workers modify it.
+
+## Prerequisites
+
+1. A Google Cloud project with the **Google Calendar API** enabled
+2. An OAuth 2.0 Client ID (type: **Web application** or **Desktop**)
+3. A refresh token obtained via the OAuth consent flow
+
+## Step 1: Create OAuth Credentials
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/)
+2. Create a new project or select an existing one
+3. Navigate to **APIs & Services → Library**
+4. Search for **Google Calendar API** and enable it
+5. Go to **APIs & Services → Credentials**
+6. Click **Create Credentials → OAuth client ID**
+7. Choose **Web application** as the application type
+8. Under **Authorized redirect URIs**, add: `https://developers.google.com/oauthplayground`
+9. Click **Create** and note the **Client ID** and **Client Secret**
+
+<Callout type="info">
+If your project's OAuth consent screen is in "Testing" mode, add your Google account as a test user under **APIs & Services → OAuth consent screen → Test users**.
+</Callout>
+
+## Step 2: Get a Refresh Token
+
+### Option A: OAuth Playground
+
+1. Open [Google OAuth Playground](https://developers.google.com/oauthplayground)
+2. Click the gear icon (⚙️) in the top right
+3. Check **Use your own OAuth credentials**
+4. Enter your Client ID and Client Secret
+5. In the left panel, find **Google Calendar API v3** and select `https://www.googleapis.com/auth/calendar`
+6. Click **Authorize APIs** and complete the consent flow
+7. Click **Exchange authorization code for tokens**
+8. Copy the **Refresh token**
+
+### Option B: Manual curl
+
+```bash
+# 1. Open this URL in your browser (replace CLIENT_ID):
+https://accounts.google.com/o/oauth2/v2/auth?\
+client_id=YOUR_CLIENT_ID&\
+redirect_uri=urn:ietf:wg:oauth:2.0:oob&\
+response_type=code&\
+scope=https://www.googleapis.com/auth/calendar&\
+access_type=offline&\
+prompt=consent
+
+# 2. After consent, you'll get an authorization code. Exchange it:
+curl -s -X POST https://oauth2.googleapis.com/token \
+  -d client_id=YOUR_CLIENT_ID \
+  -d client_secret=YOUR_CLIENT_SECRET \
+  -d code=AUTH_CODE \
+  -d grant_type=authorization_code \
+  -d redirect_uri=urn:ietf:wg:oauth:2.0:oob | jq .refresh_token
+```
+
+## Step 3: Configure Spacebot
+
+<Tabs items={["Dashboard UI", "TOML Config"]}>
+<Tab value="Dashboard UI">
+
+1. Open the Spacebot dashboard
+2. Go to **Settings → API Keys**
+3. Find the **Google Calendar** card and click **Configure**
+4. Enter your Client ID, Client Secret, and Refresh Token
+5. Optionally set a Default Calendar ID (defaults to `primary`)
+6. Click **Save**
+
+</Tab>
+<Tab value="TOML Config">
+
+Add to your `config.toml`:
+
+```toml
+[defaults.google_calendar]
+client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+client_secret = "GOCSPX-YOUR_SECRET"
+refresh_token = "1//YOUR_REFRESH_TOKEN"
+default_calendar_id = "primary"
+```
+
+You can also use `env:` references to load from environment variables:
+
+```toml
+[defaults.google_calendar]
+client_id = "env:GOOGLE_CALENDAR_CLIENT_ID"
+client_secret = "env:GOOGLE_CALENDAR_CLIENT_SECRET"
+refresh_token = "env:GOOGLE_CALENDAR_REFRESH_TOKEN"
+default_calendar_id = "primary"
+```
+
+</Tab>
+</Tabs>
+
+## Per-Agent Override
+
+You can override Google Calendar credentials for a specific agent:
+
+```toml
+[agents.personal-assistant.google_calendar]
+client_id = "DIFFERENT_CLIENT_ID.apps.googleusercontent.com"
+client_secret = "GOCSPX-DIFFERENT_SECRET"
+refresh_token = "1//DIFFERENT_REFRESH_TOKEN"
+default_calendar_id = "work@example.com"
+```
+
+This lets different agents access different Google accounts or calendars.
+
+## Troubleshooting
+
+**"invalid_grant" errors**
+- Your refresh token may have expired. Google revokes tokens if the OAuth consent screen is in "Testing" mode and the token is older than 7 days. Publish your app or re-generate the token.
+- Make sure `access_type=offline` and `prompt=consent` were used when obtaining the token.
+
+**Tools not appearing**
+- Verify all three required fields are set: `client_id`, `client_secret`, `refresh_token`.
+- Check the dashboard — the Google Calendar card should show "Configured".
+- Config changes hot-reload automatically; no restart needed.
+
+**"Access Not Configured" or 403 errors**
+- Ensure the Google Calendar API is enabled in your Google Cloud project.
+- Verify the OAuth consent screen includes your account as a test user (if in Testing mode).
+
+**Wrong calendar**
+- Set `default_calendar_id` to the specific calendar email address (e.g., `work@example.com`) instead of `primary`.
+- Use the `google_calendar_list_calendars` tool to see available calendars.

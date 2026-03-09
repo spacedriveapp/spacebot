@@ -7,7 +7,7 @@ import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/Cha
 import { ModelSelect } from "@/components/ModelSelect";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
-import { faSearch } from "@fortawesome/free-solid-svg-icons";
+import { faSearch, faCalendarDays } from "@fortawesome/free-solid-svg-icons";
 
 import { parse as parseToml } from "smol-toml";
 import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
@@ -1619,6 +1619,11 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 	const queryClient = useQueryClient();
 	const [editingBraveKey, setEditingBraveKey] = useState(false);
 	const [braveKeyInput, setBraveKeyInput] = useState("");
+	const [editingGCalCredentials, setEditingGCalCredentials] = useState(false);
+	const [gCalClientId, setGCalClientId] = useState("");
+	const [gCalClientSecret, setGCalClientSecret] = useState("");
+	const [gCalRefreshToken, setGCalRefreshToken] = useState("");
+	const [gCalDefaultCalendarId, setGCalDefaultCalendarId] = useState("");
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 
 	const updateMutation = useMutation({
@@ -1627,6 +1632,11 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 			if (result.success) {
 				setEditingBraveKey(false);
 				setBraveKeyInput("");
+				setEditingGCalCredentials(false);
+				setGCalClientId("");
+				setGCalClientSecret("");
+				setGCalRefreshToken("");
+				setGCalDefaultCalendarId("");
 				setMessage({ text: result.message, type: "success" });
 				queryClient.invalidateQueries({ queryKey: ["global-settings"] });
 			} else {
@@ -1644,6 +1654,27 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 
 	const handleRemoveBraveKey = () => {
 		updateMutation.mutate({ brave_search_key: null });
+	};
+
+	const handleSaveGCalCredentials = () => {
+		updateMutation.mutate({
+			google_calendar: {
+				client_id: gCalClientId.trim(),
+				client_secret: gCalClientSecret.trim(),
+				refresh_token: gCalRefreshToken.trim(),
+				default_calendar_id: gCalDefaultCalendarId.trim() || "primary",
+			},
+		});
+	};
+
+	const handleRemoveGCalCredentials = () => {
+		updateMutation.mutate({
+			google_calendar: {
+				client_id: "",
+				client_secret: "",
+				refresh_token: "",
+			},
+		});
 	};
 
 	return (
@@ -1701,6 +1732,50 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 							</div>
 						</div>
 					</div>
+
+					{/* Google Calendar */}
+					<div className="rounded-lg border border-app-line bg-app-box p-4">
+						<div className="flex items-center gap-3">
+							<FontAwesomeIcon icon={faCalendarDays} className="text-ink-faint" />
+							<div className="flex-1">
+								<div className="flex items-center gap-2">
+									<span className="text-sm font-medium text-ink">Google Calendar</span>
+									{settings?.google_calendar_configured && (
+										<span className="text-tiny text-green-400">● Configured</span>
+									)}
+								</div>
+								<p className="mt-0.5 text-sm text-ink-dull">
+									Enables calendar tools for listing, creating, and managing events
+								</p>
+							</div>
+							<div className="flex gap-2">
+								<Button
+									onClick={() => {
+										setEditingGCalCredentials(true);
+										setGCalClientId("");
+										setGCalClientSecret("");
+										setGCalRefreshToken("");
+										setGCalDefaultCalendarId("");
+										setMessage(null);
+									}}
+									variant="outline"
+									size="sm"
+								>
+									{settings?.google_calendar_configured ? "Update" : "Configure"}
+								</Button>
+								{settings?.google_calendar_configured && (
+									<Button
+										onClick={handleRemoveGCalCredentials}
+										variant="outline"
+										size="sm"
+										loading={updateMutation.isPending}
+									>
+										Remove
+									</Button>
+								)}
+							</div>
+						</div>
+					</div>
 				</div>
 			)}
 
@@ -1740,6 +1815,60 @@ function ApiKeysSection({ settings, isLoading }: GlobalSettingsSectionProps) {
 						<Button
 							onClick={handleSaveBraveKey}
 							disabled={!braveKeyInput.trim()}
+							loading={updateMutation.isPending}
+							size="sm"
+						>
+							Save
+						</Button>
+					</DialogFooter>
+				</DialogContent>
+			</Dialog>
+
+			{/* Google Calendar Dialog */}
+			<Dialog open={editingGCalCredentials} onOpenChange={(open) => { if (!open) setEditingGCalCredentials(false); }}>
+				<DialogContent className="max-w-md">
+					<DialogHeader>
+						<DialogTitle>{settings?.google_calendar_configured ? "Update" : "Configure"} Google Calendar</DialogTitle>
+						<DialogDescription>
+							Enter your Google OAuth credentials. See the{" "}
+							<a href="/docs/google-calendar" target="_blank" className="text-accent underline">setup guide</a>{" "}
+							for instructions.
+						</DialogDescription>
+					</DialogHeader>
+					<div className="flex flex-col gap-3">
+						<Input
+							type="password"
+							value={gCalClientId}
+							onChange={(e) => setGCalClientId(e.target.value)}
+							placeholder="xxxx.apps.googleusercontent.com"
+							autoFocus
+						/>
+						<Input
+							type="password"
+							value={gCalClientSecret}
+							onChange={(e) => setGCalClientSecret(e.target.value)}
+							placeholder="GOCSPX-..."
+						/>
+						<Input
+							type="password"
+							value={gCalRefreshToken}
+							onChange={(e) => setGCalRefreshToken(e.target.value)}
+							placeholder="1//0..."
+						/>
+						<Input
+							type="text"
+							value={gCalDefaultCalendarId}
+							onChange={(e) => setGCalDefaultCalendarId(e.target.value)}
+							placeholder="primary (optional)"
+						/>
+					</div>
+					<DialogFooter>
+						<Button onClick={() => setEditingGCalCredentials(false)} variant="ghost" size="sm">
+							Cancel
+						</Button>
+						<Button
+							onClick={handleSaveGCalCredentials}
+							disabled={!gCalClientId.trim() || !gCalClientSecret.trim() || !gCalRefreshToken.trim()}
 							loading={updateMutation.isPending}
 							size="sm"
 						>

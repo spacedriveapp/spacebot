@@ -1338,6 +1338,7 @@ export interface OpenCodeSettingsUpdate {
 
 export interface GlobalSettingsResponse {
 	brave_search_key: string | null;
+	google_calendar_configured: boolean;
 	api_enabled: boolean;
 	api_port: number;
 	api_bind: string;
@@ -1347,6 +1348,12 @@ export interface GlobalSettingsResponse {
 
 export interface GlobalSettingsUpdate {
 	brave_search_key?: string | null;
+	google_calendar?: {
+		client_id?: string;
+		client_secret?: string;
+		refresh_token?: string;
+		default_calendar_id?: string;
+	};
 	api_enabled?: boolean;
 	api_port?: number;
 	api_bind?: string;

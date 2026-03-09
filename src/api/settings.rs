@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[derive(Serialize)]
 pub(super) struct GlobalSettingsResponse {
     brave_search_key: Option<String>,
+    google_calendar_configured: bool,
     api_enabled: bool,
     api_port: u16,
     api_bind: String,
@@ -37,12 +38,21 @@ pub(super) struct OpenCodePermissionsResponse {
 #[derive(Deserialize)]
 pub(super) struct GlobalSettingsUpdate {
     brave_search_key: Option<String>,
+    google_calendar: Option<GoogleCalendarSettingsUpdate>,
     api_enabled: Option<bool>,
     api_port: Option<u16>,
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
     ssh_enabled: Option<bool>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct GoogleCalendarSettingsUpdate {
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    refresh_token: Option<String>,
+    default_calendar_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -90,7 +100,7 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
+    let (brave_search_key, google_calendar_configured, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
         if config_path.exists() {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
@@ -110,6 +120,20 @@ pub(super) async fn get_global_settings(
                         Some(s.to_string())
                     }
                 });
+
+            let gcal_table = doc.get("defaults").and_then(|d| d.get("google_calendar"));
+            let google_calendar_configured = gcal_table
+                .and_then(|g| g.get("client_id"))
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty())
+                && gcal_table
+                    .and_then(|g| g.get("client_secret"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+                && gcal_table
+                    .and_then(|g| g.get("refresh_token"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
 
             let api_enabled = doc
                 .get("api")
@@ -192,6 +216,7 @@ pub(super) async fn get_global_settings(
 
             (
                 brave_search,
+                google_calendar_configured,
                 api_enabled,
                 api_port,
                 api_bind,
@@ -202,6 +227,7 @@ pub(super) async fn get_global_settings(
         } else {
             (
                 None,
+                false,
                 true,
                 19898,
                 "127.0.0.1".to_string(),
@@ -224,6 +250,7 @@ pub(super) async fn get_global_settings(
 
     Ok(Json(GlobalSettingsResponse {
         brave_search_key,
+        google_calendar_configured,
         api_enabled,
         api_port,
         api_bind,
@@ -263,6 +290,48 @@ pub(super) async fn update_global_settings(
             }
         } else {
             doc["defaults"]["brave_search_key"] = toml_edit::value(key);
+        }
+    }
+
+    if let Some(gcal) = request.google_calendar {
+        let all_empty = gcal
+            .client_id
+            .as_deref()
+            .is_some_and(|s| s.is_empty())
+            && gcal
+                .client_secret
+                .as_deref()
+                .is_some_and(|s| s.is_empty())
+            && gcal
+                .refresh_token
+                .as_deref()
+                .is_some_and(|s| s.is_empty());
+
+        if all_empty {
+            // Remove the entire section.
+            if let Some(defaults) = doc.get_mut("defaults").and_then(|d| d.as_table_mut()) {
+                defaults.remove("google_calendar");
+            }
+        } else {
+            if doc.get("defaults").is_none() {
+                doc["defaults"] = toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            if doc["defaults"].get("google_calendar").is_none() {
+                doc["defaults"]["google_calendar"] =
+                    toml_edit::Item::Table(toml_edit::Table::new());
+            }
+            if let Some(v) = gcal.client_id {
+                doc["defaults"]["google_calendar"]["client_id"] = toml_edit::value(v);
+            }
+            if let Some(v) = gcal.client_secret {
+                doc["defaults"]["google_calendar"]["client_secret"] = toml_edit::value(v);
+            }
+            if let Some(v) = gcal.refresh_token {
+                doc["defaults"]["google_calendar"]["refresh_token"] = toml_edit::value(v);
+            }
+            if let Some(v) = gcal.default_calendar_id {
+                doc["defaults"]["google_calendar"]["default_calendar_id"] = toml_edit::value(v);
+            }
         }
     }
 
