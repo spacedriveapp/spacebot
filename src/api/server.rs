@@ -3,7 +3,7 @@
 use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
-    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, system,
+    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
     tasks, tools, webchat, workers,
 };
 
@@ -257,6 +257,8 @@ pub async fn start_http_server(
         )
         .route("/update/apply", post(settings::update_apply))
         .route("/changelog", get(settings::changelog))
+        .route("/ssh/authorized-key", put(ssh::set_authorized_key))
+        .route("/ssh/status", get(ssh::ssh_status))
         .route("/webchat/send", post(webchat::webchat_send))
         .route("/webchat/history", get(webchat::webchat_history))
         .route("/links", get(links::list_links).post(links::create_link))

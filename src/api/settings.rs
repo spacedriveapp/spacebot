@@ -14,6 +14,7 @@ pub(super) struct GlobalSettingsResponse {
     api_bind: String,
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
+    ssh_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -41,6 +42,7 @@ pub(super) struct GlobalSettingsUpdate {
     api_bind: Option<String>,
     worker_log_mode: Option<String>,
     opencode: Option<OpenCodeSettingsUpdate>,
+    ssh_enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -88,7 +90,7 @@ pub(super) async fn get_global_settings(
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode) =
+    let (brave_search_key, api_enabled, api_port, api_bind, worker_log_mode, opencode, ssh_enabled) =
         if config_path.exists() {
             let content = tokio::fs::read_to_string(&config_path)
                 .await
@@ -182,6 +184,12 @@ pub(super) async fn get_global_settings(
                 },
             };
 
+            let ssh_enabled = doc
+                .get("ssh")
+                .and_then(|s| s.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+
             (
                 brave_search,
                 api_enabled,
@@ -189,6 +197,7 @@ pub(super) async fn get_global_settings(
                 api_bind,
                 worker_log_mode,
                 opencode,
+                ssh_enabled,
             )
         } else {
             (
@@ -209,6 +218,7 @@ pub(super) async fn get_global_settings(
                         webfetch: "allow".to_string(),
                     },
                 },
+                false,
             )
         };
 
@@ -219,6 +229,7 @@ pub(super) async fn get_global_settings(
         api_bind,
         worker_log_mode,
         opencode,
+        ssh_enabled,
     }))
 }
 
@@ -329,6 +340,14 @@ pub(super) async fn update_global_settings(
         }
     }
 
+    // Persist ssh_enabled into config.toml so sshd auto-starts on boot.
+    if let Some(enabled) = request.ssh_enabled {
+        if doc.get("ssh").is_none() {
+            doc["ssh"] = toml_edit::Item::Table(toml_edit::Table::new());
+        }
+        doc["ssh"]["enabled"] = toml_edit::value(enabled);
+    }
+
     tokio::fs::write(&config_path, doc.to_string())
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -366,6 +385,35 @@ pub(super) async fn update_global_settings(
         }
         Err(error) => {
             tracing::warn!(%error, "settings written but config reload task failed");
+        }
+    }
+
+    // Toggle sshd after config is persisted so the state is consistent on restart.
+    // On failure, roll back the persisted flag so GET /api/settings stays accurate.
+    if let Some(enabled) = request.ssh_enabled {
+        let _ssh_guard = state.ssh_mutex.lock().await;
+        let ssh_result = if enabled {
+            super::ssh::enable(&state).await
+        } else {
+            super::ssh::disable().await
+        };
+        if let Err(error) = ssh_result {
+            tracing::warn!(%error, "failed to toggle SSH, rolling back config");
+            // Roll back: re-read, restore previous value, write.
+            if let Ok(content) = tokio::fs::read_to_string(&config_path).await
+                && let Ok(mut rollback_doc) = content.parse::<toml_edit::DocumentMut>()
+            {
+                rollback_doc["ssh"]["enabled"] = toml_edit::value(!enabled);
+                let _ = tokio::fs::write(&config_path, rollback_doc.to_string()).await;
+            }
+            return Ok(Json(GlobalSettingsUpdateResponse {
+                success: false,
+                message: format!(
+                    "failed to {} SSH: {error}",
+                    if enabled { "enable" } else { "disable" }
+                ),
+                requires_restart: false,
+            }));
         }
     }
 
