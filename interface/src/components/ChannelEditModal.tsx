@@ -1,6 +1,7 @@
 import {useState} from "react";
 import {useMutation, useQuery, useQueryClient} from "@tanstack/react-query";
 import {api, type PlatformStatus, type BindingInfo} from "@/api/client";
+import {isValidE164, E164_ERROR_TEXT} from "@/lib/format";
 import {
 	Button,
 	Input,
@@ -18,7 +19,7 @@ import {
 import {PlatformIcon} from "@/lib/platformIcons";
 import {TagInput} from "@/components/TagInput";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "signal";
 
 interface ChannelEditModalProps {
 	platform: Platform;
@@ -167,6 +168,26 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 				twitch_client_id: credentialInputs.twitch_client_id?.trim(),
 				twitch_client_secret: credentialInputs.twitch_client_secret?.trim(),
 				twitch_refresh_token: credentialInputs.twitch_refresh_token?.trim(),
+			};
+		} else if (platform === "signal") {
+			if (!credentialInputs.signal_http_url?.trim()) {
+				setMessage({text: "HTTP URL is required", type: "error"});
+				return;
+			}
+			if (!credentialInputs.signal_account?.trim()) {
+				setMessage({text: "Account phone number is required", type: "error"});
+				return;
+			}
+			// Basic E.164 validation
+			const account = credentialInputs.signal_account.trim();
+			if (!isValidE164(account)) {
+				setMessage({text: E164_ERROR_TEXT, type: "error"});
+				return;
+			}
+			request.platform_credentials = {
+				signal_http_url: credentialInputs.signal_http_url.trim(),
+				signal_account: account,
+				signal_dm_allowed_users: credentialInputs.signal_dm_allowed_users?.trim() || undefined,
 			};
 		}
 		saveCreds.mutate(request);
@@ -353,6 +374,41 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 								Need help?{" "}
 								<a href="https://docs.spacebot.sh/twitch-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
 									Read the Twitch setup docs &rarr;
+								</a>
+							</p>
+						</>
+					)}
+
+					{platform === "signal" && (
+						<>
+							<div className="space-y-3">
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">HTTP URL</label>
+									<Input
+										size="lg"
+										value={credentialInputs.signal_http_url ?? ""}
+										onChange={(e) => setCredentialInputs({...credentialInputs, signal_http_url: e.target.value})}
+										placeholder="http://127.0.0.1:8686"
+									/>
+								</div>
+								<div>
+									<label className="mb-1.5 block text-sm font-medium text-ink-dull">Account Phone Number</label>
+								<Input
+									size="lg"
+									value={credentialInputs.signal_account ?? ""}
+									onChange={(e) => setCredentialInputs({...credentialInputs, signal_account: e.target.value})}
+									placeholder="+1234567890"
+									onKeyDown={(e) => { if (e.key === "Enter") handleSaveCredentials(); }}
+								/>
+									<p className="mt-1 text-xs text-ink-faint">
+										Your Signal phone number in E.164 format (+ followed by 6-15 digits, first digit 1-9)
+									</p>
+								</div>
+							</div>
+							<p className="mt-3 text-xs text-ink-faint">
+								Need help?{" "}
+								<a href="https://docs.spacebot.sh/signal-setup" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+									Read the Signal setup docs &rarr;
 								</a>
 							</p>
 						</>

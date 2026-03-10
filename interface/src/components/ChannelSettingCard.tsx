@@ -23,11 +23,12 @@ import {
 	Toggle,
 } from "@/ui";
 import {PlatformIcon} from "@/lib/platformIcons";
+import {isValidE164, E164_ERROR_TEXT} from "@/lib/format";
 import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faChevronDown, faPlus} from "@fortawesome/free-solid-svg-icons";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "signal";
 
 const PLATFORM_LABELS: Record<Platform, string> = {
 	discord: "Discord",
@@ -36,6 +37,7 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 	twitch: "Twitch",
 	email: "Email",
 	webhook: "Webhook",
+	signal: "Signal",
 };
 
 const DOC_LINKS: Partial<Record<Platform, string>> = {
@@ -43,6 +45,7 @@ const DOC_LINKS: Partial<Record<Platform, string>> = {
 	slack: "https://docs.spacebot.sh/slack-setup",
 	telegram: "https://docs.spacebot.sh/telegram-setup",
 	twitch: "https://docs.spacebot.sh/twitch-setup",
+	signal: "https://docs.spacebot.sh/signal-setup",
 };
 
 // --- Platform Catalog (Left Column) ---
@@ -59,6 +62,7 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 		"twitch",
 		"email",
 		"webhook",
+		"signal",
 	];
 
 	const COMING_SOON = [
@@ -636,6 +640,57 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				credentials.webhook_bind = credentialInputs.webhook_bind.trim();
 			if (credentialInputs.webhook_auth_token?.trim())
 				credentials.webhook_auth_token = credentialInputs.webhook_auth_token.trim();
+		} else if (platform === "signal") {
+			if (!credentialInputs.signal_http_url?.trim()) {
+				setMessage({text: "HTTP URL is required", type: "error"});
+				return;
+			}
+			if (!credentialInputs.signal_account?.trim()) {
+				setMessage({text: "Account phone number is required", type: "error"});
+				return;
+		}
+		// Basic E.164 validation (frontend) - match backend rules
+			const account = credentialInputs.signal_account.trim();
+			if (!isValidE164(account)) {
+				setMessage({
+					text: E164_ERROR_TEXT,
+					type: "error"
+				});
+				return;
+			}
+			credentials.signal_http_url = credentialInputs.signal_http_url.trim();
+			credentials.signal_account = account;
+			if (credentialInputs.signal_dm_allowed_users?.trim()) {
+				// Split, trim, and validate each phone number
+				const dm_users = credentialInputs.signal_dm_allowed_users
+					.split(',')
+					.map((s: string) => s.trim())
+					.filter((s: string) => s.length > 0);
+				
+				// Validate each entry is E.164 format
+				const invalid_users: string[] = [];
+				const valid_users: string[] = [];
+				
+				for (const user of dm_users) {
+					if (!isValidE164(user)) {
+						invalid_users.push(user);
+					} else {
+						valid_users.push(user);
+					}
+				}
+				
+				if (invalid_users.length > 0) {
+					setMessage({
+						text: `Invalid phone number(s): ${invalid_users.join(', ')}. ${E164_ERROR_TEXT}`,
+						type: "error"
+					});
+					return;
+				}
+				
+				if (valid_users.length > 0) {
+					credentials.signal_dm_allowed_users = valid_users.join(',');
+				}
+			}
 		}
 
 		if (!isDefault && !instanceName.trim()) {
@@ -925,7 +980,51 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 					</>
 				)}
 
-				{docLink && (
+				{platform === "signal" && (
+					<>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">HTTP URL</label>
+						<Input
+							size="lg"
+							value={credentialInputs.signal_http_url ?? ""}
+							onChange={(e) => setCredentialInputs({...credentialInputs, signal_http_url: e.target.value})}
+							placeholder="http://127.0.0.1:8686"
+							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+						/>
+							<p className="mt-1 text-xs text-ink-faint">
+								URL of your signal-cli daemon (e.g., http://127.0.0.1:8686)
+							</p>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Account Phone Number</label>
+							<Input
+								size="lg"
+								value={credentialInputs.signal_account ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, signal_account: e.target.value})}
+								placeholder="+1234567890"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+						<p className="mt-1 text-xs text-ink-faint">
+							Your Signal phone number in E.164 format (+ followed by 6-15 digits, first digit 1-9)
+						</p>
+					</div>
+					<div>
+						<label className="mb-1.5 block text-sm font-medium text-ink-dull">DM Allowed Users (Optional)</label>
+						<Input
+							size="lg"
+							value={credentialInputs.signal_dm_allowed_users ?? ""}
+							onChange={(e) => setCredentialInputs({...credentialInputs, signal_dm_allowed_users: e.target.value})}
+							placeholder="+1234567890, +1987654321"
+							onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+						/>
+							<p className="mt-1 text-xs text-ink-faint">
+								Comma-separated list of phone numbers allowed to DM this bot (if empty, only the bot's own account can DM)
+							</p>
+					</div>
+				</>
+			)}
+
+			{docLink && (
 					<p className="text-xs text-ink-faint">
 						Need help?{" "}
 						<a href={docLink} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">

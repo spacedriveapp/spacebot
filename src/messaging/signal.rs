@@ -247,7 +247,7 @@ impl SignalAdapter {
 
         Self {
             runtime_key: runtime_key.into(),
-            http_url: http_url.into(),
+            http_url: http_url.into().trim_end_matches('/').to_string(),
             account: account.into(),
             ignore_stories,
             permissions,

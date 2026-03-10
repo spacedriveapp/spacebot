@@ -3,7 +3,9 @@
 use crate::agent::channel::ChannelState;
 use crate::agent::cortex_chat::CortexChatSession;
 use crate::agent::status::StatusBlock;
-use crate::config::{Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SlackPermissions};
+use crate::config::{
+    Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SignalPermissions, SlackPermissions,
+};
 use crate::conversation::worker_transcript::{ActionContent, TranscriptStep};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
@@ -96,6 +98,8 @@ pub struct ApiState {
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
     pub slack_permissions: RwLock<Option<Arc<ArcSwap<SlackPermissions>>>>,
+    /// Shared reference to the Signal permissions ArcSwap (same instance used by the adapter and file watcher).
+    pub signal_permissions: RwLock<Option<Arc<ArcSwap<SignalPermissions>>>>,
     /// Shared reference to the bindings ArcSwap (same instance used by the main loop and file watcher).
     pub bindings: RwLock<Option<Arc<ArcSwap<Vec<Binding>>>>>,
     /// Shared messaging manager for runtime adapter addition.
@@ -316,6 +320,7 @@ impl ApiState {
             secrets_store: ArcSwap::from_pointee(None),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
+            signal_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
             messaging_manager: RwLock::new(None),
             provider_setup_tx,
@@ -784,6 +789,11 @@ impl ApiState {
     /// Share the Slack permissions ArcSwap with the API so reads get hot-reloaded values.
     pub async fn set_slack_permissions(&self, permissions: Arc<ArcSwap<SlackPermissions>>) {
         *self.slack_permissions.write().await = Some(permissions);
+    }
+
+    /// Share the Signal permissions ArcSwap with the API so reads get hot-reloaded values.
+    pub async fn set_signal_permissions(&self, permissions: Arc<ArcSwap<SignalPermissions>>) {
+        *self.signal_permissions.write().await = Some(permissions);
     }
 
     /// Share the bindings ArcSwap with the API so reads get hot-reloaded values.
