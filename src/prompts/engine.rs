@@ -76,6 +76,10 @@ impl PromptEngine {
             crate::prompts::text::get("adapters/email"),
         )?;
         env.add_template("adapters/cron", crate::prompts::text::get("adapters/cron"))?;
+        env.add_template(
+            "adapters/signal",
+            crate::prompts::text::get("adapters/signal"),
+        )?;
 
         // Fragment templates
         env.add_template(
@@ -359,6 +363,11 @@ impl PromptEngine {
         self.render_static("fragments/system/memory_persistence")
     }
 
+    /// Retry nudge sent to a memory-persistence branch that missed its terminal completion call.
+    pub fn render_system_memory_persistence_contract_retry(&self) -> Result<String> {
+        self.render_static("fragments/system/memory_persistence_contract_retry")
+    }
+
     /// Render the profile synthesis prompt with identity and bulletin context.
     pub fn render_system_profile_synthesis(
         &self,
@@ -471,6 +480,7 @@ impl PromptEngine {
         let template_name = match adapter {
             "email" => "adapters/email",
             "cron" => "adapters/cron",
+            "signal" => "adapters/signal",
             _ => return None,
         };
 

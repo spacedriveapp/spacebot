@@ -1329,9 +1329,14 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                             }
                         }
                         UserContent::ToolResult(tr) => {
+                            let tool_call_id = tr
+                                .call_id
+                                .as_deref()
+                                .filter(|call_id| !call_id.is_empty())
+                                .unwrap_or(&tr.id);
                             tool_results.push(serde_json::json!({
                                 "role": "tool",
-                                "tool_call_id": tr.id,
+                                "tool_call_id": tool_call_id,
                                 "content": tool_result_content_to_string(&tr.content),
                             }));
                         }
@@ -1367,11 +1372,18 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                             text_parts.push(t.text.clone());
                         }
                         AssistantContent::ToolCall(tc) => {
-                            // OpenAI expects arguments as a JSON string
+                            // OpenAI expects arguments as a JSON string.
+                            // Prefer call_id (set when replaying Responses-API tool calls
+                            // through chat-completions) to keep assistant and tool IDs aligned.
+                            let preferred_id = tc
+                                .call_id
+                                .as_deref()
+                                .filter(|c| !c.is_empty())
+                                .unwrap_or(&tc.id);
                             let args_string = serde_json::to_string(&tc.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
                             tool_calls.push(serde_json::json!({
-                                "id": tc.id,
+                                "id": preferred_id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.function.name,
@@ -1420,9 +1432,14 @@ fn convert_messages_to_openai_responses(messages: &OneOrMany<Message>) -> Vec<se
                             }
                         }
                         UserContent::ToolResult(tool_result) => {
+                            let call_id = tool_result
+                                .call_id
+                                .as_deref()
+                                .filter(|call_id| !call_id.is_empty())
+                                .unwrap_or(&tool_result.id);
                             result.push(serde_json::json!({
                                 "type": "function_call_output",
-                                "call_id": tool_result.id,
+                                "call_id": call_id,
                                 "output": tool_result_content_to_string(&tool_result.content),
                             }));
                         }
@@ -1451,11 +1468,16 @@ fn convert_messages_to_openai_responses(messages: &OneOrMany<Message>) -> Vec<se
                         AssistantContent::ToolCall(tool_call) => {
                             let arguments = serde_json::to_string(&tool_call.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
+                            let call_id = tool_call
+                                .call_id
+                                .as_deref()
+                                .filter(|call_id| !call_id.is_empty())
+                                .unwrap_or(&tool_call.id);
                             result.push(serde_json::json!({
                                 "type": "function_call",
                                 "name": tool_call.function.name,
                                 "arguments": arguments,
-                                "call_id": tool_call.id,
+                                "call_id": call_id,
                             }));
                         }
                         _ => {}
@@ -2570,6 +2592,61 @@ fn parse_openai_tool_call(tool_call: &serde_json::Value, fallback_id: String) ->
     Some(make_tool_call(id, name.to_string(), arguments))
 }
 
+fn extract_text_content_from_responses_output_item(
+    value: &serde_json::Value,
+    text_parts: &mut Vec<String>,
+) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                extract_text_content_from_responses_output_item(item, text_parts);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            if matches!(
+                map.get("type").and_then(serde_json::Value::as_str),
+                Some("function_call") | Some("function_call_output")
+            ) {
+                return;
+            }
+
+            if let Some(text) = map.get("text").and_then(serde_json::Value::as_str)
+                && !text.trim().is_empty()
+            {
+                text_parts.push(text.to_string());
+            }
+            if let Some(summary) = map.get("summary") {
+                collect_openai_text_content(summary, text_parts);
+            }
+            if let Some(refusal) = map.get("refusal") {
+                collect_openai_text_content(refusal, text_parts);
+            }
+            if let Some(content) = map.get("content") {
+                extract_text_content_from_responses_output_item(content, text_parts);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn make_openai_responses_tool_call(
+    id: String,
+    call_id: Option<String>,
+    name: String,
+    arguments: serde_json::Value,
+) -> ToolCall {
+    ToolCall {
+        id,
+        call_id,
+        function: ToolFunction {
+            name: name.trim().to_string(),
+            arguments,
+        },
+        signature: None,
+        additional_params: None,
+    }
+}
+
 fn parse_openai_responses_response(
     body: serde_json::Value,
     provider_label: &str,
@@ -2579,19 +2656,34 @@ fn parse_openai_responses_response(
         .ok_or_else(|| CompletionError::ResponseError("missing output array".into()))?;
 
     let mut assistant_content = Vec::new();
+    let mut fallback_text_parts = Vec::new();
 
     for (index, output_item) in output_items.iter().enumerate() {
         match output_item["type"].as_str() {
             Some("message") => {
                 if let Some(content_items) = output_item["content"].as_array() {
+                    let mut message_output_text = Vec::new();
+                    let mut message_fallback_text = Vec::new();
+
                     for content_item in content_items {
                         if content_item["type"].as_str() == Some("output_text")
                             && let Some(text) = content_item["text"].as_str()
                             && !text.is_empty()
                         {
-                            assistant_content.push(AssistantContent::Text(Text {
-                                text: text.to_string(),
-                            }));
+                            message_output_text.push(text.to_string());
+                        }
+
+                        extract_text_content_from_responses_output_item(
+                            content_item,
+                            &mut message_fallback_text,
+                        );
+                    }
+
+                    if message_output_text.is_empty() {
+                        fallback_text_parts.extend(message_fallback_text);
+                    } else {
+                        for text in message_output_text {
+                            assistant_content.push(AssistantContent::Text(Text { text }));
                         }
                     }
                 }
@@ -2599,29 +2691,53 @@ fn parse_openai_responses_response(
             Some("function_call") => {
                 let call_id = output_item["call_id"]
                     .as_str()
-                    .or_else(|| output_item["id"].as_str())
+                    .filter(|id| !id.is_empty())
+                    .map(ToOwned::to_owned);
+                let id = output_item["id"]
+                    .as_str()
                     .filter(|id| !id.is_empty())
                     .map(ToOwned::to_owned)
+                    .or_else(|| call_id.clone())
                     .unwrap_or_else(|| format!("function_call_{index}"));
                 let name = output_item["name"].as_str().unwrap_or("").to_string();
                 let arguments = parse_openai_tool_arguments(&output_item["arguments"]);
 
-                assistant_content.push(AssistantContent::ToolCall(make_tool_call(
-                    call_id, name, arguments,
-                )));
+                assistant_content.push(AssistantContent::ToolCall(
+                    make_openai_responses_tool_call(id, call_id, name, arguments),
+                ));
             }
-            _ => {}
+            _ => {
+                extract_text_content_from_responses_output_item(
+                    output_item,
+                    &mut fallback_text_parts,
+                );
+            }
+        }
+    }
+
+    let has_text = assistant_content
+        .iter()
+        .any(|content| matches!(content, AssistantContent::Text(_)));
+    if !has_text {
+        for text in fallback_text_parts {
+            assistant_content.push(AssistantContent::Text(Text { text }));
         }
     }
 
     let choice = OneOrMany::many(assistant_content).map_err(|_| {
+        let output_types = output_items
+            .iter()
+            .map(|item| item["type"].as_str().unwrap_or("<missing-type>"))
+            .collect::<Vec<_>>()
+            .join(", ");
         tracing::warn!(
             provider = %provider_label,
             output_items = output_items.len(),
+            output_types = %output_types,
             "empty response from responses API"
         );
         CompletionError::ResponseError(format!(
-            "empty response from {provider_label} Responses API"
+            "empty or unsupported response from {provider_label} Responses API; expected text-bearing message content (output_text/text/summary/refusal/content) or function_call output items; received output types: {output_types}"
         ))
     })?;
 
@@ -3008,6 +3124,146 @@ mod tests {
         let error = parse_openai_response(body, "OpenRouter").expect_err("should fail");
         assert!(error.to_string().contains("empty response from OpenRouter"));
         assert!(error.to_string().contains("finish_reason: stop"));
+    }
+
+    #[test]
+    fn convert_messages_to_openai_tool_result_prefers_call_id_over_id() {
+        let messages = OneOrMany::one(Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(rig::message::ToolResult {
+                id: "legacy-id".to_string(),
+                call_id: Some("stable-call-id".to_string()),
+                content: OneOrMany::one(rig::message::ToolResultContent::text("ok")),
+            })),
+        });
+
+        let converted = convert_messages_to_openai(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["role"], "tool");
+        assert_eq!(converted[0]["tool_call_id"], "stable-call-id");
+    }
+
+    #[test]
+    fn convert_messages_to_openai_responses_function_call_output_prefers_call_id_over_id() {
+        let messages = OneOrMany::one(Message::User {
+            content: OneOrMany::one(UserContent::ToolResult(rig::message::ToolResult {
+                id: "legacy-id".to_string(),
+                call_id: Some("stable-call-id".to_string()),
+                content: OneOrMany::one(rig::message::ToolResultContent::text("ok")),
+            })),
+        });
+
+        let converted = convert_messages_to_openai_responses(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["type"], "function_call_output");
+        assert_eq!(converted[0]["call_id"], "stable-call-id");
+    }
+
+    #[test]
+    fn convert_messages_to_openai_responses_function_call_prefers_call_id_over_id() {
+        let messages = OneOrMany::one(Message::Assistant {
+            content: OneOrMany::one(AssistantContent::ToolCall(ToolCall {
+                id: "legacy-id".to_string(),
+                call_id: Some("stable-call-id".to_string()),
+                function: ToolFunction {
+                    name: "reply".to_string(),
+                    arguments: serde_json::json!({"content": "ok"}),
+                },
+                signature: None,
+                additional_params: None,
+            })),
+            id: None,
+        });
+
+        let converted = convert_messages_to_openai_responses(&messages);
+        assert_eq!(converted.len(), 1);
+        assert_eq!(converted[0]["type"], "function_call");
+        assert_eq!(converted[0]["call_id"], "stable-call-id");
+    }
+
+    #[test]
+    fn parse_openai_responses_response_parses_fallback_text_without_output_text() {
+        let body = serde_json::json!({
+            "output": [{
+                "type": "message",
+                "content": [{
+                    "type": "reasoning",
+                    "summary": [
+                        {"text": "step 1"},
+                        {"text": "step 2"}
+                    ]
+                }]
+            }],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        });
+
+        let response =
+            parse_openai_responses_response(body, "OpenAI").expect("fallback text should parse");
+        let texts: Vec<_> = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(texts, vec!["step 1".to_string(), "step 2".to_string()]);
+    }
+
+    #[test]
+    fn parse_openai_responses_response_preserves_function_call_call_id_from_completed_response() {
+        let body = serde_json::json!({
+            "output": [{
+                "type": "function_call",
+                "id": "legacy-id",
+                "call_id": "stable-call-id",
+                "name": "reply",
+                "arguments": "{\"content\":\"ok\"}"
+            }],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        });
+
+        let response =
+            parse_openai_responses_response(body, "OpenAI").expect("function call should parse");
+        match response.choice.first_ref() {
+            AssistantContent::ToolCall(tool_call) => {
+                assert_eq!(tool_call.id, "legacy-id");
+                assert_eq!(tool_call.call_id.as_deref(), Some("stable-call-id"));
+                assert_eq!(tool_call.function.name, "reply");
+            }
+            _ => panic!("expected tool call"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_responses_response_unsupported_empty_error_is_actionable_and_provider_specific()
+    {
+        let body = serde_json::json!({
+            "output": [{
+                "type": "unknown_shape",
+                "foo": "bar"
+            }],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        });
+
+        let error =
+            parse_openai_responses_response(body, "OpenAI").expect_err("should be unsupported");
+        let error_text = error.to_string();
+        assert!(error_text.contains("OpenAI Responses API"));
+        assert!(error_text.contains("output_text/text/summary/refusal/content"));
+        assert!(error_text.contains("unknown_shape"));
     }
 
     #[test]

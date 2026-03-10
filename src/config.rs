@@ -15,7 +15,7 @@ pub(crate) use load::resolve_env_value;
 pub use load::set_resolve_secrets_store;
 pub use onboarding::run_onboarding;
 pub use permissions::{
-    DiscordPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
+    DiscordPermissions, SignalPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
 };
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
@@ -1539,6 +1539,7 @@ maintenance_merge_similarity_threshold = 1.1
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![
             Binding {
@@ -1548,6 +1549,7 @@ maintenance_merge_similarity_threshold = 1.1
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -1559,6 +1561,7 @@ maintenance_merge_similarity_threshold = 1.1
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -1581,6 +1584,7 @@ maintenance_merge_similarity_threshold = 1.1
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1643,6 +1647,7 @@ maintenance_merge_similarity_threshold = 1.1
             }),
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1677,6 +1682,7 @@ maintenance_merge_similarity_threshold = 1.1
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         // Binding targets default adapter, but no default credentials exist
         let bindings = vec![Binding {

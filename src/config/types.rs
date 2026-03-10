@@ -1461,7 +1461,7 @@ pub struct Binding {
     pub adapter: Option<String>,
     pub guild_id: Option<String>,
     pub workspace_id: Option<String>, // Slack workspace (team) ID
-    pub chat_id: Option<String>,
+    pub chat_id: Option<String>,      // Telegram group ID
     /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
     /// Require explicit @mention (or reply-to-bot) for inbound messages.
@@ -1659,7 +1659,7 @@ pub(super) struct AdapterValidationState {
 pub(super) fn is_named_adapter_platform(platform: &str) -> bool {
     matches!(
         platform,
-        "discord" | "slack" | "telegram" | "twitch" | "email"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "signal"
     )
 }
 
@@ -1822,6 +1822,26 @@ pub(super) fn build_adapter_validation_states(
         );
     }
 
+    if let Some(signal) = &messaging.signal {
+        let named_instances = validate_instance_names(
+            "signal",
+            signal
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present =
+            !signal.http_url.trim().is_empty() && !signal.account.trim().is_empty();
+        validate_runtime_keys("signal", default_present, &named_instances)?;
+        states.insert(
+            "signal",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
     Ok(states)
 }
 
@@ -1942,6 +1962,7 @@ pub struct MessagingConfig {
     pub email: Option<EmailConfig>,
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
+    pub signal: Option<SignalConfig>,
 }
 
 #[derive(Clone)]
@@ -2434,4 +2455,103 @@ pub struct WebhookConfig {
     pub port: u16,
     pub bind: String,
     pub auth_token: Option<String>,
+}
+
+/// Signal messaging via signal-cli JSON-RPC daemon.
+///
+/// Connects to a running `signal-cli daemon --http` instance for sending and
+/// receiving Signal messages. Supports both direct messages and group chats.
+#[derive(Clone)]
+pub struct SignalConfig {
+    pub enabled: bool,
+    /// Base URL of the signal-cli JSON-RPC HTTP daemon (e.g. `http://127.0.0.1:8686`).
+    /// May contain embedded credentials which are redacted in debug output.
+    pub http_url: String,
+    /// E.164 phone number of the bot's Signal account (e.g. `+1234567890`).
+    pub account: String,
+    /// Additional named Signal adapter instances.
+    pub instances: Vec<SignalInstanceConfig>,
+    /// Phone numbers or UUIDs allowed to DM the bot. If empty, DMs are ignored.
+    pub dm_allowed_users: Vec<String>,
+    /// Group IDs allowed for this adapter. If empty, all groups are blocked
+    /// (same as `None` in the permission filter — groups are opt-in only).
+    pub group_ids: Vec<String>,
+    /// User IDs allowed to message in Signal groups.
+    pub group_allowed_users: Vec<String>,
+    /// Whether to silently drop story messages (default: true).
+    pub ignore_stories: bool,
+}
+
+/// Per-instance config for a named Signal adapter.
+#[derive(Clone)]
+pub struct SignalInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    /// Base URL of this instance's signal-cli daemon.
+    pub http_url: String,
+    /// E.164 phone number for this instance's Signal account.
+    pub account: String,
+    /// Phone numbers or UUIDs allowed to DM this instance.
+    pub dm_allowed_users: Vec<String>,
+    /// Group IDs allowed for this instance.
+    pub group_ids: Vec<String>,
+    /// User IDs allowed to message in Signal groups for this instance.
+    pub group_allowed_users: Vec<String>,
+    /// Whether this instance drops story messages.
+    pub ignore_stories: bool,
+}
+
+impl std::fmt::Debug for SignalInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignalInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("http_url", &"[REDACTED]")
+            .field("account", &"[REDACTED]")
+            .field("dm_allowed_users", &"[REDACTED]")
+            .field("group_ids", &self.group_ids)
+            .field("group_allowed_users", &"[REDACTED]")
+            .field("ignore_stories", &self.ignore_stories)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for SignalConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SignalConfig")
+            .field("enabled", &self.enabled)
+            .field("http_url", &"[REDACTED]")
+            .field("account", &"[REDACTED]")
+            .field("instances", &self.instances)
+            .field("dm_allowed_users", &"[REDACTED]")
+            .field("group_ids", &self.group_ids)
+            .field("group_allowed_users", &"[REDACTED]")
+            .field("ignore_stories", &self.ignore_stories)
+            .finish()
+    }
+}
+
+impl SystemSecrets for SignalConfig {
+    fn section() -> &'static str {
+        "signal"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "http_url",
+                secret_name: "SIGNAL_HTTP_URL",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "account",
+                secret_name: "SIGNAL_ACCOUNT",
+                instance_pattern: None,
+            },
+        ]
+    }
 }
