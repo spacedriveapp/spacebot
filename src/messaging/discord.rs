@@ -582,6 +582,7 @@ impl Messaging for DiscordAdapter {
                     author,
                     content: resolved_content,
                     is_bot,
+                    timestamp: Some(*message.timestamp),
                 }
             })
             .collect();

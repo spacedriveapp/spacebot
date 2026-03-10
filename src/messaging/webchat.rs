@@ -142,6 +142,7 @@ impl Messaging for WebChatAdapter {
                     author,
                     content: message.content,
                     is_bot,
+                    timestamp: Some(message.created_at),
                 }
             })
             .collect::<Vec<_>>();

@@ -473,6 +473,16 @@ impl Scheduler {
         jobs.contains_key(job_id)
     }
 
+    /// Return the number of enabled (active) cron jobs.
+    pub async fn job_count(&self) -> usize {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.enabled)
+            .count()
+    }
+
     /// Trigger a cron job immediately, outside the timer loop.
     pub async fn trigger_now(&self, job_id: &str) -> Result<()> {
         let job = {
@@ -851,6 +861,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         event_rx,
         context.screenshot_dir.clone(),
         context.logs_dir.clone(),
+        None, // cron channels don't capture prompt snapshots
     );
 
     // Spawn the channel's event loop

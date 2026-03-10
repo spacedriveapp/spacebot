@@ -63,6 +63,8 @@ pub struct RuntimeConfig {
     pub cron_scheduler: ArcSwap<Option<Arc<crate::cron::Scheduler>>>,
     /// Settings store for agent-specific configuration.
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
+    /// Prompt snapshot store for debugging prompt construction.
+    pub prompt_snapshots: ArcSwap<Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>>,
     /// Tracks whether listen_only_mode is explicitly configured via agent/env.
     /// When set, channel-local persisted values must not override it.
     pub channel_listen_only_explicit: ArcSwap<Option<bool>>,
@@ -134,6 +136,7 @@ impl RuntimeConfig {
             cron_store: ArcSwap::from_pointee(None),
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
+            prompt_snapshots: ArcSwap::from_pointee(None),
             channel_listen_only_explicit: ArcSwap::from_pointee(None),
             secrets: ArcSwap::from_pointee(None),
             sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),

@@ -1254,10 +1254,12 @@ impl Messaging for SlackAdapter {
                 } else {
                     "unknown".to_string()
                 };
+                let timestamp = parse_slack_history_timestamp(&msg.origin.ts.0);
                 HistoryMessage {
                     author,
                     content: msg.content.text.clone().unwrap_or_default(),
                     is_bot,
+                    timestamp,
                 }
             })
             .collect();
@@ -1317,6 +1319,37 @@ fn extract_thread_ts(message: &InboundMessage) -> Option<SlackTs> {
         .get("slack_thread_ts")
         .and_then(|v| v.as_str())
         .map(|s| SlackTs(s.to_string()))
+}
+
+fn parse_slack_history_timestamp(raw_timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let Some(seconds_part) = raw_timestamp.split('.').next() else {
+        tracing::warn!(timestamp = %raw_timestamp, "slack history timestamp missing seconds");
+        return None;
+    };
+
+    let seconds = match seconds_part.parse::<i64>() {
+        Ok(seconds) => seconds,
+        Err(error) => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                %error,
+                "failed to parse slack history timestamp"
+            );
+            return None;
+        }
+    };
+
+    match chrono::DateTime::from_timestamp(seconds, 0) {
+        Some(timestamp) => Some(timestamp),
+        None => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                seconds,
+                "slack history timestamp out of range"
+            );
+            None
+        }
+    }
 }
 
 /// Build a `SlackMessageContent` using a Markdown block with plain text fallback.

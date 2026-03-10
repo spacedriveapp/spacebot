@@ -13,6 +13,7 @@ pub mod ingestion;
 #[cfg(test)]
 mod invariant_harness;
 pub mod process_control;
+pub mod prompt_snapshot;
 pub mod status;
 pub mod worker;
 

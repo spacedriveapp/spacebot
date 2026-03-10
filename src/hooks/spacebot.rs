@@ -827,12 +827,22 @@ where
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Channel turns should end immediately after a successful reply tool call.
-        // This avoids extra post-reply LLM iterations that add latency, cost, and
-        // noisy logs when providers return empty trailing responses.
-        if self.process_type == ProcessType::Channel && tool_name == "reply" {
+        // Channel turns should end immediately after a successful reply or skip
+        // tool call. This avoids extra post-reply LLM iterations that add latency,
+        // cost, and noisy logs when providers return empty trailing responses.
+        // For skip, terminating is critical: without it the model receives the tool
+        // result and almost always generates narration like "The skip was successful"
+        // which either leaks to the user (retrigger path) or wastes tokens.
+        if !is_tool_error
+            && self.process_type == ProcessType::Channel
+            && (tool_name == "reply" || tool_name == "skip")
+        {
             return HookAction::Terminate {
-                reason: "reply delivered".into(),
+                reason: if tool_name == "reply" {
+                    "reply delivered".into()
+                } else {
+                    "skip".into()
+                },
             };
         }
 

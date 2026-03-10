@@ -841,6 +841,16 @@ pub struct CortexConfig {
     pub bulletin_max_words: usize,
     /// Max LLM turns for bulletin generation.
     pub bulletin_max_turns: usize,
+    /// Interval in seconds between memory maintenance passes.
+    pub maintenance_interval_secs: u64,
+    /// Per-day decay applied to memory importance during maintenance.
+    pub maintenance_decay_rate: f32,
+    /// Minimum importance score for non-identity memories to avoid pruning.
+    pub maintenance_prune_threshold: f32,
+    /// Minimum age in days before a memory becomes prune-eligible.
+    pub maintenance_min_age_days: i64,
+    /// Similarity threshold above which memories are merged as near-duplicates.
+    pub maintenance_merge_similarity_threshold: f32,
     /// Interval in seconds between association passes.
     pub association_interval_secs: u64,
     /// Minimum cosine similarity to create a RelatedTo edge.
@@ -863,12 +873,55 @@ impl Default for CortexConfig {
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,
             bulletin_max_turns: 15,
+            maintenance_interval_secs: 3600,
+            maintenance_decay_rate: 0.05,
+            maintenance_prune_threshold: 0.1,
+            maintenance_min_age_days: 30,
+            maintenance_merge_similarity_threshold: 0.95,
             association_interval_secs: 300,
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
         }
     }
+}
+
+impl CortexConfig {
+    /// Validate maintenance tuning bounds used by pruning/merge logic.
+    pub fn validate_maintenance_bounds(&self) -> Result<()> {
+        validate_unit_interval_f32("maintenance_decay_rate", self.maintenance_decay_rate)?;
+        validate_unit_interval_f32(
+            "maintenance_prune_threshold",
+            self.maintenance_prune_threshold,
+        )?;
+        validate_unit_interval_f32(
+            "maintenance_merge_similarity_threshold",
+            self.maintenance_merge_similarity_threshold,
+        )?;
+        if self.maintenance_min_age_days < 0 {
+            return Err(ConfigError::Invalid(format!(
+                "maintenance_min_age_days must be >= 0, got {}",
+                self.maintenance_min_age_days
+            ))
+            .into());
+        }
+        if self.maintenance_interval_secs == 0 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_unit_interval_f32(name: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(ConfigError::Invalid(format!(
+            "{name} must be finite and between 0.0 and 1.0, got {value}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Warmup configuration.
@@ -1428,8 +1481,9 @@ impl Binding {
         self.adapter.is_none()
     }
 
-    /// Check if this binding matches an inbound message.
-    fn matches(&self, message: &crate::InboundMessage) -> bool {
+    /// Check if this binding matches on routing criteria (platform, guild,
+    /// channel IDs, adapter, etc.) — everything *except* `require_mention`.
+    fn matches_route(&self, message: &crate::InboundMessage) -> bool {
         if self.channel != message.source {
             return false;
         }
@@ -1510,24 +1564,6 @@ impl Binding {
             }
         }
 
-        if self.channel == "discord" && self.require_mention {
-            let is_guild_message = message
-                .metadata
-                .get("discord_guild_id")
-                .and_then(|v| v.as_u64())
-                .is_some();
-            if is_guild_message {
-                let mentions_or_replies_to_bot = message
-                    .metadata
-                    .get("discord_mentions_or_replies_to_bot")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                if !mentions_or_replies_to_bot {
-                    return false;
-                }
-            }
-        }
-
         if let Some(chat_id) = &self.chat_id {
             let message_chat = message.metadata.get("telegram_chat_id").and_then(|value| {
                 value
@@ -1541,6 +1577,57 @@ impl Binding {
         }
 
         true
+    }
+
+    /// Check whether a message that already matched on routing criteria also
+    /// passes the `require_mention` filter. Returns `true` when
+    /// `require_mention` is disabled or the message includes a mention/reply.
+    ///
+    /// Works for all platforms by checking the platform-specific
+    /// `*_mentions_or_replies_to_bot` metadata key that every adapter sets.
+    /// DMs are always allowed through (they are inherently directed at the bot).
+    fn passes_require_mention(&self, message: &crate::InboundMessage) -> bool {
+        if !self.require_mention {
+            return true;
+        }
+
+        // DMs are inherently directed at the bot — always pass.
+        let is_dm = match message.source.as_str() {
+            "discord" => message
+                .metadata
+                .get("discord_guild_id")
+                .and_then(|v| v.as_u64())
+                .is_none(),
+            "telegram" => {
+                message
+                    .metadata
+                    .get("telegram_chat_type")
+                    .and_then(|v| v.as_str())
+                    == Some("private")
+            }
+            _ => false,
+        };
+        if is_dm {
+            return true;
+        }
+
+        // Each adapter sets a `<platform>_mentions_or_replies_to_bot` metadata
+        // key. Check the one that corresponds to the message source.
+        let mention_key = match message.source.as_str() {
+            "discord" => "discord_mentions_or_replies_to_bot",
+            "slack" => "slack_mentions_or_replies_to_bot",
+            "twitch" => "twitch_mentions_or_replies_to_bot",
+            "telegram" => "telegram_mentions_or_replies_to_bot",
+            // Unknown platforms: if require_mention is set, default to
+            // requiring a mention (safe default).
+            _ => return false,
+        };
+
+        message
+            .metadata
+            .get(mention_key)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
     }
 }
 
@@ -1814,19 +1901,32 @@ fn validate_runtime_keys(
 
 /// Resolve which agent should handle an inbound message.
 ///
-/// Checks bindings in order. First match wins. Falls back to the default
-/// agent if no binding matches.
+/// Checks bindings in order. First routing match wins. Falls back to the
+/// default agent if no binding matches on routing criteria.
+///
+/// Returns `None` when a binding matched on routing but the message was
+/// suppressed by `require_mention` — the caller should drop the message.
 pub fn resolve_agent_for_message(
     bindings: &[Binding],
     message: &crate::InboundMessage,
     default_agent_id: &str,
-) -> crate::AgentId {
+) -> Option<crate::AgentId> {
     for binding in bindings {
-        if binding.matches(message) {
-            return std::sync::Arc::from(binding.agent_id.as_str());
+        if binding.matches_route(message) {
+            if binding.passes_require_mention(message) {
+                return Some(std::sync::Arc::from(binding.agent_id.as_str()));
+            }
+            // Binding owns this message but require_mention blocked it.
+            // Drop instead of falling through to the default agent.
+            tracing::debug!(
+                agent_id = %binding.agent_id,
+                source = %message.source,
+                "message suppressed by require_mention"
+            );
+            return None;
         }
     }
-    std::sync::Arc::from(default_agent_id)
+    Some(std::sync::Arc::from(default_agent_id))
 }
 
 // ---------------------------------------------------------------------------

@@ -149,10 +149,6 @@ impl PromptEngine {
             crate::prompts::text::get("fragments/system/tool_syntax_correction"),
         )?;
         env.add_template(
-            "fragments/system/worker_time_context",
-            crate::prompts::text::get("fragments/system/worker_time_context"),
-        )?;
-        env.add_template(
             "fragments/coalesce_hint",
             crate::prompts::text::get("fragments/coalesce_hint"),
         )?;
@@ -262,6 +258,7 @@ impl PromptEngine {
         sandbox_write_allowlist: Vec<String>,
         tool_secret_names: &[String],
         browser_persist_session: bool,
+        status_text: Option<String>,
     ) -> Result<String> {
         self.render(
             "worker",
@@ -274,6 +271,7 @@ impl PromptEngine {
                 sandbox_write_allowlist => sandbox_write_allowlist,
                 tool_secret_names => tool_secret_names,
                 browser_persist_session => browser_persist_session,
+                status_text => status_text,
             },
         )
     }
@@ -328,21 +326,6 @@ impl PromptEngine {
     /// Correction message when the LLM outputs tool call syntax as plain text.
     pub fn render_system_tool_syntax_correction(&self) -> Result<String> {
         self.render_static("fragments/system/tool_syntax_correction")
-    }
-
-    /// Render worker task time-context preamble.
-    pub fn render_system_worker_time_context(
-        &self,
-        current_local_datetime: &str,
-        current_utc_datetime: &str,
-    ) -> Result<String> {
-        self.render(
-            "fragments/system/worker_time_context",
-            context! {
-                current_local_datetime => current_local_datetime,
-                current_utc_datetime => current_utc_datetime,
-            },
-        )
     }
 
     /// Convenience method for rendering truncation marker.
@@ -479,6 +462,7 @@ impl PromptEngine {
             None,
             None,
             None,
+            None,
         )
     }
 
@@ -584,6 +568,7 @@ impl PromptEngine {
         org_context: Option<String>,
         adapter_prompt: Option<String>,
         project_context: Option<String>,
+        backfill_transcript: Option<String>,
     ) -> Result<String> {
         self.render(
             "channel",
@@ -600,6 +585,7 @@ impl PromptEngine {
                 org_context => org_context,
                 adapter_prompt => adapter_prompt,
                 project_context => project_context,
+                backfill_transcript => backfill_transcript,
             },
         )
     }

@@ -142,8 +142,17 @@ fn resolve_close_policy(
 }
 
 impl CortexConfig {
-    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> CortexConfig {
-        CortexConfig {
+    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> Result<CortexConfig> {
+        let maintenance_interval_secs = overrides
+            .maintenance_interval_secs
+            .unwrap_or(defaults.maintenance_interval_secs);
+        if maintenance_interval_secs < 1 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+
+        let config = CortexConfig {
             tick_interval_secs: overrides
                 .tick_interval_secs
                 .unwrap_or(defaults.tick_interval_secs),
@@ -171,6 +180,19 @@ impl CortexConfig {
             bulletin_max_turns: overrides
                 .bulletin_max_turns
                 .unwrap_or(defaults.bulletin_max_turns),
+            maintenance_interval_secs,
+            maintenance_decay_rate: overrides
+                .maintenance_decay_rate
+                .unwrap_or(defaults.maintenance_decay_rate),
+            maintenance_prune_threshold: overrides
+                .maintenance_prune_threshold
+                .unwrap_or(defaults.maintenance_prune_threshold),
+            maintenance_min_age_days: overrides
+                .maintenance_min_age_days
+                .unwrap_or(defaults.maintenance_min_age_days),
+            maintenance_merge_similarity_threshold: overrides
+                .maintenance_merge_similarity_threshold
+                .unwrap_or(defaults.maintenance_merge_similarity_threshold),
             association_interval_secs: overrides
                 .association_interval_secs
                 .unwrap_or(defaults.association_interval_secs),
@@ -183,7 +205,9 @@ impl CortexConfig {
             association_max_per_pass: overrides
                 .association_max_per_pass
                 .unwrap_or(defaults.association_max_per_pass),
-        }
+        };
+        config.validate_maintenance_bounds()?;
+        Ok(config)
     }
 }
 
@@ -1418,6 +1442,7 @@ impl Config {
                 .defaults
                 .cortex
                 .map(|c| CortexConfig::resolve(c, base_defaults.cortex))
+                .transpose()?
                 .unwrap_or(base_defaults.cortex),
             warmup: toml
                 .defaults
@@ -1634,7 +1659,10 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
-                    cortex: a.cortex.map(|c| CortexConfig::resolve(c, defaults.cortex)),
+                    cortex: a
+                        .cortex
+                        .map(|c| CortexConfig::resolve(c, defaults.cortex))
+                        .transpose()?,
                     warmup: a.warmup.map(|w| WarmupConfig {
                         enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
                         eager_embedding_load: w

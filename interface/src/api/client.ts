@@ -255,6 +255,45 @@ export interface StatusBlockSnapshot {
 /** channel_id -> StatusBlockSnapshot */
 export type ChannelStatusResponse = Record<string, StatusBlockSnapshot>;
 
+export interface PromptInspectResponse {
+	channel_id: string;
+	system_prompt: string;
+	total_chars: number;
+	history_length: number;
+	history: unknown[];
+	capture_enabled: boolean;
+	/** Present when the channel is not active */
+	error?: string;
+	message?: string;
+}
+
+export interface PromptSnapshotSummary {
+	timestamp_ms: number;
+	user_message: string;
+	system_prompt_chars: number;
+	history_length: number;
+}
+
+export interface PromptSnapshotListResponse {
+	channel_id: string;
+	snapshots: PromptSnapshotSummary[];
+}
+
+export interface PromptSnapshot {
+	channel_id: string;
+	timestamp_ms: number;
+	user_message: string;
+	system_prompt: string;
+	system_prompt_chars: number;
+	history: unknown;
+	history_length: number;
+}
+
+export interface PromptCaptureResponse {
+	channel_id: string;
+	capture_enabled: boolean;
+}
+
 // --- Workers API types ---
 
 export type ActionContent =
@@ -1634,6 +1673,25 @@ export const api = {
 		return fetchJson<MessagesResponse>(`/channels/messages?${params}`);
 	},
 	channelStatus: () => fetchJson<ChannelStatusResponse>("/channels/status"),
+	inspectPrompt: (channelId: string) =>
+		fetchJson<PromptInspectResponse>(`/channels/inspect?channel_id=${encodeURIComponent(channelId)}`),
+	setPromptCapture: async (channelId: string, enabled: boolean) => {
+		const response = await fetch(`${API_BASE}/channels/inspect/capture`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ channel_id: channelId, enabled }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<PromptCaptureResponse>;
+	},
+	listPromptSnapshots: (channelId: string, limit = 50) =>
+		fetchJson<PromptSnapshotListResponse>(
+			`/channels/inspect/snapshots?channel_id=${encodeURIComponent(channelId)}&limit=${limit}`,
+		),
+	getPromptSnapshot: (channelId: string, timestampMs: number) =>
+		fetchJson<PromptSnapshot>(
+			`/channels/inspect/snapshot?channel_id=${encodeURIComponent(channelId)}&timestamp_ms=${timestampMs}`,
+		),
 	workersList: (agentId: string, params: { limit?: number; offset?: number; status?: string } = {}) => {
 		const search = new URLSearchParams({ agent_id: agentId });
 		if (params.limit) search.set("limit", String(params.limit));
