@@ -36,6 +36,8 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 use tokio::sync::{RwLock, broadcast};
 
+const WARM_RECALL_MEMORY_LIMIT: usize = 50;
+
 fn update_warmup_status<F>(deps: &AgentDeps, update: F)
 where
     F: FnOnce(&mut crate::config::WarmupStatus),
@@ -1528,6 +1530,19 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
         errors.push("bulletin generation failed".to_string());
     }
 
+    let warm_recall_count = match refresh_warm_recall_memories(deps).await {
+        Ok(count) => Some(count),
+        Err(error) => {
+            let refresh_error = format!("warm recall refresh failed: {error}");
+            tracing::warn!(
+                error = %refresh_error,
+                "warm recall refresh failed during warmup, keeping previous cache"
+            );
+            errors.push(refresh_error);
+            None
+        }
+    };
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     if errors.is_empty() {
         update_warmup_status(deps, |status| {
@@ -1544,6 +1559,7 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             Some(serde_json::json!({
                 "reason": reason,
                 "embedding_ready": embedding_ready,
+                "warm_recall_count": warm_recall_count,
                 "forced": force,
             })),
         );
@@ -1562,10 +1578,74 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
             Some(serde_json::json!({
                 "reason": reason,
                 "errors": errors,
+                "warm_recall_count": warm_recall_count,
                 "forced": force,
             })),
         );
     }
+}
+
+async fn refresh_warm_recall_memories(deps: &AgentDeps) -> Result<usize> {
+    let start_epoch = deps
+        .runtime_config
+        .warm_recall_cache_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    let config = SearchConfig {
+        mode: SearchMode::Important,
+        sort_by: SearchSort::Importance,
+        max_results: WARM_RECALL_MEMORY_LIMIT,
+        max_results_per_source: WARM_RECALL_MEMORY_LIMIT,
+        ..Default::default()
+    };
+
+    let results = deps.memory_search.search("", &config).await?;
+    let memories = results
+        .into_iter()
+        .map(|result| result.memory)
+        .collect::<Vec<_>>();
+
+    Ok(apply_warm_recall_refresh(
+        deps.runtime_config.as_ref(),
+        start_epoch,
+        memories,
+        chrono::Utc::now().timestamp_millis(),
+    )
+    .await)
+}
+
+async fn apply_warm_recall_refresh(
+    runtime_config: &crate::config::RuntimeConfig,
+    start_epoch: u64,
+    memories: Vec<crate::memory::types::Memory>,
+    refreshed_at_unix_ms: i64,
+) -> usize {
+    let count = memories.len();
+    let _warm_recall_cache_guard = runtime_config.warm_recall_cache_lock.lock().await;
+    let current_epoch = runtime_config
+        .warm_recall_cache_epoch
+        .load(std::sync::atomic::Ordering::SeqCst);
+    if current_epoch != start_epoch {
+        let retained_count = runtime_config.warm_recall_memories.load().len();
+        tracing::debug!(
+            start_epoch,
+            current_epoch,
+            retained_count,
+            "skipping warm recall refresh apply due to concurrent cache mutation"
+        );
+        return retained_count;
+    }
+
+    runtime_config
+        .warm_recall_memories
+        .store(Arc::new(memories));
+    runtime_config
+        .warm_recall_refreshed_at_unix_ms
+        .store(Arc::new(Some(refreshed_at_unix_ms)));
+    runtime_config
+        .warm_recall_cache_epoch
+        .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+
+    count
 }
 
 /// Trigger a forced warmup pass in the background from a dispatch path.
@@ -3253,9 +3333,10 @@ mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
         BulletinRefreshOutcome, CortexReceiverOutcome, HealthRuntimeState, ReceiverClosedBehavior,
-        Signal, WorkerTracker, apply_cancelled_warmup_status, build_kill_targets,
-        claim_detached_completion, detached_timeout_transition, handle_cortex_receiver_result,
-        has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
+        Signal, WARM_RECALL_MEMORY_LIMIT, WorkerTracker, apply_cancelled_warmup_status,
+        apply_warm_recall_refresh, build_kill_targets, claim_detached_completion,
+        detached_timeout_transition, handle_cortex_receiver_result, has_completed_initial_warmup,
+        is_cancelled_control_result, is_terminal_control_result,
         maybe_close_bulletin_refresh_circuit, maybe_generate_bulletin_under_lock,
         parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
         should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
@@ -3263,16 +3344,65 @@ mod tests {
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
+    use crate::config::{Config, RuntimeConfig};
+    use crate::identity::Identity;
     use crate::memory::MemoryType;
+    use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
+    use crate::memory::{EmbeddingModel, EmbeddingTable, Memory, MemorySearch, MemoryStore};
+    use crate::prompts::PromptEngine;
+    use crate::skills::SkillSet;
     use crate::tasks::TaskStatus;
     use crate::tasks::TaskStore;
+    use crate::tools::{MemoryDeleteArgs, MemoryDeleteTool};
     use futures::FutureExt;
     use futures::future;
+    use rig::tool::Tool as _;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::collections::VecDeque;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicU8, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    fn test_runtime_config(instance_dir: &std::path::Path) -> Arc<RuntimeConfig> {
+        let config = Config::load_from_env(instance_dir).expect("failed to build config");
+        let resolved = config
+            .resolve_agents()
+            .into_iter()
+            .next()
+            .expect("missing resolved agent config");
+        let prompts = PromptEngine::new("en").expect("failed to build prompt engine");
+
+        Arc::new(RuntimeConfig::new(
+            instance_dir,
+            &resolved,
+            &config.defaults,
+            prompts,
+            Identity::default(),
+            SkillSet::default(),
+        ))
+    }
+
+    async fn test_memory_search() -> Arc<MemorySearch> {
+        let store = MemoryStore::connect_in_memory().await;
+        let lance_dir = tempfile::tempdir().expect("failed to create lance temp dir");
+        let lance_conn = lancedb::connect(
+            lance_dir
+                .path()
+                .to_str()
+                .expect("temp path should be valid UTF-8"),
+        )
+        .execute()
+        .await
+        .expect("failed to connect lancedb");
+        let embedding_table = EmbeddingTable::open_or_create(&lance_conn)
+            .await
+            .expect("failed to open embedding table");
+        let embedding_model = Arc::new(
+            EmbeddingModel::new(lance_dir.path()).expect("failed to init embedding model"),
+        );
+
+        Arc::new(MemorySearch::new(store, embedding_table, embedding_model))
+    }
 
     #[test]
     fn run_warmup_once_semantics_skip_when_disabled_without_force() {
@@ -3465,6 +3595,187 @@ mod tests {
         let result = task.await.expect("task should join");
         assert_eq!(result, BulletinRefreshOutcome::SkippedFresh);
         assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn apply_warm_recall_refresh_skips_stale_results_after_concurrent_epoch_change() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let runtime_config = test_runtime_config(temp_dir.path());
+        let retained = Memory::new("retained cache entry", MemoryType::Fact).with_importance(0.9);
+
+        runtime_config
+            .warm_recall_memories
+            .store(Arc::new(vec![retained.clone()]));
+        runtime_config
+            .warm_recall_refreshed_at_unix_ms
+            .store(Arc::new(Some(111)));
+        runtime_config
+            .warm_recall_cache_epoch
+            .fetch_add(1, Ordering::SeqCst);
+
+        let applied_count = apply_warm_recall_refresh(
+            runtime_config.as_ref(),
+            0,
+            vec![Memory::new("stale refresh result", MemoryType::Fact)],
+            222,
+        )
+        .await;
+
+        assert_eq!(applied_count, 1);
+        assert_eq!(
+            runtime_config.warm_recall_memories.load().as_ref(),
+            &vec![retained]
+        );
+        assert_eq!(
+            *runtime_config
+                .warm_recall_refreshed_at_unix_ms
+                .load()
+                .as_ref(),
+            Some(111)
+        );
+        assert_eq!(
+            runtime_config
+                .warm_recall_cache_epoch
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_warm_recall_refresh_overwrites_cache_when_epoch_is_stable() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let runtime_config = test_runtime_config(temp_dir.path());
+        let fresh = Memory::new("fresh refresh result", MemoryType::Decision).with_importance(0.8);
+
+        let applied_count =
+            apply_warm_recall_refresh(runtime_config.as_ref(), 0, vec![fresh.clone()], 333).await;
+
+        assert_eq!(applied_count, 1);
+        assert_eq!(
+            runtime_config.warm_recall_memories.load().as_ref(),
+            &vec![fresh]
+        );
+        assert_eq!(
+            *runtime_config
+                .warm_recall_refreshed_at_unix_ms
+                .load()
+                .as_ref(),
+            Some(333)
+        );
+        assert_eq!(
+            runtime_config
+                .warm_recall_cache_epoch
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_warm_refresh_does_not_reintroduce_memory_forgotten_via_tool() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let runtime_config = test_runtime_config(temp_dir.path());
+        let memory_search = test_memory_search().await;
+
+        let forgotten_candidate =
+            Memory::new("highest importance memory to forget", MemoryType::Decision)
+                .with_importance(0.95);
+        let retained_memory = Memory::new("second memory retained in warm cache", MemoryType::Fact)
+            .with_importance(0.85);
+
+        memory_search
+            .store()
+            .save(&forgotten_candidate)
+            .await
+            .expect("failed to save forget candidate");
+        memory_search
+            .store()
+            .save(&retained_memory)
+            .await
+            .expect("failed to save retained memory");
+
+        let stale_snapshot = memory_search
+            .search(
+                "",
+                &SearchConfig {
+                    mode: SearchMode::Important,
+                    sort_by: SearchSort::Importance,
+                    max_results: WARM_RECALL_MEMORY_LIMIT,
+                    max_results_per_source: WARM_RECALL_MEMORY_LIMIT,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("failed to build warm refresh snapshot")
+            .into_iter()
+            .map(|result| result.memory)
+            .collect::<Vec<_>>();
+        assert!(
+            stale_snapshot
+                .iter()
+                .any(|memory| memory.id == forgotten_candidate.id),
+            "sanity check: stale snapshot should include forget candidate"
+        );
+
+        runtime_config
+            .warm_recall_memories
+            .store(Arc::new(stale_snapshot.clone()));
+        runtime_config
+            .warm_recall_refreshed_at_unix_ms
+            .store(Arc::new(Some(111)));
+
+        let start_epoch = runtime_config
+            .warm_recall_cache_epoch
+            .load(Ordering::SeqCst);
+        let delete_tool =
+            MemoryDeleteTool::with_runtime(Arc::clone(&memory_search), Arc::clone(&runtime_config));
+        let delete_result = delete_tool
+            .call(MemoryDeleteArgs {
+                memory_id: forgotten_candidate.id.clone(),
+                reason: Some("integration test".to_string()),
+            })
+            .await
+            .expect("memory delete should succeed");
+        assert!(
+            delete_result.forgotten,
+            "tool should forget the target memory"
+        );
+
+        let applied_count =
+            apply_warm_recall_refresh(runtime_config.as_ref(), start_epoch, stale_snapshot, 222)
+                .await;
+        assert_eq!(
+            applied_count, 1,
+            "stale apply should report retained cache size after delete/evict"
+        );
+
+        let warm_cache = runtime_config.warm_recall_memories.load();
+        assert_eq!(warm_cache.len(), 1);
+        assert_eq!(warm_cache[0].id, retained_memory.id);
+        assert_eq!(
+            *runtime_config
+                .warm_recall_refreshed_at_unix_ms
+                .load()
+                .as_ref(),
+            Some(111),
+            "stale refresh must not overwrite the retained-cache timestamp"
+        );
+        assert_eq!(
+            runtime_config
+                .warm_recall_cache_epoch
+                .load(Ordering::SeqCst),
+            1,
+            "delete/evict should be the only cache mutation that advanced the epoch"
+        );
+        assert!(
+            memory_search
+                .store()
+                .load(&forgotten_candidate.id)
+                .await
+                .expect("memory load should succeed")
+                .expect("forgotten candidate should still exist in store")
+                .forgotten,
+            "store record should remain forgotten after stale refresh apply"
+        );
     }
 
     #[test]
