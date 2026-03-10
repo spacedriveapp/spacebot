@@ -95,6 +95,11 @@ pub(super) struct InstanceCredentials {
     webhook_bind: Option<String>,
     #[serde(default)]
     webhook_auth_token: Option<String>,
+    // Signal credentials
+    #[serde(default)]
+    signal_http_url: Option<String>,
+    #[serde(default)]
+    signal_account: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -126,6 +131,15 @@ fn normalize_adapter_selector(value: Option<&str>) -> Option<String> {
         .map(str::trim)
         .filter(|candidate| !candidate.is_empty())
         .map(str::to_string)
+}
+
+/// Validate E.164 phone number format: + followed by 7+ digits
+fn is_valid_e164(phone: &str) -> bool {
+    if let Some(digits) = phone.strip_prefix('+') {
+        !digits.is_empty() && digits.len() >= 7 && digits.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
 }
 
 fn binding_count_for(
@@ -1128,7 +1142,7 @@ pub(super) async fn create_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "signal"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1269,6 +1283,62 @@ pub(super) async fn create_messaging_instance(
                         platform_table["auth_token"] = toml_edit::value(token.as_str());
                     }
                 }
+                "signal" => {
+                    // Validate required fields
+                    let http_url = credentials
+                        .signal_http_url
+                        .as_ref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            tracing::warn!("signal: http_url is required");
+                            StatusCode::BAD_REQUEST
+                        })?;
+
+                    let account = credentials
+                        .signal_account
+                        .as_ref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            tracing::warn!("signal: account is required");
+                            StatusCode::BAD_REQUEST
+                        })?;
+
+                    // Validate E.164 format
+                    if !is_valid_e164(account) {
+                        return Ok(Json(MessagingInstanceActionResponse {
+                            success: false,
+                            message: format!(
+                                "Invalid Signal account format: '{}'. Must be E.164 format (+1234567890, minimum 7 digits after +)",
+                                account
+                            ),
+                        }));
+                    }
+
+                    platform_table["http_url"] = toml_edit::value(http_url.as_str());
+                    platform_table["account"] = toml_edit::value(account.as_str());
+
+                    // Auto-add account to dm_allowed_users if not already present
+                    let dm_users: Vec<String> = platform_table
+                        .get("dm_allowed_users")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if !dm_users.contains(account) {
+                        let mut new_dm_users = dm_users;
+                        new_dm_users.push(account.clone());
+                        let mut dm_array = toml_edit::Array::new();
+                        for user in new_dm_users {
+                            dm_array.push(user);
+                        }
+                        platform_table["dm_allowed_users"] = toml_edit::value(dm_array);
+                    }
+                }
                 _ => {}
             }
             platform_table["enabled"] = toml_edit::value(enabled);
@@ -1376,6 +1446,62 @@ pub(super) async fn create_messaging_instance(
                     }
                     if let Some(token) = &credentials.webhook_auth_token {
                         instance_table["auth_token"] = toml_edit::value(token.as_str());
+                    }
+                }
+                "signal" => {
+                    // Validate required fields
+                    let http_url = credentials
+                        .signal_http_url
+                        .as_ref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            tracing::warn!("signal: http_url is required");
+                            StatusCode::BAD_REQUEST
+                        })?;
+
+                    let account = credentials
+                        .signal_account
+                        .as_ref()
+                        .filter(|s| !s.is_empty())
+                        .ok_or_else(|| {
+                            tracing::warn!("signal: account is required");
+                            StatusCode::BAD_REQUEST
+                        })?;
+
+                    // Validate E.164 format
+                    if !is_valid_e164(account) {
+                        return Ok(Json(MessagingInstanceActionResponse {
+                            success: false,
+                            message: format!(
+                                "Invalid Signal account format: '{}'. Must be E.164 format (+1234567890, minimum 7 digits after +)",
+                                account
+                            ),
+                        }));
+                    }
+
+                    instance_table["http_url"] = toml_edit::value(http_url.as_str());
+                    instance_table["account"] = toml_edit::value(account.as_str());
+
+                    // Auto-add account to dm_allowed_users for named instances
+                    let dm_users: Vec<String> = instance_table
+                        .get("dm_allowed_users")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| {
+                            arr.iter()
+                                .filter_map(|v| v.as_str())
+                                .map(|s| s.to_string())
+                                .collect()
+                        })
+                        .unwrap_or_default();
+
+                    if !dm_users.contains(account) {
+                        let mut new_dm_users = dm_users;
+                        new_dm_users.push(account.clone());
+                        let mut dm_array = toml_edit::Array::new();
+                        for user in new_dm_users {
+                            dm_array.push(user);
+                        }
+                        instance_table["dm_allowed_users"] = toml_edit::value(dm_array);
                     }
                 }
                 _ => {}
@@ -1632,4 +1758,41 @@ pub(super) async fn delete_messaging_instance(
         success: true,
         message: format!("{runtime_key} instance deleted"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_e164_valid_numbers() {
+        // Valid E.164 numbers (minimum 7 digits after +)
+        assert!(is_valid_e164("+1234567890"));
+        assert!(is_valid_e164("+1234567")); // Exactly 7 digits
+        assert!(is_valid_e164("+14155552671"));
+        assert!(is_valid_e164("+123456789012345")); // Many digits
+    }
+
+    #[test]
+    fn test_is_valid_e164_invalid_numbers() {
+        // Missing +
+        assert!(!is_valid_e164("1234567890"));
+        
+        // Too short (less than 7 digits)
+        assert!(!is_valid_e164("+123456"));
+        assert!(!is_valid_e164("+123"));
+        
+        // Empty or just +
+        assert!(!is_valid_e164("+"));
+        assert!(!is_valid_e164(""));
+        
+        // Non-digit characters
+        assert!(!is_valid_e164("+1234567890a"));
+        assert!(!is_valid_e164("+123-456-7890"));
+        assert!(!is_valid_e164("+123 456 7890"));
+        
+        // Spaces
+        assert!(!is_valid_e164(" +1234567890"));
+        assert!(!is_valid_e164("+1234567890 "));
+    }
 }
