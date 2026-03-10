@@ -566,6 +566,8 @@ pub(super) struct TomlTelegramConfig {
     pub(super) instances: Vec<TomlTelegramInstanceConfig>,
     #[serde(default)]
     pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default = "default_native_streaming")]
+    pub(super) native_streaming: bool,
 }
 
 #[derive(Deserialize)]
@@ -576,6 +578,8 @@ pub(super) struct TomlTelegramInstanceConfig {
     pub(super) token: Option<String>,
     #[serde(default)]
     pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default = "default_native_streaming")]
+    pub(super) native_streaming: bool,
 }
 
 #[derive(Deserialize)]
@@ -724,6 +728,10 @@ pub(super) fn default_email_max_body_bytes() -> usize {
 
 pub(super) fn default_email_max_attachment_bytes() -> usize {
     10 * 1024 * 1024
+}
+
+pub(super) fn default_native_streaming() -> bool {
+    true
 }
 
 #[derive(Deserialize)]

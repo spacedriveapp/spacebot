@@ -1902,6 +1902,7 @@ impl Config {
                             enabled: instance.enabled && token.is_some(),
                             token: token.unwrap_or_default(),
                             dm_allowed_users: instance.dm_allowed_users,
+                            native_streaming: instance.native_streaming,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -1919,6 +1920,7 @@ impl Config {
                     token: token.unwrap_or_default(),
                     instances,
                     dm_allowed_users: t.dm_allowed_users,
+                    native_streaming: t.native_streaming,
                 })
             }),
             email: toml.messaging.email.and_then(|email| {

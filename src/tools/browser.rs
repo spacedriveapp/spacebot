@@ -530,7 +530,8 @@ fn render_snapshot_node(node: &SnapshotNode, depth: usize, output: &mut String) 
         output.push_str(" \"");
         // Truncate very long names for context efficiency.
         let display_name = if node.name.len() > 200 {
-            format!("{}...", &node.name[..200])
+            let truncated = node.name.floor_char_boundary(200);
+            format!("{}...", &node.name[..truncated])
         } else {
             node.name.clone()
         };

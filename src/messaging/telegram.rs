@@ -15,6 +15,7 @@ use teloxide::types::{
     ParseMode, ReactionType, ReplyParameters, UpdateKind, UserId,
 };
 use teloxide::{ApiError, Bot, RequestError};
+use reqwest::Client;
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock};
@@ -38,6 +39,10 @@ pub struct TelegramAdapter {
     typing_tasks: Arc<RwLock<HashMap<String, JoinHandle<()>>>>,
     /// Shutdown signal for the polling loop.
     shutdown_tx: Arc<RwLock<Option<mpsc::Sender<()>>>>,
+    /// HTTP client for raw Telegram API calls (sendMessageDraft).
+    http_client: Client,
+    /// Bot token for raw API calls.
+    token: String,
 }
 
 /// Tracks an in-progress streaming message edit.
@@ -45,6 +50,10 @@ struct ActiveStream {
     chat_id: ChatId,
     message_id: MessageId,
     last_edit: Instant,
+    /// Draft ID for native streaming (sendMessageDraft API).
+    draft_id: Option<i32>,
+    /// Whether this is a private chat (draft API only works for private chats).
+    is_private: bool,
 }
 
 /// Telegram's per-message character limit.
@@ -55,6 +64,9 @@ const FORMATTED_SPLIT_LENGTH: usize = MAX_MESSAGE_LENGTH / 2;
 
 /// Minimum interval between streaming edits to avoid rate limits.
 const STREAM_EDIT_INTERVAL: std::time::Duration = std::time::Duration::from_millis(1000);
+
+/// Minimum interval between draft updates (100-200ms recommended by Telegram).
+const DRAFT_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(150);
 
 impl TelegramAdapter {
     pub fn new(
@@ -74,7 +86,94 @@ impl TelegramAdapter {
             active_messages: Arc::new(RwLock::new(HashMap::new())),
             typing_tasks: Arc::new(RwLock::new(HashMap::new())),
             shutdown_tx: Arc::new(RwLock::new(None)),
+            http_client: Client::new(),
+            token,
         }
+    }
+
+    /// Send a message draft using Telegram's native streaming API (Bot API 9.5+).
+    ///
+    /// This method uses the `sendMessageDraft` endpoint which provides smooth
+    /// animated text updates in the Telegram client. Only works for private chats.
+    ///
+    /// # Arguments
+    /// * `chat_id` - The target chat ID (must be a private chat)
+    /// * `draft_id` - Unique identifier for this draft (same ID = animated updates)
+    /// * `text` - The text content to display
+    /// * `parse_mode` - Optional parse mode (HTML, Markdown, MarkdownV2)
+    ///
+    /// # Returns
+    /// `true` on success, `false` on failure
+    pub async fn send_message_draft(
+        &self,
+        chat_id: i64,
+        draft_id: i32,
+        text: &str,
+        parse_mode: Option<&str>,
+    ) -> bool {
+        let url = format!(
+            "https://api.telegram.org/bot{}/sendMessageDraft",
+            self.token
+        );
+
+        let mut body = serde_json::json!({
+            "chat_id": chat_id,
+            "draft_id": draft_id,
+            "text": text,
+        });
+
+        if let Some(mode) = parse_mode {
+            body["parse_mode"] = serde_json::Value::String(mode.to_string());
+        }
+
+        match self.http_client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
+        {
+            Ok(response) => {
+                if response.status().is_success() {
+                    true
+                } else {
+                    tracing::debug!(
+                        status = %response.status(),
+                        "sendMessageDraft returned non-success status"
+                    );
+                    false
+                }
+            }
+            Err(error) => {
+                tracing::debug!(%error, "sendMessageDraft request failed");
+                false
+            }
+        }
+    }
+
+    /// Generate a unique draft ID for a streaming session.
+    fn generate_draft_id(&self) -> i32 {
+        // Use timestamp in milliseconds XORed with a random component
+        // Ensure it's non-zero (required by Telegram API)
+        let timestamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i32;
+        // Ensure non-zero by ORing with 1
+        timestamp | 1
+    }
+
+    /// Check if native streaming should be used for this message.
+    /// Returns true if native_streaming is enabled and the chat is private.
+    fn should_use_native_streaming(&self, message: &InboundMessage) -> bool {
+        let permissions = self.permissions.load();
+        if !permissions.native_streaming {
+            return false;
+        }
+        // Check if this is a private chat
+        message.metadata
+            .get("telegram_chat_type")
+            .and_then(|v| v.as_str())
+            .is_some_and(|t| t == "private")
     }
 
     fn extract_chat_id(&self, message: &InboundMessage) -> anyhow::Result<ChatId> {
@@ -428,6 +527,32 @@ impl Messaging for TelegramAdapter {
             OutboundResponse::StreamStart => {
                 self.stop_typing(&message.conversation_id).await;
 
+                let is_private = self.should_use_native_streaming(&message);
+                let chat_id_value = chat_id.0;
+
+                if is_private {
+                    // Use native sendMessageDraft API for private chats
+                    let draft_id = self.generate_draft_id();
+                    
+                    // Send initial draft
+                    if self.send_message_draft(chat_id_value, draft_id, "...", None).await {
+                        self.active_messages.write().await.insert(
+                            message.conversation_id.clone(),
+                            ActiveStream {
+                                chat_id,
+                                message_id: MessageId(0), // Not used for draft streaming
+                                last_edit: Instant::now(),
+                                draft_id: Some(draft_id),
+                                is_private: true,
+                            },
+                        );
+                        return Ok(());
+                    }
+                    // Fall through to edit-based streaming if draft fails
+                    tracing::debug!("sendMessageDraft failed, falling back to edit-based streaming");
+                }
+
+                // Fallback: traditional edit-based streaming
                 let placeholder = self
                     .bot
                     .send_message(chat_id, "...")
@@ -441,13 +566,22 @@ impl Messaging for TelegramAdapter {
                         chat_id,
                         message_id: placeholder.id,
                         last_edit: Instant::now(),
+                        draft_id: None,
+                        is_private: false,
                     },
                 );
             }
             OutboundResponse::StreamChunk(text) => {
                 let mut active = self.active_messages.write().await;
                 if let Some(stream) = active.get_mut(&message.conversation_id) {
-                    if stream.last_edit.elapsed() < STREAM_EDIT_INTERVAL {
+                    // Use faster interval for draft streaming
+                    let min_interval = if stream.is_private && stream.draft_id.is_some() {
+                        DRAFT_UPDATE_INTERVAL
+                    } else {
+                        STREAM_EDIT_INTERVAL
+                    };
+                    
+                    if stream.last_edit.elapsed() < min_interval {
                         return Ok(());
                     }
 
@@ -458,6 +592,20 @@ impl Messaging for TelegramAdapter {
                         text
                     };
 
+                    // Use native draft streaming if available
+                    if stream.is_private {
+                        if let Some(draft_id) = stream.draft_id {
+                            let html = markdown_to_telegram_html(&display_text);
+                            // Try HTML first, fall back to plain text
+                            if !self.send_message_draft(stream.chat_id.0, draft_id, &html, Some("HTML")).await {
+                                self.send_message_draft(stream.chat_id.0, draft_id, &display_text, None).await;
+                            }
+                            stream.last_edit = Instant::now();
+                            return Ok(());
+                        }
+                    }
+
+                    // Fallback: traditional edit-based streaming
                     let html = markdown_to_telegram_html(&display_text);
                     if let Err(html_error) = self
                         .bot
@@ -480,6 +628,18 @@ impl Messaging for TelegramAdapter {
                 }
             }
             OutboundResponse::StreamEnd => {
+                // For draft streaming, we need to send the final message
+                // The draft will be automatically discarded when we send a real message
+                let active = self.active_messages.read().await;
+                if let Some(stream) = active.get(&message.conversation_id) {
+                    if stream.is_private && stream.draft_id.is_some() {
+                        // Draft streaming: the final message will replace the draft
+                        // No explicit cleanup needed - just remove from active
+                        tracing::trace!("Draft streaming ended for conversation {}", message.conversation_id);
+                    }
+                }
+                drop(active);
+                
                 self.active_messages
                     .write()
                     .await
@@ -1016,10 +1176,26 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
             break;
         }
 
+        // Find split point: prefer newline, then space, then hard-cut.
+        // When hard-cutting, ensure we don't split mid-character (UTF-8 safety).
         let split_at = remaining[..max_len]
             .rfind('\n')
             .or_else(|| remaining[..max_len].rfind(' '))
-            .unwrap_or(max_len);
+            .unwrap_or_else(|| {
+                // Hard-cut: find the last valid char boundary before max_len
+                let mut pos = max_len;
+                while pos > 0 && !remaining.is_char_boundary(pos) {
+                    pos -= 1;
+                }
+                pos
+            });
+
+        // Avoid empty chunks if split_at is 0 (e.g., first char is multi-byte)
+        let split_at = if split_at == 0 {
+            remaining.char_indices().nth(1).map(|(i, _)| i).unwrap_or(remaining.len())
+        } else {
+            split_at
+        };
 
         chunks.push(remaining[..split_at].to_string());
         remaining = remaining[split_at..].trim_start();
