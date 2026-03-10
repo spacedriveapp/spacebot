@@ -150,7 +150,7 @@ Importance is influenced by:
 - **Recency** -- recent memories score higher; old memories decay
 - **Graph centrality** -- memories with many strong connections to other memories are more important
 
-A background maintenance process runs periodically to decay old memories, prune memories that have fallen below a threshold, merge near-duplicates, and recompute graph centrality scores.
+A background maintenance process runs periodically to decay old memories, prune memories that have fallen below a threshold, and merge near-duplicates.
 
 Identity and permanent-tagged memories are exempt from decay and pruning. They always survive.
 
@@ -202,6 +202,5 @@ A periodic background process handles graph hygiene:
 - **Decay** -- reduce importance of old, unaccessed memories
 - **Prune** -- delete memories below an importance floor (identity/permanent exempt)
 - **Merge** -- combine near-duplicate memories (>0.95 similarity)
-- **Reindex** -- recompute graph centrality scores
 
-This is a scheduled job managed by the cortex. It runs in workers, doesn't block anything, and keeps the graph healthy over time.
+This is a scheduled job managed by the cortex. It runs as an internal background task in the cortex loop, doesn't block channels, and keeps the graph healthy over time.

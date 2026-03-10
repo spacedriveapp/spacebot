@@ -17,6 +17,7 @@ use crate::agent::worker::Worker;
 use crate::error::Result;
 use crate::hooks::CortexHook;
 use crate::llm::SpacebotModel;
+use crate::memory::maintenance as memory_maintenance;
 use crate::memory::search::{SearchConfig, SearchMode, SearchSort};
 use crate::memory::types::{Association, MemoryType, RelationType};
 use crate::tasks::{TaskStatus, UpdateTaskInput};
@@ -86,6 +87,12 @@ const BULLETIN_REFRESH_FAILURE_BACKOFF_BASE_SECS: u64 = 30;
 const BULLETIN_REFRESH_FAILURE_BACKOFF_MAX_SECS: u64 = 600;
 const BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD: u32 = 3;
 const BULLETIN_REFRESH_CIRCUIT_OPEN_SECS: u64 = 1800;
+const MAINTENANCE_CIRCUIT_OPEN_THRESHOLD: usize = 3;
+const MAINTENANCE_CIRCUIT_OPEN_SECS: u64 = 1800;
+const MAINTENANCE_TASK_TIMEOUT_MIN_SECS: u64 = 300;
+const MAINTENANCE_TASK_TIMEOUT_MAX_SECS: u64 = 3_600;
+const MAINTENANCE_TASK_TIMEOUT_MULTIPLIER: u64 = 6;
+const MAINTENANCE_TASK_CANCEL_GRACE_SECS: u64 = 30;
 
 fn bulletin_refresh_failure_backoff(consecutive_failures: u32) -> Duration {
     let exponent = consecutive_failures.saturating_sub(1).min(5);
@@ -136,6 +143,83 @@ fn maybe_close_bulletin_refresh_circuit(
     *bulletin_refresh_circuit_open = false;
     *next_bulletin_refresh_allowed_at = now;
     true
+}
+
+fn record_maintenance_failure(
+    maintenance_consecutive_failures: &mut usize,
+    maintenance_disabled_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    *maintenance_consecutive_failures = maintenance_consecutive_failures.saturating_add(1);
+    if *maintenance_consecutive_failures >= MAINTENANCE_CIRCUIT_OPEN_THRESHOLD
+        && maintenance_disabled_at.is_none()
+    {
+        *maintenance_disabled_at = Some(now);
+        return true;
+    }
+    false
+}
+
+fn maybe_close_maintenance_circuit(
+    maintenance_consecutive_failures: &mut usize,
+    maintenance_disabled_at: &mut Option<Instant>,
+    now: Instant,
+) -> bool {
+    let Some(disabled_at) = *maintenance_disabled_at else {
+        return false;
+    };
+    if now.duration_since(disabled_at) < Duration::from_secs(MAINTENANCE_CIRCUIT_OPEN_SECS) {
+        return false;
+    }
+
+    *maintenance_consecutive_failures = 0;
+    *maintenance_disabled_at = None;
+    true
+}
+
+fn maintenance_task_timeout(maintenance_interval_secs: u64) -> Duration {
+    let interval_secs = maintenance_interval_secs.max(1);
+    let derived_secs = interval_secs.saturating_mul(MAINTENANCE_TASK_TIMEOUT_MULTIPLIER);
+    let bounded_secs = derived_secs.clamp(
+        MAINTENANCE_TASK_TIMEOUT_MIN_SECS,
+        MAINTENANCE_TASK_TIMEOUT_MAX_SECS,
+    );
+    Duration::from_secs(bounded_secs)
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+enum MaintenanceTimeoutAction {
+    None,
+    RequestCancel,
+    ForceAbort,
+}
+
+fn maintenance_timeout_action(
+    now: Instant,
+    started_at: Instant,
+    timeout: Duration,
+    cancel_requested_at: Option<Instant>,
+    forced_abort_issued: bool,
+) -> MaintenanceTimeoutAction {
+    if now.duration_since(started_at) < timeout {
+        return MaintenanceTimeoutAction::None;
+    }
+
+    if cancel_requested_at.is_none() {
+        return MaintenanceTimeoutAction::RequestCancel;
+    }
+
+    if forced_abort_issued {
+        return MaintenanceTimeoutAction::None;
+    }
+
+    if now.duration_since(cancel_requested_at.unwrap())
+        >= Duration::from_secs(MAINTENANCE_TASK_CANCEL_GRACE_SECS)
+    {
+        return MaintenanceTimeoutAction::ForceAbort;
+    }
+
+    MaintenanceTimeoutAction::None
 }
 
 fn has_completed_initial_warmup(status: &crate::config::WarmupStatus) -> bool {
@@ -1673,9 +1757,19 @@ async fn run_cortex_loop(
     let mut last_lag_warning_memory: Option<Instant> = None;
     let mut memory_event_stream_open = true;
     let mut refresh_task: Option<tokio::task::JoinHandle<BulletinRefreshOutcome>> = None;
+    let mut maintenance_task: Option<
+        tokio::task::JoinHandle<crate::error::Result<memory_maintenance::MaintenanceReport>>,
+    > = None;
+    let mut maintenance_task_started_at: Option<Instant> = None;
+    let mut maintenance_task_cancel_tx: Option<tokio::sync::watch::Sender<bool>> = None;
+    let mut maintenance_task_cancel_requested_at: Option<Instant> = None;
+    let mut maintenance_task_forced_abort_issued = false;
+    let mut maintenance_consecutive_failures: usize = 0;
+    let mut maintenance_disabled_at: Option<Instant> = None;
     let mut bulletin_refresh_failures: u32 = 0;
     let mut bulletin_refresh_circuit_open = false;
     let mut next_bulletin_refresh_allowed_at = Instant::now();
+    let mut last_maintenance = Instant::now();
 
     loop {
         tokio::select! {
@@ -1702,6 +1796,9 @@ async fn run_cortex_loop(
                     }
                     CortexReceiverOutcome::StopLoop => {
                         if let Some(task) = refresh_task.take() {
+                            task.abort();
+                        }
+                        if let Some(task) = maintenance_task.take() {
                             task.abort();
                         }
                         return Ok(());
@@ -1732,6 +1829,9 @@ async fn run_cortex_loop(
                         if let Some(task) = refresh_task.take() {
                             task.abort();
                         }
+                        if let Some(task) = maintenance_task.take() {
+                            task.abort();
+                        }
                         return Ok(());
                     }
                     CortexReceiverOutcome::DisableStream => {
@@ -1743,6 +1843,9 @@ async fn run_cortex_loop(
                 if let Err(error) = cortex.run_health_tick(logger).await {
                     tracing::warn!(%error, "cortex health tick failed");
                 }
+
+                let cortex_config = **cortex.deps.runtime_config.cortex.load();
+                let now = Instant::now();
 
                 if refresh_task
                     .as_ref()
@@ -1812,7 +1915,138 @@ async fn run_cortex_loop(
                     }
                 }
 
-                let cortex_config = **cortex.deps.runtime_config.cortex.load();
+                if maintenance_task
+                    .as_ref()
+                    .is_some_and(tokio::task::JoinHandle::is_finished)
+                    && let Some(task) = maintenance_task.take()
+                {
+                    maintenance_task_started_at = None;
+                    maintenance_task_cancel_tx = None;
+                    maintenance_task_cancel_requested_at = None;
+                    maintenance_task_forced_abort_issued = false;
+                    match task.await {
+                        Ok(Ok(report)) => {
+                            if maintenance_consecutive_failures > 0 || maintenance_disabled_at.is_some()
+                            {
+                                tracing::info!(
+                                    previous_failures = maintenance_consecutive_failures,
+                                    "cortex maintenance circuit reset after successful run"
+                                );
+                            }
+                            maintenance_consecutive_failures = 0;
+                            maintenance_disabled_at = None;
+                            logger.log(
+                                "maintenance_completed",
+                                "Memory maintenance completed",
+                                Some(serde_json::json!({
+                                    "decayed": report.decayed,
+                                    "pruned": report.pruned,
+                                    "merged": report.merged,
+                                })),
+                            );
+                        }
+                        Ok(Err(error)) => {
+                            let now = Instant::now();
+                            let circuit_opened = record_maintenance_failure(
+                                &mut maintenance_consecutive_failures,
+                                &mut maintenance_disabled_at,
+                                now,
+                            );
+                            tracing::warn!(%error, "cortex maintenance failed");
+                            if circuit_opened {
+                                tracing::warn!(
+                                    failures = maintenance_consecutive_failures,
+                                    cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                                    "cortex maintenance circuit opened after consecutive failures"
+                                );
+                            }
+                        }
+                        Err(error) => {
+                            let now = Instant::now();
+                            let circuit_opened = record_maintenance_failure(
+                                &mut maintenance_consecutive_failures,
+                                &mut maintenance_disabled_at,
+                                now,
+                            );
+                            if error.is_cancelled() {
+                                tracing::warn!(
+                                    %error,
+                                    "cortex maintenance task was cancelled before completion"
+                                );
+                            } else if error.is_panic() {
+                                tracing::warn!(%error, "cortex maintenance task panicked");
+                            } else {
+                                tracing::warn!(%error, "cortex maintenance task failed");
+                            }
+                            if circuit_opened {
+                                tracing::warn!(
+                                    failures = maintenance_consecutive_failures,
+                                    cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                                    "cortex maintenance circuit opened after task failures"
+                                );
+                            }
+                        }
+                    }
+                }
+
+                if let Some(started_at) = maintenance_task_started_at {
+                    let timeout = maintenance_task_timeout(cortex_config.maintenance_interval_secs);
+                    let action = maintenance_timeout_action(
+                        now,
+                        started_at,
+                        timeout,
+                        maintenance_task_cancel_requested_at,
+                        maintenance_task_forced_abort_issued,
+                    );
+                    match action {
+                        MaintenanceTimeoutAction::None => {}
+                        MaintenanceTimeoutAction::RequestCancel => {
+                            if let Some(cancel_tx) = maintenance_task_cancel_tx.as_ref() {
+                                cancel_tx.send(true).ok();
+                            }
+                            maintenance_task_cancel_requested_at = Some(now);
+                            tracing::warn!(
+                                elapsed_secs = started_at.elapsed().as_secs(),
+                                timeout_secs = timeout.as_secs(),
+                                "cortex maintenance task timed out; requesting graceful cancel"
+                            );
+                            logger.log(
+                                "maintenance_timeout",
+                                "Memory maintenance timeout requested",
+                                Some(serde_json::json!({
+                                    "elapsed_secs": started_at.elapsed().as_secs(),
+                                    "timeout_secs": timeout.as_secs(),
+                                    "maintenance_interval_secs": cortex_config.maintenance_interval_secs,
+                                    "graceful_cancel": true,
+                                })),
+                            );
+                        }
+                        MaintenanceTimeoutAction::ForceAbort => {
+                            if let Some(task) = maintenance_task.as_ref() {
+                                task.abort();
+                            }
+                            maintenance_task_cancel_requested_at = Some(now);
+                            maintenance_task_forced_abort_issued = true;
+                            tracing::warn!(
+                                elapsed_secs = started_at.elapsed().as_secs(),
+                                timeout_secs = timeout.as_secs(),
+                                grace_secs = MAINTENANCE_TASK_CANCEL_GRACE_SECS,
+                                "cortex maintenance task did not stop gracefully; forcing abort"
+                            );
+                            logger.log(
+                                "maintenance_timeout",
+                                "Memory maintenance forced abort",
+                                Some(serde_json::json!({
+                                    "elapsed_secs": started_at.elapsed().as_secs(),
+                                    "timeout_secs": timeout.as_secs(),
+                                    "maintenance_interval_secs": cortex_config.maintenance_interval_secs,
+                                    "forced_abort": true,
+                                })),
+                            );
+                        }
+                    }
+                }
+
                 let bulletin_interval = Duration::from_secs(cortex_config.bulletin_interval_secs.max(1));
                 let now = Instant::now();
                 if maybe_close_bulletin_refresh_circuit(
@@ -1823,6 +2057,13 @@ async fn run_cortex_loop(
                 ) {
                     tracing::info!("cortex bulletin refresh circuit closed; retries re-enabled");
                 }
+                if maybe_close_maintenance_circuit(
+                    &mut maintenance_consecutive_failures,
+                    &mut maintenance_disabled_at,
+                    now,
+                ) {
+                    tracing::info!("cortex maintenance circuit closed; retries re-enabled");
+                }
                 if refresh_task.is_none()
                     && !bulletin_refresh_circuit_open
                     && last_bulletin_refresh.elapsed() >= bulletin_interval
@@ -1832,6 +2073,55 @@ async fn run_cortex_loop(
                         cortex.deps.clone(),
                         logger.clone(),
                     ));
+                }
+
+                if last_maintenance.elapsed() >= Duration::from_secs(
+                    cortex_config.maintenance_interval_secs.max(1),
+                ) {
+                    if maintenance_task.is_none() && maintenance_disabled_at.is_none() {
+                        maintenance_task_started_at = Some(Instant::now());
+                        let maintenance_config = memory_maintenance::MaintenanceConfig {
+                            prune_threshold: cortex_config.maintenance_prune_threshold,
+                            decay_rate: cortex_config.maintenance_decay_rate,
+                            min_age_days: cortex_config.maintenance_min_age_days,
+                            merge_similarity_threshold: cortex_config
+                                .maintenance_merge_similarity_threshold,
+                        };
+                        let memory_search = cortex.deps.memory_search.clone();
+                        logger.log(
+                            "maintenance_started",
+                            "Memory maintenance started",
+                            Some(serde_json::json!({
+                                "decay_rate": maintenance_config.decay_rate,
+                                "prune_threshold": maintenance_config.prune_threshold,
+                                "min_age_days": maintenance_config.min_age_days,
+                                "merge_similarity_threshold": maintenance_config.merge_similarity_threshold,
+                            })),
+                        );
+                        let (maintenance_cancel_tx, maintenance_cancel_rx) =
+                            tokio::sync::watch::channel(false);
+                        maintenance_task = Some(tokio::spawn(async move {
+                            memory_maintenance::run_maintenance_with_cancel(
+                                memory_search.store(),
+                                memory_search.embedding_table(),
+                                memory_search.embedding_model_arc(),
+                                &maintenance_config,
+                                maintenance_cancel_rx,
+                            )
+                            .await
+                        }));
+                        maintenance_task_cancel_tx = Some(maintenance_cancel_tx);
+                        maintenance_task_cancel_requested_at = None;
+                        maintenance_task_forced_abort_issued = false;
+                    } else if maintenance_disabled_at.is_some() {
+                        tracing::debug!(
+                            failures = maintenance_consecutive_failures,
+                            cooldown_secs = MAINTENANCE_CIRCUIT_OPEN_SECS,
+                            "maintenance scheduling skipped while maintenance circuit is open"
+                        );
+                    }
+
+                    last_maintenance = Instant::now();
                 }
 
                 let updated_tick_interval_secs = cortex_config.tick_interval_secs.max(1);
@@ -3252,14 +3542,16 @@ async fn fetch_memories_for_association(
 mod tests {
     use super::{
         BULLETIN_REFRESH_CIRCUIT_OPEN_SECS, BULLETIN_REFRESH_CIRCUIT_OPEN_THRESHOLD, BranchTracker,
-        BulletinRefreshOutcome, CortexReceiverOutcome, HealthRuntimeState, ReceiverClosedBehavior,
+        BulletinRefreshOutcome, CortexReceiverOutcome, HealthRuntimeState,
+        MAINTENANCE_TASK_CANCEL_GRACE_SECS, MaintenanceTimeoutAction, ReceiverClosedBehavior,
         Signal, WorkerTracker, apply_cancelled_warmup_status, build_kill_targets,
         claim_detached_completion, detached_timeout_transition, handle_cortex_receiver_result,
         has_completed_initial_warmup, is_cancelled_control_result, is_terminal_control_result,
-        maybe_close_bulletin_refresh_circuit, maybe_generate_bulletin_under_lock,
-        parse_structured_success_flag, push_signal_into_buffer, record_bulletin_refresh_failure,
-        should_execute_warmup, should_generate_bulletin_from_bulletin_loop, signal_from_event,
-        summarize_signal_text, take_lagged_control_flag,
+        maintenance_task_timeout, maintenance_timeout_action, maybe_close_bulletin_refresh_circuit,
+        maybe_generate_bulletin_under_lock, parse_structured_success_flag, push_signal_into_buffer,
+        record_bulletin_refresh_failure, should_execute_warmup,
+        should_generate_bulletin_from_bulletin_loop, signal_from_event, summarize_signal_text,
+        take_lagged_control_flag,
     };
     use crate::ProcessEvent;
     use crate::agent::process_control::ControlActionResult;
@@ -3799,6 +4091,58 @@ mod tests {
         assert_eq!(
             parse_structured_success_flag(r#"{"success":"false"}"#),
             None
+        );
+    }
+
+    #[test]
+    fn maintenance_task_timeout_bounds() {
+        assert_eq!(maintenance_task_timeout(1).as_secs(), 300);
+        assert_eq!(maintenance_task_timeout(100).as_secs(), 600);
+        assert_eq!(maintenance_task_timeout(600).as_secs(), 3_600);
+        assert_eq!(maintenance_task_timeout(2_000).as_secs(), 3_600);
+        assert_eq!(maintenance_task_timeout(0).as_secs(), 300);
+    }
+
+    #[test]
+    fn maintenance_timeout_action_progresses_from_none_to_cancel_to_abort() {
+        let now = Instant::now();
+        let started_at = now - Duration::from_secs(1);
+        let timeout = Duration::from_secs(3);
+        let grace = Duration::from_secs(MAINTENANCE_TASK_CANCEL_GRACE_SECS);
+
+        assert_eq!(
+            maintenance_timeout_action(
+                started_at + Duration::from_secs(1),
+                started_at,
+                timeout,
+                None,
+                false
+            ),
+            MaintenanceTimeoutAction::None
+        );
+        assert_eq!(
+            maintenance_timeout_action(started_at + timeout, started_at, timeout, None, false),
+            MaintenanceTimeoutAction::RequestCancel
+        );
+        assert_eq!(
+            maintenance_timeout_action(
+                started_at + timeout + grace,
+                started_at,
+                timeout,
+                Some(started_at + timeout),
+                false
+            ),
+            MaintenanceTimeoutAction::ForceAbort
+        );
+        assert_eq!(
+            maintenance_timeout_action(
+                started_at + timeout + grace + Duration::from_secs(1),
+                started_at,
+                timeout,
+                Some(started_at + timeout),
+                true
+            ),
+            MaintenanceTimeoutAction::None,
         );
     }
 
