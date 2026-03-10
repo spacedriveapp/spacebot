@@ -15,7 +15,7 @@ pub(crate) use load::resolve_env_value;
 pub use load::set_resolve_secrets_store;
 pub use onboarding::run_onboarding;
 pub use permissions::{
-    DiscordPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
+    DiscordPermissions, SignalPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
 };
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
@@ -985,6 +985,9 @@ tick_interval_secs = 45
 detached_worker_timeout_retry_limit = 4
 supervisor_kill_budget_per_tick = 12
 bulletin_max_words = 1200
+maintenance_interval_secs = 1200
+maintenance_prune_threshold = 0.21
+maintenance_min_age_days = 17
 
 [[agents]]
 id = "main"
@@ -993,6 +996,7 @@ id = "main"
 branch_timeout_secs = 77
 supervisor_kill_budget_per_tick = 3
 association_max_per_pass = 55
+maintenance_decay_rate = 0.33
 "#;
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
@@ -1005,13 +1009,93 @@ association_max_per_pass = 55
         );
         assert_eq!(config.defaults.cortex.supervisor_kill_budget_per_tick, 12);
         assert_eq!(config.defaults.cortex.bulletin_max_words, 1200);
+        assert_eq!(config.defaults.cortex.maintenance_interval_secs, 1200);
+        assert_eq!(config.defaults.cortex.maintenance_prune_threshold, 0.21);
+        assert_eq!(config.defaults.cortex.maintenance_min_age_days, 17);
 
         assert_eq!(resolved.cortex.tick_interval_secs, 45);
         assert_eq!(resolved.cortex.branch_timeout_secs, 77);
         assert_eq!(resolved.cortex.detached_worker_timeout_retry_limit, 4);
         assert_eq!(resolved.cortex.supervisor_kill_budget_per_tick, 3);
         assert_eq!(resolved.cortex.bulletin_max_words, 1200);
+        assert_eq!(resolved.cortex.maintenance_interval_secs, 1200);
+        assert_eq!(resolved.cortex.maintenance_decay_rate, 0.33);
+        assert_eq!(resolved.cortex.maintenance_prune_threshold, 0.21);
+        assert_eq!(resolved.cortex.maintenance_min_age_days, 17);
+        assert_eq!(resolved.cortex.maintenance_merge_similarity_threshold, 0.95);
         assert_eq!(resolved.cortex.association_max_per_pass, 55);
+    }
+
+    #[test]
+    fn test_cortex_maintenance_config_rejects_invalid_ranges() {
+        let invalid_threshold = r#"
+[defaults.cortex]
+maintenance_prune_threshold = 1.2
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_threshold).expect("failed to parse invalid threshold TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid maintenance_prune_threshold to be rejected"
+        );
+
+        let invalid_min_age = r#"
+[defaults.cortex]
+maintenance_min_age_days = -3
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_min_age).expect("failed to parse invalid min age TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected negative maintenance_min_age_days to be rejected"
+        );
+
+        let invalid_agent_override = r#"
+[[agents]]
+id = "main"
+
+[agents.cortex]
+maintenance_decay_rate = -0.1
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_agent_override).expect("failed to parse invalid agent TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid agent maintenance_decay_rate to be rejected"
+        );
+
+        let invalid_interval = r#"
+[defaults.cortex]
+maintenance_interval_secs = 0
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_interval).expect("failed to parse invalid interval TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected maintenance_interval_secs = 0 to be rejected"
+        );
+
+        let invalid_merge_similarity_low = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = -0.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_low)
+            .expect("failed to parse invalid low merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected low maintenance_merge_similarity_threshold to be rejected"
+        );
+
+        let invalid_merge_similarity_high = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = 1.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_high)
+            .expect("failed to parse invalid high merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected high maintenance_merge_similarity_threshold to be rejected"
+        );
     }
 
     #[test]
@@ -1455,6 +1539,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![
             Binding {
@@ -1464,6 +1549,7 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -1475,6 +1561,7 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -1497,6 +1584,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1559,6 +1647,7 @@ association_max_per_pass = 55
             }),
             webhook: None,
             twitch: None,
+            signal: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1593,6 +1682,7 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
         };
         // Binding targets default adapter, but no default credentials exist
         let bindings = vec![Binding {

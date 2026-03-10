@@ -351,6 +351,11 @@ pub(super) struct TomlCortexConfig {
     pub(super) bulletin_interval_secs: Option<u64>,
     pub(super) bulletin_max_words: Option<usize>,
     pub(super) bulletin_max_turns: Option<usize>,
+    pub(super) maintenance_interval_secs: Option<u64>,
+    pub(super) maintenance_decay_rate: Option<f32>,
+    pub(super) maintenance_prune_threshold: Option<f32>,
+    pub(super) maintenance_min_age_days: Option<i64>,
+    pub(super) maintenance_merge_similarity_threshold: Option<f32>,
     pub(super) association_interval_secs: Option<u64>,
     pub(super) association_similarity_threshold: Option<f32>,
     pub(super) association_updates_threshold: Option<f32>,
@@ -491,6 +496,7 @@ pub(super) struct TomlMessagingConfig {
     pub(super) email: Option<TomlEmailConfig>,
     pub(super) webhook: Option<TomlWebhookConfig>,
     pub(super) twitch: Option<TomlTwitchConfig>,
+    pub(super) signal: Option<TomlSignalConfig>,
 }
 
 #[derive(Deserialize)]
@@ -680,6 +686,45 @@ pub(super) struct TomlTwitchInstanceConfig {
     #[serde(default)]
     pub(super) channels: Vec<String>,
     pub(super) trigger_prefix: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlSignalConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) http_url: Option<String>,
+    pub(super) account: Option<String>,
+    #[serde(default)]
+    pub(super) instances: Vec<TomlSignalInstanceConfig>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) group_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) group_allowed_users: Vec<String>,
+    #[serde(default = "default_signal_ignore_stories")]
+    pub(super) ignore_stories: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlSignalInstanceConfig {
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) http_url: Option<String>,
+    pub(super) account: Option<String>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default)]
+    pub(super) group_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) group_allowed_users: Vec<String>,
+    #[serde(default = "default_signal_ignore_stories")]
+    pub(super) ignore_stories: bool,
+}
+
+pub(super) fn default_signal_ignore_stories() -> bool {
+    true
 }
 
 pub(super) fn default_webhook_port() -> u16 {

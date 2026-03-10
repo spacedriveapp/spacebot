@@ -136,6 +136,9 @@ pub struct ApiState {
     /// recover the transcript without waiting for the worker to complete.
     /// Keyed by worker_id, cleared on worker completion.
     pub live_worker_transcripts: Arc<RwLock<HashMap<String, Vec<TranscriptStep>>>>,
+    /// Serializes SSH daemon enable/disable transitions to prevent races
+    /// between overlapping toggle requests.
+    pub ssh_mutex: tokio::sync::Mutex<()>,
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
@@ -331,6 +334,7 @@ impl ApiState {
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
             live_worker_transcripts: Arc::new(RwLock::new(HashMap::new())),
+            ssh_mutex: tokio::sync::Mutex::new(()),
         }
     }
 

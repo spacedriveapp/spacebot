@@ -46,8 +46,26 @@ impl MemoryStore {
         &self.pool
     }
 
+    /// Get the agent ID (for metrics labelling).
+    pub fn agent_id(&self) -> &str {
+        &self.agent_id
+    }
+
     /// Save a new memory to the store.
     pub async fn save(&self, memory: &Memory) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "save"])
+                .start_timer()
+        };
+
         sqlx::query(
             r#"
             INSERT INTO memories (id, content, memory_type, importance, created_at, updated_at,
@@ -111,10 +129,24 @@ impl MemoryStore {
 
     /// Update an existing memory.
     pub async fn update(&self, memory: &Memory) -> Result<()> {
-        sqlx::query(
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "update"])
+                .start_timer()
+        };
+
+        #[cfg_attr(not(feature = "metrics"), allow(unused_variables))]
+        let result = sqlx::query(
             r#"
-            UPDATE memories 
-            SET content = ?, memory_type = ?, importance = ?, updated_at = ?, 
+            UPDATE memories
+            SET content = ?, memory_type = ?, importance = ?, updated_at = ?,
                 last_accessed_at = ?, access_count = ?, source = ?, channel_id = ?,
                 forgotten = ?
             WHERE id = ?
@@ -134,11 +166,37 @@ impl MemoryStore {
         .await
         .with_context(|| format!("failed to update memory {}", memory.id))?;
 
+        #[cfg(feature = "metrics")]
+        if result.rows_affected() > 0 {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_updates_total
+                .with_label_values(&[agent_label, "update"])
+                .inc();
+        }
+
         Ok(())
     }
 
     /// Delete a memory by ID.
     pub async fn delete(&self, id: &str) -> Result<()> {
+        #[cfg(feature = "metrics")]
+        let _timer = {
+            let agent_label = if self.agent_id.is_empty() {
+                "unknown"
+            } else {
+                &self.agent_id
+            };
+            crate::telemetry::Metrics::global()
+                .memory_operation_duration_seconds
+                .with_label_values(&[agent_label, "delete"])
+                .start_timer()
+        };
+
         let _result = sqlx::query("DELETE FROM memories WHERE id = ?")
             .bind(id)
             .execute(&self.pool)
@@ -201,6 +259,131 @@ impl MemoryStore {
         Ok(result.rows_affected() > 0)
     }
 
+    /// Merge one memory into a survivor with atomic SQLite updates.
+    ///
+    /// This updates survivor content/metadata, rewires associations, records an
+    /// Updates edge, and marks the merged memory forgotten in one transaction.
+    pub async fn merge_memories_atomic(
+        &self,
+        updated_survivor: &Memory,
+        merged_memory: &Memory,
+    ) -> Result<()> {
+        let mut transaction = self
+            .pool
+            .begin()
+            .await
+            .with_context(|| "failed to start memory merge transaction")?;
+
+        sqlx::query(
+            r#"
+            UPDATE memories
+            SET content = ?, memory_type = ?, importance = ?, updated_at = ?,
+                last_accessed_at = ?, access_count = ?, source = ?, channel_id = ?,
+                forgotten = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(&updated_survivor.content)
+        .bind(updated_survivor.memory_type.to_string())
+        .bind(updated_survivor.importance)
+        .bind(updated_survivor.updated_at)
+        .bind(updated_survivor.last_accessed_at)
+        .bind(updated_survivor.access_count)
+        .bind(&updated_survivor.source)
+        .bind(updated_survivor.channel_id.as_ref().map(|id| id.as_ref()))
+        .bind(updated_survivor.forgotten)
+        .bind(&updated_survivor.id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("failed to update survivor memory {}", updated_survivor.id))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO associations (id, source_id, target_id, relation_type, weight, created_at)
+            SELECT
+                lower(hex(randomblob(16))),
+                CASE WHEN source_id = ?2 THEN ?1 ELSE source_id END,
+                CASE WHEN target_id = ?2 THEN ?1 ELSE target_id END,
+                relation_type,
+                weight,
+                created_at
+            FROM associations
+            WHERE (source_id = ?2 OR target_id = ?2)
+              AND source_id != ?1
+              AND CASE WHEN source_id = ?2 THEN ?1 ELSE source_id END != CASE WHEN target_id = ?2 THEN ?1 ELSE target_id END
+            ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET
+                weight = excluded.weight
+            "#,
+        )
+        .bind(&updated_survivor.id)
+        .bind(&merged_memory.id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to rewire associations while merging {} into {}",
+                merged_memory.id, updated_survivor.id
+            )
+        })?;
+
+        sqlx::query("DELETE FROM associations WHERE source_id = ? OR target_id = ?")
+            .bind(&merged_memory.id)
+            .bind(&merged_memory.id)
+            .execute(&mut *transaction)
+            .await
+            .with_context(|| {
+                format!(
+                    "failed to delete associations for merged memory {}",
+                    merged_memory.id
+                )
+            })?;
+
+        let updates_association = Association::new(
+            &updated_survivor.id,
+            &merged_memory.id,
+            RelationType::Updates,
+        )
+        .with_weight(1.0);
+        sqlx::query(
+            r#"
+            INSERT INTO associations (id, source_id, target_id, relation_type, weight, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(source_id, target_id, relation_type) DO UPDATE SET
+                weight = excluded.weight
+            "#,
+        )
+        .bind(&updates_association.id)
+        .bind(&updates_association.source_id)
+        .bind(&updates_association.target_id)
+        .bind(updates_association.relation_type.to_string())
+        .bind(updates_association.weight)
+        .bind(updates_association.created_at)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| {
+            format!(
+                "failed to create updates association {} -> {}",
+                updated_survivor.id, merged_memory.id
+            )
+        })?;
+
+        sqlx::query(
+            "UPDATE memories SET forgotten = 1, updated_at = ? WHERE id = ? AND forgotten = 0",
+        )
+        .bind(chrono::Utc::now())
+        .bind(&merged_memory.id)
+        .execute(&mut *transaction)
+        .await
+        .with_context(|| format!("failed to forget merged memory {}", merged_memory.id))?;
+
+        transaction
+            .commit()
+            .await
+            .with_context(|| "failed to commit memory merge transaction")?;
+
+        Ok(())
+    }
+
     /// Create an association between two memories.
     pub async fn create_association(&self, association: &Association) -> Result<()> {
         sqlx::query(
@@ -250,6 +433,18 @@ impl MemoryStore {
             .collect();
 
         Ok(associations)
+    }
+
+    /// Delete all associations referencing this memory.
+    pub async fn delete_associations_for_memory(&self, memory_id: &str) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM associations WHERE source_id = ? OR target_id = ?")
+            .bind(memory_id)
+            .bind(memory_id)
+            .execute(&self.pool)
+            .await
+            .with_context(|| format!("failed to delete associations for memory {}", memory_id))?;
+
+        Ok(result.rows_affected())
     }
 
     /// Get all associations where both source and target are in the provided set.

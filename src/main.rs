@@ -187,6 +187,89 @@ struct ActiveChannel {
     _outbound_handle: tokio::task::JoinHandle<()>,
 }
 
+#[derive(Debug, serde::Serialize)]
+struct BackfillTranscriptEntry {
+    role: String,
+    author: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp_utc: Option<String>,
+    content: String,
+}
+
+fn serialize_backfill_transcript(entries: Vec<BackfillTranscriptEntry>) -> Option<String> {
+    if entries.is_empty() {
+        return None;
+    }
+
+    match serde_json::to_string_pretty(&entries) {
+        Ok(serialized) => Some(serialized),
+        Err(error) => {
+            tracing::warn!(%error, "failed to serialize backfill transcript");
+            None
+        }
+    }
+}
+
+fn render_platform_history_backfill(
+    history_messages: &[spacebot::messaging::traits::HistoryMessage],
+) -> Option<String> {
+    let entries = history_messages
+        .iter()
+        .map(|entry| BackfillTranscriptEntry {
+            role: if entry.is_bot {
+                "assistant".to_string()
+            } else {
+                "user".to_string()
+            },
+            author: if entry.is_bot {
+                "(you)".to_string()
+            } else {
+                entry.author.clone()
+            },
+            timestamp_utc: entry
+                .timestamp
+                .as_ref()
+                .map(|timestamp| timestamp.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+            content: entry.content.clone(),
+        })
+        .collect();
+
+    serialize_backfill_transcript(entries)
+}
+
+fn render_conversation_history_backfill(
+    history_messages: &[spacebot::conversation::history::ConversationMessage],
+) -> Option<String> {
+    let entries = history_messages
+        .iter()
+        .filter(|entry| entry.role == "user" || entry.role == "assistant")
+        .map(|entry| {
+            let author = if entry.role == "assistant" {
+                "(you)".to_string()
+            } else {
+                entry
+                    .sender_name
+                    .clone()
+                    .or_else(|| entry.sender_id.clone())
+                    .unwrap_or_else(|| "user".to_string())
+            };
+
+            BackfillTranscriptEntry {
+                role: entry.role.clone(),
+                author,
+                timestamp_utc: Some(
+                    entry
+                        .created_at
+                        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+                ),
+                content: entry.content.clone(),
+            }
+        })
+        .collect();
+
+    serialize_backfill_transcript(entries)
+}
+
 fn main() -> anyhow::Result<()> {
     rustls::crypto::ring::default_provider()
         .install_default()
@@ -1504,6 +1587,7 @@ async fn run(
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
+        let mut signal_permissions = None;
         initialize_agents(
             &config,
             &llm_manager,
@@ -1521,6 +1605,7 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            &mut signal_permissions,
             agent_links.clone(),
             agent_humans.clone(),
             injection_tx.clone(),
@@ -1539,6 +1624,7 @@ async fn run(
             slack_permissions,
             telegram_permissions,
             twitch_permissions,
+            signal_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
             llm_manager.clone(),
@@ -1551,6 +1637,7 @@ async fn run(
             config_path.clone(),
             config.instance_dir.clone(),
             Vec::new(),
+            None,
             None,
             None,
             None,
@@ -1663,15 +1750,23 @@ async fn run(
                     let event_rx = agent.deps.event_tx.subscribe();
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
-                    let (channel, channel_tx) = spacebot::agent::channel::Channel::new(
+                    let snapshot_store = agent
+                        .deps
+                        .runtime_config
+                        .prompt_snapshots
+                        .load()
+                        .as_ref()
+                        .clone();
+                    let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
                         response_tx,
                         event_rx,
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
+                        snapshot_store,
                     );
-                    agent
+                    let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
@@ -1685,6 +1780,38 @@ async fn run(
                     api_state
                         .register_channel_state(conversation_id.clone(), channel.state.clone())
                         .await;
+
+                    let backfill_count = agent.config.history_backfill_count();
+                    if backfill_count > 0 {
+                        let backfill_limit =
+                            std::cmp::min(backfill_count, i64::MAX as usize) as i64;
+                        match channel
+                            .state
+                            .conversation_logger
+                            .load_recent(&channel.id, backfill_limit)
+                            .await
+                        {
+                            Ok(history_messages) => {
+                                if let Some(transcript) =
+                                    render_conversation_history_backfill(&history_messages)
+                                {
+                                    channel.set_backfill_transcript(transcript);
+                                    tracing::info!(
+                                        conversation_id = %conversation_id,
+                                        message_count = history_messages.len(),
+                                        "backfilled resumed channel history from conversation log"
+                                    );
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    conversation_id = %conversation_id,
+                                    %error,
+                                    "failed to backfill resumed channel history from conversation log"
+                                );
+                            }
+                        }
+                    }
 
                     // Resume workers into the channel state before spawning the event loop.
                     let mut any_resumed = false;
@@ -1736,7 +1863,7 @@ async fn run(
                         let scoped_channel_id: spacebot::ChannelId =
                             Arc::from(cleanup_channel_id.as_str());
                         process_control_registry
-                            .unregister_channel(&scoped_channel_id)
+                            .unregister_channel(&scoped_channel_id, channel_registration_id)
                             .await;
                         api_state_for_cleanup
                             .unregister_channel_status(&cleanup_channel_id)
@@ -1877,11 +2004,14 @@ async fn run(
                     existing.clone()
                 } else {
                     let current_bindings = bindings.load();
-                    let resolved = spacebot::config::resolve_agent_for_message(
+                    let Some(resolved) = spacebot::config::resolve_agent_for_message(
                         &current_bindings,
                         &message,
                         &default_agent_id,
-                    );
+                    ) else {
+                        // Message suppressed by require_mention — drop it.
+                        continue;
+                    };
                     message.agent_id = Some(resolved.clone());
                     resolved
                 };
@@ -1907,15 +2037,23 @@ async fn run(
 
                     let channel_id: spacebot::ChannelId = Arc::from(conversation_id.as_str());
 
-                    let (channel, channel_tx) = spacebot::agent::channel::Channel::new(
+                    let snapshot_store = agent
+                        .deps
+                        .runtime_config
+                        .prompt_snapshots
+                        .load()
+                        .as_ref()
+                        .clone();
+                    let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
                         response_tx,
                         event_rx,
                         agent.config.screenshot_dir(),
                         agent.config.logs_dir(),
+                        snapshot_store,
                     );
-                    agent
+                    let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
@@ -1933,36 +2071,29 @@ async fn run(
                         channel.state.clone(),
                     ).await;
 
-                    // Backfill recent message history from the platform
+                    // Backfill recent message history from the platform.
+                    // The transcript is injected into the system prompt (not chat
+                    // history) so the LLM treats it as read-only system context
+                    // rather than actionable user messages.
                     let backfill_count = agent.config.history_backfill_count();
                     if backfill_count > 0 {
                         match messaging_manager.fetch_history(&message, backfill_count).await {
-                            Ok(history_messages) if !history_messages.is_empty() => {
-                                let mut transcript = String::new();
-                                for entry in &history_messages {
-                                    let label = if entry.is_bot { "(you)" } else { &entry.author };
-                                    transcript.push_str(&format!("{}: {}\n", label, entry.content));
+                            Ok(history_messages) => {
+                                if let Some(transcript) =
+                                    render_platform_history_backfill(&history_messages)
+                                {
+                                    channel.set_backfill_transcript(transcript);
+
+                                    tracing::info!(
+                                        conversation_id = %conversation_id,
+                                        message_count = history_messages.len(),
+                                        "backfilled channel history into system prompt"
+                                    );
                                 }
-
-                                let prompt_engine = agent.deps.runtime_config.prompts.load();
-                                let backfill_text = prompt_engine
-                                    .render_system_history_backfill(transcript.trim_end())
-                                    .unwrap_or(transcript);
-
-                                let mut history = channel.state.history.write().await;
-                                history.push(rig::message::Message::from(backfill_text));
-                                drop(history);
-
-                                tracing::info!(
-                                    conversation_id = %conversation_id,
-                                    message_count = history_messages.len(),
-                                    "backfilled channel history"
-                                );
                             }
                             Err(error) => {
                                 tracing::warn!(%error, "failed to backfill channel history");
                             }
-                            _ => {}
                         }
                     }
 
@@ -1978,7 +2109,7 @@ async fn run(
                         let scoped_channel_id: spacebot::ChannelId =
                             Arc::from(cleanup_channel_id.as_str());
                         process_control_registry
-                            .unregister_channel(&scoped_channel_id)
+                            .unregister_channel(&scoped_channel_id, channel_registration_id)
                             .await;
                         api_state_for_cleanup
                             .unregister_channel_status(&cleanup_channel_id)
@@ -2189,6 +2320,7 @@ async fn run(
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
+                                let mut new_signal_permissions = None;
                                 match initialize_agents(
                                     &new_config,
                                     &new_llm_manager,
@@ -2206,6 +2338,7 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    &mut new_signal_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
                                     injection_tx.clone(),
@@ -2223,6 +2356,7 @@ async fn run(
                                             new_slack_permissions,
                                             new_telegram_permissions,
                                             new_twitch_permissions,
+                                            new_signal_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
                                             new_llm_manager.clone(),
@@ -2345,6 +2479,7 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
     injection_tx: tokio::sync::mpsc::Sender<spacebot::ChannelInjection>,
@@ -2449,6 +2584,23 @@ async fn initialize_agents(
             })?,
         );
 
+        // Per-agent prompt snapshot store (separate redb, easy to delete).
+        // Non-fatal: a corrupt/unwritable DB disables snapshotting for this agent.
+        let snapshot_path = agent_config.data_dir.join("prompt_snapshots.redb");
+        let prompt_snapshot_store =
+            match spacebot::agent::prompt_snapshot::PromptSnapshotStore::new(&snapshot_path) {
+                Ok(store) => Some(Arc::new(store)),
+                Err(error) => {
+                    tracing::warn!(
+                        agent_id = %agent_config.id,
+                        path = %snapshot_path.display(),
+                        %error,
+                        "failed to initialize prompt snapshot store; prompt snapshots disabled"
+                    );
+                    None
+                }
+            };
+
         // Per-agent memory system
         let memory_store =
             spacebot::memory::MemoryStore::with_agent_id(db.sqlite.clone(), &agent_config.id);
@@ -2513,6 +2665,9 @@ async fn initialize_agents(
             .find(|agent| agent.id == agent_config.id)
             .and_then(|agent| agent.channel.map(|channel| channel.listen_only_mode));
         runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
+        runtime_config
+            .prompt_snapshots
+            .store(Arc::new(prompt_snapshot_store.clone()));
         if let Err(error) = settings_store.set_worker_log_mode(config.defaults.worker_log_mode) {
             tracing::warn!(%error, agent = %agent_config.id, "failed to set worker_log_mode from config");
         }
@@ -3020,6 +3175,58 @@ async fn initialize_agents(
                 instance.channels.clone(),
                 instance.trigger_prefix.clone(),
                 perms,
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+    }
+
+    // Shared Signal permissions (hot-reloadable via file watcher)
+    *signal_permissions = config.messaging.signal.as_ref().map(|signal_config| {
+        let perms = spacebot::config::SignalPermissions::from_config(signal_config);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(signal_config) = &config.messaging.signal
+        && signal_config.enabled
+    {
+        let tmp_dir = config.instance_dir.join("tmp");
+        if !signal_config.http_url.is_empty() && !signal_config.account.is_empty() {
+            let adapter = spacebot::messaging::signal::SignalAdapter::new(
+                "signal",
+                &signal_config.http_url,
+                &signal_config.account,
+                signal_config.ignore_stories,
+                signal_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("signal permissions not initialized when signal is enabled")
+                })?,
+                tmp_dir.clone(),
+            );
+            new_messaging_manager.register(adapter).await;
+        }
+
+        for instance in signal_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.http_url.is_empty() || instance.account.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled signal instance with missing credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "signal",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::SignalPermissions::from_instance_config(instance),
+            ));
+            let adapter = spacebot::messaging::signal::SignalAdapter::new(
+                runtime_key,
+                &instance.http_url,
+                &instance.account,
+                instance.ignore_stories,
+                perms,
+                tmp_dir.clone(),
             );
             new_messaging_manager.register(adapter).await;
         }

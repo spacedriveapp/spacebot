@@ -2,6 +2,29 @@
 
 Seeded from GitHub releases; maintained by the release bump workflow.
 
+## v0.3.2
+
+### Release Story
+
+v0.3.2 tightens channel reliability and release ergonomics without changing the core architecture. Hosted deployments can now manage the SSH daemon through a dedicated API, and operators get stronger visibility through prompt inspection snapshots and richer live status context.
+
+This patch also closes several turn-handling edge cases that could cause surprising behavior in busy channels. `require_mention` now falls through to the default agent instead of dropping messages, `skip` terminates the channel turn immediately (including error paths), and history backfill is treated as read-only archival context in the system prompt so older transcript text is not actioned as fresh instructions.
+
+Highlights:
+- Hosted SSH daemon management API for safer remote operations
+- Prompt inspect snapshots plus expanded system/status introspection
+- Safer channel turn flow and backfill handling across resumed sessions
+
+## What's Changed
+* Enable metrics in Docker build, add comprehensive Prometheus instrumentation by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/274
+* Add SSH daemon management API by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/369
+* fix: terminate channel turn immediately after skip tool call by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/373
+* feat: system config self-awareness, prompt inspect API, release version check by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/374
+* fix: require_mention falls through to default agent instead of dropping message by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/376
+* fix: move backfill history from chat history to system prompt by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/377
+
+
+**Full Changelog**: https://github.com/spacedriveapp/spacebot/compare/v0.3.0...v0.3.2
 ## v0.3.0
 
 ### Release Story

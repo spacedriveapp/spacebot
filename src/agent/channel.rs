@@ -13,7 +13,7 @@ use crate::agent::channel_prompt::{
 };
 use crate::agent::compactor::Compactor;
 use crate::agent::process_control::ControlActionResult;
-use crate::agent::status::StatusBlock;
+use crate::agent::status::{StatusBlock, SystemInfo};
 use crate::agent::worker::Worker;
 use crate::conversation::{ChannelStore, ConversationLogger, ProcessRunLogger};
 use crate::error::{AgentError, Result};
@@ -109,6 +109,8 @@ pub struct ChannelState {
     pub channel_store: ChannelStore,
     pub screenshot_dir: std::path::PathBuf,
     pub logs_dir: std::path::PathBuf,
+    /// Prompt snapshot store for debugging prompt construction.
+    pub prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
 }
 
 impl ChannelState {
@@ -361,6 +363,10 @@ pub struct Channel {
     pending_results: Vec<PendingResult>,
     /// Optional send_agent_message tool (only when agent has active links).
     send_agent_message_tool: Option<crate::tools::SendAgentMessageTool>,
+    /// Backfilled conversation history rendered as a system-prompt fragment.
+    /// Injected into the system prompt (not into chat history) so the LLM
+    /// treats it as read-only context rather than actionable user messages.
+    backfill_transcript: Option<String>,
     /// Channel-local reply mode toggle.
     /// When true, suppress unsolicited replies unless explicitly invoked.
     listen_only_mode: bool,
@@ -368,6 +374,26 @@ pub struct Channel {
     listen_only_session_override: Option<bool>,
     /// Handle exposed to the supervision control plane.
     control_handle: ChannelControlHandle,
+}
+
+/// RAII guard that records `message_handling_duration_seconds` when dropped,
+/// ensuring the metric is observed on every exit path (including early returns
+/// and `?` error propagation).
+#[cfg(feature = "metrics")]
+struct MessageDurationGuard {
+    agent_id: String,
+    channel_type: String,
+    start: std::time::Instant,
+}
+
+#[cfg(feature = "metrics")]
+impl Drop for MessageDurationGuard {
+    fn drop(&mut self) {
+        crate::telemetry::Metrics::global()
+            .message_handling_duration_seconds
+            .with_label_values(&[&self.agent_id, &self.channel_type])
+            .observe(self.start.elapsed().as_secs_f64());
+    }
 }
 
 impl Channel {
@@ -383,6 +409,7 @@ impl Channel {
         event_rx: broadcast::Receiver<ProcessEvent>,
         screenshot_dir: std::path::PathBuf,
         logs_dir: std::path::PathBuf,
+        prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -421,6 +448,7 @@ impl Channel {
             channel_store: channel_store.clone(),
             screenshot_dir,
             logs_dir,
+            prompt_snapshot_store,
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -473,12 +501,18 @@ impl Channel {
             retrigger_deadline: None,
             pending_results: Vec::new(),
             send_agent_message_tool,
+            backfill_transcript: None,
             listen_only_mode: resolved_listen_only_mode,
             listen_only_session_override: None,
             control_handle,
         };
 
         (channel, message_tx)
+    }
+
+    /// Set the backfill transcript for injection into the system prompt.
+    pub fn set_backfill_transcript(&mut self, transcript: String) {
+        self.backfill_transcript = Some(transcript);
     }
 
     /// Get the agent's display name (falls back to agent ID).
@@ -745,19 +779,38 @@ impl Channel {
     }
 
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
-        if let Err(error) = self
+        match self
             .response_tx
             .send(OutboundResponse::Text(text.clone()))
             .await
         {
-            tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
-            return;
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+                self.state.conversation_logger.log_bot_message_with_name(
+                    &self.state.channel_id,
+                    &text,
+                    Some(self.agent_display_name()),
+                );
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, %log_label, "failed to send built-in reply");
+            }
         }
-        self.state.conversation_logger.log_bot_message_with_name(
-            &self.state.channel_id,
-            &text,
-            Some(self.agent_display_name()),
-        );
     }
 
     async fn try_handle_builtin_ops_commands(
@@ -770,7 +823,7 @@ impl Channel {
         }
         let supported_source = matches!(
             message.source.as_str(),
-            "telegram" | "discord" | "slack" | "twitch"
+            "telegram" | "discord" | "slack" | "twitch" | "signal"
         );
         if !supported_source {
             return Ok(false);
@@ -1111,6 +1164,32 @@ impl Channel {
             "handling batched messages"
         );
 
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = messages
+            .iter()
+            .find(|m| m.source != "system")
+            .map(|m| m.source.clone())
+            .or_else(|| self.current_adapter().map(str::to_string))
+            .unwrap_or_else(|| "unknown".to_string());
+        #[cfg(feature = "metrics")]
+        let _duration_guard = MessageDurationGuard {
+            agent_id: self.deps.agent_id.to_string(),
+            channel_type: metrics_channel_type.clone(),
+            start: std::time::Instant::now(),
+        };
+
+        // Increment messages_received_total for each non-system message in the batch
+        #[cfg(feature = "metrics")]
+        {
+            let received_count = messages.iter().filter(|m| m.source != "system").count() as u64;
+            if received_count > 0 {
+                crate::telemetry::Metrics::global()
+                    .messages_received_total
+                    .with_label_values(&[&self.deps.agent_id, &metrics_channel_type])
+                    .inc_by(received_count);
+            }
+        }
+
         // Count unique senders for the hint
         let unique_senders: std::collections::HashSet<_> =
             messages.iter().map(|m| &m.sender_id).collect();
@@ -1123,11 +1202,13 @@ impl Channel {
             self.conversation_id = Some(first.conversation_id.clone());
         }
 
+        // Track source adapter from the first non-system message
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none()
             && let Some(first) = messages.first()
             && first.source != "system"
         {
-            self.source_adapter = Some(first.source.clone());
+            self.source_adapter = first.adapter.clone().or_else(|| Some(first.source.clone()));
         }
 
         // Capture conversation context from the first message
@@ -1329,6 +1410,13 @@ impl Channel {
             .build_system_prompt_with_coalesce(message_count, elapsed_secs, unique_sender_count)
             .await?;
 
+        // Extract adapter from messages (prefer explicit message.adapter, fall back to stored source_adapter)
+        // This preserves per-message adapter for Signal named instances (e.g., "signal:work")
+        let batch_adapter = messages
+            .iter()
+            .find_map(|m| m.adapter.as_deref())
+            .or(self.source_adapter.as_deref());
+
         {
             let mut reply_target = self.state.reply_target_message_id.write().await;
             *reply_target = messages.iter().rev().find_map(extract_message_id);
@@ -1342,6 +1430,7 @@ impl Channel {
                 &conversation_id,
                 attachment_parts,
                 false, // not a retrigger
+                batch_adapter,
             )
             .await?;
 
@@ -1388,9 +1477,10 @@ impl Channel {
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render_with_time_context(Some(&current_time_line))
+            status.render_full(&current_time_line, &system_info)
         };
 
         // Render coalesce hint
@@ -1424,6 +1514,7 @@ impl Channel {
             org_context,
             adapter_prompt,
             project_context,
+            self.backfill_transcript.clone(),
         )
     }
 
@@ -1443,13 +1534,41 @@ impl Channel {
             "handling message"
         );
 
+        #[cfg(feature = "metrics")]
+        let _duration_guard = {
+            let channel_type = if message.source != "system" {
+                message.source.clone()
+            } else {
+                self.current_adapter().unwrap_or("unknown").to_string()
+            };
+            MessageDurationGuard {
+                agent_id: self.deps.agent_id.to_string(),
+                channel_type,
+                start: std::time::Instant::now(),
+            }
+        };
+
+        // Increment messages_received_total for non-system messages
+        #[cfg(feature = "metrics")]
+        if message.source != "system" {
+            crate::telemetry::Metrics::global()
+                .messages_received_total
+                .with_label_values(&[&self.deps.agent_id, &message.source])
+                .inc();
+        }
+
         // Track conversation_id for synthetic re-trigger messages
         if self.conversation_id.is_none() {
             self.conversation_id = Some(message.conversation_id.clone());
         }
 
+        // Track source adapter from non-system messages
+        // Prefer message.adapter (full adapter string like "signal:work") over message.source
         if self.source_adapter.is_none() && message.source != "system" {
-            self.source_adapter = Some(message.source.clone());
+            self.source_adapter = message
+                .adapter
+                .clone()
+                .or_else(|| Some(message.source.clone()));
         }
 
         let (raw_text, attachments) = match &message.content {
@@ -1639,6 +1758,10 @@ impl Channel {
             Vec::new()
         };
 
+        let adapter = message
+            .adapter
+            .as_deref()
+            .or_else(|| self.current_adapter());
         let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
@@ -1646,6 +1769,7 @@ impl Channel {
                 &message.conversation_id,
                 attachment_content,
                 is_retrigger,
+                adapter,
             )
             .await?;
 
@@ -1661,7 +1785,7 @@ impl Channel {
             && !replied_flag.load(std::sync::atomic::Ordering::Relaxed)
             && matches!(
                 message.source.as_str(),
-                "discord" | "telegram" | "slack" | "twitch"
+                "discord" | "telegram" | "slack" | "twitch" | "signal"
             )
         {
             self.send_builtin_text(
@@ -1978,6 +2102,24 @@ impl Channel {
         }
     }
 
+    /// Build a snapshot of the system configuration for status block injection.
+    async fn build_system_info(&self) -> SystemInfo {
+        let runtime_config = &self.deps.runtime_config;
+        let mut info = SystemInfo::from_runtime_config(runtime_config, &self.deps.sandbox);
+
+        // Add async-only fields that the base constructor can't populate
+        let cron_job_count = {
+            let scheduler_guard = runtime_config.cron_scheduler.load();
+            match scheduler_guard.as_ref() {
+                Some(scheduler) => Some(scheduler.job_count().await),
+                None => None,
+            }
+        };
+        info.cron_job_count = cron_job_count;
+
+        info
+    }
+
     /// Assemble the full system prompt using the PromptEngine.
     async fn build_system_prompt(&self) -> crate::error::Result<String> {
         let rc = &self.deps.runtime_config;
@@ -2002,9 +2144,10 @@ impl Channel {
 
         let temporal_context = TemporalContext::from_runtime(rc.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status_text = {
             let status = self.state.status_block.read().await;
-            status.render_with_time_context(Some(&current_time_line))
+            status.render_full(&current_time_line, &system_info)
         };
 
         let available_channels = self.build_available_channels().await;
@@ -2032,6 +2175,7 @@ impl Channel {
             org_context,
             adapter_prompt,
             project_context,
+            self.backfill_transcript.clone(),
         )
     }
 
@@ -2047,6 +2191,7 @@ impl Channel {
         conversation_id: &str,
         attachment_content: Vec<UserContent>,
         is_retrigger: bool,
+        adapter: Option<&str>,
     ) -> Result<(
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
@@ -2074,6 +2219,7 @@ impl Channel {
             self.deps.cron_tool.clone(),
             send_agent_message_tool,
             allow_direct_reply,
+            adapter.map(|s| s.to_string()),
         )
         .await
         {
@@ -2146,6 +2292,9 @@ impl Channel {
         };
         let history_len_before = history.len();
 
+        // ── Prompt snapshot capture (fire-and-forget) ──
+        self.maybe_capture_snapshot(system_prompt, user_text, &history);
+
         let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
@@ -2196,6 +2345,33 @@ impl Channel {
         Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
     }
 
+    /// Send outbound text and record send metrics.
+    async fn send_outbound_text(&self, text: String, error_context: &str) {
+        match self.response_tx.send(OutboundResponse::Text(text)).await {
+            Ok(()) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .messages_sent_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type])
+                        .inc();
+                }
+            }
+            Err(error) => {
+                #[cfg(feature = "metrics")]
+                {
+                    let channel_type = self.current_adapter().unwrap_or("unknown");
+                    crate::telemetry::Metrics::global()
+                        .channel_errors_total
+                        .with_label_values(&[&self.deps.agent_id, channel_type, "send_failed"])
+                        .inc();
+                }
+                tracing::error!(%error, channel_id = %self.id, "{error_context}");
+            }
+        }
+    }
+
     /// Dispatch the LLM result: send fallback text, log errors, clean up typing.
     ///
     /// On retrigger turns (`is_retrigger = true`), fallback text is suppressed
@@ -2210,6 +2386,13 @@ impl Channel {
         replied_flag: &crate::tools::RepliedFlag,
         is_retrigger: bool,
     ) {
+        #[cfg(feature = "metrics")]
+        let metrics = crate::telemetry::Metrics::global();
+        #[cfg(feature = "metrics")]
+        let metrics_agent_id: &str = &self.deps.agent_id;
+        #[cfg(feature = "metrics")]
+        let metrics_channel_type = self.current_adapter().unwrap_or("unknown");
+
         match result {
             Ok(response) => {
                 let skipped = skip_flag.load(std::sync::atomic::Ordering::Relaxed);
@@ -2264,13 +2447,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2282,6 +2463,11 @@ impl Channel {
                 } else if skipped {
                     tracing::debug!(channel_id = %self.id, "channel turn skipped (no response)");
                 } else if replied {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn replied via tool (fallback suppressed)");
                 } else if is_retrigger {
                     // On retrigger turns the LLM should use the reply tool, but
@@ -2326,13 +2512,11 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                if let Err(error) = self
-                                    .response_tx
-                                    .send(OutboundResponse::Text(final_text))
-                                    .await
-                                {
-                                    tracing::error!(%error, channel_id = %self.id, "failed to send retrigger fallback reply");
-                                }
+                                self.send_outbound_text(
+                                    final_text,
+                                    "failed to send retrigger fallback reply",
+                                )
+                                .await;
                             }
                         }
                     } else {
@@ -2384,13 +2568,8 @@ impl Channel {
                                 &final_text,
                                 Some(self.agent_display_name()),
                             );
-                            if let Err(error) = self
-                                .response_tx
-                                .send(OutboundResponse::Text(final_text))
-                                .await
-                            {
-                                tracing::error!(%error, channel_id = %self.id, "failed to send fallback reply");
-                            }
+                            self.send_outbound_text(final_text, "failed to send fallback reply")
+                                .await;
                         }
                     }
 
@@ -2398,16 +2577,39 @@ impl Channel {
                 }
             }
             Err(rig::completion::PromptError::MaxTurnsError { .. }) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "max_turns"])
+                    .inc();
                 tracing::warn!(channel_id = %self.id, "channel hit max turns");
             }
             Err(rig::completion::PromptError::PromptCancelled { reason, .. }) => {
                 if reason == "reply delivered" {
+                    #[cfg(feature = "metrics")]
+                    metrics
+                        .messages_sent_total
+                        .with_label_values(&[metrics_agent_id, metrics_channel_type])
+                        .inc();
                     tracing::debug!(channel_id = %self.id, "channel turn completed via reply tool");
+                } else if reason == "skip" {
+                    tracing::debug!(channel_id = %self.id, "channel turn skipped via tool");
                 } else {
                     tracing::info!(channel_id = %self.id, %reason, "channel turn cancelled");
                 }
             }
             Err(error) => {
+                #[cfg(feature = "metrics")]
+                metrics
+                    .channel_errors_total
+                    .with_label_values(&[metrics_agent_id, metrics_channel_type, "llm_error"])
+                    .inc();
+                // Send error to user so they know something went wrong
+                let error_msg = format!("I encountered an error: {}", error);
+                self.response_tx
+                    .send(OutboundResponse::Text(error_msg))
+                    .await
+                    .ok();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
             }
         }
@@ -2828,8 +3030,9 @@ impl Channel {
     pub async fn get_status(&self) -> String {
         let temporal_context = TemporalContext::from_runtime(self.deps.runtime_config.as_ref());
         let current_time_line = temporal_context.current_time_line();
+        let system_info = self.build_system_info().await;
         let status = self.state.status_block.read().await;
-        status.render_with_time_context(Some(&current_time_line))
+        status.render_full(&current_time_line, &system_info)
     }
 
     /// Check if a memory persistence branch should be spawned based on message count.
@@ -2864,6 +3067,72 @@ impl Channel {
                 );
             }
         }
+    }
+
+    /// If prompt capture is enabled for this channel, snapshot the current
+    /// system prompt sections and conversation history. The save is
+    /// fire-and-forget so it never blocks the agentic loop.
+    fn maybe_capture_snapshot(
+        &self,
+        system_prompt: &str,
+        user_message: &str,
+        history: &[rig::message::Message],
+    ) {
+        // 1. Check if we have a snapshot store.
+        let snapshot_store = match self.state.prompt_snapshot_store.as_ref() {
+            Some(store) => store.clone(),
+            None => return,
+        };
+
+        // 2. Check if capture is enabled via settings.
+        let rc = &self.deps.runtime_config;
+        let capture_enabled = rc
+            .settings
+            .load()
+            .as_ref()
+            .as_ref()
+            .map(|settings| settings.prompt_capture_enabled(&self.id))
+            .unwrap_or(false);
+        if !capture_enabled {
+            return;
+        }
+
+        // 3. Serialize history and build the snapshot.
+        let history_json = match serde_json::to_value(history) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to serialize prompt history; skipping snapshot capture"
+                );
+                return;
+            }
+        };
+        let history_length = history.len();
+        let system_prompt_chars = system_prompt.chars().count();
+
+        let snapshot = crate::agent::prompt_snapshot::PromptSnapshot {
+            channel_id: self.id.to_string(),
+            timestamp_ms: chrono::Utc::now().timestamp_millis(),
+            user_message: user_message.to_string(),
+            system_prompt: system_prompt.to_string(),
+            system_prompt_chars,
+            history: history_json,
+            history_length,
+        };
+
+        // 5. Fire-and-forget save.
+        let channel_id = self.id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = snapshot_store.save(&snapshot) {
+                tracing::warn!(
+                    channel_id = %channel_id,
+                    %error,
+                    "failed to save prompt snapshot"
+                );
+            }
+        });
     }
 }
 

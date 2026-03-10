@@ -14,6 +14,7 @@ use crate::ProcessType;
 use crate::config::IngestionConfig;
 use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
+use crate::tools::MemoryPersistenceContractState;
 
 use anyhow::Context as _;
 use rig::agent::AgentBuilder;
@@ -24,6 +25,7 @@ use sqlx::SqlitePool;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -265,6 +267,15 @@ async fn process_file(
     let final_status = if had_failure { "failed" } else { "completed" };
     complete_ingestion_file(&deps.sqlite_pool, &hash, final_status).await?;
 
+    #[cfg(feature = "metrics")]
+    {
+        let result = if had_failure { "failure" } else { "success" };
+        crate::telemetry::Metrics::global()
+            .ingestion_files_processed_total
+            .with_label_values(&[&deps.agent_id, result])
+            .inc();
+    }
+
     if had_failure {
         // Keep the source file and progress rows so the next poll cycle can
         // resume from where it left off. Deleting on failure would cause data
@@ -469,11 +480,13 @@ async fn process_chunk(
     let model_name = routing.resolve(ProcessType::Branch, None).to_string();
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "branch")
+        .with_worker_type("ingestion")
         .with_routing((**routing).clone());
 
     let conversation_logger =
         crate::conversation::history::ConversationLogger::new(deps.sqlite_pool.clone());
     let channel_store = crate::conversation::ChannelStore::new(deps.sqlite_pool.clone());
+    let contract_state = Arc::new(MemoryPersistenceContractState::default());
     let tool_server: ToolServerHandle = crate::tools::create_branch_tool_server(
         None,
         deps.agent_id.clone(),
@@ -484,6 +497,9 @@ async fn process_chunk(
         conversation_logger,
         channel_store,
         crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
+        crate::tools::BranchToolProfile::MemoryPersistence {
+            contract_state: contract_state.clone(),
+        },
     );
 
     let agent = AgentBuilder::new(model)
@@ -506,6 +522,14 @@ async fn process_chunk(
     let mut history = Vec::new();
     let result = hook.prompt_once(&agent, &mut history, &user_prompt).await;
     classify_chunk_prompt_result(result, filename, chunk_number, total_chunks)?;
+
+    if !contract_state.has_terminal_outcome() {
+        tracing::warn!(
+            file = %filename,
+            chunk = %format!("{chunk_number}/{total_chunks}"),
+            "ingestion chunk completed without memory_persistence_complete signal"
+        );
+    }
 
     Ok(())
 }

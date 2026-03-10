@@ -339,12 +339,32 @@ impl Scheduler {
                     let _guard = guard;
                     match run_cron_job(&job, &exec_context).await {
                         Ok(()) => {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .cron_executions_total
+                                .with_label_values(&[
+                                    &exec_context.deps.agent_id,
+                                    &exec_job_id,
+                                    "success",
+                                ])
+                                .inc();
+
                             let mut j = exec_jobs.write().await;
                             if let Some(j) = j.get_mut(&exec_job_id) {
                                 j.consecutive_failures = 0;
                             }
                         }
                         Err(error) => {
+                            #[cfg(feature = "metrics")]
+                            crate::telemetry::Metrics::global()
+                                .cron_executions_total
+                                .with_label_values(&[
+                                    &exec_context.deps.agent_id,
+                                    &exec_job_id,
+                                    "failure",
+                                ])
+                                .inc();
+
                             tracing::error!(
                                 cron_id = %exec_job_id,
                                 %error,
@@ -451,6 +471,16 @@ impl Scheduler {
     pub async fn is_registered(&self, job_id: &str) -> bool {
         let jobs = self.jobs.read().await;
         jobs.contains_key(job_id)
+    }
+
+    /// Return the number of enabled (active) cron jobs.
+    pub async fn job_count(&self) -> usize {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.enabled)
+            .count()
     }
 
     /// Trigger a cron job immediately, outside the timer loop.
@@ -831,6 +861,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         event_rx,
         context.screenshot_dir.clone(),
         context.logs_dir.clone(),
+        None, // cron channels don't capture prompt snapshots
     );
 
     // Spawn the channel's event loop
