@@ -841,6 +841,16 @@ pub struct CortexConfig {
     pub bulletin_max_words: usize,
     /// Max LLM turns for bulletin generation.
     pub bulletin_max_turns: usize,
+    /// Interval in seconds between memory maintenance passes.
+    pub maintenance_interval_secs: u64,
+    /// Per-day decay applied to memory importance during maintenance.
+    pub maintenance_decay_rate: f32,
+    /// Minimum importance score for non-identity memories to avoid pruning.
+    pub maintenance_prune_threshold: f32,
+    /// Minimum age in days before a memory becomes prune-eligible.
+    pub maintenance_min_age_days: i64,
+    /// Similarity threshold above which memories are merged as near-duplicates.
+    pub maintenance_merge_similarity_threshold: f32,
     /// Interval in seconds between association passes.
     pub association_interval_secs: u64,
     /// Minimum cosine similarity to create a RelatedTo edge.
@@ -863,12 +873,55 @@ impl Default for CortexConfig {
             bulletin_interval_secs: 3600,
             bulletin_max_words: 1500,
             bulletin_max_turns: 15,
+            maintenance_interval_secs: 3600,
+            maintenance_decay_rate: 0.05,
+            maintenance_prune_threshold: 0.1,
+            maintenance_min_age_days: 30,
+            maintenance_merge_similarity_threshold: 0.95,
             association_interval_secs: 300,
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
         }
     }
+}
+
+impl CortexConfig {
+    /// Validate maintenance tuning bounds used by pruning/merge logic.
+    pub fn validate_maintenance_bounds(&self) -> Result<()> {
+        validate_unit_interval_f32("maintenance_decay_rate", self.maintenance_decay_rate)?;
+        validate_unit_interval_f32(
+            "maintenance_prune_threshold",
+            self.maintenance_prune_threshold,
+        )?;
+        validate_unit_interval_f32(
+            "maintenance_merge_similarity_threshold",
+            self.maintenance_merge_similarity_threshold,
+        )?;
+        if self.maintenance_min_age_days < 0 {
+            return Err(ConfigError::Invalid(format!(
+                "maintenance_min_age_days must be >= 0, got {}",
+                self.maintenance_min_age_days
+            ))
+            .into());
+        }
+        if self.maintenance_interval_secs == 0 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+fn validate_unit_interval_f32(name: &str, value: f32) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(ConfigError::Invalid(format!(
+            "{name} must be finite and between 0.0 and 1.0, got {value}"
+        ))
+        .into());
+    }
+    Ok(())
 }
 
 /// Warmup configuration.
