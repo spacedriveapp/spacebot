@@ -1,6 +1,6 @@
 # Cortex Implementation Plan
 
-The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Phase 1 plumbing and Phase 2 health supervision are now live; maintenance and consolidation phases remain.
+The cortex is designed to be the system's self-awareness — supervising processes, maintaining memory coherence, and generating the memory bulletin. Phase 1 plumbing, Phase 2 health supervision, and Phase 3 maintenance are now live; consolidation remains.
 
 This doc covers the path from "bulletin generator" to "full system supervisor."
 
@@ -16,8 +16,8 @@ This doc covers the path from "bulletin generator" to "full system supervisor."
 - `Signal` enum — aligned to current `ProcessEvent` surface (worker/branch/tool/memory/compaction/task/link events).
 - `CortexHook` — all methods return `Continue` with trace logging.
 
-**Implemented but never called:**
-- `memory/maintenance.rs` — `apply_decay()` and `prune_memories()` work. `merge_similar_memories()` is a stub returning `Ok(0)`.
+**Implemented and wired into the cortex loop:**
+- `memory/maintenance.rs` — `apply_decay()`, `prune_memories()`, and `merge_similar_memories()` are implemented and wired into the cortex loop.
 
 **Wired through config:**
 - `tick_interval_secs` and `bulletin_interval_secs` are read by the running cortex loop and hot-reload during runtime.
@@ -124,27 +124,31 @@ Per tick, cortex maintains runtime maps for workers, branches, branch latency, a
 - Success resets the counter/tripped flag for that key.
 - Breaker state is in-memory only in Phase 2 and resets on process restart.
 
-## Phase 3: Memory Maintenance
+## Phase 3: Memory Maintenance (Implemented)
 
-Wire up the maintenance code that already exists in `memory/maintenance.rs`.
+Memory maintenance is now wired into the cortex loop.
 
-### Schedule maintenance in the tick loop
+### Scheduling and control
 
-- Add `maintenance_interval_secs` to `CortexConfig` (default: 3600)
-- On the maintenance tick, call `run_maintenance()` with the current `MaintenanceConfig`
-- Log the `MaintenanceReport` (decayed, pruned, merged counts)
-- Respect hot-reload — `MaintenanceConfig` values should come from `CortexConfig`
+- `maintenance_interval_secs` is part of `CortexConfig` and hot-reloads at runtime
+- The cortex tick loop schedules `run_maintenance_with_cancel()` with the current `MaintenanceConfig`
+- Maintenance reports log decayed, pruned, and merged counts
+- Invalid maintenance config values are rejected at load/update time:
+  - `maintenance_interval_secs >= 1`
+  - `maintenance_decay_rate`, `maintenance_prune_threshold`, `maintenance_merge_similarity_threshold` in `[0.0, 1.0]`
+  - `maintenance_min_age_days >= 0`
+- Maintenance runs with timeout, graceful cancellation, forced abort fallback, and a recurring-failure circuit breaker
 
-### Finish `merge_similar_memories()`
+### Merge behavior
 
-- Query LanceDB for high-similarity memory pairs above `merge_similarity_threshold` (default 0.95)
-- Keep the higher-importance memory as the survivor
-- Merge content from the lower-importance memory into the survivor
-- Create `Updates` association from survivor to merged memory
-- Transfer associations from the merged memory to the survivor
-- Soft-delete the merged memory
+- LanceDB similarity search drives near-duplicate detection above `merge_similarity_threshold` (default 0.95)
+- The higher-importance memory stays the survivor
+- Survivor content is updated, associations are rewired atomically in SQLite, and an `Updates` edge is preserved
+- The merged memory is soft-forgotten and its embedding is removed
+- The survivor embedding is recomputed after merge
+- Per-pass work is bounded (candidate and merge caps) to avoid unbounded scans on large corpora
 
-**End state:** Memories decay over time, low-importance orphans get pruned, near-duplicates get merged. All on autopilot.
+**End state:** Memories decay over time, low-importance orphans get pruned, and near-duplicates get merged on autopilot under cortex supervision.
 
 ## Phase 4: Memory Consolidation (LLM-Assisted)
 

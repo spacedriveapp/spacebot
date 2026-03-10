@@ -499,22 +499,60 @@ impl ProcessRunLogger {
     ///
     /// Stores the session ID and server port so the frontend can construct
     /// an iframe URL to the embedded OpenCode web UI.
+    ///
+    /// The worker row is inserted by `log_worker_started` (also fire-and-forget),
+    /// which may not have committed yet when this runs. To handle the race we
+    /// retry with a short back-off when the UPDATE affects zero rows.
     pub fn log_opencode_metadata(&self, worker_id: WorkerId, session_id: &str, port: u16) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let session_id = session_id.to_string();
 
         tokio::spawn(async move {
-            if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
-            )
-            .bind(&session_id)
-            .bind(port as i32)
-            .bind(&id)
-            .execute(&pool)
-            .await
-            {
-                tracing::warn!(%error, worker_id = %id, "failed to persist OpenCode metadata");
+            const MAX_RETRIES: u32 = 5;
+            const BASE_DELAY_MS: u64 = 50;
+
+            for attempt in 0..=MAX_RETRIES {
+                match sqlx::query(
+                    "UPDATE worker_runs SET opencode_session_id = ?, opencode_port = ? WHERE id = ?",
+                )
+                .bind(&session_id)
+                .bind(port as i32)
+                .bind(&id)
+                .execute(&pool)
+                .await
+                {
+                    Ok(result) if result.rows_affected() > 0 => {
+                        return; // Successfully updated.
+                    }
+                    Ok(_) => {
+                        // Row doesn't exist yet — INSERT hasn't committed.
+                        if attempt < MAX_RETRIES {
+                            let delay = BASE_DELAY_MS * 2u64.pow(attempt);
+                            tracing::debug!(
+                                worker_id = %id,
+                                attempt,
+                                delay_ms = delay,
+                                "worker_runs row not yet inserted, retrying opencode metadata update"
+                            );
+                            tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
+                        } else {
+                            tracing::warn!(
+                                worker_id = %id,
+                                "worker_runs row never appeared after {MAX_RETRIES} retries, \
+                                 opencode metadata (port={port}) lost"
+                            );
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            worker_id = %id,
+                            "failed to persist OpenCode metadata"
+                        );
+                        return;
+                    }
+                }
             }
         });
     }

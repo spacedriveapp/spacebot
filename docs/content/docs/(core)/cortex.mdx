@@ -1,6 +1,6 @@
 ---
 title: Cortex
-description: System-level observer that maintains memory bulletins and monitors agent health.
+description: System-level observer that maintains memory bulletins, runs maintenance, and monitors agent health.
 ---
 
 # The Cortex
@@ -84,26 +84,37 @@ These serve different purposes:
 
 The bulletin doesn't replace recall — it reduces how often recall is needed. A channel that already knows the user's name, their current project, and recent decisions from the bulletin doesn't need to spawn a branch for basic context.
 
-## Future Responsibilities
+## Current Responsibilities
 
-The bulletin is the cortex's first and most impactful responsibility. The following capabilities are designed but not yet implemented:
+The bulletin is still the cortex's most visible responsibility, but it is no longer the only one.
 
 ### System Health Monitoring
 
-The cortex monitors running processes and keeps the system clean:
+The cortex already supervises long-running process state:
 
-- **Worker supervision** — detect hanging workers, kill error loops, clean up stale state
-- **Branch supervision** — kill stale branches, track latency trends
-- **Channel health** — flag channels approaching context limits faster than compactors can manage
-- **Circuit breakers** — after 3 consecutive failures of the same type, disable the failing component
+- **Worker supervision** — detect hanging workers, apply timeout policies, and clean up detached worker state
+- **Branch supervision** — detect stale branches and enforce timeout/cancellation policy
+- **Circuit breakers** — recurring bulletin refresh and maintenance failures back off automatically instead of retrying forever
+
+### Memory Maintenance
+
+The cortex also runs periodic graph hygiene:
+
+- **Decay** — reduce importance for stale non-identity memories
+- **Prune** — delete memories that have fallen below the configured importance floor and age threshold
+- **Merge** — combine near-duplicate memories and rewire graph associations atomically
+
+## Future Responsibilities
+
+The remaining cortex roadmap is about richer cross-system inference, not basic supervision:
 
 ### Memory Coherence
 
-The cortex sees memory activity across all channels and maintains the graph:
+The cortex sees memory activity across all channels and can grow into deeper graph stewardship:
 
-- **Consolidation** — merge overlapping memories, create cross-channel associations
-- **Maintenance** — decay old memories, prune low-importance orphans, recompute centrality
-- **Observations** — generate observation-type memories from cross-channel patterns
+- **Consolidation** — merge overlapping memories across channels and create cross-channel associations
+- **Observations** — generate observation-type memories from recurring patterns
+- **Higher-order scoring** — extend maintenance beyond the current decay/prune/merge pass with richer graph analysis
 
 ### The Signal Bus
 
@@ -138,7 +149,7 @@ The cortex is the only singleton in the system (per agent). There's one cortex p
 
 **Compactors** are per-channel, programmatic monitors. They watch one channel's context size and trigger compaction workers. They're not LLM processes.
 
-**The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages the memory bulletin, and will eventually handle memory coherence and system health.
+**The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages the memory bulletin, supervises background health state, and runs periodic memory maintenance. Deeper memory coherence work still grows from here.
 
 ## Interactive Cortex Chat
 
@@ -155,7 +166,7 @@ This makes cortex chat a practical control-room interface for troubleshooting, v
 
 ```toml
 [defaults.cortex]
-# Base tick interval for health monitoring (future).
+# Base tick interval for health monitoring and maintenance scheduling.
 tick_interval_secs = 30
 
 # How often to regenerate the memory bulletin.
@@ -172,6 +183,21 @@ branch_timeout_secs = 60
 
 # Consecutive failures before circuit breaker trips.
 circuit_breaker_threshold = 3
+
+# Interval between maintenance passes.
+maintenance_interval_secs = 3600
+
+# Per-day decay applied during maintenance.
+maintenance_decay_rate = 0.05
+
+# Importance floor for pruning.
+maintenance_prune_threshold = 0.1
+
+# Minimum age before pruning can delete a memory.
+maintenance_min_age_days = 30
+
+# Similarity threshold for duplicate merges.
+maintenance_merge_similarity_threshold = 0.95
 ```
 
 ## Warmup API
