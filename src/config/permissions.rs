@@ -19,6 +19,14 @@ pub struct DiscordPermissions {
 
 impl DiscordPermissions {
     /// Build from the current config's discord settings and bindings.
+    pub fn from_config(discord: &DiscordConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            discord.dm_allowed_users.clone(),
+            discord.allow_bot_messages,
+            bindings,
+            None,
+        )
+    }
 
     /// Build permissions for a named Discord adapter instance.
     pub fn from_instance_config(instance: &DiscordInstanceConfig, bindings: &[Binding]) -> Self {
@@ -113,7 +121,9 @@ pub struct SlackPermissions {
 
 impl SlackPermissions {
     /// Build from the current config's slack settings and bindings.
+    pub fn from_config(slack: &SlackConfig, bindings: &[Binding]) -> Self {
         Self::from_bindings_for_adapter(slack.dm_allowed_users.clone(), bindings, None)
+    }
 
     /// Build permissions for a named Slack adapter instance.
     pub fn from_instance_config(instance: &SlackInstanceConfig, bindings: &[Binding]) -> Self {
@@ -278,6 +288,9 @@ pub struct TwitchPermissions {
 
 impl TwitchPermissions {
     /// Build from the current config's twitch settings and bindings.
+    pub fn from_config(_twitch: &TwitchConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(bindings, None)
+    }
 
     /// Build permissions for a named Twitch adapter instance.
     pub fn from_instance_config(instance: &TwitchInstanceConfig, bindings: &[Binding]) -> Self {
