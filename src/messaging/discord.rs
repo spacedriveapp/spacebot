@@ -223,7 +223,7 @@ impl Messaging for DiscordAdapter {
                             msg = msg.components(components);
                         }
 
-                        if let Some(poll_data) = &poll {
+                        if let Some(poll_data) = poll.as_ref().filter(|p| is_valid_poll(p)) {
                             msg = msg.poll(build_poll(poll_data));
                         }
                     }
@@ -504,7 +504,7 @@ impl Messaging for DiscordAdapter {
                         msg = msg.components(components);
                     }
 
-                    if let Some(poll_data) = &poll {
+                    if let Some(poll_data) = poll.as_ref().filter(|p| is_valid_poll(p)) {
                         msg = msg.poll(build_poll(poll_data));
                     }
                 }
@@ -1176,6 +1176,26 @@ fn build_poll(
     p
 }
 
+fn is_valid_poll(poll: &crate::Poll) -> bool {
+    let question = poll.question.trim();
+    let answer_count = poll
+        .answers
+        .iter()
+        .filter(|answer| !answer.trim().is_empty())
+        .count();
+
+    if question.is_empty() || answer_count < 2 {
+        tracing::debug!(
+            question_len = question.len(),
+            answer_count,
+            "skipping invalid discord poll payload"
+        );
+        return false;
+    }
+
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1236,5 +1256,32 @@ mod tests {
         // build_poll should limit answers to 10 and duration to 720
         let _ = build_poll(&poll);
         // Again, can't easily inspect CreatePoll fields, but we verify it runs.
+    }
+
+    #[test]
+    fn test_invalid_poll_is_rejected() {
+        let empty = Poll {
+            question: String::new(),
+            answers: Vec::new(),
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(!is_valid_poll(&empty));
+
+        let one_answer = Poll {
+            question: "Question?".into(),
+            answers: vec!["Only one".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(!is_valid_poll(&one_answer));
+
+        let valid = Poll {
+            question: "Question?".into(),
+            answers: vec!["Yes".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(is_valid_poll(&valid));
     }
 }
