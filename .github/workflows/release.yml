@@ -47,11 +47,11 @@ jobs:
             archive: tar.gz
             os: linux
           - target: aarch64-apple-darwin
-            runner: macos-14
+            runner: macos-15
             archive: tar.gz
             os: macos
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-15-intel
             archive: tar.gz
             os: macos
     runs-on: ${{ matrix.runner }}

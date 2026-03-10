@@ -1762,7 +1762,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                     );
-                    agent
+                    let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
@@ -1859,7 +1859,7 @@ async fn run(
                         let scoped_channel_id: spacebot::ChannelId =
                             Arc::from(cleanup_channel_id.as_str());
                         process_control_registry
-                            .unregister_channel(&scoped_channel_id)
+                            .unregister_channel(&scoped_channel_id, channel_registration_id)
                             .await;
                         api_state_for_cleanup
                             .unregister_channel_status(&cleanup_channel_id)
@@ -2049,7 +2049,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                     );
-                    agent
+                    let channel_registration_id = agent
                         .deps
                         .process_control_registry
                         .register_channel(channel.id.clone(), channel.control_handle().downgrade())
@@ -2105,7 +2105,7 @@ async fn run(
                         let scoped_channel_id: spacebot::ChannelId =
                             Arc::from(cleanup_channel_id.as_str());
                         process_control_registry
-                            .unregister_channel(&scoped_channel_id)
+                            .unregister_channel(&scoped_channel_id, channel_registration_id)
                             .await;
                         api_state_for_cleanup
                             .unregister_channel_status(&cleanup_channel_id)
