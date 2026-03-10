@@ -393,7 +393,8 @@ pub struct AgentDeps {
     pub sandbox: Arc<sandbox::Sandbox>,
     pub links: Arc<arc_swap::ArcSwap<Vec<links::AgentLink>>>,
     /// Map of all agent IDs to display names, for inter-agent message routing.
-    pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    /// Hot-reloadable: updated when agents are added or reconfigured.
+    pub agent_names: Arc<arc_swap::ArcSwap<std::collections::HashMap<String, String>>>,
     /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
     /// to surface human display names, roles, and descriptions in agent prompts.
     pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,

@@ -413,6 +413,7 @@ pub(super) async fn trigger_warmup(
         let task_store_registry = state.task_store_registry.clone();
         let injection_tx = state.injection_tx.clone();
         let humans = (**state.agent_humans.load()).clone();
+        let agent_names = state.agent_names.clone();
         tokio::spawn(async move {
             let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let project_store =
@@ -432,7 +433,7 @@ pub(super) async fn trigger_warmup(
                 task_store,
                 project_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-                agent_names: Arc::new(std::collections::HashMap::new()),
+                agent_names,
                 humans: Arc::new(arc_swap::ArcSwap::from_pointee(humans)),
                 task_store_registry,
                 process_control_registry: Arc::new(
@@ -764,6 +765,20 @@ pub async fn create_agent_internal(
     // Inject active project root paths into the sandbox allowlist.
     crate::projects::refresh_sandbox_project_paths(&project_store, &arc_agent_id, &sandbox).await;
 
+    // Update the shared agent name registry to include this new agent so all
+    // existing agents can resolve it immediately via their Arc<ArcSwap<...>>.
+    {
+        let new_agent_name = request
+            .display_name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .unwrap_or(&agent_id)
+            .to_string();
+        let mut names = (**state.agent_names.load()).clone();
+        names.insert(agent_id.clone(), new_agent_name);
+        state.agent_names.store(std::sync::Arc::new(names));
+    }
+
     let deps = crate::AgentDeps {
         agent_id: arc_agent_id.clone(),
         memory_search: memory_search.clone(),
@@ -789,26 +804,7 @@ pub async fn create_agent_internal(
             crate::agent::process_control::ProcessControlRegistry::new(),
         ),
         injection_tx: state.injection_tx.clone(),
-        agent_names: {
-            let configs = state.agent_configs.load();
-            let mut names: std::collections::HashMap<String, String> = configs
-                .iter()
-                .map(|c| {
-                    (
-                        c.id.clone(),
-                        c.display_name.clone().unwrap_or_else(|| c.id.clone()),
-                    )
-                })
-                .collect();
-            names.entry(agent_id.clone()).or_insert_with(|| {
-                request
-                    .display_name
-                    .clone()
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| agent_id.clone())
-            });
-            Arc::new(names)
-        },
+        agent_names: state.agent_names.clone(),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_humans.load()).clone(),
         )),

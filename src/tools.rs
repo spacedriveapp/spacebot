@@ -348,6 +348,7 @@ pub async fn add_channel_tools(
         let agent_display_name = state
             .deps
             .agent_names
+            .load()
             .get(state.deps.agent_id.as_ref())
             .cloned()
             .unwrap_or_else(|| state.deps.agent_id.to_string());
@@ -369,6 +370,7 @@ pub async fn add_channel_tools(
         let send_message_display_name = state
             .deps
             .agent_names
+            .load()
             .get(state.deps.agent_id.as_ref())
             .cloned()
             .unwrap_or_else(|| state.deps.agent_id.to_string());
