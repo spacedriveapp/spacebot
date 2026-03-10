@@ -2057,6 +2057,9 @@ impl SystemSecrets for SlackConfig {
 
 #[derive(Clone)]
 pub struct TelegramConfig {
+    /// Whether to use native streaming via sendMessageDraft API (Bot API 9.5+)
+    /// Only works for private chats. Defaults to true.
+    pub native_streaming: bool,
     pub enabled: bool,
     pub token: String,
     /// Additional named Telegram bot instances for this platform.
@@ -2072,6 +2075,8 @@ pub struct TelegramInstanceConfig {
     pub token: String,
     /// User IDs allowed to DM this bot instance.
     pub dm_allowed_users: Vec<String>,
+    /// Whether to use native streaming via sendMessageDraft API
+    pub native_streaming: bool,
 }
 
 impl std::fmt::Debug for TelegramInstanceConfig {
@@ -2081,6 +2086,7 @@ impl std::fmt::Debug for TelegramInstanceConfig {
             .field("enabled", &self.enabled)
             .field("token", &"[REDACTED]")
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("native_streaming", &self.native_streaming)
             .finish()
     }
 }
@@ -2092,6 +2098,7 @@ impl std::fmt::Debug for TelegramConfig {
             .field("token", &"[REDACTED]")
             .field("instances", &self.instances)
             .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("native_streaming", &self.native_streaming)
             .finish()
     }
 }
