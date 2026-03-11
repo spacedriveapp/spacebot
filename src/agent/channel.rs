@@ -1021,6 +1021,14 @@ impl Channel {
             tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on shutdown");
         }
 
+        // Persist any unsaved conversation context to memory before the channel
+        // closes. Without this, short-lived conversations (common on Discord and
+        // Telegram) that never reach the message_interval threshold would lose
+        // their context entirely.
+        if self.message_count > 0 {
+            self.force_memory_persistence().await;
+        }
+
         tracing::info!(channel_id = %self.id, "channel stopped");
         Ok(())
     }
@@ -3064,6 +3072,36 @@ impl Channel {
                     channel_id = %self.id,
                     %error,
                     "failed to spawn memory persistence branch"
+                );
+            }
+        }
+    }
+
+    /// Spawn a memory persistence branch unconditionally (ignoring the
+    /// message_interval threshold). Used on channel shutdown to flush any
+    /// unsaved conversation context that hasn't reached the periodic trigger.
+    async fn force_memory_persistence(&mut self) {
+        let config = **self.deps.runtime_config.memory_persistence.load();
+        if !config.enabled {
+            return;
+        }
+
+        self.message_count = 0;
+
+        match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+            Ok(branch_id) => {
+                self.memory_persistence_branches.insert(branch_id);
+                tracing::info!(
+                    channel_id = %self.id,
+                    branch_id = %branch_id,
+                    "memory persistence branch spawned on channel shutdown"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to spawn memory persistence branch on channel shutdown"
                 );
             }
         }
