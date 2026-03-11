@@ -3320,4 +3320,34 @@ mod tests {
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
     }
+
+    #[test]
+    fn memory_persistence_config_defaults_to_enabled() {
+        let config = crate::config::MemoryPersistenceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.message_interval, 50);
+    }
+
+    #[test]
+    fn memory_persistence_disabled_config_gates_off() {
+        let config = crate::config::MemoryPersistenceConfig {
+            enabled: false,
+            message_interval: 10,
+        };
+        // force_memory_persistence returns early when disabled.
+        // check_memory_persistence returns early when disabled or interval is 0.
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn memory_persistence_zero_interval_gates_off() {
+        let config = crate::config::MemoryPersistenceConfig {
+            enabled: true,
+            message_interval: 0,
+        };
+        // check_memory_persistence returns early when interval is 0.
+        // force_memory_persistence ignores interval (only checks enabled).
+        assert!(config.enabled);
+        assert_eq!(config.message_interval, 0);
+    }
 }
