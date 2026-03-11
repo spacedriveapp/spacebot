@@ -1,0 +1,69 @@
+# CodeRabbit Configuration for Spacebot
+# https://coderabbit.ai/docs/configuration
+
+# Enable CodeRabbit on all pull requests
+enabled: true
+
+# Review settings
+reviews:
+  # Automatically review PRs when opened
+  auto_review:
+    enabled: true
+    on_open: true
+  
+  # Review summary format
+  review_status: true
+  collapse_walkthrough: false
+  
+  # Path-based review configuration
+  path_filters:
+    # Include Rust source files
+    - "src/**/*.rs"
+    # Include interface files
+    - "interface/**/*"
+  
+  path_instructions:
+    - path: "src/**/*.rs"
+      instructions: |
+        Review Rust code for:
+        - Memory safety and ownership issues
+        - Error handling patterns
+        - Performance considerations
+        - Idiomatic Rust practices
+    
+    - path: "interface/**/*"
+      instructions: |
+        Review interface files for:
+        - TypeScript/JavaScript best practices
+        - Component structure and patterns
+        - Accessibility concerns
+
+# Files to skip during review
+skip_files:
+  - "**/generated/**"
+  - "**/*.generated.*"
+  - "**/dist/**"
+  - "**/build/**"
+  - "**/*.lock"
+  - "**/Cargo.lock"
+  - "**/package-lock.json"
+  - "**/yarn.lock"
+  - "**/pnpm-lock.yaml"
+  - "**/migrations/**"
+  - "**/*.snap"
+
+# Chat settings for questions
+chat:
+  enabled: true
+  auto_reply: true
+
+# Early access features
+early_access: true
+
+# Language settings
+language: en-US
+
+# Tone of reviews
+tone_instructions: |
+  Be constructive and helpful. Focus on actionable feedback.
+  Explain the "why" behind suggestions. Celebrate good code patterns.
