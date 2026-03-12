@@ -3001,15 +3001,6 @@ fn append_json_string_field(value: &mut serde_json::Value, field_name: &str, suf
         }
     }
 }
-    let object = ensure_json_object(value);
-    let mut text = object
-        .get(field_name)
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default()
-        .to_string();
-    text.push_str(suffix);
-    object.insert(field_name.to_string(), serde_json::Value::String(text));
-}
 
 fn set_json_string_field(value: &mut serde_json::Value, field_name: &str, text: &str) {
     let object = ensure_json_object(value);
