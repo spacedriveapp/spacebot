@@ -940,6 +940,31 @@ export interface ProvidersResponse {
 	has_any: boolean;
 }
 
+export type WarmupState = "cold" | "warming" | "warm" | "degraded";
+
+export interface WarmupStatus {
+	state: WarmupState;
+	embedding_ready: boolean;
+	last_refresh_unix_ms: number | null;
+	last_error: string | null;
+	bulletin_age_secs: number | null;
+}
+
+export interface WarmupStatusEntry {
+	agent_id: string;
+	status: WarmupStatus;
+}
+
+export interface WarmupStatusResponse {
+	statuses: WarmupStatusEntry[];
+}
+
+export interface WarmupTriggerResponse {
+	status: string;
+	forced: boolean;
+	accepted_agents: string[];
+}
+
 export interface ProviderActionResponse {
 	success: boolean;
 	message: string;
@@ -1216,6 +1241,23 @@ export interface DeleteMessagingInstanceRequest {
 }
 
 export interface MessagingInstanceActionResponse {
+	success: boolean;
+	message: string;
+}
+
+export interface McpServerStatusInfo {
+	name: string;
+	transport: string;
+	enabled: boolean;
+	state: string;
+}
+
+export interface McpAgentStatus {
+	agent_id: string;
+	servers: McpServerStatusInfo[];
+}
+
+export interface McpMutationResponse {
 	success: boolean;
 	message: string;
 }
@@ -1931,6 +1973,21 @@ export const api = {
 
 	// Provider management
 	providers: () => fetchJson<ProvidersResponse>("/providers"),
+	warmupStatus: () => fetchJson<WarmupStatusResponse>("/agents/warmup"),
+	triggerWarmup: async (params?: {agentId?: string; force?: boolean}) => {
+		const response = await fetch(`${API_BASE}/agents/warmup`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: params?.agentId ?? null,
+				force: params?.force ?? false,
+			}),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<WarmupTriggerResponse>;
+	},
 	updateProvider: async (provider: string, apiKey: string, model: string) => {
 		const response = await fetch(`${API_BASE}/providers`, {
 			method: "PUT",
@@ -2035,6 +2092,16 @@ export const api = {
 
 	// Messaging / Bindings API
 	messagingStatus: () => fetchJson<MessagingStatusResponse>("/messaging/status"),
+	mcpStatus: () => fetchJson<McpAgentStatus[]>("/mcp/status"),
+	reconnectMcpServer: async (serverName: string) => {
+		const response = await fetch(`${API_BASE}/mcp/servers/${encodeURIComponent(serverName)}/reconnect`, {
+			method: "POST",
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<McpMutationResponse>;
+	},
 
 	bindings: (agentId?: string) => {
 		const params = agentId

@@ -5,6 +5,7 @@ import {SparklesIcon, IdeaIcon} from "@hugeicons/core-free-icons";
 import {HugeiconsIcon} from "@hugeicons/react";
 import {api} from "@/api/client";
 import {CreateAgentDialog} from "@/components/CreateAgentDialog";
+import {SetupReadinessCard} from "@/components/SetupReadiness";
 import {TopologyGraph} from "@/components/TopologyGraph";
 import {UpdatePill} from "@/components/UpdatePill";
 import {useSetTopBar} from "@/components/TopBar";
@@ -119,6 +120,7 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 
 	return (
 		<div className="flex flex-col h-full">
+			<SetupReadinessCard />
 			{/* Full-screen topology */}
 			<div className="flex-1 overflow-hidden">
 				{overviewLoading ? (

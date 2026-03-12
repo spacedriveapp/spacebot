@@ -8,6 +8,7 @@ import {useQuery} from "@tanstack/react-query";
 import {api, BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
 import {TopBar, TopBarProvider, useSetTopBar} from "@/components/TopBar";
+import {SetupBanner} from "@/components/SetupBanner";
 import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
 import {AgentDetail} from "@/routes/AgentDetail";
@@ -37,6 +38,7 @@ function RootLayout() {
 			<div className="flex h-screen flex-col bg-app">
 				<TopBar />
 				<ConnectionBanner state={connectionState} hasData={hasData} />
+				<SetupBanner />
 				<div className="flex min-h-0 flex-1">
 					<Sidebar liveStates={liveStates} />
 					<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
