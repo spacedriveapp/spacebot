@@ -150,14 +150,13 @@ impl Tool for SendMessageTool {
             // If explicit prefix returned default "signal" adapter but we're in a named
             // Signal adapter conversation (e.g., signal:gvoice1), use the current adapter
             // to ensure the message goes through the correct account.
-            if target.adapter == "signal" {
-                if let Some(current_adapter) = self
+            if target.adapter == "signal"
+                && let Some(current_adapter) = self
                     .current_adapter
                     .as_ref()
                     .filter(|adapter| adapter.starts_with("signal:"))
-                {
-                    target.adapter = current_adapter.clone();
-                }
+            {
+                target.adapter = current_adapter.clone();
             }
 
             self.messaging_manager
@@ -189,31 +188,28 @@ impl Tool for SendMessageTool {
             .current_adapter
             .as_ref()
             .filter(|adapter| adapter.starts_with("signal"))
+            && let Some(target) = parse_implicit_signal_shorthand(&args.target, current_adapter)
         {
-            if let Some(target) = parse_implicit_signal_shorthand(&args.target, current_adapter) {
-                self.messaging_manager
-                    .broadcast(
-                        &target.adapter,
-                        &target.target,
-                        crate::OutboundResponse::Text(args.message),
-                    )
-                    .await
-                    .map_err(|error| {
-                        SendMessageError(format!("failed to send message: {error}"))
-                    })?;
+            self.messaging_manager
+                .broadcast(
+                    &target.adapter,
+                    &target.target,
+                    crate::OutboundResponse::Text(args.message),
+                )
+                .await
+                .map_err(|error| SendMessageError(format!("failed to send message: {error}")))?;
 
-                tracing::info!(
-                    adapter = %target.adapter,
-                    broadcast_target = %"[REDACTED]",
-                    "message sent via implicit Signal shorthand"
-                );
+            tracing::info!(
+                adapter = %target.adapter,
+                broadcast_target = %"[REDACTED]",
+                "message sent via implicit Signal shorthand"
+            );
 
-                return Ok(SendMessageOutput {
-                    success: true,
-                    target: target.target,
-                    platform: target.adapter,
-                });
-            }
+            return Ok(SendMessageOutput {
+                success: true,
+                target: target.target,
+                platform: target.adapter,
+            });
         }
 
         // Check for explicit email target
