@@ -125,7 +125,7 @@ If a future channel adapter requires inbound HTTP callbacks (e.g. WhatsApp Busin
 
 Some agent frameworks ship a `doctor` CLI command that checks daemon heartbeats, scheduler health, and channel connectivity. This usually exists to compensate for a fragile runtime — if you need a separate command to tell you your process is dead, the process management is the problem.
 
-Spacebot handles this through its control interface and the cortex. The embedded UI shows adapter status, agent health, and active connections in real-time. The cortex observes system-wide signals and surfaces issues proactively. Channel token validation happens at setup time through the bindings API — if something is misconfigured, you find out immediately when you add the binding, not by running `doctor` ten minutes later.
+Spacebot handles this through its control interface and the cortex. The embedded UI now keeps setup and runtime readiness visible in the normal workflow: the shell banner and Overview page call out missing providers, secrets problems, warmup drift, and MCP connectivity issues, while **Settings → System Health** shows per-agent warmup state and enabled MCP server status. The cortex still observes system-wide signals and surfaces issues proactively. Channel token validation happens at setup time through the bindings API — if something is misconfigured, you find out immediately when you add the binding, not by running `doctor` ten minutes later.
 
 ## Post-Launch
 

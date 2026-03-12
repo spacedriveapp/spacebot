@@ -36,6 +36,20 @@ describe("api client runtime health actions", () => {
 		);
 	});
 
+	test("triggerWarmup defaults to all agents without force", async () => {
+		await api.triggerWarmup();
+
+		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
+		expect(globalThis.fetch).toHaveBeenCalledWith(
+			"/api/agents/warmup",
+			expect.objectContaining({
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ agent_id: null, force: false }),
+			}),
+		);
+	});
+
 	test("reconnectMcpServer posts to the reconnect endpoint", async () => {
 		await api.reconnectMcpServer("filesystem");
 

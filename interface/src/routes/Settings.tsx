@@ -1658,7 +1658,10 @@ function formatWarmupDetails(entry: WarmupStatusEntry) {
 	if (entry.status.last_error) {
 		details.push(entry.status.last_error);
 	}
-	return details;
+	if (details.length > 0) {
+		return details;
+	}
+	return [entry.status.state === "warm" ? "Warmup is healthy." : "Warmup has not completed yet."];
 }
 
 function mcpBadgeVariant(server: McpServerStatusInfo) {
@@ -1723,6 +1726,10 @@ function SystemHealthSection() {
 			.map((server) => ({agent_id: agentStatus.agent_id, ...server})),
 	);
 	const actionableCount = readiness.blockerCount + readiness.warningCount;
+	const warmAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "warm").length;
+	const degradedAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "degraded").length;
+	const connectedMcpCount = enabledMcpServers.filter((server) => server.state === "connected").length;
+	const disconnectedMcpCount = enabledMcpServers.filter((server) => server.state !== "connected").length;
 
 	return (
 		<div className="mx-auto max-w-3xl px-6 py-6">
@@ -1753,6 +1760,42 @@ function SystemHealthSection() {
 					>
 						Trigger all warmups
 					</Button>
+				</div>
+				<div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Actionable</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{actionableCount}</p>
+						<p className="text-sm text-ink-dull">
+							{readiness.blockerCount} blocker{readiness.blockerCount === 1 ? "" : "s"}, {readiness.warningCount} warning{readiness.warningCount === 1 ? "" : "s"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Warm Agents</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{warmAgentsCount}</p>
+						<p className="text-sm text-ink-dull">
+							{degradedAgentsCount > 0
+								? `${degradedAgentsCount} degraded`
+								: warmupStatuses.length > 0
+									? "No degraded agents"
+									: "No warmup data yet"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">MCP Connected</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{connectedMcpCount}</p>
+						<p className="text-sm text-ink-dull">
+							{enabledMcpServers.length > 0
+								? `${enabledMcpServers.length} enabled server${enabledMcpServers.length === 1 ? "" : "s"}`
+								: "No enabled servers"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Needs Reconnect</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{disconnectedMcpCount}</p>
+						<p className="text-sm text-ink-dull">
+							{disconnectedMcpCount > 0 ? "Reconnect from this panel" : "All enabled servers are live"}
+						</p>
+					</div>
 				</div>
 			</div>
 
@@ -1846,6 +1889,11 @@ function SystemHealthSection() {
 											<p className="mt-1 text-sm text-ink-dull">
 												Agent {server.agent_id} via {server.transport}
 											</p>
+											{server.state !== "connected" && (
+												<p className="mt-1 text-sm text-ink-dull">
+													State: {server.state}
+												</p>
+											)}
 										</div>
 										{server.state !== "connected" && (
 											<Button
