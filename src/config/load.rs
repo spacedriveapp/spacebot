@@ -69,6 +69,7 @@ pub fn set_resolve_secrets_store(store: std::sync::Arc<crate::secrets::store::Se
 const KNOWN_TOP_LEVEL_KEYS: &[&str] = &[
     "llm",
     "defaults",
+    "memory_persistence",
     "agents",
     "links",
     "groups",
@@ -90,6 +91,15 @@ pub(super) fn warn_unknown_config_keys(content: &str) {
     };
 
     for key in table.keys() {
+        if key == "memory_persistence" {
+            tracing::warn!(
+                "config.toml contains top-level key `memory_persistence`. \
+                 This legacy location is still supported, but prefer \
+                 [defaults.memory_persistence] for new configs."
+            );
+            continue;
+        }
+
         if KNOWN_TOP_LEVEL_KEYS.contains(&key.as_str()) {
             continue;
         }
@@ -1403,6 +1413,7 @@ impl Config {
             memory_persistence: toml
                 .defaults
                 .memory_persistence
+                .or(toml.memory_persistence)
                 .map(|mp| MemoryPersistenceConfig {
                     enabled: mp
                         .enabled
