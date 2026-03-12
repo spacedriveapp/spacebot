@@ -163,8 +163,13 @@ impl Tool for TaskUpdateTool {
         let task_number = i64::from(args.task_number);
 
         if let Some(cortex_ctx) = &self.cortex_ctx {
-            let current_task_number = *cortex_ctx.current_task_number.read().await;
-            if current_task_number == Some(task_number) {
+            if let Some(current_task_number) = *cortex_ctx.current_task_number.read().await {
+                if current_task_number != task_number {
+                    return Err(TaskUpdateError(format!(
+                        "CorPilot can only update the currently scoped task (#{current_task_number})."
+                    )));
+                }
+
                 let current_task = self
                     .task_store
                     .get_by_number(&self.agent_id, task_number)
@@ -378,6 +383,16 @@ mod tests {
                 .contains("cannot rewrite the core spec of an in-progress task"),
             "unexpected error: {error}"
         );
+
+        let updated = store
+            .get_by_number(agent_id.as_ref(), created.task_number)
+            .await
+            .expect("task fetch should succeed")
+            .expect("task should exist");
+        assert_eq!(updated.status, TaskStatus::InProgress);
+        assert_eq!(updated.title, "in-progress task");
+        assert_eq!(updated.description.as_deref(), Some("original"));
+        assert!(updated.subtasks.is_empty());
     }
 
     #[tokio::test]

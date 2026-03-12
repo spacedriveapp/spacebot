@@ -427,6 +427,18 @@ pub struct CortexChatSession {
 }
 
 impl CortexChatSession {
+    fn truncate_task_context_text(value: &str, max_bytes: usize) -> &str {
+        if value.len() <= max_bytes {
+            return value;
+        }
+
+        let mut end = max_bytes;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        &value[..end]
+    }
+
     pub fn new(
         deps: AgentDeps,
         tool_server: ToolServerHandle,
@@ -904,7 +916,11 @@ impl CortexChatSession {
             && !description.trim().is_empty()
         {
             out.push_str("\n### Description\n");
-            out.push_str(description);
+            let preview = Self::truncate_task_context_text(description, 4_000);
+            out.push_str(preview);
+            if preview.len() < description.len() {
+                out.push_str("\n\n[description truncated]\n");
+            }
             out.push('\n');
         }
 
