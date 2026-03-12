@@ -16,7 +16,19 @@ impl std::fmt::Display for BroadcastTarget {
 }
 
 /// Parse and normalize a delivery target in `adapter:target` format.
+///
+/// Signal targets may contain named instance prefixes (e.g.,
+/// `signal:gvoice1:uuid:xxx`). The generic `split_once(':')` approach
+/// cannot distinguish the instance segment from the target, so we
+/// delegate to `parse_signal_target_parts` which already handles this.
 pub fn parse_delivery_target(raw: &str) -> Option<BroadcastTarget> {
+    // Signal needs special handling because named instances add an extra
+    // colon-separated segment that the generic parser can't distinguish.
+    if raw.starts_with("signal:") {
+        let parts: Vec<&str> = raw.split(':').collect();
+        return parse_signal_target_parts(parts.get(1..).unwrap_or(&[]));
+    }
+
     let (adapter, raw_target) = raw.split_once(':')?;
     if adapter.is_empty() || raw_target.is_empty() {
         return None;

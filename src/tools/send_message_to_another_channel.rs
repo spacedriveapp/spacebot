@@ -88,12 +88,8 @@ impl Tool for SendMessageTool {
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         let email_adapter_available = self.messaging_manager.has_adapter("email").await;
-        // Check if current adapter is Signal (e.g., "signal:gvoice1" starts with "signal")
-        let signal_adapter_available = self
-            .current_adapter
-            .as_ref()
-            .map(|adapter| adapter.starts_with("signal"))
-            .unwrap_or(false);
+        // Check if any Signal adapter is registered (works in any context, including cron)
+        let signal_adapter_available = self.messaging_manager.has_platform_adapters("signal").await;
 
         let mut description =
             crate::prompts::text::get("tools/send_message_to_another_channel").to_string();
@@ -147,16 +143,31 @@ impl Tool for SendMessageTool {
         // Check for explicit signal: prefix first - always honored regardless of current adapter.
         // This allows users to explicitly target Signal even when in Discord/Telegram/etc.
         if let Some(mut target) = parse_explicit_signal_prefix(&args.target) {
-            // If explicit prefix returned default "signal" adapter but we're in a named
-            // Signal adapter conversation (e.g., signal:gvoice1), use the current adapter
-            // to ensure the message goes through the correct account.
-            if target.adapter == "signal"
-                && let Some(current_adapter) = self
+            // If explicit prefix returned default "signal" adapter, try to resolve
+            // to a specific named instance for correct routing.
+            if target.adapter == "signal" {
+                if let Some(current_adapter) = self
                     .current_adapter
                     .as_ref()
                     .filter(|adapter| adapter.starts_with("signal:"))
-            {
-                target.adapter = current_adapter.clone();
+                {
+                    // In a named Signal conversation — use that instance
+                    target.adapter = current_adapter.clone();
+                } else {
+                    // Not in a Signal conversation (e.g., cron context) — look up
+                    // registered Signal adapters and use it if there's exactly one.
+                    let signal_adapters: Vec<String> = self
+                        .messaging_manager
+                        .adapter_names()
+                        .await
+                        .into_iter()
+                        .filter(|name| name == "signal" || name.starts_with("signal:"))
+                        .collect();
+                    if signal_adapters.len() == 1 {
+                        target.adapter = signal_adapters.into_iter().next().unwrap();
+                    }
+                    // If 0 or >1 adapters, leave as "signal" and let broadcast() handle it
+                }
             }
 
             self.messaging_manager

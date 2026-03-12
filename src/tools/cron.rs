@@ -21,6 +21,7 @@ pub struct CronTool {
     store: Arc<CronStore>,
     scheduler: Arc<Scheduler>,
     default_delivery_target: Option<String>,
+    current_adapter: Option<String>,
 }
 
 impl CronTool {
@@ -29,11 +30,17 @@ impl CronTool {
             store,
             scheduler,
             default_delivery_target: None,
+            current_adapter: None,
         }
     }
 
     pub fn with_default_delivery_target(mut self, default_delivery_target: Option<String>) -> Self {
         self.default_delivery_target = default_delivery_target;
+        self
+    }
+
+    pub fn with_current_adapter(mut self, current_adapter: Option<String>) -> Self {
+        self.current_adapter = current_adapter;
         self
     }
 }
@@ -207,6 +214,9 @@ impl CronTool {
                         .into(),
                 )
             })?;
+
+        // Normalize delivery target for named instances
+        let delivery_target = normalize_delivery_target(&delivery_target, &self.current_adapter);
 
         // Validate cron job ID: alphanumeric, hyphens, underscores only
         if id.is_empty()
@@ -409,5 +419,132 @@ fn format_interval(secs: u64) -> String {
         }
     } else {
         format!("every {secs} seconds")
+    }
+}
+
+/// Normalize delivery target for named instances.
+///
+/// If the LLM provided a bare platform adapter (e.g., "signal", "slack") but we're in
+/// a named instance conversation (e.g., "signal:gvoice1", "slack:work"), rewrite to
+/// include the instance name. This ensures the cron job can find the correct adapter
+/// at runtime.
+fn normalize_delivery_target(delivery_target: &str, current_adapter: &Option<String>) -> String {
+    if let Some(parsed) = crate::messaging::target::parse_delivery_target(delivery_target)
+        && let Some(current_adapter) = current_adapter.as_ref()
+    {
+        let expected_prefix = format!("{}:", parsed.adapter);
+        if current_adapter.starts_with(&expected_prefix) {
+            // current_adapter is a named instance of the parsed platform
+            return format!("{current_adapter}:{}", parsed.target);
+        }
+    }
+    delivery_target.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_delivery_target;
+
+    #[test]
+    fn test_normalize_signal_named_instance() {
+        // Bare signal + named instance context → rewrite
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal:gvoice1".to_string()),
+        );
+        assert_eq!(
+            result,
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_normalize_signal_group_named_instance() {
+        // Signal group + named instance context → rewrite
+        let result =
+            normalize_delivery_target("signal:group:grp123", &Some("signal:work".to_string()));
+        assert_eq!(result, "signal:work:group:grp123");
+    }
+
+    #[test]
+    fn test_normalize_signal_default_instance_no_rewrite() {
+        // Bare signal + default signal context → no change
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_signal_no_context_no_rewrite() {
+        // Bare signal + no context → no change
+        let result =
+            normalize_delivery_target("signal:uuid:550e8400-e29b-41d4-a716-446655440000", &None);
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_slack_named_instance() {
+        // Bare slack + named instance context → rewrite
+        let result = normalize_delivery_target("slack:C123456", &Some("slack:work".to_string()));
+        assert_eq!(result, "slack:work:C123456");
+    }
+
+    #[test]
+    fn test_normalize_discord_named_instance() {
+        // Bare discord + named instance context → rewrite
+        let result =
+            normalize_delivery_target("discord:987654321", &Some("discord:personal".to_string()));
+        assert_eq!(result, "discord:personal:987654321");
+    }
+
+    #[test]
+    fn test_normalize_telegram_named_instance() {
+        // Bare telegram + named instance context → rewrite
+        let result =
+            normalize_delivery_target("telegram:-1001234", &Some("telegram:bot1".to_string()));
+        assert_eq!(result, "telegram:bot1:-1001234");
+    }
+
+    #[test]
+    fn test_normalize_different_platform_no_rewrite() {
+        // Signal target but in Discord context → no change
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("discord:general".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_cron_context_no_rewrite() {
+        // Any target in cron context → no change (cron can't receive delivery)
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("cron".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_already_qualified_no_rewrite() {
+        // Already qualified with instance name → no change
+        let result = normalize_delivery_target(
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal:gvoice1".to_string()),
+        );
+        assert_eq!(
+            result,
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_normalize_email_no_rewrite() {
+        // Email doesn't use named instances → no change
+        let result =
+            normalize_delivery_target("email:alice@example.com", &Some("email".to_string()));
+        assert_eq!(result, "email:alice@example.com");
     }
 }
