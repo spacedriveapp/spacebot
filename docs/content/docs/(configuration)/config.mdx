@@ -463,13 +463,24 @@ At least one provider (legacy key or custom provider) must be configured.
 | `compactor` | string | `anthropic/claude-haiku-4.5-20250514` | Model for summarization |
 | `cortex` | string | `anthropic/claude-haiku-4.5-20250514` | Model for system observation |
 | `rate_limit_cooldown_secs` | integer | 60 | How long to deprioritize a rate-limited model |
+| `channel_thinking_effort` | string | `"auto"` | Internal reasoning effort hint for channel model (`"auto"`, `"max"`, `"high"`, `"medium"`, `"low"`) |
+| `branch_thinking_effort` | string | `"auto"` | Internal reasoning effort hint for branch model (`"auto"`, `"max"`, `"high"`, `"medium"`, `"low"`) |
+| `worker_thinking_effort` | string | `"auto"` | Internal reasoning effort hint for worker model (`"auto"`, `"max"`, `"high"`, `"medium"`, `"low"`) |
+| `compactor_thinking_effort` | string | `"auto"` | Internal reasoning effort hint for compactor model (`"auto"`, `"max"`, `"high"`, `"medium"`, `"low"`) |
+| `cortex_thinking_effort` | string | `"auto"` | Internal reasoning effort hint for cortex model (`"auto"`, `"max"`, `"high"`, `"medium"`, `"low"`) |
 
 Routing selects providers by the prefix before the first `/` in the model name.
+
+`*_thinking_effort` is provider-specific:
+- Anthropic adaptive-thinking models use the value directly.
+- `openai-chatgpt/*` models map this to Responses API `reasoning.effort` (`max|high -> high`, `medium -> medium`, `low -> low`, `auto -> omitted`).
 
 ```toml
 [defaults.routing]
 channel = "my_openai/gpt-4o-mini"
 worker = "custom_anthropic/claude-3-5-sonnet"
+channel_thinking_effort = "high"
+worker_thinking_effort = "medium"
 
 [llm.provider.my_openai]
 api_type = "openai_completions"
