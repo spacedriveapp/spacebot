@@ -2880,7 +2880,7 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
     }
 }
 
-fn openai_reasoning_effort<'a>(model_name: &str, configured_effort: &'a str) -> Option<&'a str> {
+fn openai_reasoning_effort(model_name: &str, configured_effort: &str) -> Option<&'static str> {
     if configured_effort == "auto" || !model_name.starts_with("gpt-5") {
         return None;
     }
