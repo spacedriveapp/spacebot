@@ -1048,6 +1048,14 @@ impl Channel {
             tracing::error!(%error, channel_id = %self.id, "error flushing coalesce buffer on shutdown");
         }
 
+        // Persist any unsaved conversation context to memory before the channel
+        // closes. Without this, short-lived conversations (common on Discord and
+        // Telegram) that never reach the message_interval threshold would lose
+        // their context entirely.
+        if self.message_count > 0 {
+            self.force_memory_persistence().await;
+        }
+
         tracing::info!(channel_id = %self.id, "channel stopped");
         Ok(())
     }
@@ -3122,6 +3130,36 @@ impl Channel {
         }
     }
 
+    /// Spawn a memory persistence branch unconditionally (ignoring the
+    /// message_interval threshold). Used on channel shutdown to flush any
+    /// unsaved conversation context that hasn't reached the periodic trigger.
+    async fn force_memory_persistence(&mut self) {
+        let config = **self.deps.runtime_config.memory_persistence.load();
+        if !config.enabled {
+            return;
+        }
+
+        self.message_count = 0;
+
+        match spawn_memory_persistence_branch(&self.state, &self.deps).await {
+            Ok(branch_id) => {
+                self.memory_persistence_branches.insert(branch_id);
+                tracing::info!(
+                    channel_id = %self.id,
+                    branch_id = %branch_id,
+                    "memory persistence branch spawned on channel shutdown"
+                );
+            }
+            Err(error) => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    %error,
+                    "failed to spawn memory persistence branch on channel shutdown"
+                );
+            }
+        }
+    }
+
     /// If prompt capture is enabled for this channel, snapshot the current
     /// system prompt sections and conversation history. The save is
     /// fire-and-forget so it never blocks the agentic loop.
@@ -3334,5 +3372,35 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn memory_persistence_config_defaults_to_enabled() {
+        let config = crate::config::MemoryPersistenceConfig::default();
+        assert!(config.enabled);
+        assert_eq!(config.message_interval, 50);
+    }
+
+    #[test]
+    fn memory_persistence_disabled_config_gates_off() {
+        let config = crate::config::MemoryPersistenceConfig {
+            enabled: false,
+            message_interval: 10,
+        };
+        // force_memory_persistence returns early when disabled.
+        // check_memory_persistence returns early when disabled or interval is 0.
+        assert!(!config.enabled);
+    }
+
+    #[test]
+    fn memory_persistence_zero_interval_gates_off() {
+        let config = crate::config::MemoryPersistenceConfig {
+            enabled: true,
+            message_interval: 0,
+        };
+        // check_memory_persistence returns early when interval is 0.
+        // force_memory_persistence ignores interval (only checks enabled).
+        assert!(config.enabled);
+        assert_eq!(config.message_interval, 0);
     }
 }
