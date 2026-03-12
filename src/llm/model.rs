@@ -306,7 +306,9 @@ impl CompletionModel for SpacebotModel {
                 return self.attempt_completion(request).await;
             };
 
-            let configured_effort = routing.thinking_effort_for_model(&self.model_name).to_string();
+            let configured_effort = routing
+                .thinking_effort_for_model(&self.model_name)
+                .to_string();
             let cooldown = routing.rate_limit_cooldown_secs;
             let fallbacks = routing.get_fallbacks(&self.full_model_name);
             let mut last_error: Option<CompletionError> = None;
