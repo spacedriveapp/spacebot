@@ -31,6 +31,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   "opencode-go": "OpenCode Go",
   minimax: "MiniMax",
   "minimax-cn": "MiniMax CN",
+  "github-copilot": "GitHub Copilot",
 };
 
 function formatContextWindow(tokens: number | null): string {
@@ -134,6 +135,7 @@ export function ModelSelect({
     "anthropic",
     "openai",
     "openai-chatgpt",
+    "github-copilot",
     "ollama",
     "deepseek",
     "xai",

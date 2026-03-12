@@ -150,14 +150,13 @@ impl Tool for SendMessageTool {
             // If explicit prefix returned default "signal" adapter but we're in a named
             // Signal adapter conversation (e.g., signal:gvoice1), use the current adapter
             // to ensure the message goes through the correct account.
-            if target.adapter == "signal" {
-                if let Some(current_adapter) = self
+            if target.adapter == "signal"
+                && let Some(current_adapter) = self
                     .current_adapter
                     .as_ref()
                     .filter(|adapter| adapter.starts_with("signal:"))
-                {
-                    target.adapter = current_adapter.clone();
-                }
+            {
+                target.adapter = current_adapter.clone();
             }
 
             self.messaging_manager
@@ -190,29 +189,37 @@ impl Tool for SendMessageTool {
             .as_ref()
             .filter(|adapter| adapter.starts_with("signal"))
         {
-            if let Some(target) = parse_implicit_signal_shorthand(&args.target, current_adapter) {
-                self.messaging_manager
-                    .broadcast(
-                        &target.adapter,
-                        &target.target,
-                        crate::OutboundResponse::Text(args.message),
-                    )
-                    .await
-                    .map_err(|error| {
-                        SendMessageError(format!("failed to send message: {error}"))
-                    })?;
+            match parse_implicit_signal_shorthand(&args.target, current_adapter) {
+                Ok(Some(target)) => {
+                    self.messaging_manager
+                        .broadcast(
+                            &target.adapter,
+                            &target.target,
+                            crate::OutboundResponse::Text(args.message),
+                        )
+                        .await
+                        .map_err(|error| {
+                            SendMessageError(format!("failed to send message: {error}"))
+                        })?;
 
-                tracing::info!(
-                    adapter = %target.adapter,
-                    broadcast_target = %"[REDACTED]",
-                    "message sent via implicit Signal shorthand"
-                );
+                    tracing::info!(
+                        adapter = %target.adapter,
+                        broadcast_target = %"[REDACTED]",
+                        "message sent via implicit Signal shorthand"
+                    );
 
-                return Ok(SendMessageOutput {
-                    success: true,
-                    target: target.target,
-                    platform: target.adapter,
-                });
+                    return Ok(SendMessageOutput {
+                        success: true,
+                        target: target.target,
+                        platform: target.adapter,
+                    });
+                }
+                Err(validation_error) => {
+                    return Err(SendMessageError(validation_error));
+                }
+                Ok(None) => {
+                    // Not a Signal shorthand — fall through to channel-name lookup.
+                }
             }
         }
 
@@ -332,25 +339,34 @@ fn parse_explicit_signal_prefix(raw: &str) -> Option<crate::messaging::target::B
 
 /// Parse implicit Signal shorthands - only in Signal conversations.
 /// Handles bare UUIDs, group:xxx, and +phone without explicit signal: prefix.
-/// Returns BroadcastTarget directly instead of building strings to avoid
-/// parse_delivery_target() issues with colons in named adapters.
+/// Returns `Ok(Some(...))` on valid shorthand, `Ok(None)` when the input is
+/// clearly not a Signal shorthand, and `Err(...)` when it *looks like* a
+/// shorthand but is malformed (so the caller can surface a targeted error to
+/// the LLM instead of falling through to a generic "no channel found").
 fn parse_implicit_signal_shorthand(
     raw: &str,
     current_adapter: &str,
-) -> Option<crate::messaging::target::BroadcastTarget> {
+) -> Result<Option<crate::messaging::target::BroadcastTarget>, String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     use crate::messaging::target::BroadcastTarget;
 
     // Check for bare UUID format (strict validation)
     if is_valid_uuid(trimmed) {
-        return Some(BroadcastTarget {
+        return Ok(Some(BroadcastTarget {
             adapter: current_adapter.to_string(),
             target: format!("uuid:{trimmed}"),
-        });
+        }));
+    }
+
+    // Looks like a UUID but doesn't parse — give a targeted error.
+    if trimmed.len() == 36 && trimmed.chars().filter(|c| *c == '-').count() == 4 {
+        return Err(format!(
+            "'{trimmed}' looks like a UUID but is malformed. Use the format: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+        ));
     }
 
     // Phone number format: starts with + followed by 7+ digits
@@ -358,21 +374,38 @@ fn parse_implicit_signal_shorthand(
         && trimmed[1..].len() >= 7
         && trimmed[1..].chars().all(|c| c.is_ascii_digit())
     {
-        return Some(BroadcastTarget {
+        return Ok(Some(BroadcastTarget {
             adapter: current_adapter.to_string(),
             target: trimmed.to_string(),
-        });
+        }));
+    }
+
+    // Starts with + but doesn't meet phone number requirements.
+    if let Some(digits) = trimmed.strip_prefix('+') {
+        if digits.chars().all(|c| c.is_ascii_digit()) {
+            return Err(format!(
+                "'{trimmed}' looks like a phone number but is too short. Phone numbers need at least 7 digits after the + prefix."
+            ));
+        }
+        if !digits.is_empty() {
+            return Err(format!(
+                "'{trimmed}' looks like a phone number but contains non-digit characters. Use format: +1234567890"
+            ));
+        }
     }
 
     // Group ID format: group:xxx
-    if trimmed.starts_with("group:") {
-        return Some(BroadcastTarget {
+    if let Some(group_id) = trimmed.strip_prefix("group:") {
+        if group_id.is_empty() {
+            return Err("group: prefix requires an ID. Use format: group:<group_id>".to_string());
+        }
+        return Ok(Some(BroadcastTarget {
             adapter: current_adapter.to_string(),
             target: trimmed.to_string(),
-        });
+        }));
     }
 
-    None
+    Ok(None)
 }
 
 fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::BroadcastTarget> {
@@ -481,6 +514,7 @@ mod tests {
             "123e4567-e89b-12d3-a456-426655440000",
             "signal:gvoice1",
         )
+        .expect("no error")
         .expect("signal target");
         assert_eq!(target.adapter, "signal:gvoice1");
         assert_eq!(target.target, "uuid:123e4567-e89b-12d3-a456-426655440000");
@@ -489,6 +523,7 @@ mod tests {
     #[test]
     fn parses_implicit_signal_group_shorthand() {
         let target = parse_implicit_signal_shorthand("group:grp123", "signal:default")
+            .expect("no error")
             .expect("signal target");
         assert_eq!(target.adapter, "signal:default");
         assert_eq!(target.target, "group:grp123");
@@ -497,6 +532,7 @@ mod tests {
     #[test]
     fn parses_implicit_signal_bare_phone_plus() {
         let target = parse_implicit_signal_shorthand("+1234567890", "signal:primary")
+            .expect("no error")
             .expect("signal target");
         assert_eq!(target.adapter, "signal:primary");
         assert_eq!(target.target, "+1234567890");
@@ -506,27 +542,82 @@ mod tests {
     fn ignores_bare_phone_digits_for_implicit() {
         // Bare phone numbers without + prefix are rejected
         // to avoid confusing numeric channel IDs with Signal numbers
-        assert!(parse_implicit_signal_shorthand("1234567890", "signal:default").is_none());
+        assert!(
+            parse_implicit_signal_shorthand("1234567890", "signal:default")
+                .expect("no error")
+                .is_none()
+        );
     }
 
     #[test]
     fn ignores_explicit_signal_prefix_for_implicit() {
         // parse_implicit_signal_shorthand does NOT handle signal: prefix
         // that's handled by parse_explicit_signal_prefix
-        assert!(parse_implicit_signal_shorthand("signal:+1234567890", "signal:default").is_none());
+        assert!(
+            parse_implicit_signal_shorthand("signal:+1234567890", "signal:default")
+                .expect("no error")
+                .is_none()
+        );
         assert!(
             parse_implicit_signal_shorthand(
                 "signal:uuid:123e4567-e89b-12d3-a456-426655440000",
                 "signal:default"
             )
+            .expect("no error")
             .is_none()
         );
     }
 
     #[test]
     fn ignores_non_signal_targets_for_implicit() {
-        assert!(parse_implicit_signal_shorthand("discord:123", "signal:default").is_none());
-        assert!(parse_implicit_signal_shorthand("general", "signal:default").is_none());
-        assert!(parse_implicit_signal_shorthand("", "signal:default").is_none());
+        assert!(
+            parse_implicit_signal_shorthand("discord:123", "signal:default")
+                .expect("no error")
+                .is_none()
+        );
+        assert!(
+            parse_implicit_signal_shorthand("general", "signal:default")
+                .expect("no error")
+                .is_none()
+        );
+        assert!(
+            parse_implicit_signal_shorthand("", "signal:default")
+                .expect("no error")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_uuid_shorthand() {
+        let error = parse_implicit_signal_shorthand(
+            "123e4567-e89b-12d3-a456-42665544ZZZZ",
+            "signal:default",
+        )
+        .expect_err("should be validation error");
+        assert!(
+            error.contains("looks like a UUID but is malformed"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn rejects_short_phone_number() {
+        let error = parse_implicit_signal_shorthand("+123", "signal:default")
+            .expect_err("should be validation error");
+        assert!(error.contains("too short"), "{error}");
+    }
+
+    #[test]
+    fn rejects_phone_with_non_digits() {
+        let error = parse_implicit_signal_shorthand("+123456abc0", "signal:default")
+            .expect_err("should be validation error");
+        assert!(error.contains("non-digit"), "{error}");
+    }
+
+    #[test]
+    fn rejects_empty_group_id() {
+        let error = parse_implicit_signal_shorthand("group:", "signal:default")
+            .expect_err("should be validation error");
+        assert!(error.contains("requires an ID"), "{error}");
     }
 }

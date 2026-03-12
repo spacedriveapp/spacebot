@@ -1,14 +1,13 @@
 //! Send file tool for delivering file attachments to users (channel only).
 
-use crate::OutboundResponse;
 use crate::sandbox::Sandbox;
+use crate::{OutboundResponse, RoutedSender};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 /// Tool for sending files to users.
 ///
@@ -19,17 +18,13 @@ use tokio::sync::mpsc;
 /// workspace boundary. When sandbox is disabled, any readable path is allowed.
 #[derive(Debug, Clone)]
 pub struct SendFileTool {
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: RoutedSender,
     workspace: PathBuf,
     sandbox: Arc<Sandbox>,
 }
 
 impl SendFileTool {
-    pub fn new(
-        response_tx: mpsc::Sender<OutboundResponse>,
-        workspace: PathBuf,
-        sandbox: Arc<Sandbox>,
-    ) -> Self {
+    pub fn new(response_tx: RoutedSender, workspace: PathBuf, sandbox: Arc<Sandbox>) -> Self {
         Self {
             response_tx,
             workspace,
@@ -239,7 +234,8 @@ mod tests {
 
     fn create_tool(workspace: PathBuf) -> SendFileTool {
         let sandbox = create_sandbox(SandboxMode::Enabled, &workspace);
-        let (response_tx, _response_rx) = mpsc::channel(1);
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let response_tx = RoutedSender::new(tx, crate::InboundMessage::empty());
         SendFileTool::new(response_tx, workspace, sandbox)
     }
 
@@ -320,7 +316,8 @@ mod tests {
         fs::write(&file, "public data").expect("failed to write file");
 
         let sandbox = create_sandbox(SandboxMode::Disabled, &workspace);
-        let (response_tx, mut response_rx) = mpsc::channel(1);
+        let (tx, mut response_rx) = tokio::sync::mpsc::channel(1);
+        let response_tx = RoutedSender::new(tx, crate::InboundMessage::empty());
         let tool = SendFileTool::new(response_tx, workspace, sandbox);
 
         let result = tool
@@ -336,10 +333,10 @@ mod tests {
         assert_eq!(result.size_bytes, 11);
 
         // Verify the file data was actually sent through the channel.
-        let response = response_rx
+        let routed = response_rx
             .try_recv()
             .expect("should have received response");
-        match response {
+        match routed.response {
             crate::OutboundResponse::File { filename, data, .. } => {
                 assert_eq!(filename, "report.txt");
                 assert_eq!(data, b"public data");

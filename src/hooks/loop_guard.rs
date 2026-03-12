@@ -448,12 +448,8 @@ impl LoopGuard {
         hasher.update(b"|");
         hasher.update(args.as_bytes());
         hasher.update(b"|");
-        let truncated = if result.len() > RESULT_HASH_TRUNCATION {
-            &result[..RESULT_HASH_TRUNCATION]
-        } else {
-            result
-        };
-        hasher.update(truncated.as_bytes());
+        let result_bytes = result.as_bytes();
+        hasher.update(&result_bytes[..result_bytes.len().min(RESULT_HASH_TRUNCATION)]);
         hex::encode(hasher.finalize())
     }
 }

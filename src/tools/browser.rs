@@ -529,11 +529,7 @@ fn render_snapshot_node(node: &SnapshotNode, depth: usize, output: &mut String) 
     if !node.name.is_empty() {
         output.push_str(" \"");
         // Truncate very long names for context efficiency.
-        let display_name = if node.name.len() > 200 {
-            format!("{}...", &node.name[..200])
-        } else {
-            node.name.clone()
-        };
+        let display_name = super::truncate_utf8_ellipsis(&node.name, 200);
         output.push_str(&display_name.replace('"', "\\\""));
         output.push('"');
     }
@@ -574,11 +570,7 @@ fn render_snapshot_node(node: &SnapshotNode, depth: usize, output: &mut String) 
 
     // Value (e.g., text input current value)
     if let Some(ref value) = node.value {
-        let display_value = if value.len() > 100 {
-            format!("{}...", &value[..100])
-        } else {
-            value.clone()
-        };
+        let display_value = super::truncate_utf8_ellipsis(value, 100);
         output.push_str(&format!(
             " value=\"{}\"",
             display_value.replace('"', "\\\"")
@@ -1588,11 +1580,7 @@ impl Tool for BrowserTypeTool {
                 args.secret.as_deref().unwrap_or("unknown")
             )
         } else {
-            let display_text = if text_value.len() > 50 {
-                format!("{}...", &text_value[..50])
-            } else {
-                text_value
-            };
+            let display_text = super::truncate_utf8_ellipsis(&text_value, 50);
             format!("Typed '{display_text}' into element at {label}")
         };
 

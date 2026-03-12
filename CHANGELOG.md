@@ -2,6 +2,46 @@
 
 Seeded from GitHub releases; maintained by the release bump workflow.
 
+## v0.3.3
+
+### Release Story
+
+v0.3.3 extends platform reach and hardens the runtime. The big additions are a native desktop app shell, Signal messaging support, and GitHub Copilot as a first-class LLM provider — plus the cortex now runs autonomous memory maintenance on each tick.
+
+The Tauri 2 desktop app wraps the embedded interface with macOS-native window chrome, giving a polished local experience without running a browser tab. Signal joins Discord, Slack, and Telegram as a supported messaging adapter, with SSE inbound streaming, JSON-RPC outbound delivery, per-contact permission controls, and 23 tests covering edge cases. GitHub Copilot provider support auto-exchanges a GitHub PAT for short-lived API tokens, caches them to disk, and refreshes on expiry — configuration is a single env var.
+
+Under the hood, the cortex now performs bounded, cancel-aware memory maintenance (decay, pruning, reindexing) as part of its tick loop, with explicit two-step cancellation and detached-worker lifecycle safety. Several UTF-8 boundary panics across loop guards, string truncation, and byte slicing have been fixed with `floor_char_boundary`. Slack thread routing is pinned at enqueue time to prevent cross-thread misrouting, and Slack conversation IDs are normalized to stop thread splits. Reasoning content is now preserved through assistant tool-call serialization, OpenAI call_id linkage is hardened, and whitespace-only streaming segments are no longer dropped.
+
+Highlights:
+- Native desktop app (Tauri 2 + macOS window chrome)
+- Signal messaging adapter via signal-cli daemon
+- GitHub Copilot LLM provider with automatic token management
+- Cortex memory maintenance with bounded execution and cancellation
+- Multiple UTF-8 safety fixes across the runtime
+- Slack thread routing and conversation ID normalization
+
+## What's Changed
+* cortex: phase2/3 health supervision and detached lifecycle hardening by @vsumner in https://github.com/spacedriveapp/spacebot/pull/307
+* fix: race condition losing opencode worker port in database by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/384
+* feat(messaging): add Signal adapter via signal-cli JSON-RPC daemon by @ibhagwan in https://github.com/spacedriveapp/spacebot/pull/347
+* fix: harden GPT/Codex tool linkage, follow-up outcomes, and memory persistence contracts by @tomasmach in https://github.com/spacedriveapp/spacebot/pull/386
+* feat(llm): add GitHub Copilot as a first-class LLM provider by @ibhagwan in https://github.com/spacedriveapp/spacebot/pull/394
+* fix(slack): normalize conversation ID to prevent thread splits by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/406
+* fix: preserve reasoning in assistant tool-call conversion by @skulldogged in https://github.com/spacedriveapp/spacebot/pull/393
+* fix: use byte slice in loop_guard to avoid UTF-8 panic on multibyte content by @Dakai666 in https://github.com/spacedriveapp/spacebot/pull/389
+* fix: prevent deletion of instance-level skills via agent API by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/400
+* fix: UTF-8 safe string truncation in browser tool and debug logging by @l33t0 in https://github.com/spacedriveapp/spacebot/pull/398
+* fix(config): override host when deployed to docker by @DeJayDev in https://github.com/spacedriveapp/spacebot/pull/403
+* fix: harden Discord poll handling and refresh docs by @vsumner in https://github.com/spacedriveapp/spacebot/pull/407
+* Desktop app by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/387
+* fix: preserve whitespace-only content segments in streaming responses by @jamiepine in https://github.com/spacedriveapp/spacebot/pull/413
+
+## New Contributors
+* @ibhagwan made their first contribution in https://github.com/spacedriveapp/spacebot/pull/347
+* @Dakai666 made their first contribution in https://github.com/spacedriveapp/spacebot/pull/389
+* @DeJayDev made their first contribution in https://github.com/spacedriveapp/spacebot/pull/403
+
+**Full Changelog**: https://github.com/spacedriveapp/spacebot/compare/v0.3.2...v0.3.3
 ## v0.3.2
 
 ### Release Story

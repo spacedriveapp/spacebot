@@ -126,10 +126,10 @@ docker run -d \
   -v spacebot-data:/data \
   -p 19898:19898 \
   -p 9090:9090 \
-  ghcr.io/spacedriveapp/spacebot:slim
+  ghcr.io/spacedriveapp/spacebot:latest
 ```
 
-The Docker image must be built with `--features metrics` for this to work. The default images do not include metrics support.
+The published Docker image already includes metrics support.
 
 ## Histogram Buckets
 

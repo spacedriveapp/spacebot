@@ -520,6 +520,41 @@ bind = "127.0.0.1"
         assert_eq!(config.api.bind, "[::]");
     }
 
+    #[test]
+    fn test_docker_deployment_forces_api_bind_from_toml() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("SPACEBOT_DEPLOYMENT", "docker");
+        }
+
+        let toml = r#"
+[api]
+bind = "127.0.0.1"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(config.api.bind, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_docker_deployment_forces_api_bind_from_env_defaults() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("SPACEBOT_DEPLOYMENT", "docker");
+        }
+
+        let config = Config::load_from_env(&Config::default_instance_dir())
+            .expect("failed to load config from env");
+
+        assert_eq!(config.api.bind, "0.0.0.0");
+    }
+
     /// Helper to build a minimal `SlackConfig` for permission tests.
     fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
         SlackConfig {

@@ -203,7 +203,7 @@ docker run -d \
   -v spacebot-data:/data \
   -p 19898:19898 \
   -p 9090:9090 \
-  ghcr.io/spacedriveapp/spacebot:full
+  ghcr.io/spacedriveapp/spacebot:latest
 ```
 
 The Docker image always includes metrics. For local builds without metrics, omit the `--features metrics` flag.

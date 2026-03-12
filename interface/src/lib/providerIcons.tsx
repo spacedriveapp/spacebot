@@ -12,6 +12,7 @@ import ZAI from "@lobehub/icons/es/ZAI";
 import Minimax from "@lobehub/icons/es/Minimax";
 import Kimi from "@lobehub/icons/es/Kimi";
 import Google from "@lobehub/icons/es/Google";
+import GithubCopilot from "@lobehub/icons/es/GithubCopilot";
 
 interface IconProps {
 	size?: number;
@@ -138,6 +139,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		minimax: Minimax,
 		"minimax-cn": Minimax,
 		moonshot: Kimi, // Kimi is Moonshot AI's product brand
+		"github-copilot": GithubCopilot,
 	};
 
 	const IconComponent = iconMap[provider.toLowerCase()];

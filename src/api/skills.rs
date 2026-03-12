@@ -252,8 +252,14 @@ pub(super) async fn remove_skill(
         crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
 
     let removed_path = skills.remove(&req.name).await.map_err(|error| {
-        tracing::warn!(%error, skill = %req.name, "failed to remove skill");
-        StatusCode::INTERNAL_SERVER_ERROR
+        let msg = error.to_string();
+        if msg.contains("instance-level skill") {
+            tracing::warn!(skill = %req.name, "rejected removal of instance-level skill");
+            StatusCode::FORBIDDEN
+        } else {
+            tracing::warn!(%error, skill = %req.name, "failed to remove skill");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     })?;
 
     state.send_event(ApiEvent::ConfigReloaded);
