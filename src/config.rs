@@ -1854,4 +1854,44 @@ command = "/usr/bin/test"
         // The mcp_servers data is silently dropped — verify it's not accessible
         assert!(parsed.defaults.mcp.is_empty());
     }
+
+    #[test]
+    fn top_level_memory_persistence_is_still_honored() {
+        let _guard = env_test_lock().lock();
+        let guard = EnvGuard::new();
+
+        let toml_content = r#"
+[memory_persistence]
+enabled = true
+message_interval = 7
+"#;
+        let config_path = guard.test_dir.join("config.toml");
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        assert!(config.defaults.memory_persistence.enabled);
+        assert_eq!(config.defaults.memory_persistence.message_interval, 7);
+    }
+
+    #[test]
+    fn defaults_memory_persistence_overrides_top_level_legacy() {
+        let _guard = env_test_lock().lock();
+        let guard = EnvGuard::new();
+
+        let toml_content = r#"
+[memory_persistence]
+enabled = false
+message_interval = 99
+
+[defaults.memory_persistence]
+enabled = true
+message_interval = 5
+"#;
+        let config_path = guard.test_dir.join("config.toml");
+        std::fs::write(&config_path, toml_content).unwrap();
+
+        let config = Config::load_from_path(&config_path).unwrap();
+        assert!(config.defaults.memory_persistence.enabled);
+        assert_eq!(config.defaults.memory_persistence.message_interval, 5);
+    }
 }
