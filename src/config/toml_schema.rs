@@ -308,6 +308,7 @@ pub(super) struct TomlRegistryConfig {
     pub(super) auto_clone: Option<bool>,
     #[serde(default)]
     pub(super) exclude_patterns: Option<Vec<String>>,
+    pub(super) notification_target: Option<String>,
 }
 
 #[derive(Deserialize, Default)]

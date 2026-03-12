@@ -1013,6 +1013,9 @@ pub struct RegistryConfig {
     pub auto_clone: bool,
     /// Repos to exclude from the registry (exact match or trailing `*` glob).
     pub exclude_patterns: Vec<String>,
+    /// Optional delivery target for notifications when repos are discovered/archived.
+    /// Format: "adapter:target" (e.g., "telegram:1285309093", "discord:123456789").
+    pub notification_target: Option<String>,
 }
 
 impl Default for RegistryConfig {
@@ -1024,6 +1027,7 @@ impl Default for RegistryConfig {
             sync_interval_secs: 3600,
             auto_clone: false,
             exclude_patterns: Vec::new(),
+            notification_target: None,
         }
     }
 }

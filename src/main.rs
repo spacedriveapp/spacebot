@@ -2735,11 +2735,13 @@ async fn initialize_agents(
                 let reg_store = agent.deps.registry_store.as_ref().clone();
                 let reg_agent_id = agent_id.to_string();
                 let reg_runtime_config = agent.deps.runtime_config.clone();
+                let reg_messaging = agent.deps.messaging_manager.clone();
                 tokio::spawn(spacebot::registry::sync::registry_sync_loop(
                     reg_store,
                     reg_agent_id,
                     reg_runtime_config,
                     sync_status,
+                    reg_messaging,
                 ));
             }
             agent_workspaces.insert(agent_id.to_string(), agent.config.workspace.clone());

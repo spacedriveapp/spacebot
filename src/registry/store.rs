@@ -272,6 +272,22 @@ impl RegistryStore {
         Ok(result.rows_affected())
     }
 
+    /// Get the full names of all non-archived repos for an agent.
+    pub async fn get_non_archived_names(&self, agent_id: &str) -> Result<Vec<String>> {
+        let rows = sqlx::query(
+            "SELECT full_name FROM registry_repos WHERE agent_id = ? AND is_archived = 0",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .context("failed to fetch non-archived repo names")?;
+
+        rows.iter()
+            .map(|r| r.try_get("full_name").context("missing full_name"))
+            .collect::<std::result::Result<Vec<String>, _>>()
+            .map_err(Into::into)
+    }
+
     /// Delete a repo from the registry.
     pub async fn delete_repo(&self, agent_id: &str, full_name: &str) -> Result<bool> {
         let result = sqlx::query(

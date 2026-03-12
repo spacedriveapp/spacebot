@@ -4,6 +4,9 @@
 use super::store::{RegistryStore, UpsertRepoInput};
 use crate::config::RegistryConfig;
 use crate::error::Result;
+use crate::messaging::MessagingManager;
+use crate::messaging::target::parse_delivery_target;
+use crate::OutboundResponse;
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
@@ -21,6 +24,10 @@ pub struct SyncResult {
     pub archived: usize,
     pub cloned: usize,
     pub errors: Vec<String>,
+    /// Names of newly discovered repos (for notifications).
+    pub new_repos: Vec<String>,
+    /// Names of repos newly marked as archived (for notifications).
+    pub archived_repos: Vec<String>,
 }
 
 /// Current sync status.
@@ -171,6 +178,7 @@ pub async fn sync_registry(
                         result.updated += 1;
                     } else {
                         result.new += 1;
+                        result.new_repos.push(full_name.clone());
 
                         // Auto-clone if configured
                         if config.auto_clone && !gh_repo.is_archived {
@@ -223,9 +231,19 @@ pub async fn sync_registry(
 
     // Mark repos not seen in this sync as archived
     if !all_seen.is_empty() {
+        // Snapshot non-archived names before marking, so we can report which ones changed.
+        let before = store.get_non_archived_names(agent_id).await?;
         result.archived = store
             .mark_absent_as_archived(agent_id, &all_seen)
             .await? as usize;
+        if result.archived > 0 {
+            let seen_set: std::collections::HashSet<&str> =
+                all_seen.iter().map(|s| s.as_str()).collect();
+            result.archived_repos = before
+                .into_iter()
+                .filter(|name| !seen_set.contains(name.as_str()))
+                .collect();
+        }
     }
 
     Ok(result)
@@ -260,6 +278,7 @@ pub async fn registry_sync_loop(
     agent_id: String,
     runtime_config: Arc<crate::config::RuntimeConfig>,
     status: Arc<ArcSwap<SyncStatus>>,
+    messaging_manager: Option<Arc<MessagingManager>>,
 ) {
     // Initial delay to let the agent fully start up.
     tokio::time::sleep(Duration::from_secs(30)).await;
@@ -287,6 +306,17 @@ pub async fn registry_sync_loop(
                     errors = result.errors.len(),
                     "registry sync completed"
                 );
+
+                // Send notification if there are new or archived repos.
+                if !result.new_repos.is_empty() || !result.archived_repos.is_empty() {
+                    send_sync_notification(
+                        &current_config,
+                        &messaging_manager,
+                        &result,
+                    )
+                    .await;
+                }
+
                 status.store(Arc::new(SyncStatus::Completed {
                     at: chrono::Utc::now().to_rfc3339(),
                     result,
@@ -302,6 +332,55 @@ pub async fn registry_sync_loop(
         }
 
         tokio::time::sleep(Duration::from_secs(sync_interval)).await;
+    }
+}
+
+/// Build and send a notification about new/archived repos after a sync pass.
+async fn send_sync_notification(
+    config: &RegistryConfig,
+    messaging_manager: &Option<Arc<MessagingManager>>,
+    result: &SyncResult,
+) {
+    let target_str = match &config.notification_target {
+        Some(t) => t,
+        None => return,
+    };
+    let mm = match messaging_manager {
+        Some(m) => m,
+        None => return,
+    };
+    let target = match parse_delivery_target(target_str) {
+        Some(t) => t,
+        None => {
+            tracing::warn!(
+                target = %target_str,
+                "invalid notification_target for registry sync"
+            );
+            return;
+        }
+    };
+
+    let mut lines = Vec::new();
+    lines.push("📦 Registry sync update:".to_string());
+    if !result.new_repos.is_empty() {
+        lines.push(format!("\nNew repos ({}):", result.new_repos.len()));
+        for name in &result.new_repos {
+            lines.push(format!("  + {}", name));
+        }
+    }
+    if !result.archived_repos.is_empty() {
+        lines.push(format!("\nArchived repos ({}):", result.archived_repos.len()));
+        for name in &result.archived_repos {
+            lines.push(format!("  − {}", name));
+        }
+    }
+    let text = lines.join("\n");
+
+    if let Err(e) = mm
+        .broadcast(&target.adapter, &target.target, OutboundResponse::Text(text))
+        .await
+    {
+        tracing::warn!(error = %e, "failed to send registry sync notification");
     }
 }
 

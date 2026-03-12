@@ -1629,6 +1629,9 @@ impl Config {
                         exclude_patterns: r
                             .exclude_patterns
                             .unwrap_or_else(|| base.exclude_patterns.clone()),
+                        notification_target: r
+                            .notification_target
+                            .or_else(|| base.notification_target.clone()),
                     }
                 })
                 .unwrap_or_else(|| base_defaults.registry.clone()),
