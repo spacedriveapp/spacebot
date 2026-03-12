@@ -477,15 +477,13 @@ Routing selects providers by the prefix before the first `/` in the model name.
 
 ```toml
 [defaults.routing]
-channel = "my_openai/gpt-4o-mini"
-worker = "custom_anthropic/claude-3-5-sonnet"
+channel = "openai-chatgpt/gpt-5.3-codex"
+worker = "openai-chatgpt/gpt-5.3-codex"
 channel_thinking_effort = "high"
 worker_thinking_effort = "medium"
 
-[llm.provider.my_openai]
-api_type = "openai_completions"
-base_url = "https://api.openai.com"
-api_key = "env:OPENAI_API_KEY"
+[llm]
+openai_key = "env:OPENAI_API_KEY"
 
 [llm.provider.custom_anthropic]
 api_type = "anthropic"
