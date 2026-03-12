@@ -223,7 +223,7 @@ impl Messaging for DiscordAdapter {
                             msg = msg.components(components);
                         }
 
-                        if let Some(poll_data) = &poll {
+                        if let Some(poll_data) = poll.as_ref().filter(|p| is_valid_poll(p)) {
                             msg = msg.poll(build_poll(poll_data));
                         }
                     }
@@ -504,7 +504,7 @@ impl Messaging for DiscordAdapter {
                         msg = msg.components(components);
                     }
 
-                    if let Some(poll_data) = &poll {
+                    if let Some(poll_data) = poll.as_ref().filter(|p| is_valid_poll(p)) {
                         msg = msg.poll(build_poll(poll_data));
                     }
                 }
@@ -1152,12 +1152,9 @@ fn build_action_row(elements: &crate::InteractiveElements) -> CreateActionRow {
 fn build_poll(
     poll: &crate::Poll,
 ) -> serenity::builder::CreatePoll<serenity::builder::create_poll::Ready> {
-    // Discord limits: max 10 answers
-    let answers: Vec<_> = poll
-        .answers
-        .iter()
-        .take(10)
-        .map(|a| CreatePollAnswer::new().text(a))
+    let answers: Vec<_> = normalized_poll_answers(poll)
+        .into_iter()
+        .map(|answer| CreatePollAnswer::new().text(answer))
         .collect();
 
     // Duration must be at least 1 hour, usually up to 720 hours (30 days).
@@ -1174,6 +1171,33 @@ fn build_poll(
     }
 
     p
+}
+
+fn normalized_poll_answers(poll: &crate::Poll) -> Vec<String> {
+    // Discord limits polls to 10 answers and rejects blank options.
+    poll.answers
+        .iter()
+        .map(|answer| answer.trim())
+        .filter(|answer| !answer.is_empty())
+        .take(10)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn is_valid_poll(poll: &crate::Poll) -> bool {
+    let question = poll.question.trim();
+    let answers = normalized_poll_answers(poll);
+
+    if question.is_empty() || answers.len() < 2 {
+        tracing::debug!(
+            question_len = question.len(),
+            answer_count = answers.len(),
+            "skipping invalid discord poll payload"
+        );
+        return false;
+    }
+
+    true
 }
 
 #[cfg(test)]
@@ -1236,5 +1260,104 @@ mod tests {
         // build_poll should limit answers to 10 and duration to 720
         let _ = build_poll(&poll);
         // Again, can't easily inspect CreatePoll fields, but we verify it runs.
+    }
+
+    #[test]
+    fn test_invalid_poll_is_rejected() {
+        let empty = Poll {
+            question: String::new(),
+            answers: Vec::new(),
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(!is_valid_poll(&empty));
+
+        let one_answer = Poll {
+            question: "Question?".into(),
+            answers: vec![" Only one ".into(), "   ".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(!is_valid_poll(&one_answer));
+
+        let sparse_answers = Poll {
+            question: "Question?".into(),
+            answers: vec!["Yes".into(), "   ".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert_eq!(
+            normalized_poll_answers(&sparse_answers),
+            vec!["Yes".to_string(), "No".to_string()]
+        );
+        assert!(is_valid_poll(&sparse_answers));
+
+        let answers_beyond_limit = Poll {
+            question: "Question?".into(),
+            answers: vec![
+                "Yes".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                " ".into(),
+                "No".into(),
+            ],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert_eq!(
+            normalized_poll_answers(&answers_beyond_limit),
+            vec!["Yes".to_string(), "No".to_string()]
+        );
+        assert!(is_valid_poll(&answers_beyond_limit));
+
+        let normalized_limit = Poll {
+            question: "Question?".into(),
+            answers: vec![
+                "Answer 1".into(),
+                " ".into(),
+                "Answer 2".into(),
+                "Answer 3".into(),
+                "Answer 4".into(),
+                "Answer 5".into(),
+                "Answer 6".into(),
+                "Answer 7".into(),
+                "Answer 8".into(),
+                "Answer 9".into(),
+                "Answer 10".into(),
+                "Answer 11".into(),
+            ],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert_eq!(
+            normalized_poll_answers(&normalized_limit),
+            vec![
+                "Answer 1".to_string(),
+                "Answer 2".to_string(),
+                "Answer 3".to_string(),
+                "Answer 4".to_string(),
+                "Answer 5".to_string(),
+                "Answer 6".to_string(),
+                "Answer 7".to_string(),
+                "Answer 8".to_string(),
+                "Answer 9".to_string(),
+                "Answer 10".to_string(),
+            ]
+        );
+        assert!(is_valid_poll(&normalized_limit));
+
+        let valid = Poll {
+            question: "Question?".into(),
+            answers: vec!["Yes".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+        assert!(is_valid_poll(&valid));
     }
 }
