@@ -12,7 +12,7 @@ import {
 import {Banner, BannerActions, cx} from "@/ui";
 
 type SetupSeverity = "blocker" | "warning" | "info";
-type SettingsTab = "providers" | "secrets" | "channels";
+type SettingsTab = "providers" | "secrets" | "channels" | "system-health";
 
 interface SetupReadinessItem {
 	id: string;
@@ -98,6 +98,7 @@ export function classifySetupReadiness(params: {
 				severity: "warning",
 				title: "Warmup is degraded",
 				description: `Warmup is degraded for ${formatAgentList(degradedAgents)}.`,
+				tab: "system-health",
 			});
 		} else if (warmAgents.length === 0) {
 			items.push({
@@ -105,6 +106,7 @@ export function classifySetupReadiness(params: {
 				severity: "info",
 				title: "Warmup is still settling",
 				description: "Models and bulletin state are still warming up, so first responses may be slower.",
+				tab: "system-health",
 			});
 		}
 	}
@@ -129,6 +131,7 @@ export function classifySetupReadiness(params: {
 				severity: "warning",
 				title: "Some MCP servers are disconnected",
 				description: `${pluralize(failedServers.length, "enabled MCP server")} ${failedServers.length === 1 ? "is" : "are"} not connected.`,
+				tab: "system-health",
 			});
 		} else if (connectingServers.length > 0) {
 			items.push({
@@ -136,6 +139,7 @@ export function classifySetupReadiness(params: {
 				severity: "info",
 				title: "MCP servers are still connecting",
 				description: `${pluralize(connectingServers.length, "enabled MCP server")} ${connectingServers.length === 1 ? "is" : "are"} still connecting.`,
+				tab: "system-health",
 			});
 		}
 	}

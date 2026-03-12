@@ -1262,6 +1262,12 @@ export interface McpMutationResponse {
 	message: string;
 }
 
+export interface ReconnectAgentMcpResponse {
+	success: boolean;
+	agent_id: string;
+	server_name: string;
+}
+
 export interface BindingInfo {
 	agent_id: string;
 	channel: string;
@@ -2093,14 +2099,19 @@ export const api = {
 	// Messaging / Bindings API
 	messagingStatus: () => fetchJson<MessagingStatusResponse>("/messaging/status"),
 	mcpStatus: () => fetchJson<McpAgentStatus[]>("/mcp/status"),
-	reconnectMcpServer: async (serverName: string) => {
-		const response = await fetch(`${API_BASE}/mcp/servers/${encodeURIComponent(serverName)}/reconnect`, {
+	reconnectMcpServer: async (params: {agentId: string; serverName: string}) => {
+		const response = await fetch(`${API_BASE}/agents/mcp/reconnect`, {
 			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				agent_id: params.agentId,
+				server_name: params.serverName,
+			}),
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
-		return response.json() as Promise<McpMutationResponse>;
+		return response.json() as Promise<ReconnectAgentMcpResponse>;
 	},
 
 	bindings: (agentId?: string) => {

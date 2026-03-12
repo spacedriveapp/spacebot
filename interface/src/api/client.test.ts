@@ -50,14 +50,16 @@ describe("api client runtime health actions", () => {
 		);
 	});
 
-	test("reconnectMcpServer posts to the reconnect endpoint", async () => {
-		await api.reconnectMcpServer("filesystem");
+	test("reconnectMcpServer posts the agent-scoped reconnect payload", async () => {
+		await api.reconnectMcpServer({ agentId: "main", serverName: "filesystem" });
 
 		expect(globalThis.fetch).toHaveBeenCalledTimes(1);
 		expect(globalThis.fetch).toHaveBeenCalledWith(
-			"/api/mcp/servers/filesystem/reconnect",
+			"/api/agents/mcp/reconnect",
 			expect.objectContaining({
 				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ agent_id: "main", server_name: "filesystem" }),
 			}),
 		);
 	});

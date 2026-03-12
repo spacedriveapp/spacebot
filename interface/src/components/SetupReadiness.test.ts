@@ -136,12 +136,13 @@ describe("classifySetupReadiness", () => {
 			]),
 		});
 
-		expect(items).toContainEqual(
-			expect.objectContaining({
-				id: "warmup_degraded",
-				severity: "warning",
-			}),
-		);
+	expect(items).toContainEqual(
+		expect.objectContaining({
+			id: "warmup_degraded",
+			severity: "warning",
+			tab: "system-health",
+		}),
+	);
 
 		const noProviderItems = classifySetupReadiness({
 			providers: configuredProviders(false),
@@ -175,9 +176,51 @@ describe("classifySetupReadiness", () => {
 			expect.objectContaining({
 				id: "mcp_failed",
 				severity: "warning",
+				tab: "system-health",
 			}),
 		);
 		expect(items.some((item) => item.description.includes("2 enabled MCP servers"))).toBe(false);
+	});
+
+	test("routes settling runtime signals to system health", () => {
+		const warmupItems = classifySetupReadiness({
+			providers: configuredProviders(),
+			warmup: warmupStatus([
+				{
+					agent_id: "alpha",
+					status: {
+						state: "cold",
+						embedding_ready: false,
+						last_refresh_unix_ms: null,
+						last_error: null,
+						bulletin_age_secs: null,
+					},
+				},
+			]),
+		});
+
+		expect(warmupItems).toContainEqual(
+			expect.objectContaining({
+				id: "warmup_pending",
+				severity: "info",
+				tab: "system-health",
+			}),
+		);
+
+		const mcpItems = classifySetupReadiness({
+			providers: configuredProviders(),
+			mcp: mcpStatus([
+				{name: "filesystem", transport: "stdio", enabled: true, state: "connecting"},
+			]),
+		});
+
+		expect(mcpItems).toContainEqual(
+			expect.objectContaining({
+				id: "mcp_connecting",
+				severity: "info",
+				tab: "system-health",
+			}),
+		);
 	});
 
 	test("reports messaging setup and binding gaps as informational", () => {

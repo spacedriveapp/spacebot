@@ -1671,6 +1671,10 @@ function mcpBadgeVariant(server: McpServerStatusInfo) {
 	return "amber";
 }
 
+function needsMcpReconnect(server: McpServerStatusInfo) {
+	return server.state === "disconnected" || server.state.startsWith("failed");
+}
+
 function SystemHealthSection() {
 	const queryClient = useQueryClient();
 	const readiness = useSetupReadiness();
@@ -1706,11 +1710,11 @@ function SystemHealthSection() {
 	});
 
 	const reconnectMcpMutation = useMutation({
-		mutationFn: (serverName: string) => api.reconnectMcpServer(serverName),
+		mutationFn: (params: {agentId: string; serverName: string}) => api.reconnectMcpServer(params),
 		onSuccess: (result) => {
 			setMessage({
-				text: result.message,
-				type: result.success ? "success" : "error",
+				text: `Server '${result.server_name}' reconnected for agent '${result.agent_id}'.`,
+				type: "success",
 			});
 			queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
 		},
@@ -1729,7 +1733,7 @@ function SystemHealthSection() {
 	const warmAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "warm").length;
 	const degradedAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "degraded").length;
 	const connectedMcpCount = enabledMcpServers.filter((server) => server.state === "connected").length;
-	const disconnectedMcpCount = enabledMcpServers.filter((server) => server.state !== "connected").length;
+	const disconnectedMcpCount = enabledMcpServers.filter((server) => needsMcpReconnect(server)).length;
 
 	return (
 		<div className="mx-auto max-w-3xl px-6 py-6">
@@ -1889,15 +1893,18 @@ function SystemHealthSection() {
 											<p className="mt-1 text-sm text-ink-dull">
 												Agent {server.agent_id} via {server.transport}
 											</p>
-											{server.state !== "connected" && (
+											{needsMcpReconnect(server) && (
 												<p className="mt-1 text-sm text-ink-dull">
 													State: {server.state}
 												</p>
 											)}
 										</div>
-										{server.state !== "connected" && (
+										{needsMcpReconnect(server) && (
 											<Button
-												onClick={() => reconnectMcpMutation.mutate(server.name)}
+												onClick={() => reconnectMcpMutation.mutate({
+													agentId: server.agent_id,
+													serverName: server.name,
+												})}
 												loading={reconnectMcpMutation.isPending}
 												variant="outline"
 												size="sm"
