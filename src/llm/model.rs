@@ -745,6 +745,15 @@ impl SpacebotModel {
             "input": input,
         });
 
+        let configured_effort = self
+            .routing
+            .as_ref()
+            .map(|r| r.thinking_effort_for_model(&self.model_name))
+            .unwrap_or("auto");
+        if let Some(effort) = openai_reasoning_effort(&api_model_name, configured_effort) {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
+        }
+
         if let Some(preamble) = &request.preamble {
             body["instructions"] = serde_json::json!(preamble);
         } else if is_chatgpt_codex {
@@ -2871,6 +2880,22 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
     }
 }
 
+fn openai_reasoning_effort<'a>(model_name: &str, configured_effort: &'a str) -> Option<&'a str> {
+    if configured_effort == "auto" || !model_name.starts_with("gpt-5") {
+        return None;
+    }
+
+    let is_pro_model = model_name.contains("-pro");
+    match configured_effort {
+        "max" => Some("xhigh"),
+        "high" => Some("high"),
+        "medium" => Some("medium"),
+        "low" if is_pro_model => Some("medium"),
+        "low" => Some("low"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2931,6 +2956,29 @@ mod tests {
             "gpt-4o-mini"
         );
         assert_eq!(remap_model_name_for_api("openai", "zai/glm-5"), "zai/glm-5");
+    }
+
+    #[test]
+    fn openai_reasoning_effort_omits_auto_and_non_gpt5_models() {
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "auto"), None);
+        assert_eq!(openai_reasoning_effort("gpt-4.1", "high"), None);
+    }
+
+    #[test]
+    fn openai_reasoning_effort_maps_standard_gpt5_values() {
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "low"), Some("low"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "medium"), Some("medium"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "high"), Some("high"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "max"), Some("xhigh"));
+    }
+
+    #[test]
+    fn openai_reasoning_effort_raises_low_floor_for_pro_models() {
+        assert_eq!(
+            openai_reasoning_effort("gpt-5.4-pro", "low"),
+            Some("medium")
+        );
+        assert_eq!(openai_reasoning_effort("gpt-5.4-pro", "max"), Some("xhigh"));
     }
 
     #[test]
