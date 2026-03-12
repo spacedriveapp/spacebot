@@ -18,6 +18,7 @@ import {
   DialogFooter,
 } from "@/ui/Dialog";
 import { Markdown } from "@/components/Markdown";
+import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { formatTimeAgo } from "@/lib/format";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -507,89 +508,120 @@ function TaskDetailDialog({
   onDelete: () => void;
   onStatusChange: (status: TaskStatus) => void;
 }) {
+  const [tab, setTab] = useState<"overview" | "corpilot">("overview");
+
   return (
     <Dialog open={true} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="!flex max-h-[85vh] max-w-lg !flex-col overflow-hidden">
+      <DialogContent className="!flex h-[85vh] w-[min(96vw,72rem)] max-w-[72rem] !flex-col overflow-hidden">
         <DialogHeader className="shrink-0">
           <DialogTitle>
             #{task.task_number} {task.title}
           </DialogTitle>
         </DialogHeader>
-        <div className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto py-2 pr-1">
-          {/* Status + Priority */}
-          <div className="flex items-center gap-2">
-            <Badge variant={STATUS_COLORS[task.status]} size="md">
-              {task.status.replace("_", " ")}
-            </Badge>
-            <Badge variant={PRIORITY_COLORS[task.priority]} size="md">
-              {PRIORITY_LABELS[task.priority]}
-            </Badge>
-            {task.worker_id && (
-              <Badge variant="violet" size="md">
-                Worker: {task.worker_id.slice(0, 8)}
-              </Badge>
-            )}
-          </div>
+        <div className="flex items-center gap-2 border-b border-app-line/30 pb-3">
+          <button
+            type="button"
+            onClick={() => setTab("overview")}
+            className={`rounded-md px-3 py-1.5 text-sm transition-colors ${
+              tab === "overview"
+                ? "bg-app-hover/40 text-ink"
+                : "text-ink-dull hover:bg-app-hover/20"
+            }`}
+          >
+            Overview
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("corpilot")}
+            className={`inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm transition-colors ${
+              tab === "corpilot"
+                ? "bg-app-hover/40 text-ink"
+                : "text-ink-dull hover:bg-app-hover/20"
+            }`}
+          >
+            <CorPilotMark />
+            CorPilot
+          </button>
+        </div>
+        <div className="min-h-0 flex-1 py-2">
+          {tab === "overview" ? (
+            <div className="flex h-full min-h-0 flex-col gap-3 overflow-y-auto pr-1">
+              <div className="flex items-center gap-2">
+                <Badge variant={STATUS_COLORS[task.status]} size="md">
+                  {task.status.replace("_", " ")}
+                </Badge>
+                <Badge variant={PRIORITY_COLORS[task.priority]} size="md">
+                  {PRIORITY_LABELS[task.priority]}
+                </Badge>
+                {task.worker_id && (
+                  <Badge variant="violet" size="md">
+                    Worker: {task.worker_id.slice(0, 8)}
+                  </Badge>
+                )}
+              </div>
 
-          {/* Description */}
-          {task.description && (
-            <div>
-              <label className="mb-1 block text-xs text-ink-dull">
-                Description
-              </label>
-              <Markdown className="break-words text-sm text-ink">
-                {task.description}
-              </Markdown>
+              {task.description && (
+                <div>
+                  <label className="mb-1 block text-xs text-ink-dull">
+                    Description
+                  </label>
+                  <Markdown className="break-words text-sm text-ink">
+                    {task.description}
+                  </Markdown>
+                </div>
+              )}
+
+              {task.subtasks.length > 0 && (
+                <div>
+                  <label className="mb-1 block text-xs text-ink-dull">
+                    Subtasks ({task.subtasks.filter((s) => s.completed).length}/
+                    {task.subtasks.length})
+                  </label>
+                  <ul className="space-y-1">
+                    {task.subtasks.map((subtask, index) => (
+                      <li key={index} className="flex items-center gap-2 text-sm">
+                        <span
+                          className={
+                            subtask.completed
+                              ? "text-emerald-400"
+                              : "text-ink-faint"
+                          }
+                        >
+                          {subtask.completed ? "[x]" : "[ ]"}
+                        </span>
+                        <span
+                          className={
+                            subtask.completed
+                              ? "text-ink-dull line-through"
+                              : "text-ink"
+                          }
+                        >
+                          {subtask.title}
+                        </span>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div className="grid grid-cols-1 gap-2 text-xs text-ink-dull sm:grid-cols-2">
+                <div>Created: {formatTimeAgo(task.created_at)}</div>
+                <div>By: {task.created_by}</div>
+                {task.approved_at && (
+                  <div>Approved: {formatTimeAgo(task.approved_at)}</div>
+                )}
+                {task.approved_by && <div>By: {task.approved_by}</div>}
+                {task.completed_at && (
+                  <div>Completed: {formatTimeAgo(task.completed_at)}</div>
+                )}
+                <div>Updated: {formatTimeAgo(task.updated_at)}</div>
+              </div>
+            </div>
+          ) : (
+            <div className="h-full min-h-0 overflow-hidden">
+              <CorPilotPanel task={task} />
             </div>
           )}
-
-          {/* Subtasks */}
-          {task.subtasks.length > 0 && (
-            <div>
-              <label className="mb-1 block text-xs text-ink-dull">
-                Subtasks ({task.subtasks.filter((s) => s.completed).length}/
-                {task.subtasks.length})
-              </label>
-              <ul className="space-y-1">
-                {task.subtasks.map((subtask, index) => (
-                  <li key={index} className="flex items-center gap-2 text-sm">
-                    <span
-                      className={
-                        subtask.completed
-                          ? "text-emerald-400"
-                          : "text-ink-faint"
-                      }
-                    >
-                      {subtask.completed ? "[x]" : "[ ]"}
-                    </span>
-                    <span
-                      className={
-                        subtask.completed
-                          ? "text-ink-dull line-through"
-                          : "text-ink"
-                      }
-                    >
-                      {subtask.title}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {/* Metadata */}
-          <div className="grid grid-cols-1 gap-2 text-xs text-ink-dull sm:grid-cols-2">
-            <div>Created: {formatTimeAgo(task.created_at)}</div>
-            <div>By: {task.created_by}</div>
-            {task.approved_at && (
-              <div>Approved: {formatTimeAgo(task.approved_at)}</div>
-            )}
-            {task.approved_by && <div>By: {task.approved_by}</div>}
-            {task.completed_at && (
-              <div>Completed: {formatTimeAgo(task.completed_at)}</div>
-            )}
-            <div>Updated: {formatTimeAgo(task.updated_at)}</div>
-          </div>
         </div>
 
         <DialogFooter className="shrink-0">
@@ -639,5 +671,111 @@ function TaskDetailDialog({
         </DialogFooter>
       </DialogContent>
     </Dialog>
+  );
+}
+
+function CorPilotMark() {
+  return (
+    <span className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center">
+      <span
+        aria-hidden="true"
+        className="absolute inset-[-3px] rounded-full bg-[conic-gradient(from_0deg,rgba(124,58,237,0.0),rgba(167,139,250,0.55),rgba(192,132,252,0.5),rgba(236,72,153,0.32),rgba(124,58,237,0.0))] opacity-75 blur-[4px] animate-[spin_8s_linear_infinite]"
+      />
+      <img
+        src="/favicon-32x32.png"
+        alt=""
+        aria-hidden="true"
+        className="relative h-5 w-5 rounded-full"
+      />
+      <span className="pointer-events-none absolute inset-0 flex items-center justify-center">
+        <SparklesGlyph className="h-3.5 w-3.5 text-white drop-shadow-[0_0_2px_rgba(255,255,255,0.55)]" />
+      </span>
+    </span>
+  );
+}
+
+function SparklesGlyph({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      aria-hidden="true"
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2.15"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M11.017 2.814a1 1 0 0 1 1.966 0l1.051 5.558a2 2 0 0 0 1.594 1.594l5.558 1.051a1 1 0 0 1 0 1.966l-5.558 1.051a2 2 0 0 0-1.594 1.594l-1.051 5.558a1 1 0 0 1-1.966 0l-1.051-5.558a2 2 0 0 0-1.594-1.594l-5.558-1.051a1 1 0 0 1 0-1.966l5.558-1.051a2 2 0 0 0 1.594-1.594z" />
+      <path d="M20 2v4" />
+      <path d="M22 4h-4" />
+    </svg>
+  );
+}
+
+function corpilotThreadId(task: TaskItem): string {
+  return `corpilot:task:${task.id}`;
+}
+
+function corpilotStarterPrompts(task: TaskItem) {
+  return [
+    {
+      label: "Refine",
+      prompt: `Refine task #${task.task_number}. Tighten the title, description, and success criteria without changing the core goal.`,
+    },
+    {
+      label: "Add Context",
+      prompt: `Help me add missing context to task #${task.task_number}. Ask for only the highest-value missing details, then update the task.`,
+    },
+    {
+      label: "Split Subtasks",
+      prompt: `Break task #${task.task_number} into a tighter executable subtask plan. Prefer 3-5 concrete subtasks, avoid filler, and only expand further if the task truly needs it.`,
+    },
+    {
+      label: "Inspect",
+      prompt: `Inspect task #${task.task_number}, check worker state or blockers, and tell me the next best steering action.`,
+    },
+  ];
+}
+
+function CorPilotPanel({ task }: { task: TaskItem }) {
+  return (
+    <div className="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-app-line/40 bg-app-darkBox/15">
+      <div className="border-b border-app-line/30 px-4 py-3">
+        <div className="flex items-center gap-2">
+          <div className="inline-flex items-center gap-2 rounded-full border border-app-line/40 bg-app-box/30 px-2.5 py-1 text-xs font-medium text-ink">
+            <CorPilotMark />
+            <span>CorPilot</span>
+          </div>
+          <Badge variant={STATUS_COLORS[task.status]} size="sm">
+            {task.status.replace("_", " ")}
+          </Badge>
+          <Badge variant={PRIORITY_COLORS[task.priority]} size="sm">
+            {PRIORITY_LABELS[task.priority]}
+          </Badge>
+          {task.worker_id && (
+            <Badge variant="violet" size="sm">
+              Worker attached
+            </Badge>
+          )}
+        </div>
+        <p className="mt-2 text-sm text-ink-dull">
+          steer this task, refine the spec, add context, or direct execution.
+        </p>
+      </div>
+      <div className="min-h-0 flex-1 overflow-hidden">
+        <CortexChatPanel
+          agentId={task.agent_id}
+          hideHeader
+          title="CorPilot"
+          description="task-scoped steering for this item. refine the task, add context, inspect execution, and guide next actions."
+          inputPlaceholder="Steer this task..."
+          starterPrompts={corpilotStarterPrompts(task)}
+          fixedThreadId={corpilotThreadId(task)}
+          taskNumber={task.task_number}
+          disableThreadControls
+        />
+      </div>
+    </div>
   );
 }

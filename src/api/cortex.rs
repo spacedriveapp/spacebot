@@ -45,6 +45,7 @@ pub(super) struct CortexChatSendRequest {
     thread_id: String,
     message: String,
     channel_id: Option<String>,
+    task_number: Option<i64>,
 }
 
 #[derive(Deserialize)]
@@ -125,10 +126,11 @@ pub(super) async fn cortex_chat_send(
     let thread_id = request.thread_id;
     let message = request.message;
     let channel_id = request.channel_id;
+    let task_number = request.task_number;
 
     let channel_ref = channel_id.as_deref();
     let mut event_rx = session
-        .send_message_with_events(&thread_id, &message, channel_ref)
+        .send_message_with_events(&thread_id, &message, channel_ref, task_number)
         .await
         .map_err(|error| {
             let status = map_cortex_chat_send_error(&error);

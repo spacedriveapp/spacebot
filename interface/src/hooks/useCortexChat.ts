@@ -51,18 +51,33 @@ function generateThreadId(): string {
 	return generateId();
 }
 
-export function useCortexChat(agentId: string, channelId?: string, options?: { freshThread?: boolean }) {
+export function useCortexChat(
+	agentId: string,
+	channelId?: string,
+	options?: { freshThread?: boolean; fixedThreadId?: string; taskNumber?: number },
+) {
 	const [messages, setMessages] = useState<CortexChatMessage[]>([]);
-	const [threadId, setThreadId] = useState<string | null>(null);
+	const [threadId, setThreadId] = useState<string | null>(options?.fixedThreadId ?? null);
 	const [isStreaming, setIsStreaming] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 	const [toolActivity, setToolActivity] = useState<ToolActivity[]>([]);
 	const loadedRef = useRef(false);
 
-	// Load latest thread on mount, or start fresh if requested
+	// Load latest thread on mount, or use a fixed/fresh thread if requested
 	useEffect(() => {
 		if (loadedRef.current) return;
 		loadedRef.current = true;
+
+		if (options?.fixedThreadId) {
+			api.cortexChatMessages(agentId, options.fixedThreadId).then((data) => {
+				setThreadId(data.thread_id);
+				setMessages(data.messages);
+			}).catch((error) => {
+				console.warn("Failed to load fixed cortex chat thread:", error);
+				setThreadId(options.fixedThreadId ?? null);
+			});
+			return;
+		}
 
 		if (options?.freshThread) {
 			setThreadId(generateThreadId());
@@ -76,7 +91,7 @@ export function useCortexChat(agentId: string, channelId?: string, options?: { f
 			console.warn("Failed to load cortex chat history:", error);
 			setThreadId(generateThreadId());
 		});
-	}, [agentId]);
+	}, [agentId, options?.fixedThreadId, options?.freshThread]);
 
 	const sendMessage = useCallback(async (text: string) => {
 		if (isStreaming || !threadId) return;
@@ -97,7 +112,13 @@ export function useCortexChat(agentId: string, channelId?: string, options?: { f
 		setMessages((prev) => [...prev, userMessage]);
 
 		try {
-			const response = await api.cortexChatSend(agentId, threadId, text, channelId);
+			const response = await api.cortexChatSend(
+				agentId,
+				threadId,
+				text,
+				channelId,
+				options?.taskNumber,
+			);
 			if (!response.ok) {
 				throw new Error(`HTTP ${response.status}`);
 			}
@@ -167,7 +188,7 @@ export function useCortexChat(agentId: string, channelId?: string, options?: { f
 			setIsStreaming(false);
 			setToolActivity([]);
 		}
-	}, [agentId, channelId, threadId, isStreaming]);
+	}, [agentId, channelId, threadId, isStreaming, options?.taskNumber]);
 
 	// Listen for auto-triggered cortex chat messages (e.g. worker results)
 	// delivered via the global SSE stream.
@@ -198,11 +219,12 @@ export function useCortexChat(agentId: string, channelId?: string, options?: { f
 	}, [agentId, threadId, channelId]);
 
 	const newThread = useCallback(() => {
+		if (options?.fixedThreadId) return;
 		setThreadId(generateThreadId());
 		setMessages([]);
 		setError(null);
 		setToolActivity([]);
-	}, []);
+	}, [options?.fixedThreadId]);
 
 	const loadThread = useCallback(async (targetThreadId: string) => {
 		if (isStreaming) return;

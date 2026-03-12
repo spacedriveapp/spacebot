@@ -1741,7 +1741,7 @@ export const api = {
 		if (threadId) search.set("thread_id", threadId);
 		return fetchJson<CortexChatMessagesResponse>(`/cortex-chat/messages?${search}`);
 	},
-	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string) =>
+	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string, taskNumber?: number) =>
 		fetch(`${API_BASE}/cortex-chat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
@@ -1750,6 +1750,7 @@ export const api = {
 				thread_id: threadId,
 				message,
 				channel_id: channelId ?? null,
+				task_number: taskNumber ?? null,
 			}),
 		}),
 	cortexChatThreads: (agentId: string) =>

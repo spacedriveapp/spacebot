@@ -293,6 +293,8 @@ pub struct CortexChatContext {
     pub current_thread_id: Arc<tokio::sync::RwLock<Option<String>>>,
     /// Current channel context (if cortex chat was opened on a channel page).
     pub current_channel_context: Arc<tokio::sync::RwLock<Option<String>>>,
+    /// Current task number when cortex chat is operating as CorPilot for a task.
+    pub current_task_number: Arc<tokio::sync::RwLock<Option<i64>>>,
     /// Workers tracked by the cortex chat event loop.
     pub tracked_workers: Arc<
         tokio::sync::RwLock<
