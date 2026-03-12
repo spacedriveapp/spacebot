@@ -16,6 +16,13 @@ interface CortexChatPanelProps {
 	initialPrompt?: string;
 	/** If true, hides the header bar (useful when embedded in another dialog). */
 	hideHeader?: boolean;
+	title?: string;
+	description?: string;
+	inputPlaceholder?: string;
+	starterPrompts?: StarterPrompt[];
+	fixedThreadId?: string;
+	taskNumber?: number;
+	disableThreadControls?: boolean;
 }
 
 interface StarterPrompt {
@@ -103,10 +110,16 @@ function EmptyCortexState({
 	channelId,
 	onStarterPrompt,
 	disabled,
+	title,
+	description,
+	starterPrompts,
 }: {
 	channelId?: string;
 	onStarterPrompt: (prompt: string) => void;
 	disabled: boolean;
+	title: string;
+	description: string;
+	starterPrompts: StarterPrompt[];
 }) {
 	const contextHint = channelId
 		? "Current channel transcript is injected for this send only."
@@ -116,16 +129,15 @@ function EmptyCortexState({
 		<div className="mx-auto w-full max-w-md">
 			<div className="rounded-2xl border border-app-line/40 bg-app-darkBox/15 p-5">
 				<h3 className="font-plex text-base font-medium text-ink">
-					Cortex chat
+					{title}
 				</h3>
 				<p className="mt-2 text-sm leading-relaxed text-ink-dull">
-					System-level control for this agent: memory, tasks, worker inspection,
-					and direct tool execution.
+					{description}
 				</p>
 				<p className="mt-2 text-tiny text-ink-faint">{contextHint}</p>
 
 				<div className="mt-4 grid grid-cols-2 gap-2">
-					{STARTER_PROMPTS.map((item) => (
+					{starterPrompts.map((item) => (
 						<button
 							key={item.label}
 							type="button"
@@ -169,11 +181,13 @@ function CortexChatInput({
 	onChange,
 	onSubmit,
 	isStreaming,
+	placeholder,
 }: {
 	value: string;
 	onChange: (value: string) => void;
 	onSubmit: () => void;
 	isStreaming: boolean;
+	placeholder: string;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -214,7 +228,7 @@ function CortexChatInput({
 					onChange={(event) => onChange(event.target.value)}
 					onKeyDown={handleKeyDown}
 					placeholder={
-						isStreaming ? "Waiting for response..." : "Message the cortex..."
+						isStreaming ? "Waiting for response..." : placeholder
 					}
 					disabled={isStreaming}
 					rows={1}
@@ -360,6 +374,13 @@ export function CortexChatPanel({
 	onClose,
 	initialPrompt,
 	hideHeader,
+	title = "Cortex",
+	description = "System-level control for this agent: memory, tasks, worker inspection, and direct tool execution.",
+	inputPlaceholder = "Message the cortex...",
+	starterPrompts = STARTER_PROMPTS,
+	fixedThreadId,
+	taskNumber,
+	disableThreadControls = false,
 }: CortexChatPanelProps) {
 	const {
 		messages,
@@ -370,7 +391,11 @@ export function CortexChatPanel({
 		sendMessage,
 		newThread,
 		loadThread,
-	} = useCortexChat(agentId, channelId, {freshThread: !!initialPrompt});
+	} = useCortexChat(agentId, channelId, {
+		freshThread: !!initialPrompt && !fixedThreadId,
+		fixedThreadId,
+		taskNumber,
+	});
 	const [input, setInput] = useState("");
 	const [threadListOpen, setThreadListOpen] = useState(false);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -407,12 +432,12 @@ export function CortexChatPanel({
 	};
 
 	return (
-		<div className="flex h-full w-full flex-col p-2">
+		<div className="flex h-full min-h-0 w-full flex-col overflow-hidden p-2">
 			{/* Header */}
 			{!hideHeader && (
 				<div className="flex h-10 items-center justify-between border-b border-app-line/50 px-3">
 					<div className="flex items-center gap-2">
-						<span className="text-sm font-medium text-ink">Cortex</span>
+						<span className="text-sm font-medium text-ink">{title}</span>
 						{channelId && (
 							<span className="rounded-full bg-app-box px-2 py-0.5 text-tiny text-ink-faint">
 								{channelId.length > 20
@@ -422,6 +447,7 @@ export function CortexChatPanel({
 						)}
 					</div>
 				<div className="flex items-center gap-0.5">
+					{!disableThreadControls && (
 					<Popover open={threadListOpen} onOpenChange={setThreadListOpen}>
 						<PopoverTrigger asChild>
 							<Button
@@ -450,6 +476,8 @@ export function CortexChatPanel({
 							/>
 						</PopoverContent>
 					</Popover>
+					)}
+					{!disableThreadControls && (
 					<Button
 						onClick={newThread}
 						variant="ghost"
@@ -460,6 +488,7 @@ export function CortexChatPanel({
 					>
 						<HugeiconsIcon icon={PlusSignIcon} className="h-3.5 w-3.5" />
 					</Button>
+					)}
 					{onClose && (
 						<Button
 							onClick={onClose}
@@ -530,6 +559,9 @@ export function CortexChatPanel({
 						channelId={channelId}
 						onStarterPrompt={handleStarterPrompt}
 						disabled={isStreaming || !threadId}
+						title={title}
+						description={description}
+						starterPrompts={starterPrompts}
 					/>
 				</div>
 			)}
@@ -541,6 +573,7 @@ export function CortexChatPanel({
 					onChange={setInput}
 					onSubmit={handleSubmit}
 					isStreaming={isStreaming}
+					placeholder={inputPlaceholder}
 				/>
 			</div>
 		</div>

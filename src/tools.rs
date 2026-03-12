@@ -655,7 +655,7 @@ pub fn create_cortex_chat_tool_server(
     let spawn_tool = {
         let tool = DetachedSpawnWorkerTool::new(deps, screenshot_dir.clone(), logs_dir);
         match cortex_ctx {
-            Some(ctx) => tool.with_cortex_context(ctx),
+            Some(ref ctx) => tool.with_cortex_context(ctx.clone()),
             None => tool,
         }
     };
@@ -684,7 +684,10 @@ pub fn create_cortex_chat_tool_server(
             "cortex",
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
-        .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
+        .tool(match cortex_ctx.clone() {
+            Some(ctx) => TaskUpdateTool::for_cortex(task_store, agent_id.clone(), ctx),
+            None => TaskUpdateTool::for_branch(task_store, agent_id.clone()),
+        })
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()));
 
     server = register_file_tools(server, workspace, sandbox);

@@ -19,6 +19,7 @@ pub struct TaskUpdateTool {
     task_store: Arc<TaskStore>,
     agent_id: AgentId,
     scope: TaskUpdateScope,
+    cortex_ctx: Option<crate::tools::spawn_worker::CortexChatContext>,
 }
 
 impl TaskUpdateTool {
@@ -27,6 +28,7 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Branch,
+            cortex_ctx: None,
         }
     }
 
@@ -35,6 +37,20 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Worker(worker_id),
+            cortex_ctx: None,
+        }
+    }
+
+    pub fn for_cortex(
+        task_store: Arc<TaskStore>,
+        agent_id: AgentId,
+        cortex_ctx: crate::tools::spawn_worker::CortexChatContext,
+    ) -> Self {
+        Self {
+            task_store,
+            agent_id,
+            scope: TaskUpdateScope::Branch,
+            cortex_ctx: Some(cortex_ctx),
         }
     }
 }
@@ -136,15 +152,49 @@ impl Tool for TaskUpdateTool {
             })
         };
 
+        let mut description = crate::prompts::text::get("tools/task_update").to_string();
+        if self.cortex_ctx.is_some() {
+            description.push_str(
+                " In CorPilot, do not rewrite the core spec of an `in_progress` task in place; prefer adding context, steering execution, or changing status first.",
+            );
+        }
+
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/task_update").to_string(),
+            description,
             parameters,
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
+
+        if let Some(cortex_ctx) = &self.cortex_ctx
+            && let Some(current_task_number) = *cortex_ctx.current_task_number.read().await
+        {
+            if current_task_number != task_number {
+                return Err(TaskUpdateError(format!(
+                    "CorPilot can only update the currently scoped task (#{current_task_number})."
+                )));
+            }
+
+            let current_task = self
+                .task_store
+                .get_by_number(&self.agent_id, task_number)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?;
+
+            if let Some(task) = current_task {
+                let is_rewriting_core_spec =
+                    args.title.is_some() || args.description.is_some() || args.subtasks.is_some();
+
+                if task.status == TaskStatus::InProgress && is_rewriting_core_spec {
+                    return Err(TaskUpdateError(
+                        "CorPilot cannot rewrite the core spec of an in-progress task in place. Add context, inspect/steer execution, update status, or move it out of in_progress before rewriting the title/description/subtasks.".to_string(),
+                    ));
+                }
+            }
+        }
 
         if let TaskUpdateScope::Worker(ref worker_id) = self.scope {
             let current = self
@@ -231,5 +281,176 @@ impl Tool for TaskUpdateTool {
             status: updated.status.to_string(),
             message: format!("Updated task #{}", updated.task_number),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tasks::CreateTaskInput;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::collections::HashMap;
+    use tokio::sync::RwLock;
+
+    async fn setup_store() -> TaskStore {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("in-memory sqlite should connect");
+
+        sqlx::query(
+            r#"
+            CREATE TABLE tasks (
+                id TEXT PRIMARY KEY,
+                agent_id TEXT NOT NULL,
+                task_number INTEGER NOT NULL,
+                title TEXT NOT NULL,
+                description TEXT,
+                status TEXT NOT NULL DEFAULT 'backlog',
+                priority TEXT NOT NULL DEFAULT 'medium',
+                subtasks TEXT,
+                metadata TEXT,
+                source_memory_id TEXT,
+                worker_id TEXT,
+                created_by TEXT NOT NULL,
+                approved_at TIMESTAMP,
+                approved_by TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                completed_at TIMESTAMP,
+                UNIQUE(agent_id, task_number)
+            )
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("tasks schema should be created");
+
+        TaskStore::new(pool)
+    }
+
+    fn corpilot_context(task_number: i64) -> crate::tools::spawn_worker::CortexChatContext {
+        crate::tools::spawn_worker::CortexChatContext {
+            current_thread_id: Arc::new(RwLock::new(Some("corpilot:test".to_string()))),
+            current_channel_context: Arc::new(RwLock::new(None)),
+            current_task_number: Arc::new(RwLock::new(Some(task_number))),
+            tracked_workers: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    #[tokio::test]
+    async fn corpilot_blocks_core_rewrite_for_in_progress_task() {
+        let store = Arc::new(setup_store().await);
+        let agent_id: AgentId = Arc::from("agent-test");
+        let created = store
+            .create(CreateTaskInput {
+                agent_id: agent_id.to_string(),
+                title: "in-progress task".to_string(),
+                description: Some("original".to_string()),
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "cortex".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let tool = TaskUpdateTool::for_cortex(
+            store.clone(),
+            agent_id.clone(),
+            corpilot_context(created.task_number),
+        );
+
+        let error = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: Some("rewritten".to_string()),
+                description: Some("rewritten description".to_string()),
+                status: None,
+                priority: None,
+                subtasks: Some(vec![TaskSubtask {
+                    title: "new subtask".to_string(),
+                    completed: false,
+                }]),
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect_err("CorPilot should block core rewrites for in-progress tasks");
+
+        assert!(
+            error
+                .to_string()
+                .contains("cannot rewrite the core spec of an in-progress task"),
+            "unexpected error: {error}"
+        );
+
+        let updated = store
+            .get_by_number(agent_id.as_ref(), created.task_number)
+            .await
+            .expect("task fetch should succeed")
+            .expect("task should exist");
+        assert_eq!(updated.status, TaskStatus::InProgress);
+        assert_eq!(updated.title, "in-progress task");
+        assert_eq!(updated.description.as_deref(), Some("original"));
+        assert!(updated.subtasks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn corpilot_allows_status_only_update_for_in_progress_task() {
+        let store = Arc::new(setup_store().await);
+        let agent_id: AgentId = Arc::from("agent-test");
+        let created = store
+            .create(CreateTaskInput {
+                agent_id: agent_id.to_string(),
+                title: "in-progress task".to_string(),
+                description: Some("original".to_string()),
+                status: TaskStatus::InProgress,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "cortex".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let tool = TaskUpdateTool::for_cortex(
+            store.clone(),
+            agent_id.clone(),
+            corpilot_context(created.task_number),
+        );
+
+        let output = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: None,
+                description: None,
+                status: Some("ready".to_string()),
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect("status-only update should succeed");
+
+        assert_eq!(output.status, "ready");
+
+        let updated = store
+            .get_by_number(agent_id.as_ref(), created.task_number)
+            .await
+            .expect("task fetch should succeed")
+            .expect("task should exist");
+        assert_eq!(updated.status, TaskStatus::Ready);
+        assert_eq!(updated.title, "in-progress task");
+        assert_eq!(updated.description.as_deref(), Some("original"));
     }
 }

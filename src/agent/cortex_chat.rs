@@ -412,6 +412,7 @@ impl CortexChatStore {
 pub struct TrackedWorker {
     pub thread_id: String,
     pub channel_context: Option<String>,
+    pub task_number: Option<i64>,
 }
 
 pub struct CortexChatSession {
@@ -427,6 +428,18 @@ pub struct CortexChatSession {
 }
 
 impl CortexChatSession {
+    fn truncate_task_context_text(value: &str, max_bytes: usize) -> &str {
+        if value.len() <= max_bytes {
+            return value;
+        }
+
+        let mut end = max_bytes;
+        while end > 0 && !value.is_char_boundary(end) {
+            end -= 1;
+        }
+        &value[..end]
+    }
+
     pub fn new(
         deps: AgentDeps,
         tool_server: ToolServerHandle,
@@ -449,6 +462,7 @@ impl CortexChatSession {
         crate::tools::spawn_worker::CortexChatContext {
             current_thread_id: Arc::new(RwLock::new(None)),
             current_channel_context: Arc::new(RwLock::new(None)),
+            current_task_number: Arc::new(RwLock::new(None)),
             tracked_workers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -523,7 +537,12 @@ impl CortexChatSession {
                 // The send_lock may be held if the admin is mid-conversation.
                 // Wait for it rather than dropping the result.
                 let event_rx = match session
-                    .send_message_blocking(&tracked.thread_id, &retrigger_message, channel_ref)
+                    .send_message_blocking(
+                        &tracked.thread_id,
+                        &retrigger_message,
+                        channel_ref,
+                        tracked.task_number,
+                    )
                     .await
                 {
                     Ok(rx) => rx,
@@ -591,10 +610,17 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
+        task_number: Option<i64>,
     ) -> std::result::Result<mpsc::Receiver<CortexChatEvent>, CortexChatSendError> {
         let send_guard = try_acquire_send_lock(&self.send_lock)?;
-        self.send_message_impl(send_guard, thread_id, user_text, channel_context_id)
-            .await
+        self.send_message_impl(
+            send_guard,
+            thread_id,
+            user_text,
+            channel_context_id,
+            task_number,
+        )
+        .await
     }
 
     /// Like `send_message_with_events` but waits for the send lock instead of
@@ -605,10 +631,18 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
+        task_number: Option<i64>,
     ) -> std::result::Result<mpsc::Receiver<CortexChatEvent>, CortexChatSendError> {
         let send_guard = self.send_lock.clone().lock_owned().await;
-        self.send_message_inner(send_guard, thread_id, user_text, channel_context_id, false)
-            .await
+        self.send_message_inner(
+            send_guard,
+            thread_id,
+            user_text,
+            channel_context_id,
+            task_number,
+            false,
+        )
+        .await
     }
 
     async fn send_message_impl(
@@ -617,9 +651,17 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
+        task_number: Option<i64>,
     ) -> std::result::Result<mpsc::Receiver<CortexChatEvent>, CortexChatSendError> {
-        self.send_message_inner(send_guard, thread_id, user_text, channel_context_id, true)
-            .await
+        self.send_message_inner(
+            send_guard,
+            thread_id,
+            user_text,
+            channel_context_id,
+            task_number,
+            true,
+        )
+        .await
     }
 
     /// Core send implementation. When `persist_input` is false the incoming
@@ -632,6 +674,7 @@ impl CortexChatSession {
         thread_id: &str,
         user_text: &str,
         channel_context_id: Option<&str>,
+        task_number: Option<i64>,
         persist_input: bool,
     ) -> std::result::Result<mpsc::Receiver<CortexChatEvent>, CortexChatSendError> {
         // Update the shared context so DetachedSpawnWorkerTool knows which
@@ -639,6 +682,7 @@ impl CortexChatSession {
         *self.cortex_ctx.current_thread_id.write().await = Some(thread_id.to_string());
         *self.cortex_ctx.current_channel_context.write().await =
             channel_context_id.map(|s| s.to_string());
+        *self.cortex_ctx.current_task_number.write().await = task_number;
 
         if persist_input {
             self.store
@@ -647,7 +691,9 @@ impl CortexChatSession {
         }
 
         // Build the system prompt
-        let system_prompt = self.build_system_prompt(channel_context_id).await?;
+        let system_prompt = self
+            .build_system_prompt(channel_context_id, task_number)
+            .await?;
 
         // Load chat history and convert to Rig messages.
         // When we persisted the input, the last message in history is the one
@@ -789,6 +835,7 @@ impl CortexChatSession {
     async fn build_system_prompt(
         &self,
         channel_context_id: Option<&str>,
+        task_number: Option<i64>,
     ) -> crate::error::Result<String> {
         let runtime_config = &self.deps.runtime_config;
         let prompt_engine = runtime_config.prompts.load();
@@ -819,6 +866,11 @@ impl CortexChatSession {
         } else {
             None
         };
+        let task_context = if let Some(number) = task_number {
+            self.load_task_context(number).await
+        } else {
+            None
+        };
 
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
@@ -826,12 +878,108 @@ impl CortexChatSession {
             empty_to_none(identity_context),
             empty_to_none(memory_bulletin.to_string()),
             channel_transcript,
+            task_context,
             empty_to_none(agents_manifest),
             empty_to_none(changelog_highlights),
             empty_to_none(runtime_config_snapshot),
             worker_capabilities,
             self.factory_enabled,
         )
+    }
+
+    async fn load_task_context(&self, task_number: i64) -> Option<String> {
+        let task = match self
+            .deps
+            .task_store
+            .get_by_number(self.deps.agent_id.as_ref(), task_number)
+            .await
+        {
+            Ok(Some(task)) => task,
+            Ok(None) => return None,
+            Err(error) => {
+                tracing::warn!(%error, task_number, "failed to load task for corpilot context");
+                return None;
+            }
+        };
+
+        let mut out = format!(
+            "- task_number: {}\n- title: {}\n- status: {}\n- priority: {}\n- created_by: {}\n- created_at: {}\n- updated_at: {}\n",
+            task.task_number,
+            task.title,
+            task.status,
+            task.priority,
+            task.created_by,
+            task.created_at,
+            task.updated_at,
+        );
+
+        if let Some(description) = task.description.as_deref()
+            && !description.trim().is_empty()
+        {
+            out.push_str("\n### Description\n");
+            let preview = Self::truncate_task_context_text(description, 4_000);
+            out.push_str(preview);
+            if preview.len() < description.len() {
+                out.push_str("\n\n[description truncated]\n");
+            }
+            out.push('\n');
+        }
+
+        if !task.subtasks.is_empty() {
+            out.push_str("\n### Subtasks\n");
+            for (index, subtask) in task.subtasks.iter().enumerate() {
+                let status = if subtask.completed { "done" } else { "open" };
+                out.push_str(&format!("{}. [{}] {}\n", index + 1, status, subtask.title));
+            }
+        }
+
+        if task.metadata != serde_json::json!({})
+            && let Ok(pretty_metadata) = serde_json::to_string_pretty(&task.metadata)
+        {
+            out.push_str("\n### Metadata\n```json\n");
+            out.push_str(&pretty_metadata);
+            out.push_str("\n```\n");
+        }
+
+        if let Some(worker_id) = task.worker_id.as_deref() {
+            out.push_str("\n### Active Worker\n");
+            out.push_str(&format!("- worker_id: {}\n", worker_id));
+
+            let logger = ProcessRunLogger::new(self.deps.sqlite_pool.clone());
+            match logger
+                .get_worker_detail(self.deps.agent_id.as_ref(), worker_id)
+                .await
+            {
+                Ok(Some(worker)) => {
+                    out.push_str(&format!(
+                        "- status: {}\n- worker_type: {}\n- started_at: {}\n",
+                        worker.status, worker.worker_type, worker.started_at
+                    ));
+                    if let Some(directory) = worker.directory.as_deref() {
+                        out.push_str(&format!("- directory: {}\n", directory));
+                    }
+                    if let Some(result) = worker.result.as_deref()
+                        && !result.trim().is_empty()
+                    {
+                        let preview = if result.len() > 800 {
+                            let boundary = result.floor_char_boundary(800);
+                            format!("{}...", &result[..boundary])
+                        } else {
+                            result.to_string()
+                        };
+                        out.push_str("\n### Worker Result Preview\n");
+                        out.push_str(&preview);
+                        out.push('\n');
+                    }
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, worker_id, "failed to load worker detail for corpilot context");
+                }
+            }
+        }
+
+        Some(out)
     }
 
     /// Load the last 50 messages from a channel as a formatted transcript.
