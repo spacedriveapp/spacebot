@@ -50,6 +50,7 @@ pub struct SpacebotModel {
     provider: String,
     full_model_name: String,
     routing: Option<RoutingConfig>,
+    configured_thinking_effort: Option<String>,
     agent_id: Option<String>,
     process_type: Option<String>,
     worker_type: Option<String>,
@@ -72,6 +73,14 @@ impl SpacebotModel {
         self
     }
 
+    pub fn with_configured_thinking_effort(
+        mut self,
+        configured_thinking_effort: impl Into<String>,
+    ) -> Self {
+        self.configured_thinking_effort = Some(configured_thinking_effort.into());
+        self
+    }
+
     /// Attach agent context for per-agent metric labels.
     pub fn with_context(
         mut self,
@@ -87,6 +96,17 @@ impl SpacebotModel {
     pub fn with_worker_type(mut self, worker_type: impl Into<String>) -> Self {
         self.worker_type = Some(worker_type.into());
         self
+    }
+
+    fn configured_thinking_effort(&self) -> &str {
+        self.configured_thinking_effort
+            .as_deref()
+            .or_else(|| {
+                self.routing
+                    .as_ref()
+                    .map(|routing| routing.thinking_effort_for_model(&self.model_name))
+            })
+            .unwrap_or("auto")
     }
 
     async fn provider_config_for_current_model(&self) -> Result<ProviderConfig, CompletionError> {
@@ -192,11 +212,14 @@ impl SpacebotModel {
         &self,
         model_name: &str,
         request: &CompletionRequest,
+        configured_effort: &str,
     ) -> Result<completion::CompletionResponse<RawResponse>, (CompletionError, bool)> {
         let model = if model_name == self.full_model_name {
             self.clone()
+                .with_configured_thinking_effort(configured_effort.to_string())
         } else {
             SpacebotModel::make(&self.llm_manager, model_name)
+                .with_configured_thinking_effort(configured_effort.to_string())
         };
 
         let mut last_error = None;
@@ -268,6 +291,7 @@ impl CompletionModel for SpacebotModel {
             provider,
             full_model_name,
             routing: None,
+            configured_thinking_effort: None,
             agent_id: None,
             process_type: None,
             worker_type: None,
@@ -287,6 +311,9 @@ impl CompletionModel for SpacebotModel {
                 return self.attempt_completion(request).await;
             };
 
+            let configured_effort = routing
+                .thinking_effort_for_model(&self.model_name)
+                .to_string();
             let cooldown = routing.rate_limit_cooldown_secs;
             let fallbacks = routing.get_fallbacks(&self.full_model_name);
             let mut last_error: Option<CompletionError> = None;
@@ -307,7 +334,7 @@ impl CompletionModel for SpacebotModel {
                 );
             } else {
                 match self
-                    .attempt_with_retries(&self.full_model_name, &request)
+                    .attempt_with_retries(&self.full_model_name, &request, &configured_effort)
                     .await
                 {
                     Ok(response) => return Ok(response),
@@ -344,7 +371,10 @@ impl CompletionModel for SpacebotModel {
                     continue;
                 }
 
-                match self.attempt_with_retries(fallback_name, &request).await {
+                match self
+                    .attempt_with_retries(fallback_name, &request, &configured_effort)
+                    .await
+                {
                     Ok(response) => {
                         tracing::info!(
                             original = %self.full_model_name,
@@ -557,11 +587,7 @@ impl SpacebotModel {
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let api_key = provider_config.api_key.as_str();
 
-        let effort = self
-            .routing
-            .as_ref()
-            .map(|r| r.thinking_effort_for_model(&self.model_name))
-            .unwrap_or("auto");
+        let effort = self.configured_thinking_effort();
         let anthropic_request = crate::llm::anthropic::build_anthropic_request(
             self.llm_manager.http_client(),
             api_key,
@@ -749,6 +775,11 @@ impl SpacebotModel {
             "model": api_model_name,
             "input": input,
         });
+
+        let configured_effort = self.configured_thinking_effort();
+        if let Some(effort) = openai_reasoning_effort(&api_model_name, configured_effort) {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
+        }
 
         if let Some(preamble) = &request.preamble {
             body["instructions"] = serde_json::json!(preamble);
@@ -2876,6 +2907,29 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
     }
 }
 
+fn openai_reasoning_effort(model_name: &str, configured_effort: &str) -> Option<&'static str> {
+    if configured_effort == "auto" || !model_name.starts_with("gpt-5") {
+        return None;
+    }
+
+    let is_pro_model = model_name.contains("-pro");
+    match configured_effort {
+        "max" => Some("xhigh"),
+        "high" => Some("high"),
+        "medium" => Some("medium"),
+        "low" if is_pro_model => Some("medium"),
+        "low" => Some("low"),
+        _ => {
+            tracing::warn!(
+                model = %model_name,
+                configured_effort = %configured_effort,
+                "ignoring invalid OpenAI reasoning effort"
+            );
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2936,6 +2990,29 @@ mod tests {
             "gpt-4o-mini"
         );
         assert_eq!(remap_model_name_for_api("openai", "zai/glm-5"), "zai/glm-5");
+    }
+
+    #[test]
+    fn openai_reasoning_effort_omits_auto_and_non_gpt5_models() {
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "auto"), None);
+        assert_eq!(openai_reasoning_effort("gpt-4.1", "high"), None);
+    }
+
+    #[test]
+    fn openai_reasoning_effort_maps_standard_gpt5_values() {
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "low"), Some("low"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "medium"), Some("medium"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "high"), Some("high"));
+        assert_eq!(openai_reasoning_effort("gpt-5.4", "max"), Some("xhigh"));
+    }
+
+    #[test]
+    fn openai_reasoning_effort_raises_low_floor_for_pro_models() {
+        assert_eq!(
+            openai_reasoning_effort("gpt-5.4-pro", "low"),
+            Some("medium")
+        );
+        assert_eq!(openai_reasoning_effort("gpt-5.4-pro", "max"), Some("xhigh"));
     }
 
     #[test]
