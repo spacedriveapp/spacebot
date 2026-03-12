@@ -412,6 +412,7 @@ impl CortexChatStore {
 pub struct TrackedWorker {
     pub thread_id: String,
     pub channel_context: Option<String>,
+    pub task_number: Option<i64>,
 }
 
 pub struct CortexChatSession {
@@ -540,7 +541,7 @@ impl CortexChatSession {
                         &tracked.thread_id,
                         &retrigger_message,
                         channel_ref,
-                        None,
+                        tracked.task_number,
                     )
                     .await
                 {

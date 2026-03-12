@@ -492,6 +492,7 @@ impl Tool for DetachedSpawnWorkerTool {
         if let Some(ctx) = &self.cortex_ctx {
             let thread_id: Option<String> = ctx.current_thread_id.read().await.clone();
             let channel_context: Option<String> = ctx.current_channel_context.read().await.clone();
+            let task_number = *ctx.current_task_number.read().await;
             if let Some(thread_id) = thread_id {
                 let mut workers = ctx.tracked_workers.write().await;
                 workers.insert(
@@ -499,6 +500,7 @@ impl Tool for DetachedSpawnWorkerTool {
                     crate::agent::cortex_chat::TrackedWorker {
                         thread_id,
                         channel_context,
+                        task_number,
                     },
                 );
             }

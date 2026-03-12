@@ -152,9 +152,16 @@ impl Tool for TaskUpdateTool {
             })
         };
 
+        let mut description = crate::prompts::text::get("tools/task_update").to_string();
+        if self.cortex_ctx.is_some() {
+            description.push_str(
+                " In CorPilot, do not rewrite the core spec of an `in_progress` task in place; prefer adding context, steering execution, or changing status first.",
+            );
+        }
+
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: crate::prompts::text::get("tools/task_update").to_string(),
+            description,
             parameters,
         }
     }
@@ -162,30 +169,29 @@ impl Tool for TaskUpdateTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
 
-        if let Some(cortex_ctx) = &self.cortex_ctx {
-            if let Some(current_task_number) = *cortex_ctx.current_task_number.read().await {
-                if current_task_number != task_number {
-                    return Err(TaskUpdateError(format!(
-                        "CorPilot can only update the currently scoped task (#{current_task_number})."
-                    )));
-                }
+        if let Some(cortex_ctx) = &self.cortex_ctx
+            && let Some(current_task_number) = *cortex_ctx.current_task_number.read().await
+        {
+            if current_task_number != task_number {
+                return Err(TaskUpdateError(format!(
+                    "CorPilot can only update the currently scoped task (#{current_task_number})."
+                )));
+            }
 
-                let current_task = self
-                    .task_store
-                    .get_by_number(&self.agent_id, task_number)
-                    .await
-                    .map_err(|error| TaskUpdateError(format!("{error}")))?;
+            let current_task = self
+                .task_store
+                .get_by_number(&self.agent_id, task_number)
+                .await
+                .map_err(|error| TaskUpdateError(format!("{error}")))?;
 
-                if let Some(task) = current_task {
-                    let is_rewriting_core_spec = args.title.is_some()
-                        || args.description.is_some()
-                        || args.subtasks.is_some();
+            if let Some(task) = current_task {
+                let is_rewriting_core_spec =
+                    args.title.is_some() || args.description.is_some() || args.subtasks.is_some();
 
-                    if task.status == TaskStatus::InProgress && is_rewriting_core_spec {
-                        return Err(TaskUpdateError(
-                            "CorPilot cannot rewrite the core spec of an in-progress task in place. Add context, inspect/steer execution, update status, or move it out of in_progress before rewriting the title/description/subtasks.".to_string(),
-                        ));
-                    }
+                if task.status == TaskStatus::InProgress && is_rewriting_core_spec {
+                    return Err(TaskUpdateError(
+                        "CorPilot cannot rewrite the core spec of an in-progress task in place. Add context, inspect/steer execution, update status, or move it out of in_progress before rewriting the title/description/subtasks.".to_string(),
+                    ));
                 }
             }
         }
