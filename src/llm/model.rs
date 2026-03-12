@@ -2990,6 +2990,18 @@ fn ensure_responses_content_part<'a>(
 
 fn append_json_string_field(value: &mut serde_json::Value, field_name: &str, suffix: &str) {
     let object = ensure_json_object(value);
+
+    match object.get_mut(field_name) {
+        Some(serde_json::Value::String(text)) => text.push_str(suffix),
+        _ => {
+            object.insert(
+                field_name.to_string(),
+                serde_json::Value::String(suffix.to_string()),
+            );
+        }
+    }
+}
+    let object = ensure_json_object(value);
     let mut text = object
         .get(field_name)
         .and_then(serde_json::Value::as_str)
