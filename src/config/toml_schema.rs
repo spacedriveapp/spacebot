@@ -10,6 +10,8 @@ pub(super) struct TomlConfig {
     #[serde(default)]
     pub(super) defaults: TomlDefaultsConfig,
     #[serde(default)]
+    pub(super) memory_persistence: Option<TomlMemoryPersistenceConfig>,
+    #[serde(default)]
     pub(super) agents: Vec<TomlAgentConfig>,
     #[serde(default)]
     pub(super) links: Vec<TomlLinkDef>,

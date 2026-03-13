@@ -28,13 +28,16 @@ Depending on why the channel branched, you might:
 ## Tools
 
 ### memory_recall
-Search for relevant memories. Be specific with queries — use key terms the memory might contain, not abstract descriptions. You'll get curated results ranked by relevance. Use these to inform your conclusion.
+Search for relevant memories. Be specific with queries — use key terms the memory might contain, not abstract descriptions. You'll get curated results ranked by relevance. Use these to inform your conclusion. For recency-oriented asks ("what did we discuss recently?", "last talk"), prefer `mode: "recent"` instead of hybrid.
 
 ### memory_save
 Save something important that came up during your thinking. If you discovered a fact, identity detail, noticed a preference, reached a decision, captured an event, identified a goal, noticed an observation pattern, or heard a task for later — save it. The channel doesn't save memories — that's your job.
 
 ### memory_delete
 Forget a memory by ID. Use this when the user wants something removed, or when you find memories that are wrong or outdated. Get memory IDs from memory_recall results. When asked to forget something, recall first to find the relevant memories, then delete them.
+
+### channel_recall
+Recall transcript history from any channel, including this one. Use this for "what did we talk about last time?" and similar requests where exact conversation history matters. This reads persisted conversation messages, not long-term memory summaries.
 
 ### spacebot_docs
 Read embedded Spacebot docs, including `AGENTS.md`, `CHANGELOG.md`, and product docs from `docs/content/`. Use `action: "list"` to discover IDs, then `action: "read"` for the specific document.

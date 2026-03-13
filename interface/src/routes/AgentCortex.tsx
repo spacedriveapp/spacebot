@@ -7,6 +7,7 @@ import {
 	type CortexEventType,
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
+import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
 import { formatTimeAgo } from "@/lib/format";
 import { IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -72,7 +73,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 	const [groupFilter, setGroupFilter] = useState<string | null>(null);
 	const [offset, setOffset] = useState(0);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(true);
+	const [chatOpen, setChatOpen] = useState(false);
 
 	// Determine actual event_type filter from group or individual selection
 	// For groups, we pass no event_type and filter client-side (API only supports single type)
@@ -80,13 +81,15 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 		? FILTER_GROUPS.find((g) => g.label === groupFilter)?.types ?? []
 		: [];
 	const isGroupFiltering = activeGroupTypes.length > 0;
+	const serverLimit = isGroupFiltering ? 200 : PAGE_SIZE;
+	const serverOffset = isGroupFiltering ? 0 : offset;
 
 	const { data, isLoading, isError } = useQuery({
-		queryKey: ["cortex-events", agentId, typeFilter, offset],
+		queryKey: ["cortex-events", agentId, typeFilter, groupFilter, serverOffset, serverLimit],
 		queryFn: () =>
 			api.cortexEvents(agentId, {
-				limit: isGroupFiltering ? 200 : PAGE_SIZE,
-				offset: isGroupFiltering ? 0 : offset,
+				limit: serverLimit,
+				offset: serverOffset,
 				event_type: typeFilter ?? undefined,
 			}),
 		staleTime: 5_000,
@@ -112,12 +115,10 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 		setExpandedId(null);
 	};
 
-	return (
-		<div className="flex h-full">
-			{/* Event timeline */}
-			<div className="flex flex-1 flex-col overflow-hidden">
+	const primary = (
+		<div className="flex h-full flex-col overflow-hidden">
 				{/* Filter bar */}
-				<div className="flex items-center gap-1.5 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-2">
+				<div className="flex flex-wrap items-center gap-1.5 border-b border-app-line/50 bg-app-darkBox/20 px-3 py-2 md:px-6">
 					<button
 						onClick={() => handleFilterChange(null, null)}
 						className={`rounded-md px-2 py-1 text-tiny font-medium transition-colors ${
@@ -145,7 +146,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 				))}
 
 					{/* Count + pagination + chat toggle */}
-					<div className="ml-auto flex items-center gap-3">
+					<div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end sm:gap-3">
 						{total > 0 && (
 							<span className="text-tiny text-ink-faint">
 								{offset + 1}-{Math.min(offset + PAGE_SIZE, total)} of {total}
@@ -247,27 +248,23 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 						</div>
 					</div>
 				)}
-			</div>
-
-			{/* Cortex chat panel */}
-			<AnimatePresence>
-				{chatOpen && (
-					<motion.div
-						initial={{ width: 0, opacity: 0 }}
-						animate={{ width: 400, opacity: 1 }}
-						exit={{ width: 0, opacity: 0 }}
-						transition={{ type: "spring", stiffness: 400, damping: 30 }}
-						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
-					>
-						<div className="h-full w-[400px]">
-							<CortexChatPanel
-								agentId={agentId}
-								onClose={() => setChatOpen(false)}
-							/>
-						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
 		</div>
+	);
+
+	const secondary = (
+		<div className="h-full">
+			<CortexChatPanel agentId={agentId} onClose={() => setChatOpen(false)} />
+		</div>
+	);
+
+	return (
+		<ResponsiveSplitPane
+			primary={primary}
+			secondary={secondary}
+			showSecondary={chatOpen}
+			onCloseSecondary={() => setChatOpen(false)}
+			secondaryTitle="Cortex Chat"
+			secondaryWidthClassName="w-[400px]"
+		/>
 	);
 }

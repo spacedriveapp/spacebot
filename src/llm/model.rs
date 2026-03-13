@@ -550,6 +550,25 @@ impl CompletionModel for SpacebotModel {
 }
 
 impl SpacebotModel {
+    fn configured_thinking_effort(&self) -> &str {
+        let Some(routing) = self.routing.as_ref() else {
+            return "auto";
+        };
+
+        if let Some(process_type) = self.process_type.as_deref() {
+            return match process_type {
+                "channel" => routing.channel_thinking_effort.as_str(),
+                "branch" => routing.branch_thinking_effort.as_str(),
+                "worker" => routing.worker_thinking_effort.as_str(),
+                "compactor" => routing.compactor_thinking_effort.as_str(),
+                "cortex" => routing.cortex_thinking_effort.as_str(),
+                _ => routing.thinking_effort_for_model(&self.model_name),
+            };
+        }
+
+        routing.thinking_effort_for_model(&self.model_name)
+    }
+
     async fn call_anthropic(
         &self,
         request: CompletionRequest,
@@ -557,11 +576,7 @@ impl SpacebotModel {
     ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
         let api_key = provider_config.api_key.as_str();
 
-        let effort = self
-            .routing
-            .as_ref()
-            .map(|r| r.thinking_effort_for_model(&self.model_name))
-            .unwrap_or("auto");
+        let effort = self.configured_thinking_effort();
         let anthropic_request = crate::llm::anthropic::build_anthropic_request(
             self.llm_manager.http_client(),
             api_key,
@@ -769,6 +784,12 @@ impl SpacebotModel {
         if is_chatgpt_codex {
             body["store"] = serde_json::json!(false);
             body["stream"] = serde_json::json!(true);
+        }
+
+        if self.provider == "openai-chatgpt"
+            && let Some(effort) = map_openai_reasoning_effort(self.configured_thinking_effort())
+        {
+            body["reasoning"] = serde_json::json!({ "effort": effort });
         }
 
         if !request.tools.is_empty() {
@@ -2914,6 +2935,16 @@ fn provider_display_name(provider_id: &str) -> String {
     }
 }
 
+fn map_openai_reasoning_effort(config_effort: &str) -> Option<&'static str> {
+    match config_effort.trim().to_ascii_lowercase().as_str() {
+        "auto" => None,
+        "max" | "high" => Some("high"),
+        "medium" => Some("medium"),
+        "low" | "minimal" => Some("low"),
+        _ => None,
+    }
+}
+
 fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
     if provider == "zai-coding-plan" {
         // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
@@ -2971,6 +3002,18 @@ mod tests {
             panic!("expected ToolCall");
         }
     }
+
+    #[test]
+    fn map_openai_reasoning_effort_maps_values() {
+        assert_eq!(map_openai_reasoning_effort("auto"), None);
+        assert_eq!(map_openai_reasoning_effort("max"), Some("high"));
+        assert_eq!(map_openai_reasoning_effort("high"), Some("high"));
+        assert_eq!(map_openai_reasoning_effort("medium"), Some("medium"));
+        assert_eq!(map_openai_reasoning_effort("low"), Some("low"));
+        assert_eq!(map_openai_reasoning_effort("minimal"), Some("low"));
+        assert_eq!(map_openai_reasoning_effort("invalid"), None);
+    }
+
     #[test]
     fn coding_plan_model_name_uses_plain_glm_id() {
         assert_eq!(
