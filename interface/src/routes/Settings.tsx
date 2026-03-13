@@ -1677,6 +1677,10 @@ function needsMcpReconnect(server: McpServerStatusInfo) {
 	return server.state === "disconnected" || server.state.startsWith("failed");
 }
 
+function describeQueryError(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
 function SystemHealthSection() {
 	const queryClient = useQueryClient();
 	const readiness = useSetupReadiness();
@@ -1684,13 +1688,23 @@ function SystemHealthSection() {
 	const [pendingWarmupTarget, setPendingWarmupTarget] = useState<string | null>(null);
 	const [pendingReconnectTarget, setPendingReconnectTarget] = useState<string | null>(null);
 
-	const { data: warmupData, isLoading: warmupLoading } = useQuery({
+	const {
+		data: warmupData,
+		isLoading: warmupLoading,
+		isError: warmupError,
+		error: warmupFetchError,
+	} = useQuery({
 		queryKey: ["warmup-status"],
 		queryFn: api.warmupStatus,
 		staleTime: 5_000,
 	});
 
-	const { data: mcpData, isLoading: mcpLoading } = useQuery({
+	const {
+		data: mcpData,
+		isLoading: mcpLoading,
+		isError: mcpError,
+		error: mcpFetchError,
+	} = useQuery({
 		queryKey: ["mcp-status"],
 		queryFn: api.mcpStatus,
 		staleTime: 5_000,
@@ -1828,10 +1842,14 @@ function SystemHealthSection() {
 						</p>
 					</div>
 
-					{warmupLoading ? (
-						<div className="flex items-center gap-2 text-ink-dull">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-							Loading warmup status...
+						{warmupError ? (
+							<div className="rounded-lg border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-300">
+								Failed to load warmup status: {describeQueryError(warmupFetchError)}
+							</div>
+						) : warmupLoading ? (
+							<div className="flex items-center gap-2 text-ink-dull">
+								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+								Loading warmup status...
 						</div>
 					) : warmupStatuses.length > 0 ? (
 						<div className="flex flex-col gap-3">
@@ -1886,10 +1904,14 @@ function SystemHealthSection() {
 						</p>
 					</div>
 
-					{mcpLoading ? (
-						<div className="flex items-center gap-2 text-ink-dull">
-							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-							Loading MCP status...
+						{mcpError ? (
+							<div className="rounded-lg border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-300">
+								Failed to load MCP status: {describeQueryError(mcpFetchError)}
+							</div>
+						) : mcpLoading ? (
+							<div className="flex items-center gap-2 text-ink-dull">
+								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+								Loading MCP status...
 						</div>
 					) : enabledMcpServers.length > 0 ? (
 						<div className="flex flex-col gap-3">
