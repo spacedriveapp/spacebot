@@ -94,7 +94,7 @@ export function classifySetupReadiness(params: {
 		});
 	}
 
-	if (providers?.has_any && warmup?.statuses.length) {
+	if (warmup?.statuses.length) {
 		const degradedAgents = warmup.statuses
 			.filter((entry) => entry.status.state === "degraded")
 			.map((entry) => entry.agent_id);

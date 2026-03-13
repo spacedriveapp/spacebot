@@ -121,7 +121,7 @@ describe("classifySetupReadiness", () => {
 		);
 	});
 
-	test("reports degraded warmup only when providers are configured", () => {
+	test("reports degraded warmup whenever warmup data is present", () => {
 		const items = classifySetupReadiness({
 			providers: configuredProviders(),
 			warmup: warmupStatus([
@@ -147,7 +147,6 @@ describe("classifySetupReadiness", () => {
 		);
 
 		const noProviderItems = classifySetupReadiness({
-			providers: configuredProviders(false),
 			warmup: warmupStatus([
 				{
 					agent_id: "alpha",
@@ -162,7 +161,13 @@ describe("classifySetupReadiness", () => {
 			]),
 		});
 
-		expect(noProviderItems.some((item) => item.id === "warmup_degraded")).toBe(false);
+		expect(noProviderItems).toContainEqual(
+			expect.objectContaining({
+				id: "warmup_degraded",
+				severity: "warning",
+				tab: "system-health",
+			}),
+		);
 	});
 
 	test("reports disconnected MCP servers and ignores disabled ones", () => {
