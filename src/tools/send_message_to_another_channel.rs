@@ -427,15 +427,15 @@ fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::Br
 
 #[cfg(test)]
 mod tests {
+    use super::{
+        SendMessageArgs, SendMessageTool, parse_explicit_email_target,
+        parse_explicit_signal_prefix, parse_implicit_signal_shorthand,
+    };
     use crate::conversation::ChannelStore;
     use crate::conversation::history::ConversationLogger;
     use crate::messaging::MessagingManager;
     use crate::messaging::traits::{InboundStream, Messaging};
     use crate::{OutboundResponse, StatusUpdate};
-    use super::{
-        SendMessageArgs, SendMessageTool, parse_explicit_email_target, parse_explicit_signal_prefix,
-        parse_implicit_signal_shorthand,
-    };
     use rig::tool::Tool as _;
     use sqlx::SqlitePool;
     use std::sync::{Arc, Mutex};
@@ -730,11 +730,8 @@ mod tests {
             .register_shared(signal_adapter.clone())
             .await;
 
-        let tool = test_send_message_tool(
-            messaging_manager,
-            Some("signal:gvoice1".to_string()),
-        )
-        .await;
+        let tool =
+            test_send_message_tool(messaging_manager, Some("signal:gvoice1".to_string())).await;
 
         let output = tool
             .call(SendMessageArgs {
