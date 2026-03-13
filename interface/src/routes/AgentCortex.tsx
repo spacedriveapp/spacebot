@@ -81,13 +81,15 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 		? FILTER_GROUPS.find((g) => g.label === groupFilter)?.types ?? []
 		: [];
 	const isGroupFiltering = activeGroupTypes.length > 0;
+	const serverLimit = isGroupFiltering ? 200 : PAGE_SIZE;
+	const serverOffset = isGroupFiltering ? 0 : offset;
 
 	const { data, isLoading, isError } = useQuery({
-		queryKey: ["cortex-events", agentId, typeFilter, groupFilter, offset],
+		queryKey: ["cortex-events", agentId, typeFilter, groupFilter, serverOffset, serverLimit],
 		queryFn: () =>
 			api.cortexEvents(agentId, {
-				limit: isGroupFiltering ? 200 : PAGE_SIZE,
-				offset: isGroupFiltering ? 0 : offset,
+				limit: serverLimit,
+				offset: serverOffset,
 				event_type: typeFilter ?? undefined,
 			}),
 		staleTime: 5_000,

@@ -83,15 +83,19 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen = false, onCloseMobile }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
 
+	const isDrawerHidden = isMobile && !mobileOpen;
+
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,
-		refetchInterval: 30_000,
+		enabled: !isDrawerHidden,
+		refetchInterval: isDrawerHidden ? false : 30_000,
 	});
 
 	const { data: providersData } = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
+		enabled: !isDrawerHidden,
 		staleTime: 10_000,
 	});
 
@@ -192,7 +196,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 											gradientStart={agentGradients[agentId]?.start}
 											gradientEnd={agentGradients[agentId]?.end}
 										/>
-										<span className="truncate text-sm">{agentDisplayNames[agentId] ?? agentId}</span>
+										<span className="min-w-0 flex-1 truncate text-sm">{agentDisplayNames[agentId] ?? agentId}</span>
 									</Link>
 								);
 							})}
