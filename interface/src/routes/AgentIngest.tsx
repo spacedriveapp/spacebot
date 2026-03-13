@@ -296,7 +296,7 @@ function FileRow({
 			</div>
 
 			{/* Status badge - centered on the right */}
-			<div className="w-full sm:w-auto sm:flex-shrink-0">
+			<div className="flex-shrink-0">
 				<StatusBadge status={file.status} />
 			</div>
 

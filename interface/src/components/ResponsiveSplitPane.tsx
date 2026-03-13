@@ -38,14 +38,16 @@ export function ResponsiveSplitPane({
 		return (
 			<div className="flex h-full flex-col">
 				<div className="flex h-11 items-center gap-2 border-b border-app-line/50 bg-app-darkBox/30 px-3">
-					<Button
-						type="button"
-						variant="ghost"
-						size="sm"
-						onClick={onCloseSecondary}
-					>
-						Back
-					</Button>
+					{onCloseSecondary && (
+						<Button
+							type="button"
+							variant="ghost"
+							size="sm"
+							onClick={onCloseSecondary}
+						>
+							Back
+						</Button>
+					)}
 					<span className="truncate text-sm text-ink-dull">{secondaryTitle}</span>
 				</div>
 				<div className="min-h-0 flex-1">{secondary}</div>

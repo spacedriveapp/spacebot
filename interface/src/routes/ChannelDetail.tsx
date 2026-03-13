@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
-import { AnimatePresence, motion } from "framer-motion";
 import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
 import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type ActiveBranch } from "@/hooks/useChannelLiveState";
 import { useIsMobile } from "@/hooks/useViewport";

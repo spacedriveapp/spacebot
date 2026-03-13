@@ -83,7 +83,18 @@ export function TopBar({ isMobile = false, onOpenMobileNav }: TopBarProps) {
 			onMouseDown={handleMouseDown}
 		>
 			{IS_TAURI ? (
-				<div className="w-[72px] shrink-0" />
+				<div className="flex w-[72px] shrink-0 items-center border-r border-sidebar-line bg-sidebar px-2">
+					{isMobile && (
+						<button
+							type="button"
+							onClick={onOpenMobileNav}
+							className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkDull hover:bg-sidebar-selected/50 hover:text-sidebar-ink"
+							aria-label="Open navigation"
+						>
+							<HugeiconsIcon icon={Menu01Icon} className="h-4 w-4" />
+						</button>
+					)}
+				</div>
 			) : isMobile ? (
 				<div className="flex shrink-0 items-center border-r border-sidebar-line bg-sidebar px-2">
 					<button

@@ -146,6 +146,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 						<button
 							type="button"
 							onClick={onCloseMobile}
+							aria-label="Close navigation"
 							className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkDull hover:bg-sidebar-selected/50 hover:text-sidebar-ink"
 						>
 							<HugeiconsIcon icon={Cancel01Icon} className="h-4 w-4" />

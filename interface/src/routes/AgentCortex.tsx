@@ -83,7 +83,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 	const isGroupFiltering = activeGroupTypes.length > 0;
 
 	const { data, isLoading, isError } = useQuery({
-		queryKey: ["cortex-events", agentId, typeFilter, offset],
+		queryKey: ["cortex-events", agentId, typeFilter, groupFilter, offset],
 		queryFn: () =>
 			api.cortexEvents(agentId, {
 				limit: isGroupFiltering ? 200 : PAGE_SIZE,

@@ -8,7 +8,6 @@ import { Markdown } from "@/components/Markdown";
 import { ProfileAvatar, seedGradient } from "@/components/ProfileAvatar";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
-import { useIsMobile } from "@/hooks/useViewport";
 
 
 function supportsAdaptiveThinking(modelId: string): boolean {
@@ -62,7 +61,6 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	const navigate = useNavigate();
 	const search = useSearch({from: "/agents/$agentId/config"}) as {tab?: string};
 	const [activeSection, setActiveSection] = useState<SectionId>("general");
-	const isMobile = useIsMobile();
 	const [dirty, setDirty] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const saveHandlerRef = useRef<{ save?: () => void; revert?: () => void }>({});
@@ -261,7 +259,6 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 			{/* Editor */}
 			<div className="flex flex-1 flex-col overflow-hidden">
-				{isMobile && (
 					<div className="border-b border-app-line/50 bg-app-darkBox/20 px-3 py-2 md:hidden">
 						<label className="mb-1 block text-tiny uppercase tracking-wider text-ink-faint">
 							Section
@@ -278,7 +275,6 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 							))}
 						</select>
 					</div>
-				)}
 			{isGeneralSection ? (
 			<GeneralEditor
 				key={active.id}

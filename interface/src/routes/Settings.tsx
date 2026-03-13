@@ -985,7 +985,7 @@ function ChannelsSection() {
 									No messaging platforms configured yet.
 								</p>
 								<p className="mt-1 text-sm text-ink-faint">
-									Click a platform on the left to get started.
+									Click a platform in the catalog to get started.
 								</p>
 							</div>
 						) : null}

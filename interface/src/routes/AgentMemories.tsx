@@ -254,7 +254,14 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 										<TypeBadge type={memory.memory_type} />
 										<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
 									</div>
-									<p className="line-clamp-3 text-sm text-ink-dull">{memory.content}</p>
+									<p className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
+                                    <button
+                                        type="button"
+                                        onClick={() => setExpandedId(expandedId === memory.id ? null : memory.id)}
+                                        className="mt-1 text-tiny text-accent hover:text-accent/80"
+                                    >
+                                        {expandedId === memory.id ? "Less" : "More"}
+                                    </button>
 									<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
 										<span className="truncate">{memory.source ?? "-"}</span>
 										<span>{memory.importance.toFixed(2)}</span>
