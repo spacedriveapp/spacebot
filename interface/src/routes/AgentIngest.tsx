@@ -124,25 +124,25 @@ export function AgentIngest({agentId}: AgentIngestProps) {
 			onDrop={handleDrop}
 		>
 			{/* Stats bar */}
-			<div className="flex items-center gap-2 border-b border-app-line px-6 py-3">
-				<Badge variant="accent" size="md">
+			<div className="flex flex-wrap items-center gap-2 border-b border-app-line px-4 py-3 sm:px-6">
+				<Badge variant="accent" size="md" className="whitespace-nowrap">
 					{files.length} total
 				</Badge>
 				{queued > 0 && (
-					<Badge variant="amber" size="md">
+					<Badge variant="amber" size="md" className="whitespace-nowrap">
 						{queued} queued
 					</Badge>
 				)}
 				{processing > 0 && (
-					<Badge variant="accent" size="md">
+					<Badge variant="accent" size="md" className="whitespace-nowrap">
 						{processing} processing
 					</Badge>
 				)}
-				<Badge variant="green" size="md">
+				<Badge variant="green" size="md" className="whitespace-nowrap">
 					{completed} completed
 				</Badge>
 				{failed > 0 && (
-					<Badge variant="red" size="md">
+					<Badge variant="red" size="md" className="whitespace-nowrap">
 						{failed} failed
 					</Badge>
 				)}
@@ -258,7 +258,7 @@ function FileRow({
 			: 0;
 
 	return (
-		<div className="group flex items-center gap-4 rounded-lg border border-app-line bg-app-darkBox/30 px-4 py-3">
+		<div className="group flex flex-wrap items-start gap-3 rounded-lg border border-app-line bg-app-darkBox/30 px-3 py-3 sm:flex-nowrap sm:items-center sm:gap-4 sm:px-4">
 			{/* File icon */}
 			<div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-app-box text-xs text-ink-faint">
 				{file.filename.split(".").pop()?.toUpperCase() ?? "TXT"}
@@ -296,7 +296,7 @@ function FileRow({
 			</div>
 
 			{/* Status badge - centered on the right */}
-			<div className="flex-shrink-0">
+			<div className="w-full sm:w-auto sm:flex-shrink-0">
 				<StatusBadge status={file.status} />
 			</div>
 

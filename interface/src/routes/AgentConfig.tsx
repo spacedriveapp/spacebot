@@ -8,6 +8,7 @@ import { Markdown } from "@/components/Markdown";
 import { ProfileAvatar, seedGradient } from "@/components/ProfileAvatar";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSearch, useNavigate } from "@tanstack/react-router";
+import { useIsMobile } from "@/hooks/useViewport";
 
 
 function supportsAdaptiveThinking(modelId: string): boolean {
@@ -61,6 +62,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	const navigate = useNavigate();
 	const search = useSearch({from: "/agents/$agentId/config"}) as {tab?: string};
 	const [activeSection, setActiveSection] = useState<SectionId>("general");
+	const isMobile = useIsMobile();
 	const [dirty, setDirty] = useState(false);
 	const [saving, setSaving] = useState(false);
 	const saveHandlerRef = useRef<{ save?: () => void; revert?: () => void }>({});
@@ -197,7 +199,7 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 	return (
 		<div className="flex h-full relative">
 			{/* Sidebar */}
-			<div className="flex w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto">
+			<div className="hidden w-52 flex-shrink-0 flex-col border-r border-app-line/50 bg-app-darkBox/20 overflow-y-auto md:flex">
 			{/* General Group */}
 			<div className="flex flex-col gap-0.5 px-2 pt-3">
 				{SECTIONS.filter((s) => s.group === "general").map((section) => {
@@ -259,6 +261,24 @@ export function AgentConfig({ agentId }: AgentConfigProps) {
 
 			{/* Editor */}
 			<div className="flex flex-1 flex-col overflow-hidden">
+				{isMobile && (
+					<div className="border-b border-app-line/50 bg-app-darkBox/20 px-3 py-2 md:hidden">
+						<label className="mb-1 block text-tiny uppercase tracking-wider text-ink-faint">
+							Section
+						</label>
+						<select
+							value={activeSection}
+							onChange={(event) => handleSectionChange(event.target.value as SectionId)}
+							className="w-full rounded-md border border-app-line bg-app-input px-2.5 py-2 text-sm text-ink focus:border-accent/50 focus:outline-none"
+						>
+							{SECTIONS.map((section) => (
+								<option key={section.id} value={section.id}>
+									{section.label}
+								</option>
+							))}
+						</select>
+					</div>
+				)}
 			{isGeneralSection ? (
 			<GeneralEditor
 				key={active.id}

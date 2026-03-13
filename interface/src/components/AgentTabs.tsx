@@ -1,5 +1,6 @@
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useRouterState } from "@tanstack/react-router";
 import { motion } from "framer-motion";
+import { useEffect, useRef } from "react";
 
 const tabs = [
 	{ label: "Overview", to: "/agents/$agentId" as const, exact: true },
@@ -18,10 +19,20 @@ const tabs = [
 
 export function AgentTabs({ agentId }: { agentId: string }) {
 	const matchRoute = useMatchRoute();
+	const pathname = useRouterState({ select: (state) => state.location.pathname });
+	const containerRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		const active = container.querySelector<HTMLElement>("[data-active='true']");
+		if (!active) return;
+		active.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+	}, [pathname, agentId]);
 
 	return (
 		<div className="relative h-12 overflow-x-auto border-b border-app-line bg-app-darkBox/30 px-3 sm:px-6">
-			<div className="flex h-full min-w-max items-stretch">
+			<div ref={containerRef} className="flex h-full min-w-max items-stretch">
 				{tabs.map((tab) => {
 					const isActive = matchRoute({
 						to: tab.to,
@@ -34,6 +45,7 @@ export function AgentTabs({ agentId }: { agentId: string }) {
 							key={tab.to}
 							to={tab.to}
 							params={{ agentId }}
+							data-active={isActive ? "true" : "false"}
 							className={`relative flex items-center whitespace-nowrap px-3 text-sm transition-colors ${
 								isActive ? "text-ink" : "text-ink-faint hover:text-ink-dull"
 							}`}

@@ -73,7 +73,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 	const [groupFilter, setGroupFilter] = useState<string | null>(null);
 	const [offset, setOffset] = useState(0);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(true);
+	const [chatOpen, setChatOpen] = useState(false);
 
 	// Determine actual event_type filter from group or individual selection
 	// For groups, we pass no event_type and filter client-side (API only supports single type)

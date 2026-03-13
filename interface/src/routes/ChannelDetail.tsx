@@ -293,7 +293,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const activeWorkerCount = Object.keys(workers).length;
 	const activeBranchCount = Object.keys(branches).length;
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
-	const [cortexOpen, setCortexOpen] = useState(true);
+	const [cortexOpen, setCortexOpen] = useState(false);
 	const [inspectOpen, setInspectOpen] = useState(false);
 	const isMobile = useIsMobile();
 
