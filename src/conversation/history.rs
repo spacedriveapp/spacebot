@@ -475,14 +475,24 @@ impl ProcessRunLogger {
 
     /// Record a worker completing with its result. Fire-and-forget.
     pub fn log_worker_completed(&self, worker_id: WorkerId, result: &str, success: bool) {
+        let status = if success { "done" } else { "failed" };
+        self.log_worker_completed_with_status(worker_id, result, status);
+    }
+
+    /// Record a worker as cancelled. Fire-and-forget.
+    pub fn log_worker_cancelled(&self, worker_id: WorkerId, result: &str) {
+        self.log_worker_completed_with_status(worker_id, result, "cancelled");
+    }
+
+    fn log_worker_completed_with_status(&self, worker_id: WorkerId, result: &str, status: &str) {
         let pool = self.pool.clone();
         let id = worker_id.to_string();
         let result = result.to_string();
-        let status = if success { "done" } else { "failed" };
+        let status = status.to_string();
 
         tokio::spawn(async move {
             if let Err(error) = sqlx::query(
-                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ?"
+                "UPDATE worker_runs SET result = ?, status = ?, completed_at = CURRENT_TIMESTAMP WHERE id = ? AND completed_at IS NULL"
             )
             .bind(&result)
             .bind(status)
@@ -671,7 +681,7 @@ impl ProcessRunLogger {
                      WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
                      ELSE result \
                  END, \
-                 status = 'failed', \
+                 status = 'cancelled', \
                  completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
              WHERE id = ? AND channel_id = ? AND status = 'running'",
         )
@@ -697,7 +707,7 @@ impl ProcessRunLogger {
                      WHEN result IS NULL OR result = '' THEN 'Worker cancelled' \
                      ELSE result \
                  END, \
-                 status = 'failed', \
+                 status = 'cancelled', \
                  completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP) \
              WHERE id = ? AND channel_id IS NULL AND status = 'running'",
         )
@@ -1050,8 +1060,129 @@ mod tests {
 
         let status: String = sqlx::Row::try_get(&row, "status").expect("missing status");
         let result: String = sqlx::Row::try_get(&row, "result").expect("missing result");
-        assert_eq!(status, "failed");
+        assert_eq!(status, "cancelled");
         assert_eq!(result, "Worker cancelled");
+    }
+
+    #[tokio::test]
+    async fn cancel_running_worker_sets_cancelled_status() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'ch-1', 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("insert");
+
+        let cancelled = logger
+            .cancel_running_worker("ch-1", worker_id)
+            .await
+            .expect("cancel should succeed");
+        assert!(cancelled);
+
+        let row = sqlx::query("SELECT status, result FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("fetch");
+        let status: String = sqlx::Row::try_get(&row, "status").expect("status");
+        let result: String = sqlx::Row::try_get(&row, "result").expect("result");
+        assert_eq!(status, "cancelled");
+        assert_eq!(result, "Worker cancelled");
+    }
+
+    /// Poll until a worker's status changes from "running", with a timeout.
+    async fn poll_worker_status(
+        pool: &sqlx::SqlitePool,
+        worker_id: uuid::Uuid,
+        timeout_ms: u64,
+    ) -> String {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            let row = sqlx::query("SELECT status FROM worker_runs WHERE id = ?")
+                .bind(worker_id.to_string())
+                .fetch_one(pool)
+                .await
+                .expect("fetch");
+            let status: String = sqlx::Row::try_get(&row, "status").expect("status");
+            if status != "running" {
+                return status;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                panic!("worker status did not transition within {timeout_ms}ms");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn log_worker_completed_success_sets_done_status() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'ch-1', 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("insert");
+
+        logger.log_worker_completed(worker_id, "task finished", true);
+        let status = poll_worker_status(&pool, worker_id, 2000).await;
+
+        assert_eq!(status, "done");
+        let row = sqlx::query("SELECT result FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("fetch");
+        let result: String = sqlx::Row::try_get(&row, "result").expect("result");
+        assert_eq!(result, "task finished");
+    }
+
+    #[tokio::test]
+    async fn log_worker_completed_failure_sets_failed_status() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'ch-1', 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("insert");
+
+        logger.log_worker_completed(worker_id, "something broke", false);
+        let status = poll_worker_status(&pool, worker_id, 2000).await;
+
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn log_worker_cancelled_sets_cancelled_status() {
+        let pool = setup_worker_runs_table().await;
+        let logger = ProcessRunLogger::new(pool.clone());
+        let worker_id = uuid::Uuid::new_v4();
+
+        sqlx::query("INSERT INTO worker_runs (id, channel_id, status, result) VALUES (?, 'ch-1', 'running', '')")
+            .bind(worker_id.to_string())
+            .execute(&pool)
+            .await
+            .expect("insert");
+
+        logger.log_worker_cancelled(worker_id, "Worker cancelled: user requested");
+        let status = poll_worker_status(&pool, worker_id, 2000).await;
+
+        assert_eq!(status, "cancelled");
+        let row = sqlx::query("SELECT result FROM worker_runs WHERE id = ?")
+            .bind(worker_id.to_string())
+            .fetch_one(&pool)
+            .await
+            .expect("fetch");
+        let result: String = sqlx::Row::try_get(&row, "result").expect("result");
+        assert_eq!(result, "Worker cancelled: user requested");
     }
 
     #[tokio::test]

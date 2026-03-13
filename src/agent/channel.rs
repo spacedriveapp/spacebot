@@ -240,7 +240,7 @@ impl ChannelState {
         };
 
         self.process_run_logger
-            .log_worker_completed(worker_id, &result, false);
+            .log_worker_cancelled(worker_id, &result);
         if let Err(error) = self.deps.event_tx.send(ProcessEvent::WorkerComplete {
             agent_id: self.deps.agent_id.clone(),
             worker_id,
