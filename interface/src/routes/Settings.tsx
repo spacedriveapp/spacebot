@@ -350,7 +350,8 @@ export function Settings() {
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			setMessage({ text: `Failed: ${errorMessage}`, type: "error" });
 		},
 	});
 
@@ -373,7 +374,8 @@ export function Settings() {
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			setMessage({ text: `Failed: ${errorMessage}`, type: "error" });
 		},
 	});
 
@@ -1679,6 +1681,8 @@ function SystemHealthSection() {
 	const queryClient = useQueryClient();
 	const readiness = useSetupReadiness();
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+	const [pendingWarmupTarget, setPendingWarmupTarget] = useState<string | null>(null);
+	const [pendingReconnectTarget, setPendingReconnectTarget] = useState<string | null>(null);
 
 	const { data: warmupData, isLoading: warmupLoading } = useQuery({
 		queryKey: ["warmup-status"],
@@ -1694,6 +1698,9 @@ function SystemHealthSection() {
 
 	const triggerWarmupMutation = useMutation({
 		mutationFn: (params?: {agentId?: string; force?: boolean}) => api.triggerWarmup(params),
+		onMutate: (params) => {
+			setPendingWarmupTarget(params?.agentId ?? "__all__");
+		},
 		onSuccess: (result) => {
 			setMessage({
 				text: result.accepted_agents.length > 0
@@ -1707,10 +1714,16 @@ function SystemHealthSection() {
 		onError: (error) => {
 			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
+		onSettled: () => {
+			setPendingWarmupTarget(null);
+		},
 	});
 
 	const reconnectMcpMutation = useMutation({
 		mutationFn: (params: {agentId: string; serverName: string}) => api.reconnectMcpServer(params),
+		onMutate: (params) => {
+			setPendingReconnectTarget(`${params.agentId}:${params.serverName}`);
+		},
 		onSuccess: (result) => {
 			setMessage({
 				text: `Server '${result.server_name}' reconnected for agent '${result.agent_id}'.`,
@@ -1720,6 +1733,9 @@ function SystemHealthSection() {
 		},
 		onError: (error) => {
 			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+		onSettled: () => {
+			setPendingReconnectTarget(null);
 		},
 	});
 
@@ -1756,12 +1772,12 @@ function SystemHealthSection() {
 							Providers, secrets, messaging, warmup, and MCP are all evaluated from live control-plane state.
 						</p>
 					</div>
-					<Button
-						onClick={() => triggerWarmupMutation.mutate({ force: true })}
-						loading={triggerWarmupMutation.isPending}
-						variant="outline"
-						size="sm"
-					>
+						<Button
+							onClick={() => triggerWarmupMutation.mutate({ force: true })}
+							loading={pendingWarmupTarget === "__all__" && triggerWarmupMutation.isPending}
+							variant="outline"
+							size="sm"
+						>
 						Trigger all warmups
 					</Button>
 				</div>
@@ -1834,20 +1850,20 @@ function SystemHealthSection() {
 														{entry.status.state}
 													</Badge>
 												</div>
-												{details.length > 0 && (
-													<div className="mt-2 flex flex-col gap-1 text-sm text-ink-dull">
-														{details.map((detail) => (
-															<p key={detail}>{detail}</p>
-														))}
-													</div>
-												)}
-											</div>
-											<Button
-												onClick={() => triggerWarmupMutation.mutate({ agentId: entry.agent_id, force: true })}
-												loading={triggerWarmupMutation.isPending}
-												variant="outline"
-												size="sm"
-											>
+													{details.length > 0 && (
+														<div className="mt-2 flex flex-col gap-1 text-sm text-ink-dull">
+															{details.map((detail, index) => (
+																<p key={index}>{detail}</p>
+															))}
+														</div>
+													)}
+												</div>
+												<Button
+													onClick={() => triggerWarmupMutation.mutate({ agentId: entry.agent_id, force: true })}
+													loading={pendingWarmupTarget === entry.agent_id && triggerWarmupMutation.isPending}
+													variant="outline"
+													size="sm"
+												>
 												Refresh
 											</Button>
 										</div>
@@ -1899,16 +1915,16 @@ function SystemHealthSection() {
 												</p>
 											)}
 										</div>
-										{needsMcpReconnect(server) && (
-											<Button
-												onClick={() => reconnectMcpMutation.mutate({
-													agentId: server.agent_id,
-													serverName: server.name,
-												})}
-												loading={reconnectMcpMutation.isPending}
-												variant="outline"
-												size="sm"
-											>
+											{needsMcpReconnect(server) && (
+												<Button
+													onClick={() => reconnectMcpMutation.mutate({
+														agentId: server.agent_id,
+														serverName: server.name,
+													})}
+													loading={pendingReconnectTarget === `${server.agent_id}:${server.name}` && reconnectMcpMutation.isPending}
+													variant="outline"
+													size="sm"
+												>
 												Reconnect
 											</Button>
 										)}

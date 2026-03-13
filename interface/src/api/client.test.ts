@@ -60,7 +60,27 @@ describe("api client runtime health actions", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify({ agent_id: "main", server_name: "filesystem" }),
-			}),
-		);
+				}),
+			);
+		});
+
+		test("triggerWarmup includes response text in thrown API errors", async () => {
+			globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+				return new Response("warmup unavailable", { status: 503 });
+			}) as typeof fetch;
+
+			await expect(api.triggerWarmup({ agentId: "main" })).rejects.toThrow(
+				"API error: 503: warmup unavailable",
+			);
+		});
+
+		test("reconnectMcpServer includes response text in thrown API errors", async () => {
+			globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+				return new Response("reconnect failed", { status: 500 });
+			}) as typeof fetch;
+
+			await expect(
+				api.reconnectMcpServer({ agentId: "main", serverName: "filesystem" }),
+			).rejects.toThrow("API error: 500: reconnect failed");
+		});
 	});
-});

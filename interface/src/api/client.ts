@@ -187,6 +187,11 @@ async function fetchJson<T>(path: string): Promise<T> {
 	return response.json();
 }
 
+async function readApiError(response: Response): Promise<Error> {
+	const errorText = await response.text().catch(() => "");
+	return new Error(`API error: ${response.status}${errorText ? `: ${errorText}` : ""}`);
+}
+
 export interface TimelineMessage {
 	type: "message";
 	id: string;
@@ -1990,7 +1995,7 @@ export const api = {
 			}),
 		});
 		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
+			throw await readApiError(response);
 		}
 		return response.json() as Promise<WarmupTriggerResponse>;
 	},
@@ -2109,7 +2114,7 @@ export const api = {
 			}),
 		});
 		if (!response.ok) {
-			throw new Error(`API error: ${response.status}`);
+			throw await readApiError(response);
 		}
 		return response.json() as Promise<ReconnectAgentMcpResponse>;
 	},

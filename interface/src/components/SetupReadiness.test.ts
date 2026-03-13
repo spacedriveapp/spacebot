@@ -136,13 +136,13 @@ describe("classifySetupReadiness", () => {
 			]),
 		});
 
-	expect(items).toContainEqual(
-		expect.objectContaining({
-			id: "warmup_degraded",
-			severity: "warning",
-			tab: "system-health",
-		}),
-	);
+		expect(items).toContainEqual(
+			expect.objectContaining({
+				id: "warmup_degraded",
+				severity: "warning",
+				tab: "system-health",
+			}),
+		);
 
 		const noProviderItems = classifySetupReadiness({
 			providers: configuredProviders(false),
@@ -256,6 +256,58 @@ describe("classifySetupReadiness", () => {
 				id: "messaging_unbound",
 				severity: "info",
 				tab: "channels",
+			}),
+		);
+
+		const partiallyBoundItems = classifySetupReadiness({
+			providers: configuredProviders(),
+			messaging: messagingStatus([
+				{
+					platform: "discord",
+					name: "ops",
+					runtime_key: "discord:ops",
+					configured: true,
+					enabled: true,
+					binding_count: 2,
+				},
+				{
+					platform: "telegram",
+					name: "alerts",
+					runtime_key: "telegram:alerts",
+					configured: true,
+					enabled: true,
+					binding_count: 0,
+				},
+			]),
+		});
+
+		expect(partiallyBoundItems).toContainEqual(
+			expect.objectContaining({
+				id: "messaging_unbound",
+				severity: "info",
+				tab: "channels",
+				description: "Some configured platforms still need bindings before they deliver conversations to an agent.",
+			}),
+		);
+	});
+
+	test("surfaces probe errors without suppressing other readiness items", () => {
+		const items = classifySetupReadiness({
+			providers: configuredProviders(false),
+			probeErrors: ["warmup", "mcp"],
+		});
+
+		expect(items).toContainEqual(
+			expect.objectContaining({
+				id: "probe_error",
+				severity: "warning",
+			}),
+		);
+		expect(items).toContainEqual(
+			expect.objectContaining({
+				id: "provider",
+				severity: "blocker",
+				tab: "providers",
 			}),
 		);
 	});

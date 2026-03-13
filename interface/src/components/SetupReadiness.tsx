@@ -47,9 +47,19 @@ export function classifySetupReadiness(params: {
 	messaging?: MessagingStatusResponse;
 	warmup?: WarmupStatusResponse;
 	mcp?: McpAgentStatus[];
+	probeErrors?: string[];
 }): SetupReadinessItem[] {
 	const items: SetupReadinessItem[] = [];
-	const {providers, secrets, messaging, warmup, mcp} = params;
+	const {providers, secrets, messaging, warmup, mcp, probeErrors} = params;
+
+	if (probeErrors && probeErrors.length > 0) {
+		items.push({
+			id: "probe_error",
+			severity: "warning",
+			title: "Some readiness checks failed to load",
+			description: `${pluralize(probeErrors.length, "check")} failed: ${probeErrors.join(", ")}. Existing readiness results may be incomplete until those probes recover.`,
+		});
+	}
 
 	if (providers && !providers.has_any) {
 		items.push({
@@ -151,6 +161,9 @@ export function classifySetupReadiness(params: {
 		const boundInstances = configuredInstances.filter(
 			(instance) => instance.binding_count > 0,
 		);
+		const hasUnboundConfiguredInstance = configuredInstances.some(
+			(instance) => instance.binding_count === 0,
+		);
 
 		if (configuredInstances.length === 0) {
 			items.push({
@@ -160,12 +173,14 @@ export function classifySetupReadiness(params: {
 				description: "Connect Discord, Telegram, Slack, or another adapter when you want Spacebot to handle real conversations.",
 				tab: "channels",
 			});
-		} else if (boundInstances.length === 0) {
+		} else if (hasUnboundConfiguredInstance) {
 			items.push({
 				id: "messaging_unbound",
 				severity: "info",
 				title: "Messaging is configured but not routed",
-				description: "Add bindings so configured platforms actually deliver conversations to an agent.",
+				description: boundInstances.length === 0
+					? "Add bindings so configured platforms actually deliver conversations to an agent."
+					: "Some configured platforms still need bindings before they deliver conversations to an agent.",
 				tab: "channels",
 			});
 		}
@@ -207,18 +222,28 @@ export function useSetupReadiness(): SetupReadinessState {
 	});
 
 	return useMemo(() => {
+		const probeErrors = [
+			["providers", providersQuery],
+			["secrets", secretsQuery],
+			["messaging", messagingQuery],
+			["warmup", warmupQuery],
+			["mcp", mcpQuery],
+		]
+			.filter(([, query]) => query.isError)
+			.map(([label]) => label);
 		const items = classifySetupReadiness({
 			providers: providersQuery.data,
 			secrets: secretsQuery.data,
 			messaging: messagingQuery.data,
 			warmup: warmupQuery.data,
 			mcp: mcpQuery.data,
+			probeErrors,
 		});
 		const actionableItems = items.filter((item) => item.severity !== "info");
 		const blockerCount = items.filter((item) => item.severity === "blocker").length;
 		const warningCount = items.filter((item) => item.severity === "warning").length;
 		const isLoading = [providersQuery, secretsQuery, messagingQuery, warmupQuery, mcpQuery]
-			.some((query) => query.isLoading && !query.data);
+			.some((query) => query.isLoading && !query.isError && !query.data);
 
 		return {
 			items,
