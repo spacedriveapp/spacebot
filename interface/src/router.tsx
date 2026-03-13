@@ -145,7 +145,7 @@ const agentRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentDetail agentId={agentId} liveStates={liveStates} />
 				</div>
 			</div>
@@ -161,7 +161,7 @@ const agentChatRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentChat agentId={agentId} />
 				</div>
 			</div>
@@ -178,7 +178,7 @@ const agentChannelsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentChannels agentId={agentId} liveStates={liveStates} />
 				</div>
 			</div>
@@ -194,7 +194,7 @@ const agentMemoriesRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentMemories agentId={agentId} />
 				</div>
 			</div>
@@ -210,7 +210,7 @@ const agentIngestRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentIngest agentId={agentId} />
 				</div>
 			</div>
@@ -229,7 +229,7 @@ const agentWorkersRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentWorkers agentId={agentId} />
 				</div>
 			</div>
@@ -245,7 +245,7 @@ const agentProjectsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentProjects agentId={agentId} />
 				</div>
 			</div>
@@ -261,7 +261,7 @@ const agentTasksRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentTasks agentId={agentId} />
 				</div>
 			</div>
@@ -277,7 +277,7 @@ const agentCronRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentCron agentId={agentId} />
 				</div>
 			</div>
@@ -298,7 +298,7 @@ const agentConfigRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentConfig agentId={agentId} />
 				</div>
 			</div>
@@ -314,7 +314,7 @@ const agentCortexRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentCortex agentId={agentId} />
 				</div>
 			</div>
@@ -330,7 +330,7 @@ const agentSkillsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentSkills agentId={agentId} />
 				</div>
 			</div>
@@ -348,7 +348,7 @@ const channelRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<ChannelDetail
 						agentId={agentId}
 						channelId={channelId}

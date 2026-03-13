@@ -329,11 +329,11 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	}, [handleIntersection]);
 
 	return (
-		<div className="flex h-full">
+		<div className="flex h-full min-h-0 min-w-0">
 			{/* Main channel content */}
-			<div className={`flex flex-1 flex-col overflow-hidden ${isMobile && cortexOpen ? "hidden" : ""}`}>
+			<div className={`flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden ${isMobile && cortexOpen ? "hidden" : ""}`}>
 				{/* Channel sub-header */}
-				<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
+				<div className="flex min-h-12 flex-wrap items-center gap-2 border-b border-app-line/50 bg-app-darkBox/20 px-3 py-2 sm:h-12 sm:flex-nowrap sm:gap-3 sm:px-6 sm:py-0">
 					<Link
 						to="/agents/$agentId/channels"
 						params={{ agentId }}
@@ -342,7 +342,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 						Channels
 					</Link>
 					<span className="text-ink-faint/50">/</span>
-					<span className="text-sm font-medium text-ink">
+					<span className="min-w-0 truncate text-sm font-medium text-ink">
 						{channel?.display_name ?? channelId}
 						{channel?.display_name && (
 							<span className="ml-2 font-normal text-ink-faint text-tiny">{channelId}</span>
@@ -355,9 +355,9 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 					)}
 
 					{/* Right side: activity indicators + typing + cortex toggle */}
-					<div className="ml-auto flex items-center gap-3">
+					<div className="ml-auto flex w-full items-center justify-end gap-2 sm:w-auto sm:gap-3">
 						{hasActivity && (
-							<div className="flex items-center gap-2">
+							<div className="hidden items-center gap-2 sm:flex">
 								{activeWorkerCount > 0 && (
 									<div className="flex items-center gap-1.5">
 										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
@@ -408,8 +408,8 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 				</div>
 
 				{/* Timeline — flex-col-reverse keeps scroll pinned to bottom */}
-				<div ref={scrollRef} className="flex flex-1 flex-col-reverse overflow-y-auto">
-					<div className="flex flex-col gap-1 p-6">
+				<div ref={scrollRef} className="flex min-h-0 flex-1 flex-col-reverse overflow-y-auto">
+					<div className="flex flex-col gap-1 px-3 py-4 sm:p-6">
 						{/* Sentinel for infinite scroll — sits above the oldest item */}
 						<div ref={sentinelRef} className="h-px" />
 						{loadingMore && (
