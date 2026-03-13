@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
 import { api, type ChannelInfo, type TimelineItem, type TimelineBranchRun, type TimelineWorkerRun } from "@/api/client";
 import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type ActiveBranch } from "@/hooks/useChannelLiveState";
+import { useIsMobile } from "@/hooks/useViewport";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
@@ -294,6 +295,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
 	const [cortexOpen, setCortexOpen] = useState(true);
 	const [inspectOpen, setInspectOpen] = useState(false);
+	const isMobile = useIsMobile();
 
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -329,7 +331,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	return (
 		<div className="flex h-full">
 			{/* Main channel content */}
-			<div className="flex flex-1 flex-col overflow-hidden">
+			<div className={`flex flex-1 flex-col overflow-hidden ${isMobile && cortexOpen ? "hidden" : ""}`}>
 				{/* Channel sub-header */}
 				<div className="flex h-12 items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6">
 					<Link
@@ -454,25 +456,32 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 			<PromptInspectModal open={inspectOpen} onOpenChange={setInspectOpen} channelId={channelId} />
 
 			{/* Cortex chat panel */}
-			<AnimatePresence>
-				{cortexOpen && (
-					<motion.div
-						initial={{ width: 0, opacity: 0 }}
-						animate={{ width: 400, opacity: 1 }}
-						exit={{ width: 0, opacity: 0 }}
-						transition={{ type: "spring", stiffness: 400, damping: 30 }}
-						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
-					>
-						<div className="h-full w-[400px]">
-							<CortexChatPanel
-								agentId={agentId}
-								channelId={channelId}
-								onClose={() => setCortexOpen(false)}
-							/>
+			{cortexOpen && (
+				<div
+					className={`overflow-hidden border-l border-app-line/50 ${
+						isMobile ? "flex min-w-0 flex-1 flex-col" : "w-[400px] flex-shrink-0"
+					}`}
+				>
+					{isMobile && (
+						<div className="border-b border-app-line/50 px-4 py-2">
+							<button
+								type="button"
+								onClick={() => setCortexOpen(false)}
+								className="rounded-md border border-app-line px-2 py-1 text-xs text-ink-faint hover:text-ink-dull"
+							>
+								Back to channel
+							</button>
 						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
+					)}
+					<div className={isMobile ? "min-h-0 flex-1" : "h-full w-[400px]"}>
+						<CortexChatPanel
+							agentId={agentId}
+							channelId={channelId}
+							onClose={() => setCortexOpen(false)}
+						/>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }

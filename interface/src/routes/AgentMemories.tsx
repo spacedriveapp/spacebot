@@ -22,6 +22,7 @@ import {
 	FilterButton,
 } from "@/ui";
 import { formatTimeAgo } from "@/lib/format";
+import { useIsMobile } from "@/hooks/useViewport";
 import { ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -78,6 +79,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [typeFilter, setTypeFilter] = useState<MemoryType | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
 	const [chatOpen, setChatOpen] = useState(true);
+	const isMobile = useIsMobile();
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -144,7 +146,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 
 	return (
 		<div className="flex h-full">
-			<div className="flex flex-1 flex-col overflow-hidden">
+			<div className={`flex flex-1 flex-col overflow-hidden ${isMobile && chatOpen ? "hidden" : ""}`}>
 			{/* Toolbar */}
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				{/* Search */}
@@ -225,9 +227,45 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 
 			{viewMode === "graph" ? (
 				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
+			) : isMobile ? (
+				isLoading ? (
+					<div className="flex flex-1 items-center justify-center">
+						<div className="flex items-center gap-2 text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							{isSearching ? "Searching..." : "Loading memories..."}
+						</div>
+					</div>
+				) : isError ? (
+					<div className="flex flex-1 items-center justify-center">
+						<p className="text-sm text-red-400">Failed to load memories</p>
+					</div>
+				) : memories.length === 0 ? (
+					<div className="flex flex-1 items-center justify-center">
+						<p className="text-sm text-ink-faint">
+							{isSearching ? "No results found" : "No memories yet"}
+						</p>
+					</div>
+				) : (
+					<div className="flex-1 overflow-y-auto px-4 py-3">
+						<div className="flex flex-col gap-2">
+							{memories.map((memory) => (
+								<div key={memory.id} className="rounded-lg border border-app-line/50 bg-app-darkBox/20 px-3 py-2">
+									<div className="mb-1 flex items-center justify-between gap-2">
+										<TypeBadge type={memory.memory_type} />
+										<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
+									</div>
+									<p className="line-clamp-3 text-sm text-ink-dull">{memory.content}</p>
+									<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
+										<span className="truncate">{memory.source ?? "-"}</span>
+										<span>{memory.importance.toFixed(2)}</span>
+									</div>
+								</div>
+							))}
+						</div>
+					</div>
+				)
 			) : (
 				<>
-					{/* Table header */}
 					<div className="grid grid-cols-[80px_1fr_100px_120px_100px] gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						<span>Type</span>
 						<span>{isSearching ? "Content / Score" : "Content"}</span>
@@ -236,7 +274,6 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 						<span>Created</span>
 					</div>
 
-					{/* Virtualized rows */}
 					{isLoading ? (
 						<div className="flex flex-1 items-center justify-center">
 							<div className="flex items-center gap-2 text-ink-dull">
@@ -274,11 +311,11 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											className="absolute left-0 top-0 w-full"
 											style={{ transform: `translateY(${virtualRow.start}px)` }}
 										>
-										<Button
-											onClick={() => setExpandedId(isExpanded ? null : memory.id)}
-											variant="ghost"
-											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
-										>
+											<Button
+												onClick={() => setExpandedId(isExpanded ? null : memory.id)}
+												variant="ghost"
+												className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
+											>
 												<TypeBadge type={memory.memory_type} />
 												<div className="min-w-0">
 													<p className="truncate text-sm text-ink-dull">
@@ -299,7 +336,6 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 												</span>
 											</Button>
 
-											{/* Expanded detail */}
 											<AnimatePresence>
 												{isExpanded && (
 													<motion.div
@@ -337,24 +373,31 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			</div>
 
 			{/* Cortex chat panel */}
-			<AnimatePresence>
-				{chatOpen && (
-					<motion.div
-						initial={{ width: 0, opacity: 0 }}
-						animate={{ width: 400, opacity: 1 }}
-						exit={{ width: 0, opacity: 0 }}
-						transition={{ type: "spring", stiffness: 400, damping: 30 }}
-						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
-					>
-						<div className="h-full w-[400px]">
-							<CortexChatPanel
-								agentId={agentId}
-								onClose={() => setChatOpen(false)}
-							/>
+			{chatOpen && (
+				<div
+					className={`overflow-hidden border-l border-app-line/50 ${
+						isMobile ? "flex min-w-0 flex-1 flex-col" : "w-[400px] flex-shrink-0"
+					}`}
+				>
+					{isMobile && (
+						<div className="border-b border-app-line/50 px-4 py-2">
+							<button
+								type="button"
+								onClick={() => setChatOpen(false)}
+								className="rounded-md border border-app-line px-2 py-1 text-xs text-ink-faint hover:text-ink-dull"
+							>
+								Back to memories
+							</button>
 						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
+					)}
+					<div className={isMobile ? "min-h-0 flex-1" : "h-full w-[400px]"}>
+						<CortexChatPanel
+							agentId={agentId}
+							onClose={() => setChatOpen(false)}
+						/>
+					</div>
+				</div>
+			)}
 		</div>
 	);
 }

@@ -1,8 +1,8 @@
 import { createContext, useContext, useRef, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { BASE_PATH, IS_TAURI } from "@/api/client";
-
-// ── Context ──────────────────────────────────────────────────────────────
+import { Menu01Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 
 interface TopBarStore {
 	content: ReactNode;
@@ -47,25 +47,18 @@ export function TopBarProvider({ children }: { children: ReactNode }) {
 	);
 }
 
-/**
- * Hook for routes to set topbar content. Content is displayed in the TopBar
- * component rendered at the root layout level.
- *
- * The component that calls this hook "owns" the topbar content for its lifetime.
- * Uses a ref + effect to avoid re-render loops.
- */
 export function useSetTopBar(node: ReactNode) {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("useSetTopBar must be used within TopBarProvider");
-
-	// Update content synchronously during render (like useSyncExternalStore pattern).
-	// This avoids the useEffect loop entirely.
 	store.setContent(node);
 }
 
-// ── Component ────────────────────────────────────────────────────────────
+interface TopBarProps {
+	isMobile?: boolean;
+	onOpenMobileNav?: () => void;
+}
 
-export function TopBar() {
+export function TopBar({ isMobile = false, onOpenMobileNav }: TopBarProps) {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("TopBar must be used within TopBarProvider");
 
@@ -77,7 +70,6 @@ export function TopBar() {
 
 	const handleMouseDown = useCallback((e: MouseEvent) => {
 		if (!IS_TAURI) return;
-		// Only drag on primary button, and not when clicking interactive elements
 		if (e.buttons !== 1) return;
 		const target = e.target as HTMLElement;
 		if (target.closest("a, button, input, select, textarea, [role=button]")) return;
@@ -90,12 +82,20 @@ export function TopBar() {
 			className={`flex h-12 w-full shrink-0 border-b border-app-line bg-app-darkBox/50${IS_TAURI ? " select-none" : ""}`}
 			onMouseDown={handleMouseDown}
 		>
-			{/* Left corner block */}
 			{IS_TAURI ? (
-				/* Tauri: padding for macOS traffic lights */
 				<div className="w-[72px] shrink-0" />
+			) : isMobile ? (
+				<div className="flex shrink-0 items-center border-r border-sidebar-line bg-sidebar px-2">
+					<button
+						type="button"
+						onClick={onOpenMobileNav}
+						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkDull hover:bg-sidebar-selected/50 hover:text-sidebar-ink"
+						aria-label="Open navigation"
+					>
+						<HugeiconsIcon icon={Menu01Icon} className="h-4 w-4" />
+					</button>
+				</div>
 			) : (
-				/* Web: ball icon block matching sidebar width + border */
 				<Link
 					to="/"
 					className="flex w-14 shrink-0 items-center justify-center border-r border-sidebar-line bg-sidebar"
@@ -109,10 +109,7 @@ export function TopBar() {
 				</Link>
 			)}
 
-			{/* Route-controlled content area */}
-			<div className="flex min-w-0 flex-1 items-center">
-				{content}
-			</div>
+			<div className="flex min-w-0 flex-1 items-center overflow-hidden">{content}</div>
 		</div>
 	);
 }

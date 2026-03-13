@@ -20,36 +20,36 @@ export function AgentTabs({ agentId }: { agentId: string }) {
 	const matchRoute = useMatchRoute();
 
 	return (
-		<div className="relative flex h-12 items-stretch border-b border-app-line bg-app-darkBox/30 px-6">
-			{tabs.map((tab) => {
-				const isActive = matchRoute({
-					to: tab.to,
-					params: { agentId },
-					fuzzy: !tab.exact,
-				});
+		<div className="relative h-12 overflow-x-auto border-b border-app-line bg-app-darkBox/30 px-3 sm:px-6">
+			<div className="flex h-full min-w-max items-stretch">
+				{tabs.map((tab) => {
+					const isActive = matchRoute({
+						to: tab.to,
+						params: { agentId },
+						fuzzy: !tab.exact,
+					});
 
-				return (
-					<Link
-						key={tab.to}
-						to={tab.to}
-						params={{ agentId }}
-						className={`relative flex items-center px-3 text-sm transition-colors ${
-							isActive
-								? "text-ink"
-								: "text-ink-faint hover:text-ink-dull"
-						}`}
-					>
-						{tab.label}
-						{isActive && (
-							<motion.div
-								layoutId={`agent-tab-indicator-${agentId}`}
-								className="absolute bottom-0 left-0 right-0 h-px bg-accent"
-								transition={{ type: "spring", stiffness: 500, damping: 35 }}
-							/>
-						)}
-					</Link>
-				);
-			})}
+					return (
+						<Link
+							key={tab.to}
+							to={tab.to}
+							params={{ agentId }}
+							className={`relative flex items-center whitespace-nowrap px-3 text-sm transition-colors ${
+								isActive ? "text-ink" : "text-ink-faint hover:text-ink-dull"
+							}`}
+						>
+							{tab.label}
+							{isActive && (
+								<motion.div
+									layoutId={`agent-tab-indicator-${agentId}`}
+									className="absolute bottom-0 left-0 right-0 h-px bg-accent"
+									transition={{ type: "spring", stiffness: 500, damping: 35 }}
+								/>
+							)}
+						</Link>
+					);
+				})}
+			</div>
 		</div>
 	);
 }

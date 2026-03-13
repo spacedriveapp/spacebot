@@ -7,6 +7,7 @@ import {
 	type CortexEventType,
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
+import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
 import { formatTimeAgo } from "@/lib/format";
 import { IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -112,10 +113,8 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 		setExpandedId(null);
 	};
 
-	return (
-		<div className="flex h-full">
-			{/* Event timeline */}
-			<div className="flex flex-1 flex-col overflow-hidden">
+	const primary = (
+		<div className="flex h-full flex-col overflow-hidden">
 				{/* Filter bar */}
 				<div className="flex items-center gap-1.5 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-2">
 					<button
@@ -247,27 +246,23 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 						</div>
 					</div>
 				)}
-			</div>
-
-			{/* Cortex chat panel */}
-			<AnimatePresence>
-				{chatOpen && (
-					<motion.div
-						initial={{ width: 0, opacity: 0 }}
-						animate={{ width: 400, opacity: 1 }}
-						exit={{ width: 0, opacity: 0 }}
-						transition={{ type: "spring", stiffness: 400, damping: 30 }}
-						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
-					>
-						<div className="h-full w-[400px]">
-							<CortexChatPanel
-								agentId={agentId}
-								onClose={() => setChatOpen(false)}
-							/>
-						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
 		</div>
+	);
+
+	const secondary = (
+		<div className="h-full">
+			<CortexChatPanel agentId={agentId} onClose={() => setChatOpen(false)} />
+		</div>
+	);
+
+	return (
+		<ResponsiveSplitPane
+			primary={primary}
+			secondary={secondary}
+			showSecondary={chatOpen}
+			onCloseSecondary={() => setChatOpen(false)}
+			secondaryTitle="Cortex Chat"
+			secondaryWidthClassName="w-[400px]"
+		/>
 	);
 }
