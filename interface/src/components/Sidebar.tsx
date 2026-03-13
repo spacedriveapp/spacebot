@@ -198,20 +198,20 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 							})}
 						</div>
 					</div>
-					{hasProvider && (
-						<div className="border-t border-sidebar-line p-2">
-							<button
-								onClick={() => setCreateOpen(true)}
-								className="w-full rounded-md bg-sidebar-selected px-3 py-2 text-sm text-sidebar-ink hover:bg-sidebar-selected/80"
-							>
-								+ New Agent
-							</button>
-						</div>
-					)}
-				</nav>
-				{agents[0] && (
-					<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
+				{hasProvider && agents[0] && (
+					<div className="border-t border-sidebar-line p-2">
+						<button
+							onClick={() => setCreateOpen(true)}
+							className="w-full rounded-md bg-sidebar-selected px-3 py-2 text-sm text-sidebar-ink hover:bg-sidebar-selected/80"
+						>
+							 New Agent
+						</button>
+					</div>
 				)}
+			</nav>
+			{agents[0] && (
+				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
+			)}
 			</>
 		);
 	}
