@@ -223,14 +223,14 @@ export function useSetupReadiness(): SetupReadinessState {
 
 	return useMemo(() => {
 		const probeErrors = [
-			["providers", providersQuery],
-			["secrets", secretsQuery],
-			["messaging", messagingQuery],
-			["warmup", warmupQuery],
-			["mcp", mcpQuery],
+			{label: "providers", isError: providersQuery.isError},
+			{label: "secrets", isError: secretsQuery.isError},
+			{label: "messaging", isError: messagingQuery.isError},
+			{label: "warmup", isError: warmupQuery.isError},
+			{label: "mcp", isError: mcpQuery.isError},
 		]
-			.filter(([, query]) => query.isError)
-			.map(([label]) => label);
+			.filter((query) => query.isError)
+			.map((query) => query.label);
 		const items = classifySetupReadiness({
 			providers: providersQuery.data,
 			secrets: secretsQuery.data,

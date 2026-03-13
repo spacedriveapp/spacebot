@@ -1,7 +1,8 @@
 import {afterEach, beforeEach, describe, expect, mock, test} from "bun:test";
 
 if (!("window" in globalThis)) {
-	(globalThis as typeof globalThis & {window: Record<string, unknown>}).window = {};
+	(globalThis as typeof globalThis & {window: Window & typeof globalThis}).window =
+		globalThis as Window & typeof globalThis;
 }
 
 const {api} = await import("./client");
@@ -9,14 +10,14 @@ const {api} = await import("./client");
 const originalFetch = globalThis.fetch;
 
 describe("api client runtime health actions", () => {
-	beforeEach(() => {
-		globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
-			return new Response(JSON.stringify({ success: true, status: "accepted", forced: true, accepted_agents: ["main"], message: "ok" }), {
-				status: 200,
-				headers: { "Content-Type": "application/json" },
-			});
-		}) as typeof fetch;
-	});
+		beforeEach(() => {
+			globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
+				return new Response(JSON.stringify({ success: true, status: "accepted", forced: true, accepted_agents: ["main"], message: "ok" }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as unknown as typeof fetch;
+		});
 
 	afterEach(() => {
 		globalThis.fetch = originalFetch;
@@ -67,7 +68,7 @@ describe("api client runtime health actions", () => {
 		test("triggerWarmup includes response text in thrown API errors", async () => {
 			globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
 				return new Response("warmup unavailable", { status: 503 });
-			}) as typeof fetch;
+			}) as unknown as typeof fetch;
 
 			await expect(api.triggerWarmup({ agentId: "main" })).rejects.toThrow(
 				"API error: 503: warmup unavailable",
@@ -77,7 +78,7 @@ describe("api client runtime health actions", () => {
 		test("reconnectMcpServer includes response text in thrown API errors", async () => {
 			globalThis.fetch = mock(async (_input: RequestInfo | URL, _init?: RequestInit) => {
 				return new Response("reconnect failed", { status: 500 });
-			}) as typeof fetch;
+			}) as unknown as typeof fetch;
 
 			await expect(
 				api.reconnectMcpServer({ agentId: "main", serverName: "filesystem" }),

@@ -8,7 +8,8 @@ import type {
 } from "@/api/client";
 
 if (!("window" in globalThis)) {
-	(globalThis as typeof globalThis & {window: Record<string, unknown>}).window = {};
+	(globalThis as typeof globalThis & {window: Window & typeof globalThis}).window =
+		globalThis as Window & typeof globalThis;
 }
 
 const {classifySetupReadiness} = await import("./SetupReadiness");
@@ -38,6 +39,7 @@ function configuredProviders(hasAny = true): ProvidersResponse {
 			minimax_cn: false,
 			moonshot: false,
 			zai_coding_plan: false,
+			github_copilot: false,
 		},
 	};
 }
