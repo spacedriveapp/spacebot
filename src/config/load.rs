@@ -905,13 +905,22 @@ impl Config {
 
         let toml_config: TomlConfig =
             toml::from_str(content).context("failed to parse config TOML")?;
-        // Run full conversion to catch semantic errors (env resolution, defaults, etc.)
+        // Run full conversion with strict binding validation so config
+        // authoring catches unresolvable bindings as errors.
         let instance_dir = Self::default_instance_dir();
-        Self::from_toml(toml_config, instance_dir)?;
+        Self::from_toml_inner(toml_config, instance_dir, true)?;
         Ok(())
     }
 
     pub(super) fn from_toml(toml: TomlConfig, instance_dir: PathBuf) -> Result<Self> {
+        Self::from_toml_inner(toml, instance_dir, false)
+    }
+
+    fn from_toml_inner(
+        toml: TomlConfig,
+        instance_dir: PathBuf,
+        strict_bindings: bool,
+    ) -> Result<Self> {
         // Validate providers before processing
         for (provider_id, config) in &toml.llm.providers {
             // Validate provider_id
@@ -2245,7 +2254,7 @@ impl Config {
             })
             .collect();
 
-        validate_named_messaging_adapters(&messaging, &bindings)?;
+        let bindings = validate_named_messaging_adapters(&messaging, bindings, strict_bindings)?;
 
         let api = ApiConfig {
             enabled: toml.api.enabled,
