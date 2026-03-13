@@ -44,8 +44,10 @@ pub async fn secrets_status(State(state): State<Arc<ApiState>>) -> impl IntoResp
         Err(e) => return e.into_response(),
     };
 
-    // TODO: detect platform_managed from deployment mode.
-    match store.status(false) {
+    let platform_managed = std::env::var("SPACEBOT_DEPLOYMENT")
+        .is_ok_and(|deployment| deployment.eq_ignore_ascii_case("hosted"));
+
+    match store.status(platform_managed) {
         Ok(status) => Json(status).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,

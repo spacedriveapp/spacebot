@@ -348,7 +348,13 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
+    let secrets_store = state.secrets_store.load();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
+    let env_set = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
 
     let (
         anthropic,
@@ -381,17 +387,36 @@ pub(super) async fn get_providers(
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let resolve_value = |value: &str| -> Option<String> {
+            if let Some(alias) = value.strip_prefix("secret:") {
+                let store = secrets_store.as_ref().as_ref()?;
+                return store
+                    .get(alias)
+                    .ok()
+                    .map(|secret| secret.expose().to_string());
+            }
+
+            if let Some(var_name) = value.strip_prefix("env:") {
+                return std::env::var(var_name)
+                    .ok()
+                    .filter(|resolved| !resolved.trim().is_empty());
+            }
+
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        };
+
         let has_value = |key: &str, env_var: &str| -> bool {
             if let Some(llm) = doc.get("llm")
                 && let Some(val) = llm.get(key)
                 && let Some(s) = val.as_str()
             {
-                if let Some(var_name) = s.strip_prefix("env:") {
-                    return std::env::var(var_name).is_ok();
-                }
-                return !s.is_empty();
+                return resolve_value(s).is_some();
             }
-            std::env::var(env_var).is_ok()
+            env_set(env_var)
         };
 
         (
@@ -421,28 +446,28 @@ pub(super) async fn get_providers(
         )
     } else {
         (
-            std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            std::env::var("OPENAI_API_KEY").is_ok(),
+            env_set("ANTHROPIC_API_KEY"),
+            env_set("OPENAI_API_KEY"),
             openai_oauth_configured,
-            std::env::var("OPENROUTER_API_KEY").is_ok(),
-            std::env::var("KILO_API_KEY").is_ok(),
-            std::env::var("ZHIPU_API_KEY").is_ok(),
-            std::env::var("GROQ_API_KEY").is_ok(),
-            std::env::var("TOGETHER_API_KEY").is_ok(),
-            std::env::var("FIREWORKS_API_KEY").is_ok(),
-            std::env::var("DEEPSEEK_API_KEY").is_ok(),
-            std::env::var("XAI_API_KEY").is_ok(),
-            std::env::var("MISTRAL_API_KEY").is_ok(),
-            std::env::var("GEMINI_API_KEY").is_ok(),
-            std::env::var("OLLAMA_BASE_URL").is_ok() || std::env::var("OLLAMA_API_KEY").is_ok(),
-            std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
-            std::env::var("OPENCODE_GO_API_KEY").is_ok(),
-            std::env::var("NVIDIA_API_KEY").is_ok(),
-            std::env::var("MINIMAX_API_KEY").is_ok(),
-            std::env::var("MINIMAX_CN_API_KEY").is_ok(),
-            std::env::var("MOONSHOT_API_KEY").is_ok(),
-            std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
-            std::env::var("GITHUB_COPILOT_API_KEY").is_ok(),
+            env_set("OPENROUTER_API_KEY"),
+            env_set("KILO_API_KEY"),
+            env_set("ZHIPU_API_KEY"),
+            env_set("GROQ_API_KEY"),
+            env_set("TOGETHER_API_KEY"),
+            env_set("FIREWORKS_API_KEY"),
+            env_set("DEEPSEEK_API_KEY"),
+            env_set("XAI_API_KEY"),
+            env_set("MISTRAL_API_KEY"),
+            env_set("GEMINI_API_KEY"),
+            env_set("OLLAMA_BASE_URL") || env_set("OLLAMA_API_KEY"),
+            env_set("OPENCODE_ZEN_API_KEY"),
+            env_set("OPENCODE_GO_API_KEY"),
+            env_set("NVIDIA_API_KEY"),
+            env_set("MINIMAX_API_KEY"),
+            env_set("MINIMAX_CN_API_KEY"),
+            env_set("MOONSHOT_API_KEY"),
+            env_set("ZAI_CODING_PLAN_API_KEY"),
+            env_set("GITHUB_COPILOT_API_KEY"),
         )
     };
 
