@@ -116,7 +116,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 	const primary = (
 		<div className="flex h-full flex-col overflow-hidden">
 				{/* Filter bar */}
-				<div className="flex items-center gap-1.5 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-2">
+				<div className="flex flex-wrap items-center gap-1.5 border-b border-app-line/50 bg-app-darkBox/20 px-3 py-2 md:px-6">
 					<button
 						onClick={() => handleFilterChange(null, null)}
 						className={`rounded-md px-2 py-1 text-tiny font-medium transition-colors ${
@@ -144,7 +144,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 				))}
 
 					{/* Count + pagination + chat toggle */}
-					<div className="ml-auto flex items-center gap-3">
+					<div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end sm:gap-3">
 						{total > 0 && (
 							<span className="text-tiny text-ink-faint">
 								{offset + 1}-{Math.min(offset + PAGE_SIZE, total)} of {total}
