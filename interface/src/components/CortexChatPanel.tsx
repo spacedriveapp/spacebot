@@ -176,11 +176,6 @@ function CortexChatInput({
 	isStreaming: boolean;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-	useEffect(() => {
-		textareaRef.current?.focus();
-	}, []);
-
 	useEffect(() => {
 		const textarea = textareaRef.current;
 		if (!textarea) return;
@@ -218,7 +213,7 @@ function CortexChatInput({
 					}
 					disabled={isStreaming}
 					rows={1}
-					className="flex-1 resize-none bg-transparent px-1 py-1 text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
+					className="flex-1 resize-none bg-transparent px-1 py-1 text-base md:text-sm text-ink placeholder:text-ink-faint/60 focus:outline-none disabled:opacity-40"
 					style={{maxHeight: "160px"}}
 				/>
 				<button
