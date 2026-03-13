@@ -1658,7 +1658,7 @@ function formatWarmupDetails(entry: WarmupStatusEntry) {
 		details.push(`bulletin age ${entry.status.bulletin_age_secs}s`);
 	}
 	if (entry.status.last_error) {
-		details.push(entry.status.last_error);
+		details.push(sanitizeRuntimeError(entry.status.last_error));
 	}
 	if (details.length > 0) {
 		return details;
@@ -1681,12 +1681,43 @@ function describeQueryError(error: unknown) {
 	return error instanceof Error ? error.message : String(error);
 }
 
+function sanitizeRuntimeError(errorText: string) {
+	const normalized = errorText.toLowerCase();
+	let code = "internal";
+	if (normalized.includes("timeout") || normalized.includes("deadline")) {
+		code = "timeout";
+	} else if (
+		normalized.includes("unauthorized") ||
+		normalized.includes("forbidden") ||
+		normalized.includes("auth") ||
+		normalized.includes("401") ||
+		normalized.includes("403")
+	) {
+		code = "auth";
+	} else if (normalized.includes("not found") || normalized.includes("404")) {
+		code = "missing_dependency";
+	} else if (
+		normalized.includes("unavailable") ||
+		normalized.includes("connection refused") ||
+		normalized.includes("econnrefused") ||
+		normalized.includes("econnreset") ||
+		normalized.includes("network") ||
+		normalized.includes("503")
+	) {
+		code = "unavailable";
+	} else if (normalized.includes("rate limit") || normalized.includes("429")) {
+		code = "rate_limited";
+	}
+
+	return `Error occurred (code: ${code})`;
+}
+
 function SystemHealthSection() {
 	const queryClient = useQueryClient();
 	const readiness = useSetupReadiness();
 	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-	const [pendingWarmupTarget, setPendingWarmupTarget] = useState<string | null>(null);
-	const [pendingReconnectTarget, setPendingReconnectTarget] = useState<string | null>(null);
+	const [pendingWarmupTargets, setPendingWarmupTargets] = useState<Set<string>>(() => new Set());
+	const [pendingReconnectTargets, setPendingReconnectTargets] = useState<Set<string>>(() => new Set());
 
 	const {
 		data: warmupData,
@@ -1713,7 +1744,12 @@ function SystemHealthSection() {
 	const triggerWarmupMutation = useMutation({
 		mutationFn: (params?: {agentId?: string; force?: boolean}) => api.triggerWarmup(params),
 		onMutate: (params) => {
-			setPendingWarmupTarget(params?.agentId ?? "__all__");
+			const targetId = params?.agentId ?? "__all__";
+			setPendingWarmupTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.add(targetId);
+				return nextTargets;
+			});
 		},
 		onSuccess: (result) => {
 			setMessage({
@@ -1728,15 +1764,25 @@ function SystemHealthSection() {
 		onError: (error) => {
 			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
-		onSettled: () => {
-			setPendingWarmupTarget(null);
+		onSettled: (_result, _error, params) => {
+			const targetId = params?.agentId ?? "__all__";
+			setPendingWarmupTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.delete(targetId);
+				return nextTargets;
+			});
 		},
 	});
 
 	const reconnectMcpMutation = useMutation({
 		mutationFn: (params: {agentId: string; serverName: string}) => api.reconnectMcpServer(params),
 		onMutate: (params) => {
-			setPendingReconnectTarget(`${params.agentId}:${params.serverName}`);
+			const targetId = `${params.agentId}:${params.serverName}`;
+			setPendingReconnectTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.add(targetId);
+				return nextTargets;
+			});
 		},
 		onSuccess: (result) => {
 			setMessage({
@@ -1748,8 +1794,13 @@ function SystemHealthSection() {
 		onError: (error) => {
 			setMessage({ text: `Failed: ${error.message}`, type: "error" });
 		},
-		onSettled: () => {
-			setPendingReconnectTarget(null);
+		onSettled: (_result, _error, params) => {
+			const targetId = `${params.agentId}:${params.serverName}`;
+			setPendingReconnectTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.delete(targetId);
+				return nextTargets;
+			});
 		},
 	});
 
@@ -1786,12 +1837,12 @@ function SystemHealthSection() {
 							Providers, secrets, messaging, warmup, and MCP are all evaluated from live control-plane state.
 						</p>
 					</div>
-						<Button
-							onClick={() => triggerWarmupMutation.mutate({ force: true })}
-							loading={pendingWarmupTarget === "__all__" && triggerWarmupMutation.isPending}
-							variant="outline"
-							size="sm"
-						>
+							<Button
+								onClick={() => triggerWarmupMutation.mutate({ force: true })}
+								loading={pendingWarmupTargets.has("__all__") && triggerWarmupMutation.isPending}
+								variant="outline"
+								size="sm"
+							>
 						Trigger all warmups
 					</Button>
 				</div>
@@ -1876,12 +1927,12 @@ function SystemHealthSection() {
 														</div>
 													)}
 												</div>
-												<Button
-													onClick={() => triggerWarmupMutation.mutate({ agentId: entry.agent_id, force: true })}
-													loading={pendingWarmupTarget === entry.agent_id && triggerWarmupMutation.isPending}
-													variant="outline"
-													size="sm"
-												>
+													<Button
+														onClick={() => triggerWarmupMutation.mutate({ agentId: entry.agent_id, force: true })}
+														loading={pendingWarmupTargets.has(entry.agent_id) && triggerWarmupMutation.isPending}
+														variant="outline"
+														size="sm"
+													>
 												Refresh
 											</Button>
 										</div>
@@ -1938,15 +1989,15 @@ function SystemHealthSection() {
 											)}
 										</div>
 											{needsMcpReconnect(server) && (
-												<Button
-													onClick={() => reconnectMcpMutation.mutate({
-														agentId: server.agent_id,
-														serverName: server.name,
-													})}
-													loading={pendingReconnectTarget === `${server.agent_id}:${server.name}` && reconnectMcpMutation.isPending}
-													variant="outline"
-													size="sm"
-												>
+													<Button
+														onClick={() => reconnectMcpMutation.mutate({
+															agentId: server.agent_id,
+															serverName: server.name,
+														})}
+														loading={pendingReconnectTargets.has(`${server.agent_id}:${server.name}`) && reconnectMcpMutation.isPending}
+														variant="outline"
+														size="sm"
+													>
 												Reconnect
 											</Button>
 										)}
