@@ -1,5 +1,6 @@
-import { Link, useMatchRoute } from "@tanstack/react-router";
+import { Link, useMatchRoute, useRouterState } from "@tanstack/react-router";
 import { motion } from "framer-motion";
+import { useEffect, useRef } from "react";
 
 const tabs = [
 	{ label: "Overview", to: "/agents/$agentId" as const, exact: true },
@@ -18,38 +19,49 @@ const tabs = [
 
 export function AgentTabs({ agentId }: { agentId: string }) {
 	const matchRoute = useMatchRoute();
+	const pathname = useRouterState({ select: (state) => state.location.pathname });
+	const containerRef = useRef<HTMLDivElement>(null);
+
+	useEffect(() => {
+		const container = containerRef.current;
+		if (!container) return;
+		const active = container.querySelector<HTMLElement>("[data-active='true']");
+		if (!active) return;
+		active.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+	}, [pathname, agentId]);
 
 	return (
-		<div className="relative flex h-12 items-stretch border-b border-app-line bg-app-darkBox/30 px-6">
-			{tabs.map((tab) => {
-				const isActive = matchRoute({
-					to: tab.to,
-					params: { agentId },
-					fuzzy: !tab.exact,
-				});
+		<div className="relative h-12 overflow-x-auto border-b border-app-line bg-app-darkBox/30 px-3 sm:px-6">
+			<div ref={containerRef} className="flex h-full min-w-max items-stretch">
+				{tabs.map((tab) => {
+					const isActive = matchRoute({
+						to: tab.to,
+						params: { agentId },
+						fuzzy: !tab.exact,
+					});
 
-				return (
-					<Link
-						key={tab.to}
-						to={tab.to}
-						params={{ agentId }}
-						className={`relative flex items-center px-3 text-sm transition-colors ${
-							isActive
-								? "text-ink"
-								: "text-ink-faint hover:text-ink-dull"
-						}`}
-					>
-						{tab.label}
-						{isActive && (
-							<motion.div
-								layoutId={`agent-tab-indicator-${agentId}`}
-								className="absolute bottom-0 left-0 right-0 h-px bg-accent"
-								transition={{ type: "spring", stiffness: 500, damping: 35 }}
-							/>
-						)}
-					</Link>
-				);
-			})}
+					return (
+						<Link
+							key={tab.to}
+							to={tab.to}
+							params={{ agentId }}
+							data-active={isActive ? "true" : "false"}
+							className={`relative flex items-center whitespace-nowrap px-3 text-sm transition-colors ${
+								isActive ? "text-ink" : "text-ink-faint hover:text-ink-dull"
+							}`}
+						>
+							{tab.label}
+							{isActive && (
+								<motion.div
+									layoutId={`agent-tab-indicator-${agentId}`}
+									className="absolute bottom-0 left-0 right-0 h-px bg-accent"
+									transition={{ type: "spring", stiffness: 500, damping: 35 }}
+								/>
+							)}
+						</Link>
+					);
+				})}
+			</div>
 		</div>
 	);
 }
