@@ -600,12 +600,13 @@ impl Channel {
     }
 
     /// Get the agent's display name (falls back to agent ID).
-    fn agent_display_name(&self) -> &str {
+    fn agent_display_name(&self) -> String {
         self.deps
             .agent_names
+            .load()
             .get(self.deps.agent_id.as_ref())
-            .map(String::as_str)
-            .unwrap_or(self.deps.agent_id.as_ref())
+            .cloned()
+            .unwrap_or_else(|| self.deps.agent_id.to_string())
     }
 
     fn current_adapter(&self) -> Option<&str> {
@@ -819,10 +820,11 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
+                let display_name = self.agent_display_name();
                 self.state.conversation_logger.log_bot_message_with_name(
                     &self.state.channel_id,
                     &text,
-                    Some(self.agent_display_name()),
+                    Some(&display_name),
                 );
             }
             Err(error) => {
@@ -1985,6 +1987,7 @@ impl Channel {
                 let name = self
                     .deps
                     .agent_names
+                    .load()
                     .get(other_id.as_str())
                     .cloned()
                     .unwrap_or_else(|| other_id.clone());
@@ -2598,10 +2601,11 @@ impl Channel {
                             if extracted.is_some() {
                                 tracing::warn!(channel_id = %self.id, "extracted reply from malformed tool syntax in LLM text output");
                             }
+                            let display_name = self.agent_display_name();
                             self.state.conversation_logger.log_bot_message_with_name(
                                 &self.state.channel_id,
                                 &final_text,
-                                Some(self.agent_display_name()),
+                                Some(&display_name),
                             );
                             self.send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
