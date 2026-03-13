@@ -60,6 +60,7 @@ pub(super) struct ProviderStatus {
     minimax_cn: bool,
     moonshot: bool,
     zai_coding_plan: bool,
+    github_copilot: bool,
 }
 
 #[derive(Serialize)]
@@ -146,6 +147,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "minimax-cn" => Some("minimax_cn_key"),
         "moonshot" => Some("moonshot_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
+        "github-copilot" => Some("github_copilot_key"),
         _ => None,
     }
 }
@@ -214,6 +216,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
+        github_copilot_key: (provider == "github-copilot").then(|| credential.to_string()),
         providers,
     }
 }
@@ -369,6 +372,7 @@ pub(super) async fn get_providers(
         minimax_cn,
         moonshot,
         zai_coding_plan,
+        github_copilot,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -413,6 +417,7 @@ pub(super) async fn get_providers(
             has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
+            has_value("github_copilot_key", "GITHUB_COPILOT_API_KEY"),
         )
     } else {
         (
@@ -437,6 +442,7 @@ pub(super) async fn get_providers(
             std::env::var("MINIMAX_CN_API_KEY").is_ok(),
             std::env::var("MOONSHOT_API_KEY").is_ok(),
             std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
+            std::env::var("GITHUB_COPILOT_API_KEY").is_ok(),
         )
     };
 
@@ -462,6 +468,7 @@ pub(super) async fn get_providers(
         minimax_cn,
         moonshot,
         zai_coding_plan,
+        github_copilot,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -483,7 +490,8 @@ pub(super) async fn get_providers(
         || providers.minimax
         || providers.minimax_cn
         || providers.moonshot
-        || providers.zai_coding_plan;
+        || providers.zai_coding_plan
+        || providers.github_copilot;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -912,6 +920,21 @@ pub(super) async fn delete_provider(
             success: true,
             message: "ChatGPT Plus OAuth credentials removed".into(),
         }));
+    }
+
+    // GitHub Copilot has a cached token file alongside the TOML key.
+    // Remove both the TOML key and the cached token.
+    if provider == "github-copilot" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let token_path = crate::github_copilot_auth::credentials_path(&instance_dir);
+        if token_path.exists() {
+            tokio::fs::remove_file(&token_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(manager) = state.llm_manager.read().await.as_ref() {
+            manager.clear_copilot_token().await;
+        }
     }
 
     let Some(key_name) = provider_toml_key(&provider) else {

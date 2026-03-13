@@ -21,7 +21,7 @@ use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::{
     AgentDeps, BranchId, ChannelId, InboundMessage, OutboundResponse, ProcessEvent, ProcessId,
-    ProcessType, WorkerId,
+    ProcessType, RoutedResponse, RoutedSender, WorkerId,
 };
 use rig::agent::AgentBuilder;
 use rig::completion::CompletionModel;
@@ -33,6 +33,10 @@ use std::collections::HashSet;
 use std::sync::{Arc, Weak};
 use tokio::sync::broadcast;
 use tokio::sync::{RwLock, mpsc};
+
+/// Shared cache of in-flight worker transcript steps, keyed by worker ID.
+pub type LiveWorkerTranscripts =
+    Arc<RwLock<HashMap<String, Vec<crate::conversation::worker_transcript::TranscriptStep>>>>;
 
 /// A background process result waiting to be relayed to the user via retrigger.
 ///
@@ -111,6 +115,15 @@ pub struct ChannelState {
     pub logs_dir: std::path::PathBuf,
     /// Prompt snapshot store for debugging prompt construction.
     pub prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
+    /// Shared live transcript cache for running workers. When a worker is
+    /// cancelled via `handle.abort()`, we drain its accumulated transcript
+    /// steps from this cache and persist them to the DB so that cancelled
+    /// workers still have their transcript available for review.
+    ///
+    /// This Arc is shared with `ApiState` — the event loop populates it from
+    /// `ToolStarted`/`ToolCompleted` events as they flow through the system.
+    /// Defaults to a standalone empty map when the API layer is not active.
+    pub live_worker_transcripts: LiveWorkerTranscripts,
 }
 
 impl ChannelState {
@@ -152,8 +165,71 @@ impl ChannelState {
             return Err(format!("Worker {worker_id} not found"));
         }
 
+        // Abort first so the worker stops producing new ToolStarted/ToolCompleted
+        // events, then drain whatever was accumulated. This avoids a race where
+        // events written between drain and abort would be lost.
         if let Some(handle) = handle {
             handle.abort();
+        }
+
+        // Now that the worker future is cancelled, drain the live transcript
+        // cache. persist_transcript() inside the worker's run() method will
+        // never execute after abort, so we compensate here.
+        let live_steps = self
+            .live_worker_transcripts
+            .write()
+            .await
+            .remove(&worker_id.to_string());
+
+        // Persist whatever transcript was accumulated from ToolStarted/ToolCompleted
+        // events. This is a best-effort snapshot — it won't include the worker's
+        // internal reasoning text (which only exists in the Rig history) but it
+        // captures every tool call and result, which is the most useful part.
+        if let Some(steps) = &live_steps
+            && !steps.is_empty()
+        {
+            let transcript_blob = crate::conversation::worker_transcript::serialize_steps(steps);
+            let worker_id_str = worker_id.to_string();
+            let pool = self.deps.sqlite_pool.clone();
+            // Count tool calls from the transcript steps.
+            let tool_calls: i64 = steps
+                .iter()
+                .map(|step| match step {
+                    crate::conversation::worker_transcript::TranscriptStep::Action { content } => {
+                        content
+                            .iter()
+                            .filter(|c| {
+                                matches!(
+                                c,
+                                crate::conversation::worker_transcript::ActionContent::ToolCall {
+                                    ..
+                                }
+                            )
+                            })
+                            .count() as i64
+                    }
+                    _ => 0,
+                })
+                .sum();
+            // Fire-and-forget DB write (consistent with the existing pattern
+            // documented in AGENTS.md under "Fire-and-forget DB writes").
+            tokio::spawn(async move {
+                if let Err(error) = sqlx::query(
+                    "UPDATE worker_runs SET transcript = ?, tool_calls = ? WHERE id = ? AND transcript IS NULL",
+                )
+                .bind(&transcript_blob)
+                .bind(tool_calls)
+                .bind(&worker_id_str)
+                .execute(&pool)
+                .await
+                {
+                    tracing::warn!(
+                        %error,
+                        worker_id = %worker_id_str,
+                        "failed to persist cancelled worker transcript"
+                    );
+                }
+            });
         }
 
         let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
@@ -329,9 +405,12 @@ pub struct Channel {
     /// Event receiver for process events.
     pub event_rx: broadcast::Receiver<ProcessEvent>,
     /// Outbound response sender for the messaging layer.
-    pub response_tx: mpsc::Sender<OutboundResponse>,
+    pub response_tx: mpsc::Sender<RoutedResponse>,
     /// Self-sender for re-triggering the channel after background process completion.
     pub self_tx: mpsc::Sender<InboundMessage>,
+    /// The inbound message currently being processed. Used to pair outbound
+    /// responses with the correct platform routing metadata (e.g. Slack thread_ts).
+    current_inbound: Option<InboundMessage>,
     /// Conversation ID from the first message (for synthetic re-trigger messages).
     pub conversation_id: Option<String>,
     /// Adapter source captured from the first non-system message.
@@ -402,14 +481,16 @@ impl Channel {
     /// All tunable config (prompts, routing, thresholds, browser, skills) is read
     /// from `deps.runtime_config` on each use, so changes propagate to running
     /// channels without restart.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         id: ChannelId,
         deps: AgentDeps,
-        response_tx: mpsc::Sender<OutboundResponse>,
+        response_tx: mpsc::Sender<RoutedResponse>,
         event_rx: broadcast::Receiver<ProcessEvent>,
         screenshot_dir: std::path::PathBuf,
         logs_dir: std::path::PathBuf,
         prompt_snapshot_store: Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>,
+        live_worker_transcripts: Option<LiveWorkerTranscripts>,
     ) -> (Self, mpsc::Sender<InboundMessage>) {
         let process_id = ProcessId::Channel(id.clone());
         let hook = SpacebotHook::new(
@@ -449,6 +530,8 @@ impl Channel {
             screenshot_dir,
             logs_dir,
             prompt_snapshot_store,
+            live_worker_transcripts: live_worker_transcripts
+                .unwrap_or_else(|| Arc::new(RwLock::new(HashMap::new()))),
         };
 
         // Each channel gets its own isolated tool server to avoid races between
@@ -486,6 +569,7 @@ impl Channel {
             event_rx,
             response_tx,
             self_tx,
+            current_inbound: None,
             conversation_id: None,
             source_adapter: None,
             conversation_context: None,
@@ -694,96 +778,38 @@ impl Channel {
         message: &InboundMessage,
         raw_text: &str,
     ) -> (bool, bool, bool) {
-        let text = raw_text.trim();
-        let invoked_by_command = text.starts_with('/');
-        let invoked_by_mention = match message.source.as_str() {
-            "telegram" => {
-                let text_lower = text.to_lowercase();
-                message
-                    .metadata
-                    .get("telegram_bot_username")
-                    .and_then(|v| v.as_str())
-                    .map(|username| {
-                        let mention = format!("@{}", username.to_lowercase());
-                        text_lower.match_indices(&mention).any(|(start, _)| {
-                            let end = start + mention.len();
-                            let before_ok = start == 0
-                                || text_lower[..start].chars().next_back().is_none_or(
-                                    |character| {
-                                        !(character.is_ascii_alphanumeric() || character == '_')
-                                    },
-                                );
-                            let after_ok = end == text_lower.len()
-                                || text_lower[end..].chars().next().is_none_or(|character| {
-                                    !(character.is_ascii_alphanumeric() || character == '_')
-                                });
-                            before_ok && after_ok
-                        })
-                    })
-                    .unwrap_or(false)
-            }
-            "discord" => message
-                .metadata
-                .get("discord_mentioned_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "slack" => message
-                .metadata
-                .get("slack_mentions_or_replies_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "twitch" => message
-                .metadata
-                .get("twitch_mentions_or_replies_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            _ => false,
-        };
-        let invoked_by_reply = match message.source.as_str() {
-            // Use bot-specific reply metadata; generic reply_to_is_bot can
-            // match unrelated bots and cause false invokes.
-            "discord" => message
-                .metadata
-                .get("discord_reply_to_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-            "telegram" => {
-                let reply_to_is_bot = message
-                    .metadata
-                    .get("reply_to_is_bot")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
-                let bot_username = message
-                    .metadata
-                    .get("telegram_bot_username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_lowercase);
-                let reply_username = message
-                    .metadata
-                    .get("reply_to_username")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_lowercase);
-                reply_to_is_bot
-                    && reply_username
-                        .zip(bot_username)
-                        .is_some_and(|(reply, bot)| bot == reply)
-            }
-            _ => message
-                .metadata
-                .get("reply_to_is_bot")
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false),
-        };
+        compute_listen_mode_invocation(message, raw_text)
+    }
 
-        (invoked_by_command, invoked_by_mention, invoked_by_reply)
+    /// Send a routed response paired with the current inbound message.
+    ///
+    /// Falls back to a bare response with a placeholder target if no inbound
+    /// message is set (should not happen during normal turn processing).
+    async fn send_routed(
+        &self,
+        response: OutboundResponse,
+    ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
+        let routed = match &self.current_inbound {
+            Some(target) => RoutedResponse {
+                response,
+                target: target.clone(),
+            },
+            None => {
+                tracing::warn!(
+                    channel_id = %self.id,
+                    "sending response without a current inbound message"
+                );
+                RoutedResponse {
+                    response,
+                    target: InboundMessage::empty(),
+                }
+            }
+        };
+        self.response_tx.send(routed).await
     }
 
     async fn send_builtin_text(&mut self, text: String, log_label: &str) {
-        match self
-            .response_tx
-            .send(OutboundResponse::Text(text.clone()))
-            .await
-        {
+        match self.send_routed(OutboundResponse::Text(text.clone())).await {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
                 {
@@ -1422,6 +1448,13 @@ impl Channel {
             *reply_target = messages.iter().rev().find_map(extract_message_id);
         }
 
+        // Pin the inbound routing target from the last non-system message in the
+        // batch so the RoutedSender (and send_routed) carry the correct platform
+        // metadata (e.g. Slack thread_ts) for outbound responses.
+        if let Some(last_real) = messages.iter().rev().find(|m| m.source != "system") {
+            self.current_inbound = Some(last_real.clone());
+        }
+
         // Run agent turn with any image/audio attachments preserved
         let (result, skip_flag, replied_flag, _) = self
             .run_agent_turn(
@@ -1528,6 +1561,13 @@ impl Channel {
         // Apply runtime-config updates immediately without requiring a restart.
         self.sync_listen_only_mode_from_runtime();
 
+        // Track the inbound message that triggered this turn so outbound
+        // responses carry the correct routing metadata (e.g. Slack thread_ts).
+        // System retrigger messages keep the previous inbound target.
+        if message.source != "system" {
+            self.current_inbound = Some(message.clone());
+        }
+
         tracing::info!(
             channel_id = %self.id,
             message_id = %message.id,
@@ -1619,16 +1659,8 @@ impl Channel {
         // Deterministic liveness ping for Telegram mentions.
         // This avoids model/provider flakiness for simple "you there?" style checks.
         if message.source == "telegram" {
-            let text = raw_text.trim().to_lowercase();
             let (_, has_mention, _) = self.compute_listen_mode_invocation(&message, &raw_text);
-            let looks_like_ping = text.contains("you here")
-                || text.contains("ping")
-                || text.ends_with(" yo")
-                || text == "yo"
-                || text.contains("alive")
-                || text.contains("there?");
-
-            if has_mention && looks_like_ping {
+            if has_mention && looks_like_liveness_ping(&raw_text) {
                 self.send_builtin_text("yeah i'm here".to_string(), "telegram-ping")
                     .await;
                 return Ok(());
@@ -1637,22 +1669,10 @@ impl Channel {
 
         // Deterministic ping ack for Discord quiet-mode mentions/replies to avoid
         // flaky model behavior (e.g. skipping or over-formatting simple liveness checks).
-        if message.source == "discord" && self.listen_only_mode {
-            let text = raw_text.trim().to_lowercase();
-            let (_, invoked_by_mention, invoked_by_reply) =
-                self.compute_listen_mode_invocation(&message, &raw_text);
-            let directed = invoked_by_mention || invoked_by_reply;
-            let looks_like_ping = text.contains("you here")
-                || text.contains("ping")
-                || text.ends_with(" yo")
-                || text == "yo"
-                || text.contains("alive")
-                || text.contains("there?");
-            if directed && looks_like_ping {
-                self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
-                    .await;
-                return Ok(());
-            }
+        if should_send_discord_quiet_mode_ping_ack(&message, &raw_text, self.listen_only_mode) {
+            self.send_builtin_text("yeah i'm here".to_string(), "discord-ping")
+                .await;
+            return Ok(());
         }
 
         // Capture conversation context from the first message (platform, channel, server)
@@ -1777,17 +1797,18 @@ impl Channel {
             .await;
 
         // Safety-net: in quiet mode, explicit mention/reply should never be dropped silently.
-        if self.listen_only_mode
-            && !is_retrigger
-            && !invoked_by_command
-            && (invoked_by_mention || invoked_by_reply)
-            && skip_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && !replied_flag.load(std::sync::atomic::Ordering::Relaxed)
-            && matches!(
-                message.source.as_str(),
-                "discord" | "telegram" | "slack" | "twitch" | "signal"
-            )
-        {
+        if should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: self.listen_only_mode,
+                is_retrigger,
+                invoked_by_command,
+                invoked_by_mention,
+                invoked_by_reply,
+                skip_flag: skip_flag.load(std::sync::atomic::Ordering::Relaxed),
+                replied_flag: replied_flag.load(std::sync::atomic::Ordering::Relaxed),
+            },
+        ) {
             self.send_builtin_text(
                 "yeah i'm here — tell me what you need.".to_string(),
                 "quiet-mode-fallback",
@@ -2209,10 +2230,24 @@ impl Channel {
             .clone()
             .map(|tool| tool.with_originating_channel(conversation_id.to_string()));
 
+        let current_inbound = self
+            .current_inbound
+            .clone()
+            .unwrap_or_else(InboundMessage::empty);
+        let routed_sender = RoutedSender::new(self.response_tx.clone(), current_inbound.clone());
+
+        // Extract Slack thread_ts from the current inbound message so cron
+        // delivery targets include the originating thread.
+        let slack_thread_ts = current_inbound
+            .metadata
+            .get("slack_thread_ts")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
         if let Err(error) = crate::tools::add_channel_tools(
             &self.tool_server,
             self.state.clone(),
-            self.response_tx.clone(),
+            routed_sender,
             conversation_id,
             skip_flag.clone(),
             replied_flag.clone(),
@@ -2220,6 +2255,7 @@ impl Channel {
             send_agent_message_tool,
             allow_direct_reply,
             adapter.map(|s| s.to_string()),
+            slack_thread_ts.as_deref(),
         )
         .await
         {
@@ -2245,10 +2281,9 @@ impl Channel {
             .tool_server_handle(self.tool_server.clone())
             .build();
 
-        let _ = self
-            .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::Thinking))
-            .await;
+        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::Thinking))
+            .await
+            .ok();
 
         // Inject attachments as a user message before the text prompt
         if !attachment_content.is_empty() {
@@ -2347,7 +2382,7 @@ impl Channel {
 
     /// Send outbound text and record send metrics.
     async fn send_outbound_text(&self, text: String, error_context: &str) {
-        match self.response_tx.send(OutboundResponse::Text(text)).await {
+        match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
                 {
@@ -2606,8 +2641,7 @@ impl Channel {
                     .inc();
                 // Send error to user so they know something went wrong
                 let error_msg = format!("I encountered an error: {}", error);
-                self.response_tx
-                    .send(OutboundResponse::Text(error_msg))
+                self.send_routed(OutboundResponse::Text(error_msg))
                     .await
                     .ok();
                 tracing::error!(channel_id = %self.id, %error, "channel LLM call failed");
@@ -2615,10 +2649,9 @@ impl Channel {
         }
 
         // Ensure typing indicator is always cleaned up, even on error paths
-        let _ = self
-            .response_tx
-            .send(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
-            .await;
+        self.send_routed(OutboundResponse::Status(crate::StatusUpdate::StopTyping))
+            .await
+            .ok();
     }
 
     /// Handle a process event (branch results, worker completions, status updates).
@@ -3136,12 +3169,178 @@ impl Channel {
     }
 }
 
+fn compute_listen_mode_invocation(message: &InboundMessage, raw_text: &str) -> (bool, bool, bool) {
+    let text = raw_text.trim();
+    let invoked_by_command = text.starts_with('/');
+    let invoked_by_mention = match message.source.as_str() {
+        "telegram" => {
+            let text_lower = text.to_lowercase();
+            message
+                .metadata
+                .get("telegram_bot_username")
+                .and_then(|v| v.as_str())
+                .map(|username| {
+                    let mention = format!("@{}", username.to_lowercase());
+                    text_lower.match_indices(&mention).any(|(start, _)| {
+                        let end = start + mention.len();
+                        let before_ok = start == 0
+                            || text_lower[..start]
+                                .chars()
+                                .next_back()
+                                .is_none_or(|character| {
+                                    !(character.is_ascii_alphanumeric() || character == '_')
+                                });
+                        let after_ok = end == text_lower.len()
+                            || text_lower[end..].chars().next().is_none_or(|character| {
+                                !(character.is_ascii_alphanumeric() || character == '_')
+                            });
+                        before_ok && after_ok
+                    })
+                })
+                .unwrap_or(false)
+        }
+        "discord" => message
+            .metadata
+            .get("discord_mentioned_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "slack" => message
+            .metadata
+            .get("slack_mentions_or_replies_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "twitch" => message
+            .metadata
+            .get("twitch_mentions_or_replies_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        _ => false,
+    };
+    let invoked_by_reply = match message.source.as_str() {
+        // Use bot-specific reply metadata; generic reply_to_is_bot can
+        // match unrelated bots and cause false invokes.
+        "discord" => message
+            .metadata
+            .get("discord_reply_to_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        "telegram" => {
+            let reply_to_is_bot = message
+                .metadata
+                .get("reply_to_is_bot")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            let bot_username = message
+                .metadata
+                .get("telegram_bot_username")
+                .and_then(|v| v.as_str())
+                .map(str::to_lowercase);
+            let reply_username = message
+                .metadata
+                .get("reply_to_username")
+                .and_then(|v| v.as_str())
+                .map(str::to_lowercase);
+            reply_to_is_bot
+                && reply_username
+                    .zip(bot_username)
+                    .is_some_and(|(reply, bot)| bot == reply)
+        }
+        _ => message
+            .metadata
+            .get("reply_to_is_bot")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    };
+
+    (invoked_by_command, invoked_by_mention, invoked_by_reply)
+}
+
+fn looks_like_liveness_ping(text: &str) -> bool {
+    let text = text.trim().to_lowercase();
+    text.contains("you here")
+        || text.contains("ping")
+        || text.ends_with(" yo")
+        || text == "yo"
+        || text.contains("alive")
+        || text.contains("there?")
+}
+
+fn should_send_discord_quiet_mode_ping_ack(
+    message: &InboundMessage,
+    raw_text: &str,
+    listen_only_mode: bool,
+) -> bool {
+    if message.source != "discord" || !listen_only_mode {
+        return false;
+    }
+
+    let (_, invoked_by_mention, invoked_by_reply) =
+        compute_listen_mode_invocation(message, raw_text);
+    (invoked_by_mention || invoked_by_reply) && looks_like_liveness_ping(raw_text)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QuietModeFallbackState {
+    listen_only_mode: bool,
+    is_retrigger: bool,
+    invoked_by_command: bool,
+    invoked_by_mention: bool,
+    invoked_by_reply: bool,
+    skip_flag: bool,
+    replied_flag: bool,
+}
+
+fn should_send_quiet_mode_fallback(
+    message: &InboundMessage,
+    state: QuietModeFallbackState,
+) -> bool {
+    state.listen_only_mode
+        && !state.is_retrigger
+        && !state.invoked_by_command
+        && (state.invoked_by_mention || state.invoked_by_reply)
+        && state.skip_flag
+        && !state.replied_flag
+        && matches!(
+            message.source.as_str(),
+            "discord" | "telegram" | "slack" | "twitch" | "signal"
+        )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{recv_channel_event, should_process_event_for_channel};
+    use super::{
+        QuietModeFallbackState, compute_listen_mode_invocation, recv_channel_event,
+        should_process_event_for_channel, should_send_discord_quiet_mode_ping_ack,
+        should_send_quiet_mode_fallback,
+    };
     use crate::memory::MemoryType;
-    use crate::{AgentId, ChannelId, ProcessEvent, ProcessId};
+    use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
+    use std::collections::HashMap;
     use std::sync::Arc;
+
+    fn inbound_message(
+        source: &str,
+        metadata: &[(&str, serde_json::Value)],
+        content: &str,
+    ) -> InboundMessage {
+        let mut message_metadata = HashMap::new();
+        for (key, value) in metadata {
+            message_metadata.insert((*key).to_string(), value.clone());
+        }
+
+        InboundMessage {
+            id: "message-1".into(),
+            source: source.into(),
+            adapter: None,
+            conversation_id: format!("{source}:conversation"),
+            sender_id: "user-1".into(),
+            agent_id: None,
+            content: MessageContent::Text(content.into()),
+            timestamp: chrono::Utc::now(),
+            metadata: message_metadata,
+            formatted_author: None,
+        }
+    }
 
     #[tokio::test]
     async fn channel_event_loop_continues_after_lagged_broadcast() {
@@ -3281,5 +3480,108 @@ mod tests {
         };
 
         assert!(!should_process_event_for_channel(&event, &channel_id));
+    }
+
+    #[test]
+    fn quiet_mode_invocation_uses_discord_mention_and_reply_metadata() {
+        let message = inbound_message(
+            "discord",
+            &[
+                ("discord_mentioned_bot", true.into()),
+                ("discord_reply_to_bot", false.into()),
+            ],
+            "@bot ping",
+        );
+
+        let (invoked_by_command, invoked_by_mention, invoked_by_reply) =
+            compute_listen_mode_invocation(&message, "@bot ping");
+
+        assert!(!invoked_by_command);
+        assert!(invoked_by_mention);
+        assert!(!invoked_by_reply);
+    }
+
+    #[test]
+    fn discord_quiet_mode_ping_ack_requires_directed_ping() {
+        let directed_message = inbound_message(
+            "discord",
+            &[("discord_reply_to_bot", true.into())],
+            "ping are you there?",
+        );
+        let ambient_message = inbound_message(
+            "discord",
+            &[("discord_reply_to_bot", false.into())],
+            "ping are you there?",
+        );
+
+        assert!(should_send_discord_quiet_mode_ping_ack(
+            &directed_message,
+            "ping are you there?",
+            true
+        ));
+        assert!(!should_send_discord_quiet_mode_ping_ack(
+            &ambient_message,
+            "ping are you there?",
+            true
+        ));
+        assert!(!should_send_discord_quiet_mode_ping_ack(
+            &directed_message,
+            "ping are you there?",
+            false
+        ));
+    }
+
+    #[test]
+    fn quiet_mode_fallback_requires_directed_skipped_turn_without_reply() {
+        let message = inbound_message("discord", &[], "hey");
+
+        assert!(should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: false,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: false,
+                replied_flag: false,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: false,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: true,
+            }
+        ));
+        assert!(!should_send_quiet_mode_fallback(
+            &message,
+            QuietModeFallbackState {
+                listen_only_mode: true,
+                is_retrigger: true,
+                invoked_by_command: false,
+                invoked_by_mention: true,
+                invoked_by_reply: false,
+                skip_flag: true,
+                replied_flag: false,
+            }
+        ));
     }
 }

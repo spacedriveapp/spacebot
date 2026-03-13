@@ -10,7 +10,7 @@ use crate::cron::store::CronStore;
 use crate::error::Result;
 use crate::messaging::MessagingManager;
 use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
-use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
+use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse, RoutedResponse};
 use chrono::Timelike;
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -849,7 +849,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<OutboundResponse>(32);
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
 
     // Subscribe to the agent's event bus (the channel needs this for branch/worker events)
     let event_rx = context.deps.event_tx.subscribe();
@@ -862,6 +862,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         context.screenshot_dir.clone(),
         context.logs_dir.clone(),
         None, // cron channels don't capture prompt snapshots
+        None, // cron channels don't share live transcript cache
     );
 
     // Spawn the channel's event loop
@@ -909,10 +910,16 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
             break;
         }
         match tokio::time::timeout(remaining, response_rx.recv()).await {
-            Ok(Some(OutboundResponse::Text(text))) => {
+            Ok(Some(RoutedResponse {
+                response: OutboundResponse::Text(text),
+                ..
+            })) => {
                 collected_text.push(text);
             }
-            Ok(Some(OutboundResponse::RichMessage { text, .. })) => {
+            Ok(Some(RoutedResponse {
+                response: OutboundResponse::RichMessage { text, .. },
+                ..
+            })) => {
                 collected_text.push(text);
             }
             Ok(Some(_)) => {}

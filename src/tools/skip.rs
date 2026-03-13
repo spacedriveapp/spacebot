@@ -5,14 +5,13 @@
 //! instead of `reply`. The channel checks the skip flag after the LLM turn and
 //! suppresses any fallback text output.
 
-use crate::OutboundResponse;
+use crate::{OutboundResponse, RoutedSender};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
 
 /// Shared flag between the SkipTool and the channel event loop.
 ///
@@ -29,11 +28,11 @@ pub fn new_skip_flag() -> SkipFlag {
 #[derive(Debug, Clone)]
 pub struct SkipTool {
     flag: SkipFlag,
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: RoutedSender,
 }
 
 impl SkipTool {
-    pub fn new(flag: SkipFlag, response_tx: mpsc::Sender<OutboundResponse>) -> Self {
+    pub fn new(flag: SkipFlag, response_tx: RoutedSender) -> Self {
         Self { flag, response_tx }
     }
 }

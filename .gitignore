@@ -1,6 +1,7 @@
 /target
 .DS_Store
 .fastembed_cache
+.build/
 
 # Interface
 interface/node_modules/

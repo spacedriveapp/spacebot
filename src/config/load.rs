@@ -1,12 +1,13 @@
 use super::providers::{
     ANTHROPIC_PROVIDER_BASE_URL, DEEPSEEK_PROVIDER_BASE_URL, FIREWORKS_PROVIDER_BASE_URL,
-    GEMINI_PROVIDER_BASE_URL, GROQ_PROVIDER_BASE_URL, KILO_PROVIDER_BASE_URL,
-    MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL, MISTRAL_PROVIDER_BASE_URL,
-    MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL, OLLAMA_PROVIDER_BASE_URL,
-    OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL, OPENCODE_ZEN_PROVIDER_BASE_URL,
-    OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL, XAI_PROVIDER_BASE_URL,
-    ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL, add_shorthand_provider,
-    infer_routing_from_providers, openrouter_extra_headers, resolve_routing,
+    GEMINI_PROVIDER_BASE_URL, GITHUB_COPILOT_DEFAULT_BASE_URL, GROQ_PROVIDER_BASE_URL,
+    KILO_PROVIDER_BASE_URL, MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL,
+    MISTRAL_PROVIDER_BASE_URL, MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL,
+    OLLAMA_PROVIDER_BASE_URL, OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL,
+    OPENCODE_ZEN_PROVIDER_BASE_URL, OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL,
+    XAI_PROVIDER_BASE_URL, ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL,
+    add_shorthand_provider, infer_routing_from_providers, openrouter_extra_headers,
+    resolve_routing,
 };
 use super::toml_schema::*;
 use super::{
@@ -431,6 +432,7 @@ impl Config {
             minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
+            github_copilot_key: std::env::var("GITHUB_COPILOT_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
@@ -509,6 +511,16 @@ impl Config {
             OPENCODE_GO_PROVIDER_BASE_URL,
             None,
             false,
+        );
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "github-copilot",
+            llm.github_copilot_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            GITHUB_COPILOT_DEFAULT_BASE_URL,
+            Some("GitHub Copilot"),
+            true,
         );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
@@ -1061,6 +1073,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
+            github_copilot_key: toml
+                .llm
+                .github_copilot_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GITHUB_COPILOT_API_KEY").ok()),
             providers: toml
                 .llm
                 .providers
@@ -1185,6 +1203,16 @@ impl Config {
             OPENCODE_GO_PROVIDER_BASE_URL,
             None,
             false,
+        );
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "github-copilot",
+            llm.github_copilot_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            GITHUB_COPILOT_DEFAULT_BASE_URL,
+            Some("GitHub Copilot"),
+            true,
         );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {

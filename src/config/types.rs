@@ -269,6 +269,7 @@ pub struct LlmConfig {
     pub minimax_cn_key: Option<String>,
     pub moonshot_key: Option<String>,
     pub zai_coding_plan_key: Option<String>,
+    pub github_copilot_key: Option<String>,
     pub providers: HashMap<String, ProviderConfig>,
 }
 
@@ -340,6 +341,10 @@ impl std::fmt::Debug for LlmConfig {
                 "zai_coding_plan_key",
                 &self.zai_coding_plan_key.as_ref().map(|_| "[REDACTED]"),
             )
+            .field(
+                "github_copilot_key",
+                &self.github_copilot_key.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("providers", &self.providers)
             .finish()
     }
@@ -369,6 +374,7 @@ impl LlmConfig {
             || self.minimax_cn_key.is_some()
             || self.moonshot_key.is_some()
             || self.zai_coding_plan_key.is_some()
+            || self.github_copilot_key.is_some()
             || !self.providers.is_empty()
     }
 }
@@ -498,6 +504,11 @@ impl SystemSecrets for LlmConfig {
             SecretField {
                 toml_key: "sambanova_key",
                 secret_name: "SAMBANOVA_API_KEY",
+                instance_pattern: None,
+            },
+            SecretField {
+                toml_key: "github_copilot_key",
+                secret_name: "GITHUB_COPILOT_API_KEY",
                 instance_pattern: None,
             },
         ]

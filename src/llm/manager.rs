@@ -11,12 +11,21 @@
 use crate::auth::OAuthCredentials as AnthropicOAuthCredentials;
 use crate::config::{ApiType, LlmConfig, ProviderConfig};
 use crate::error::{LlmError, Result};
+use crate::github_copilot_auth::CopilotToken;
 use crate::openai_auth::OAuthCredentials as OpenAiOAuthCredentials;
 
 use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::path::PathBuf;
+
+/// Editor version header for GitHub Copilot API requests.
+/// Matches VSCode 1.96.2 which Copilot expects for IDE auth.
+const COPILOT_EDITOR_VERSION: &str = "vscode/1.96.2";
+
+/// Editor plugin version header for GitHub Copilot API requests.
+/// Matches Copilot Chat extension version 0.26.7.
+const COPILOT_EDITOR_PLUGIN_VERSION: &str = "copilot-chat/0.26.7";
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -33,6 +42,8 @@ pub struct LlmManager {
     anthropic_oauth_credentials: RwLock<Option<AnthropicOAuthCredentials>>,
     /// Cached OpenAI OAuth credentials (refreshed lazily).
     openai_oauth_credentials: RwLock<Option<OpenAiOAuthCredentials>>,
+    /// Cached GitHub Copilot API token (exchanged from PAT, refreshed lazily).
+    copilot_token: RwLock<Option<CopilotToken>>,
 }
 
 impl LlmManager {
@@ -50,6 +61,7 @@ impl LlmManager {
             instance_dir: None,
             anthropic_oauth_credentials: RwLock::new(None),
             openai_oauth_credentials: RwLock::new(None),
+            copilot_token: RwLock::new(None),
         })
     }
 
@@ -62,6 +74,18 @@ impl LlmManager {
         if let Ok(Some(creds)) = crate::openai_auth::load_credentials(&instance_dir) {
             tracing::info!("loaded OpenAI OAuth credentials from openai_chatgpt_oauth.json");
             *self.openai_oauth_credentials.write().await = Some(creds);
+        }
+        match crate::github_copilot_auth::load_cached_token(&instance_dir) {
+            Ok(Some(token)) => {
+                tracing::info!("loaded GitHub Copilot token from github_copilot_token.json");
+                *self.copilot_token.write().await = Some(token);
+            }
+            Ok(None) => {
+                tracing::debug!("no cached GitHub Copilot token found");
+            }
+            Err(error) => {
+                tracing::warn!(%error, "failed to load GitHub Copilot token");
+            }
         }
         // Store instance_dir — we can't set it on &self since it's not behind RwLock,
         // but we only need it for save_credentials which we handle inline.
@@ -98,6 +122,18 @@ impl LlmManager {
             }
         };
 
+        let copilot_token = match crate::github_copilot_auth::load_cached_token(&instance_dir) {
+            Ok(Some(token)) => {
+                tracing::info!("loaded GitHub Copilot token from github_copilot_token.json");
+                Some(token)
+            }
+            Ok(None) => None,
+            Err(error) => {
+                tracing::warn!(%error, "failed to load GitHub Copilot token");
+                None
+            }
+        };
+
         Ok(Self {
             config: ArcSwap::from_pointee(config),
             http_client,
@@ -105,6 +141,7 @@ impl LlmManager {
             instance_dir: Some(instance_dir),
             anthropic_oauth_credentials: RwLock::new(anthropic_oauth_credentials),
             openai_oauth_credentials: RwLock::new(openai_oauth_credentials),
+            copilot_token: RwLock::new(copilot_token),
         })
     }
 
@@ -269,6 +306,116 @@ impl LlmManager {
             .await
             .as_ref()
             .and_then(|credentials| credentials.account_id.clone())
+    }
+
+    /// Get a valid GitHub Copilot API token, exchanging/refreshing as needed.
+    ///
+    /// Reads the GitHub PAT from the `github-copilot` provider config, checks
+    /// whether the cached Copilot token is still valid, and exchanges for a new
+    /// one if expired or missing. Saves refreshed tokens to disk.
+    pub async fn get_copilot_token(&self) -> Result<Option<String>> {
+        // Check if there's a github-copilot provider configured with a PAT
+        let github_pat = match self.get_provider("github-copilot") {
+            Ok(provider) if !provider.api_key.is_empty() => provider.api_key,
+            _ => return Ok(None),
+        };
+
+        let pat_hash = crate::github_copilot_auth::hash_pat(&github_pat);
+
+        // Check cached token — must be unexpired AND for the same PAT
+        {
+            let token_guard = self.copilot_token.read().await;
+            if let Some(ref cached) = *token_guard
+                && !cached.is_expired()
+                && cached.pat_hash == pat_hash
+            {
+                return Ok(Some(cached.token.clone()));
+            }
+        } // read lock dropped here before network call
+
+        // Need to exchange
+        tracing::info!("exchanging GitHub PAT for Copilot API token...");
+        match crate::github_copilot_auth::exchange_github_token(
+            &self.http_client,
+            &github_pat,
+            pat_hash.clone(),
+        )
+        .await
+        {
+            Ok(new_token) => {
+                let api_token = new_token.token.clone();
+                // Save to disk
+                if let Some(ref instance_dir) = self.instance_dir
+                    && let Err(error) =
+                        crate::github_copilot_auth::save_cached_token(instance_dir, &new_token)
+                {
+                    tracing::warn!(%error, "failed to persist GitHub Copilot token");
+                }
+                // Update cache with write lock held only for the assignment
+                *self.copilot_token.write().await = Some(new_token);
+                tracing::info!("GitHub Copilot token exchanged successfully");
+                Ok(Some(api_token))
+            }
+            Err(error) => {
+                tracing::error!(%error, "GitHub Copilot token exchange failed");
+                // Only fall back to cached token if it matches the current PAT hash
+                let token_guard = self.copilot_token.read().await;
+                if let Some(ref cached) = *token_guard
+                    && cached.pat_hash == pat_hash
+                {
+                    return Ok(Some(cached.token.clone()));
+                }
+                Err(error.into())
+            }
+        }
+    }
+
+    /// Resolve the GitHub Copilot provider config with a fresh API token.
+    ///
+    /// Exchanges the stored GitHub PAT for a Copilot API token, derives the
+    /// base URL from the token's `proxy-ep` field, and returns a complete
+    /// `ProviderConfig` ready for OpenAI-compatible API calls.
+    pub async fn get_github_copilot_provider(&self) -> Result<ProviderConfig> {
+        let token = self
+            .get_copilot_token()
+            .await?
+            .ok_or_else(|| LlmError::UnknownProvider("github-copilot".to_string()))?;
+
+        let base_url = crate::github_copilot_auth::derive_base_url_from_token(&token)
+            .unwrap_or_else(|| {
+                crate::github_copilot_auth::DEFAULT_COPILOT_API_BASE_URL.to_string()
+            });
+
+        Ok(ProviderConfig {
+            api_type: ApiType::OpenAiChatCompletions,
+            base_url,
+            api_key: token,
+            name: Some("GitHub Copilot".to_string()),
+            use_bearer_auth: true,
+            extra_headers: vec![
+                (
+                    "user-agent".to_string(),
+                    format!("spacebot/{}", env!("CARGO_PKG_VERSION")),
+                ),
+                (
+                    "editor-version".to_string(),
+                    COPILOT_EDITOR_VERSION.to_string(),
+                ),
+                (
+                    "editor-plugin-version".to_string(),
+                    COPILOT_EDITOR_PLUGIN_VERSION.to_string(),
+                ),
+            ],
+        })
+    }
+
+    /// Clear cached GitHub Copilot token from memory only.
+    ///
+    /// Note: Does not delete the on-disk cache file. Use
+    /// `github_copilot_auth::credentials_path()` and delete the file separately
+    /// if persistent removal is needed (e.g., in `delete_provider`).
+    pub async fn clear_copilot_token(&self) {
+        *self.copilot_token.write().await = None;
     }
 
     /// Get the appropriate API key for a provider.

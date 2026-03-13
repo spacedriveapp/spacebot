@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod factory;
+pub mod github_copilot_auth;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -37,6 +38,7 @@ pub use error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Signal from the API to the main event loop to trigger provider setup.
 #[derive(Debug)]
@@ -473,6 +475,23 @@ pub struct InboundMessage {
 }
 
 impl InboundMessage {
+    /// Construct an empty placeholder message. Used as a fallback when no
+    /// inbound context is available for outbound routing.
+    pub fn empty() -> Self {
+        Self {
+            id: String::new(),
+            source: String::new(),
+            adapter: None,
+            conversation_id: String::new(),
+            sender_id: String::new(),
+            agent_id: None,
+            content: MessageContent::Text(String::new()),
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+        }
+    }
+
     /// Runtime adapter key for routing outbound operations.
     ///
     /// Falls back to the platform source for backward compatibility.
@@ -569,6 +588,45 @@ pub struct Attachment {
     /// Excluded from serialization to prevent credential leakage.
     #[serde(skip)]
     pub auth_header: Option<String>,
+}
+
+/// An outbound response paired with the inbound message that triggered it.
+///
+/// This ensures outbound routing targets the correct thread/conversation even
+/// when multiple threads share the same channel (e.g. Slack threads within a
+/// single channel). The paired `InboundMessage` carries the platform metadata
+/// (thread_ts, message_ts, etc.) needed to route the response correctly.
+#[derive(Debug, Clone)]
+pub struct RoutedResponse {
+    pub response: OutboundResponse,
+    pub target: InboundMessage,
+}
+
+/// A sender that automatically pairs outbound responses with a captured
+/// inbound message target. Used by channel tools (reply, react, etc.) so
+/// they don't need direct access to the triggering `InboundMessage`.
+#[derive(Debug, Clone)]
+pub struct RoutedSender {
+    inner: mpsc::Sender<RoutedResponse>,
+    target: InboundMessage,
+}
+
+impl RoutedSender {
+    pub fn new(inner: mpsc::Sender<RoutedResponse>, target: InboundMessage) -> Self {
+        Self { inner, target }
+    }
+
+    pub async fn send(
+        &self,
+        response: OutboundResponse,
+    ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
+        self.inner
+            .send(RoutedResponse {
+                response,
+                target: self.target.clone(),
+            })
+            .await
+    }
 }
 
 /// Outbound response to messaging platforms.

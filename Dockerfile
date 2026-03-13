@@ -93,6 +93,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libcairo2 \
     libcups2 \
+    libxkbcommon0 \
     libxss1 \
     libxtst6 \
     && rm -rf /var/lib/apt/lists/*

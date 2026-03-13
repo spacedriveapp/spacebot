@@ -2,7 +2,7 @@
 
 use crate::conversation::ConversationLogger;
 
-use crate::{ChannelId, OutboundResponse};
+use crate::{ChannelId, OutboundResponse, RoutedSender};
 use regex::Regex;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
@@ -12,7 +12,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::sync::mpsc;
 
 static BROKEN_DISCORD_MENTION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"<{2,}@(!?)>\s*(\d{15,22})>").expect("hardcoded broken mention regex")
@@ -40,7 +39,7 @@ pub fn new_replied_flag() -> RepliedFlag {
 /// tools once and shares them across calls.
 #[derive(Debug, Clone)]
 pub struct ReplyTool {
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: RoutedSender,
     conversation_id: String,
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
@@ -51,7 +50,7 @@ pub struct ReplyTool {
 impl ReplyTool {
     /// Create a new reply tool bound to a conversation's response channel.
     pub fn new(
-        response_tx: mpsc::Sender<OutboundResponse>,
+        response_tx: RoutedSender,
         conversation_id: impl Into<String>,
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
@@ -220,6 +219,31 @@ pub(crate) fn normalize_discord_mention_tokens(content: &str, source: &str) -> S
     normalized
 }
 
+fn normalize_poll_payload(poll: crate::Poll) -> Option<crate::Poll> {
+    let question = poll.question.trim().to_string();
+    if question.is_empty() {
+        return None;
+    }
+
+    let answers: Vec<String> = poll
+        .answers
+        .into_iter()
+        .map(|answer| answer.trim().to_string())
+        .filter(|answer| !answer.is_empty())
+        .collect();
+
+    if answers.len() < 2 {
+        return None;
+    }
+
+    Some(crate::Poll {
+        question,
+        answers,
+        allow_multiselect: poll.allow_multiselect,
+        duration_hours: poll.duration_hours,
+    })
+}
+
 impl Tool for ReplyTool {
     const NAME: &'static str = "reply";
 
@@ -377,6 +401,7 @@ impl Tool for ReplyTool {
             .as_ref()
             .map(|name| name.trim())
             .filter(|name| !name.is_empty());
+        let poll = args.poll.and_then(normalize_poll_payload);
 
         if let Some(leak) = crate::secrets::scrub::scan_for_leaks(&converted_content) {
             tracing::error!(
@@ -400,14 +425,13 @@ impl Tool for ReplyTool {
                 thread_name,
                 text: converted_content.clone(),
             }
-        } else if args.cards.is_some() || args.interactive_elements.is_some() || args.poll.is_some()
-        {
+        } else if args.cards.is_some() || args.interactive_elements.is_some() || poll.is_some() {
             OutboundResponse::RichMessage {
                 text: converted_content.clone(),
                 blocks: vec![],
                 cards: args.cards.unwrap_or_default(),
                 interactive_elements: args.interactive_elements.unwrap_or_default(),
-                poll: args.poll,
+                poll,
             }
         } else {
             OutboundResponse::Text(converted_content.clone())
@@ -439,7 +463,10 @@ impl Tool for ReplyTool {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_discord_mention_tokens, sanitize_discord_user_id};
+    use super::{
+        normalize_discord_mention_tokens, normalize_poll_payload, sanitize_discord_user_id,
+    };
+    use crate::Poll;
 
     #[test]
     fn normalizes_broken_discord_mentions() {
@@ -469,5 +496,46 @@ mod tests {
     fn sanitizes_discord_ids_with_prefix_noise() {
         let parsed = sanitize_discord_user_id(">234152400653385729").expect("should parse id");
         assert_eq!(parsed, "234152400653385729");
+    }
+
+    #[test]
+    fn drops_poll_with_blank_question() {
+        let poll = Poll {
+            question: "   ".into(),
+            answers: vec!["Yes".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+
+        assert!(normalize_poll_payload(poll).is_none());
+    }
+
+    #[test]
+    fn drops_poll_with_fewer_than_two_non_empty_answers() {
+        let poll = Poll {
+            question: "Ship it?".into(),
+            answers: vec!["Yes".into(), "   ".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+
+        assert!(normalize_poll_payload(poll).is_none());
+    }
+
+    #[test]
+    fn trims_poll_question_and_answers() {
+        let poll = Poll {
+            question: "  Ship it?  ".into(),
+            answers: vec!["  Yes ".into(), " No  ".into()],
+            allow_multiselect: true,
+            duration_hours: 12,
+        };
+
+        let normalized = normalize_poll_payload(poll).expect("poll should remain valid");
+
+        assert_eq!(normalized.question, "Ship it?");
+        assert_eq!(normalized.answers, vec!["Yes", "No"]);
+        assert!(normalized.allow_multiselect);
+        assert_eq!(normalized.duration_hours, 12);
     }
 }

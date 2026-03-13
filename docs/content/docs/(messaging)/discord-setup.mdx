@@ -136,6 +136,19 @@ require_mention = true
 
 This works nicely for busy channels where you only want direct interactions.
 
+### Quiet mode
+
+Inside Discord you can also toggle the channel's runtime behavior with chat
+commands:
+
+- `/quiet` switches the current conversation into listen-only mode
+- `/active` returns it to normal reply behavior
+- In quiet mode, Spacebot only replies to slash commands, `@mentions`, or
+  replies to one of its messages
+
+Use this when you want the bot present in a busy room without responding to
+general chatter.
+
 ### DM filtering
 
 By default, all DMs are ignored. To allow specific users, add their Discord user IDs.

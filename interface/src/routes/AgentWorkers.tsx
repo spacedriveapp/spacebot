@@ -38,19 +38,6 @@ function normalizeStatus(status: string): string {
 	return "failed";
 }
 
-function statusBadgeVariant(status: string) {
-	switch (status) {
-		case "running":
-			return "amber" as const;
-		case "idle":
-			return "blue" as const;
-		case "failed":
-			return "red" as const;
-		default:
-			return "outline" as const;
-	}
-}
-
 function durationBetween(start: string, end: string | null): string {
 	if (!end) return "";
 	const seconds = Math.floor(
@@ -230,7 +217,7 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 							className={cx(
 								"rounded-full px-2.5 py-0.5 text-tiny font-medium transition-colors",
 								statusFilter === filter
-									? "bg-accent/15 text-accent"
+									? "bg-app-hover text-ink"
 									: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
 							)}
 						>
@@ -314,23 +301,26 @@ function WorkerCard({
 			onClick={onClick}
 			className={cx(
 				"flex w-full flex-col gap-1 border-b border-app-line/30 px-4 py-3 text-left transition-colors",
-				selected ? "bg-app-selected/50" : "",
+				selected ? "bg-app-hover/30" : "",
 			)}
 		>
-			<div className="flex items-start justify-between gap-2">
-				<p className={cx("line-clamp-2 flex-1 text-xs font-medium", selected ? "text-ink" : "text-ink-dull")}>
-					{worker.task}
+			<div className="flex items-center justify-between gap-2">
+				<p className={cx("min-w-0 flex-1 truncate text-xs font-medium", selected ? "text-ink" : "text-ink-dull")}>
+					{worker.task.replace(/^\[opencode]\s*/, "")}
 				</p>
-				<div className="flex items-center gap-1.5">
-					{isInteractive && (
+				<div className="flex shrink-0 items-center gap-1.5 pointer-events-none">
+					{worker.worker_type === "opencode" ? (
+						<Badge variant="outline" size="sm">
+							OpenCode
+						</Badge>
+					) : isInteractive ? (
 						<Badge variant="outline" size="sm">
 							interactive
 						</Badge>
-					)}
+					) : null}
 					<Badge
-						variant={statusBadgeVariant(displayStatus)}
+						variant="outline"
 						size="sm"
-						className={!isLive && worker.status === "done" ? "hover:border-app-line hover:text-ink-dull" : undefined}
 					>
 						{isLive && !isIdle && (
 							<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
@@ -451,33 +441,61 @@ function WorkerDetail({
 						/>
 					)}
 				</div>
-				<div className="flex items-center gap-3 text-tiny text-ink-faint">
-					{detail.channel_name && <span>{detail.channel_name}</span>}
-					{hasOpenCodeEmbed && detail.opencode_port && (
-						<OpenCodeDirectLink
-							port={detail.opencode_port}
-							sessionId={detail.opencode_session_id!}
-							directory={detail.directory}
-						/>
-					)}
-					{isRunning ? (
-						<span>
-							Running for{" "}
-							<LiveDuration
-								startMs={
-									liveWorker?.startedAt ??
-									new Date(detail.started_at).getTime()
-								}
+				<div className="flex items-center justify-between gap-3">
+					<div className="flex items-center gap-3 text-tiny text-ink-faint">
+						{detail.channel_name && <span>{detail.channel_name}</span>}
+						{hasOpenCodeEmbed && detail.opencode_port && (
+							<OpenCodeDirectLink
+								port={detail.opencode_port}
+								sessionId={detail.opencode_session_id!}
+								directory={detail.directory}
 							/>
-						</span>
-					) : isIdle ? (
-						<span className="text-blue-500">Idle — waiting for follow-up</span>
-					) : (
-						duration && <span>{duration}</span>
-					)}
-					{!isLive && <span>{formatTimeAgo(detail.started_at)}</span>}
-					{toolCalls > 0 && (
-						<span>{toolCalls} tool calls</span>
+						)}
+						{isRunning ? (
+							<span>
+								Running for{" "}
+								<LiveDuration
+									startMs={
+										liveWorker?.startedAt ??
+										new Date(detail.started_at).getTime()
+									}
+								/>
+							</span>
+						) : isIdle ? (
+							<span className="text-blue-500">Idle — waiting for follow-up</span>
+						) : (
+							duration && <span>{duration}</span>
+						)}
+						{!isLive && <span>{formatTimeAgo(detail.started_at)}</span>}
+						{toolCalls > 0 && (
+							<span>{toolCalls} tool calls</span>
+						)}
+					</div>
+					{hasOpenCodeEmbed && (
+						<div className="flex items-center gap-1 rounded-full border border-app-line/50 p-0.5">
+							<button
+								onClick={() => setActiveTab("opencode")}
+								className={cx(
+									"rounded-full px-2 py-0.5 text-tiny font-medium transition-colors",
+									activeTab === "opencode"
+										? "bg-app-hover/50 text-ink"
+										: "text-ink-faint hover:text-ink-dull",
+								)}
+							>
+								OpenCode
+							</button>
+							<button
+								onClick={() => setActiveTab("transcript")}
+								className={cx(
+									"rounded-full px-2 py-0.5 text-tiny font-medium transition-colors",
+									activeTab === "transcript"
+										? "bg-app-hover/50 text-ink"
+										: "text-ink-faint hover:text-ink-dull",
+								)}
+							>
+								Transcript
+							</button>
+						</div>
 					)}
 				</div>
 				{/* Live status bar for running workers */}
@@ -493,34 +511,6 @@ function WorkerDetail({
 					</div>
 				)}
 			</div>
-
-			{/* Tab bar (only for OpenCode workers with embed data) */}
-			{hasOpenCodeEmbed && (
-				<div className="flex border-b border-app-line/50">
-					<button
-						onClick={() => setActiveTab("opencode")}
-						className={cx(
-							"px-4 py-2 text-xs font-medium transition-colors",
-							activeTab === "opencode"
-								? "border-b-2 border-accent text-accent"
-								: "text-ink-faint hover:text-ink-dull",
-						)}
-					>
-						OpenCode
-					</button>
-					<button
-						onClick={() => setActiveTab("transcript")}
-						className={cx(
-							"px-4 py-2 text-xs font-medium transition-colors",
-							activeTab === "transcript"
-								? "border-b-2 border-accent text-accent"
-								: "text-ink-faint hover:text-ink-dull",
-						)}
-					>
-						Transcript
-					</button>
-				</div>
-			)}
 
 			{/* Content */}
 			{activeTab === "opencode" && hasOpenCodeEmbed ? (
@@ -885,12 +875,15 @@ function OpenCodeEmbed({
 				style.textContent = cssText;
 				shadow.appendChild(style);
 
-				// Hide the sidebar and mobile sidebar in embedded mode —
-				// we only want the session/chat view.
+				// Hide the sidebar, mobile sidebar, and top bar in embedded
+				// mode — we only want the session/chat view.
 				const overrides = document.createElement("style");
 				overrides.textContent = `
 					[data-component="sidebar-nav-desktop"],
-					[data-component="sidebar-nav-mobile"] { display: none !important; }
+					[data-component="sidebar-nav-mobile"],
+					header:has(#opencode-titlebar-center),
+					[data-session-title] { display: none !important; }
+					main { border: none !important; border-radius: 0 !important; }
 				`;
 				shadow.appendChild(overrides);
 
