@@ -1344,31 +1344,92 @@ fn bootstrap_secrets_store(
     // Try to auto-unlock if encrypted.
     if store.is_encrypted() {
         let keystore = spacebot::secrets::keystore::platform_keystore();
+        let tmpfs_paths = [
+            std::path::Path::new("/run/spacebot/master_key"),
+            std::path::Path::new("/run/secrets/master_key"),
+        ];
 
         // Hosted: check tmpfs-injected key.
-        let tmpfs_key_path = std::path::Path::new("/run/spacebot/master_key");
-        let master_key = if tmpfs_key_path.exists() {
-            std::fs::read(tmpfs_key_path).ok().inspect(|key| {
-                if let Err(error) = std::fs::remove_file(tmpfs_key_path) {
-                    tracing::warn!(%error, "failed to remove tmpfs master key — key may remain accessible");
+        let tmpfs_master_key = tmpfs_paths.iter().find_map(|path| {
+            if !path.exists() {
+                return None;
+            }
+
+            let raw_key = match std::fs::read(path) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "failed to read tmpfs master key");
+                    return None;
                 }
-                if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, key) {
-                    tracing::warn!(%error, "failed to persist master key to OS credential store");
+            };
+
+            // Remove any injected key files after reading.
+            for cleanup_path in tmpfs_paths {
+                if cleanup_path.exists()
+                    && let Err(error) = std::fs::remove_file(cleanup_path)
+                {
+                    tracing::warn!(
+                        %error,
+                        path = %cleanup_path.display(),
+                        "failed to remove tmpfs master key — key may remain accessible"
+                    );
                 }
-            })
-        } else {
+            }
+
+            // Platform currently stores keys as 64-char hex strings. Decode
+            // those to raw bytes before unlock; otherwise treat as raw bytes.
+            if let Ok(text) = std::str::from_utf8(&raw_key) {
+                let trimmed = text.trim();
+                if trimmed.len() == 64 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return match hex::decode(trimmed) {
+                        Ok(decoded) => Some(decoded),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                path = %path.display(),
+                                "failed to decode hex tmpfs master key, falling back to raw bytes"
+                            );
+                            Some(raw_key)
+                        }
+                    };
+                }
+            }
+
+            Some(raw_key)
+        });
+
+        let mut unlocked = false;
+
+        if let Some(key) = tmpfs_master_key {
+            match store.unlock(&key) {
+                Ok(()) => {
+                    unlocked = true;
+                    if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, &key) {
+                        tracing::warn!(%error, "failed to persist master key to OS credential store");
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to unlock secret store with tmpfs key");
+                }
+            }
+        }
+
+        if !unlocked {
             // Try instance-level key first, then fall back to legacy agent keys.
-            keystore
+            let master_key = keystore
                 .load_key(KEYSTORE_INSTANCE_ID)
                 .ok()
                 .flatten()
-                .or_else(|| load_legacy_keystore_key(&instance_dir))
-        };
+                .or_else(|| load_legacy_keystore_key(&instance_dir));
 
-        if let Some(key) = master_key
-            && let Err(error) = store.unlock(&key)
-        {
-            tracing::warn!(%error, "failed to unlock secret store — secrets will be inaccessible");
+            if let Some(key) = master_key
+                && let Err(error) = store.unlock(&key)
+            {
+                tracing::warn!(
+                    %error,
+                    "failed to unlock secret store — secrets will be inaccessible"
+                );
+            }
         }
     }
 
@@ -1475,6 +1536,25 @@ fn has_provider_credentials(
         || spacebot::openai_auth::credentials_path(instance_dir).exists()
 }
 
+fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::api::AgentInfo> {
+    config
+        .resolve_agents()
+        .into_iter()
+        .map(|agent| spacebot::api::AgentInfo {
+            id: agent.id,
+            display_name: agent.display_name,
+            role: agent.role,
+            gradient_start: agent.gradient_start,
+            gradient_end: agent.gradient_end,
+            workspace: agent.workspace,
+            context_window: agent.context_window,
+            max_turns: agent.max_turns,
+            max_concurrent_branches: agent.max_concurrent_branches,
+            max_concurrent_workers: agent.max_concurrent_workers,
+        })
+        .collect()
+}
+
 async fn run(
     config: spacebot::config::Config,
     foreground: bool,
@@ -1518,6 +1598,12 @@ async fn run(
     );
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
+
+    // Keep the secrets API available in setup mode so encrypted stores can be
+    // unlocked before providers/agents are initialized.
+    if let Some(store) = &bootstrapped_store {
+        api_state.set_secrets_store(store.clone());
+    }
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
@@ -1637,6 +1723,7 @@ async fn run(
     api_state.set_agent_links((**agent_links.load()).clone());
     api_state.set_agent_groups(config.groups.clone());
     api_state.set_agent_humans(config.humans.clone());
+    api_state.set_agent_configs(configured_agent_infos(&config));
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;
@@ -2217,9 +2304,10 @@ async fn run(
                 };
 
                 match new_config {
-                    Ok(new_config)
-                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
-                    {
+                    Ok(new_config) => {
+                        api_state.set_agent_configs(configured_agent_infos(&new_config));
+
+                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) {
                         // Refresh in-memory defaults so newly created agents
                         // inherit the latest routing from the updated config.
                         api_state.set_defaults_config(new_config.defaults.clone()).await;
@@ -2296,9 +2384,9 @@ async fn run(
                                 tracing::error!(%error, "failed to create LLM manager with new keys");
                             }
                         }
-                    }
-                    Ok(_) => {
-                        tracing::warn!("config reloaded but still no providers configured");
+                        } else {
+                            tracing::warn!("config reloaded but still no providers configured");
+                        }
                     }
                     Err(error) => {
                         tracing::error!(%error, "failed to reload config after provider setup");

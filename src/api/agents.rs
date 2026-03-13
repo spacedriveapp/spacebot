@@ -1472,6 +1472,16 @@ pub(super) async fn instance_overview(
         let agent_id = agent_config.id.clone();
 
         let Some(pool) = pools.get(&agent_id) else {
+            agents.push(AgentSummary {
+                id: agent_id,
+                channel_count: 0,
+                memory_total: 0,
+                cron_job_count: 0,
+                activity_sparkline: vec![0; 14],
+                last_activity_at: None,
+                last_bulletin_at: None,
+                profile: None,
+            });
             continue;
         };
 
