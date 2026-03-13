@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState } from "@/api/client";
+import { api, type GlobalSettingsResponse, type McpServerStatusInfo, type SecretCategory, type SecretListItem, type StoreState, type UpdateStatus, type WarmupStatusEntry } from "@/api/client";
 import { Badge, Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
 import { ModelSelect } from "@/components/ModelSelect";
+import { useSetupReadiness } from "@/components/SetupReadiness";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
@@ -14,7 +15,7 @@ import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
 import { Markdown } from "@/components/Markdown";
 import { useSetTopBar } from "@/components/TopBar";
 
-type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file" | "changelog";
+type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "system-health" | "server" | "opencode" | "worker-logs" | "updates" | "config-file" | "changelog";
 
 const SECTIONS = [
 	{
@@ -40,6 +41,12 @@ const SECTIONS = [
 		label: "Secrets",
 		group: "general" as const,
 		description: "Encrypted secret storage",
+	},
+	{
+		id: "system-health" as const,
+		label: "System Health",
+		group: "system" as const,
+		description: "Warmup and MCP runtime readiness",
 	},
 	{
 		id: "server" as const,
@@ -343,7 +350,8 @@ export function Settings() {
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			setMessage({ text: `Failed: ${errorMessage}`, type: "error" });
 		},
 	});
 
@@ -366,7 +374,8 @@ export function Settings() {
 			}
 		},
 		onError: (error) => {
-			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+			const errorMessage = error instanceof Error ? error.message : String(error);
+			setMessage({ text: `Failed: ${errorMessage}`, type: "error" });
 		},
 	});
 
@@ -712,6 +721,8 @@ export function Settings() {
 						<ApiKeysSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "secrets" ? (
 						<SecretsSection />
+					) : activeSection === "system-health" ? (
+						<SystemHealthSection />
 					) : activeSection === "server" ? (
 						<ServerSection settings={globalSettings} isLoading={globalSettingsLoading} />
 					) : activeSection === "opencode" ? (
@@ -1620,6 +1631,398 @@ function SecretsSection() {
 					</DialogFooter>
 				</DialogContent>
 			</Dialog>
+		</div>
+	);
+}
+
+function warmupBadgeVariant(state: WarmupStatusEntry["status"]["state"]) {
+	switch (state) {
+		case "warm":
+			return "green";
+		case "warming":
+			return "blue";
+		case "degraded":
+			return "red";
+		case "cold":
+		default:
+			return "amber";
+	}
+}
+
+function formatWarmupDetails(entry: WarmupStatusEntry) {
+	const details: string[] = [];
+	if (entry.status.embedding_ready) {
+		details.push("embeddings ready");
+	}
+	if (entry.status.bulletin_age_secs != null) {
+		details.push(`bulletin age ${entry.status.bulletin_age_secs}s`);
+	}
+	if (entry.status.last_error) {
+		details.push(sanitizeRuntimeError(entry.status.last_error));
+	}
+	if (details.length > 0) {
+		return details;
+	}
+	return [entry.status.state === "warm" ? "Warmup is healthy." : "Warmup has not completed yet."];
+}
+
+function mcpBadgeVariant(server: McpServerStatusInfo) {
+	if (server.state === "connected") return "green";
+	if (server.state === "connecting") return "blue";
+	if (server.state.startsWith("failed")) return "red";
+	return "amber";
+}
+
+function needsMcpReconnect(server: McpServerStatusInfo) {
+	return server.state === "disconnected" || server.state.startsWith("failed");
+}
+
+function describeQueryError(error: unknown) {
+	return error instanceof Error ? error.message : String(error);
+}
+
+function sanitizeRuntimeError(errorText: string) {
+	const normalized = errorText.toLowerCase();
+	let code = "internal";
+	if (normalized.includes("timeout") || normalized.includes("deadline")) {
+		code = "timeout";
+	} else if (
+		normalized.includes("unauthorized") ||
+		normalized.includes("forbidden") ||
+		normalized.includes("auth") ||
+		normalized.includes("401") ||
+		normalized.includes("403")
+	) {
+		code = "auth";
+	} else if (normalized.includes("not found") || normalized.includes("404")) {
+		code = "missing_dependency";
+	} else if (
+		normalized.includes("unavailable") ||
+		normalized.includes("connection refused") ||
+		normalized.includes("econnrefused") ||
+		normalized.includes("econnreset") ||
+		normalized.includes("network") ||
+		normalized.includes("503")
+	) {
+		code = "unavailable";
+	} else if (normalized.includes("rate limit") || normalized.includes("429")) {
+		code = "rate_limited";
+	}
+
+	return `Error occurred (code: ${code})`;
+}
+
+function SystemHealthSection() {
+	const queryClient = useQueryClient();
+	const readiness = useSetupReadiness();
+	const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
+	const [pendingWarmupTargets, setPendingWarmupTargets] = useState<Set<string>>(() => new Set());
+	const [pendingReconnectTargets, setPendingReconnectTargets] = useState<Set<string>>(() => new Set());
+
+	const {
+		data: warmupData,
+		isLoading: warmupLoading,
+		isError: warmupError,
+		error: warmupFetchError,
+	} = useQuery({
+		queryKey: ["warmup-status"],
+		queryFn: api.warmupStatus,
+		staleTime: 5_000,
+	});
+
+	const {
+		data: mcpData,
+		isLoading: mcpLoading,
+		isError: mcpError,
+		error: mcpFetchError,
+	} = useQuery({
+		queryKey: ["mcp-status"],
+		queryFn: api.mcpStatus,
+		staleTime: 5_000,
+	});
+
+	const triggerWarmupMutation = useMutation({
+		mutationFn: (params?: {agentId?: string; force?: boolean}) => api.triggerWarmup(params),
+		onMutate: (params) => {
+			const targetId = params?.agentId ?? "__all__";
+			setPendingWarmupTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.add(targetId);
+				return nextTargets;
+			});
+		},
+		onSuccess: (result) => {
+			setMessage({
+				text: result.accepted_agents.length > 0
+					? `Warmup triggered for ${result.accepted_agents.join(", ")}.`
+					: "Warmup trigger accepted.",
+				type: "success",
+			});
+			queryClient.invalidateQueries({ queryKey: ["warmup-status"] });
+			queryClient.invalidateQueries({ queryKey: ["providers"] });
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+		onSettled: (_result, _error, params) => {
+			const targetId = params?.agentId ?? "__all__";
+			setPendingWarmupTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.delete(targetId);
+				return nextTargets;
+			});
+		},
+	});
+
+	const reconnectMcpMutation = useMutation({
+		mutationFn: (params: {agentId: string; serverName: string}) => api.reconnectMcpServer(params),
+		onMutate: (params) => {
+			const targetId = `${params.agentId}:${params.serverName}`;
+			setPendingReconnectTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.add(targetId);
+				return nextTargets;
+			});
+		},
+		onSuccess: (result) => {
+			setMessage({
+				text: `Server '${result.server_name}' reconnected for agent '${result.agent_id}'.`,
+				type: "success",
+			});
+			queryClient.invalidateQueries({ queryKey: ["mcp-status"] });
+		},
+		onError: (error) => {
+			setMessage({ text: `Failed: ${error.message}`, type: "error" });
+		},
+		onSettled: (_result, _error, params) => {
+			const targetId = `${params.agentId}:${params.serverName}`;
+			setPendingReconnectTargets((currentTargets) => {
+				const nextTargets = new Set(currentTargets);
+				nextTargets.delete(targetId);
+				return nextTargets;
+			});
+		},
+	});
+
+	const warmupStatuses = warmupData?.statuses ?? [];
+	const enabledMcpServers = (mcpData ?? []).flatMap((agentStatus) =>
+		agentStatus.servers
+			.filter((server) => server.enabled)
+			.map((server) => ({agent_id: agentStatus.agent_id, ...server})),
+	);
+	const actionableCount = readiness.blockerCount + readiness.warningCount;
+	const warmAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "warm").length;
+	const degradedAgentsCount = warmupStatuses.filter((entry) => entry.status.state === "degraded").length;
+	const connectedMcpCount = enabledMcpServers.filter((server) => server.state === "connected").length;
+	const disconnectedMcpCount = enabledMcpServers.filter((server) => needsMcpReconnect(server)).length;
+
+	return (
+		<div className="mx-auto max-w-3xl px-6 py-6">
+			<div className="mb-6">
+				<h2 className="font-plex text-sm font-semibold text-ink">System Health</h2>
+				<p className="mt-1 text-sm text-ink-dull">
+					Runtime readiness for warmup and MCP, using the same control-plane signals surfaced on the overview page.
+				</p>
+			</div>
+
+			<div className="mb-6 rounded-lg border border-app-line bg-app-box p-4">
+				<div className="flex items-center justify-between gap-4">
+					<div>
+						<p className="text-sm font-medium text-ink">
+							{actionableCount > 0
+								? `${actionableCount} setup or runtime issue${actionableCount === 1 ? "" : "s"} need attention`
+								: "No blocking setup issues detected"}
+						</p>
+						<p className="mt-1 text-sm text-ink-dull">
+							Providers, secrets, messaging, warmup, and MCP are all evaluated from live control-plane state.
+						</p>
+					</div>
+							<Button
+								onClick={() => triggerWarmupMutation.mutate({ force: true })}
+								loading={pendingWarmupTargets.has("__all__") && triggerWarmupMutation.isPending}
+								variant="outline"
+								size="sm"
+							>
+						Trigger all warmups
+					</Button>
+				</div>
+				<div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Actionable</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{actionableCount}</p>
+						<p className="text-sm text-ink-dull">
+							{readiness.blockerCount} blocker{readiness.blockerCount === 1 ? "" : "s"}, {readiness.warningCount} warning{readiness.warningCount === 1 ? "" : "s"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Warm Agents</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{warmAgentsCount}</p>
+						<p className="text-sm text-ink-dull">
+							{degradedAgentsCount > 0
+								? `${degradedAgentsCount} degraded`
+								: warmupStatuses.length > 0
+									? "No degraded agents"
+									: "No warmup data yet"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">MCP Connected</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{connectedMcpCount}</p>
+						<p className="text-sm text-ink-dull">
+							{enabledMcpServers.length > 0
+								? `${enabledMcpServers.length} enabled server${enabledMcpServers.length === 1 ? "" : "s"}`
+								: "No enabled servers"}
+						</p>
+					</div>
+					<div className="rounded-md border border-app-line/70 bg-app-darkerBox/60 px-3 py-3">
+						<p className="text-tiny uppercase tracking-[0.14em] text-ink-duller">Needs Reconnect</p>
+						<p className="mt-1 text-lg font-semibold text-ink">{disconnectedMcpCount}</p>
+						<p className="text-sm text-ink-dull">
+							{disconnectedMcpCount > 0 ? "Reconnect from this panel" : "All enabled servers are live"}
+						</p>
+					</div>
+				</div>
+			</div>
+
+			<div className="flex flex-col gap-6">
+				<div>
+					<div className="mb-3">
+						<h3 className="text-sm font-medium text-ink">Warmup</h3>
+						<p className="mt-1 text-sm text-ink-dull">
+							Per-agent readiness for embeddings and bulletin-backed startup warmup.
+						</p>
+					</div>
+
+						{warmupError ? (
+							<div className="rounded-lg border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-300">
+								Failed to load warmup status: {describeQueryError(warmupFetchError)}
+							</div>
+						) : warmupLoading ? (
+							<div className="flex items-center gap-2 text-ink-dull">
+								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+								Loading warmup status...
+						</div>
+					) : warmupStatuses.length > 0 ? (
+						<div className="flex flex-col gap-3">
+							{warmupStatuses.map((entry) => {
+								const details = formatWarmupDetails(entry);
+								return (
+									<div
+										key={entry.agent_id}
+										className="rounded-lg border border-app-line bg-app-box p-4"
+									>
+										<div className="flex items-start justify-between gap-4">
+											<div className="min-w-0">
+												<div className="flex items-center gap-2">
+													<h4 className="text-sm font-medium text-ink">{entry.agent_id}</h4>
+													<Badge variant={warmupBadgeVariant(entry.status.state)} size="sm">
+														{entry.status.state}
+													</Badge>
+												</div>
+													{details.length > 0 && (
+														<div className="mt-2 flex flex-col gap-1 text-sm text-ink-dull">
+															{details.map((detail, index) => (
+																<p key={index}>{detail}</p>
+															))}
+														</div>
+													)}
+												</div>
+													<Button
+														onClick={() => triggerWarmupMutation.mutate({ agentId: entry.agent_id, force: true })}
+														loading={pendingWarmupTargets.has(entry.agent_id) && triggerWarmupMutation.isPending}
+														variant="outline"
+														size="sm"
+													>
+												Refresh
+											</Button>
+										</div>
+									</div>
+								);
+							})}
+						</div>
+					) : (
+						<div className="rounded-lg border border-app-line border-dashed bg-app-box/50 p-6 text-sm text-ink-dull">
+							No agents are currently reporting warmup state.
+						</div>
+					)}
+				</div>
+
+				<div>
+					<div className="mb-3">
+						<h3 className="text-sm font-medium text-ink">MCP Connections</h3>
+						<p className="mt-1 text-sm text-ink-dull">
+							Live status for enabled MCP servers across all agents.
+						</p>
+					</div>
+
+						{mcpError ? (
+							<div className="rounded-lg border border-red-500/30 bg-red-500/10 p-6 text-sm text-red-300">
+								Failed to load MCP status: {describeQueryError(mcpFetchError)}
+							</div>
+						) : mcpLoading ? (
+							<div className="flex items-center gap-2 text-ink-dull">
+								<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+								Loading MCP status...
+						</div>
+					) : enabledMcpServers.length > 0 ? (
+						<div className="flex flex-col gap-3">
+							{enabledMcpServers.map((server) => (
+								<div
+									key={`${server.agent_id}:${server.name}`}
+									className="rounded-lg border border-app-line bg-app-box p-4"
+								>
+									<div className="flex items-start justify-between gap-4">
+										<div className="min-w-0">
+											<div className="flex items-center gap-2">
+												<h4 className="text-sm font-medium text-ink">{server.name}</h4>
+												<Badge variant={mcpBadgeVariant(server)} size="sm">
+													{server.state}
+												</Badge>
+											</div>
+											<p className="mt-1 text-sm text-ink-dull">
+												Agent {server.agent_id} via {server.transport}
+											</p>
+											{needsMcpReconnect(server) && (
+												<p className="mt-1 text-sm text-ink-dull">
+													State: {server.state}
+												</p>
+											)}
+										</div>
+											{needsMcpReconnect(server) && (
+													<Button
+														onClick={() => reconnectMcpMutation.mutate({
+															agentId: server.agent_id,
+															serverName: server.name,
+														})}
+														loading={pendingReconnectTargets.has(`${server.agent_id}:${server.name}`) && reconnectMcpMutation.isPending}
+														variant="outline"
+														size="sm"
+													>
+												Reconnect
+											</Button>
+										)}
+									</div>
+								</div>
+							))}
+						</div>
+					) : (
+						<div className="rounded-lg border border-app-line border-dashed bg-app-box/50 p-6 text-sm text-ink-dull">
+							No enabled MCP servers are configured.
+						</div>
+					)}
+				</div>
+			</div>
+
+			{message && (
+				<div
+					className={`mt-4 rounded-md border px-3 py-2 text-sm ${message.type === "success"
+							? "border-green-500/20 bg-green-500/10 text-green-400"
+							: "border-red-500/20 bg-red-500/10 text-red-400"
+						}`}
+				>
+					{message.text}
+				</div>
+			)}
 		</div>
 	);
 }

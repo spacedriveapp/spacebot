@@ -428,8 +428,109 @@ fn parse_explicit_email_target(raw: &str) -> Option<crate::messaging::target::Br
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_explicit_email_target, parse_explicit_signal_prefix, parse_implicit_signal_shorthand,
+        SendMessageArgs, SendMessageTool, parse_explicit_email_target,
+        parse_explicit_signal_prefix, parse_implicit_signal_shorthand,
     };
+    use crate::conversation::ChannelStore;
+    use crate::conversation::history::ConversationLogger;
+    use crate::messaging::MessagingManager;
+    use crate::messaging::traits::{InboundStream, Messaging};
+    use crate::{OutboundResponse, StatusUpdate};
+    use rig::tool::Tool as _;
+    use sqlx::SqlitePool;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Debug, Clone)]
+    struct BroadcastRecord {
+        target: String,
+        response: OutboundResponse,
+    }
+
+    #[derive(Debug)]
+    struct TestSignalAdapter {
+        name: String,
+        broadcasts: Mutex<Vec<BroadcastRecord>>,
+    }
+
+    impl TestSignalAdapter {
+        fn new(name: impl Into<String>) -> Self {
+            Self {
+                name: name.into(),
+                broadcasts: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn broadcasts(&self) -> Vec<BroadcastRecord> {
+            self.broadcasts
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .clone()
+        }
+    }
+
+    impl Messaging for TestSignalAdapter {
+        fn name(&self) -> &str {
+            &self.name
+        }
+
+        async fn start(&self) -> crate::error::Result<InboundStream> {
+            Ok(Box::pin(tokio_stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _message: &crate::InboundMessage,
+            _response: OutboundResponse,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            _message: &crate::InboundMessage,
+            _status: StatusUpdate,
+        ) -> crate::error::Result<()> {
+            Ok(())
+        }
+
+        async fn broadcast(
+            &self,
+            target: &str,
+            response: OutboundResponse,
+        ) -> crate::error::Result<()> {
+            self.broadcasts
+                .lock()
+                .expect("broadcast mutex poisoned")
+                .push(BroadcastRecord {
+                    target: target.to_string(),
+                    response,
+                });
+            Ok(())
+        }
+
+        async fn health_check(&self) -> crate::error::Result<()> {
+            Ok(())
+        }
+    }
+
+    async fn test_send_message_tool(
+        messaging_manager: Arc<MessagingManager>,
+        current_adapter: Option<String>,
+    ) -> SendMessageTool {
+        let pool = SqlitePool::connect("sqlite::memory:")
+            .await
+            .expect("sqlite memory pool");
+        let channel_store = ChannelStore::new(pool.clone());
+        let conversation_logger = ConversationLogger::new(pool);
+
+        SendMessageTool::new(
+            messaging_manager,
+            channel_store,
+            conversation_logger,
+            "Spacebot".to_string(),
+            current_adapter,
+        )
+    }
 
     #[test]
     fn parses_prefixed_email_target() {
@@ -619,5 +720,35 @@ mod tests {
         let error = parse_implicit_signal_shorthand("group:", "signal:default")
             .expect_err("should be validation error");
         assert!(error.contains("requires an ID"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn explicit_signal_prefix_uses_named_current_adapter() {
+        let messaging_manager = Arc::new(MessagingManager::new());
+        let signal_adapter = Arc::new(TestSignalAdapter::new("signal:gvoice1"));
+        messaging_manager
+            .register_shared(signal_adapter.clone())
+            .await;
+
+        let tool =
+            test_send_message_tool(messaging_manager, Some("signal:gvoice1".to_string())).await;
+
+        let output = tool
+            .call(SendMessageArgs {
+                target: "signal:+1234567890".to_string(),
+                message: "hello".to_string(),
+            })
+            .await
+            .expect("send message succeeds");
+
+        assert_eq!(output.platform, "signal:gvoice1");
+        assert_eq!(output.target, "+1234567890");
+        let broadcasts = signal_adapter.broadcasts();
+        assert_eq!(broadcasts.len(), 1);
+        assert_eq!(broadcasts[0].target, "+1234567890");
+        assert!(matches!(
+            &broadcasts[0].response,
+            OutboundResponse::Text(message) if message == "hello"
+        ));
     }
 }
