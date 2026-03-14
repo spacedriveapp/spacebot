@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -82,6 +82,15 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 
 export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen = false, onCloseMobile }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
+
+	useEffect(() => {
+		if (!isMobile || !mobileOpen) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") onCloseMobile?.();
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+	}, [isMobile, mobileOpen, onCloseMobile]);
 
 	const isDrawerHidden = isMobile && !mobileOpen;
 
@@ -205,6 +214,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 				{hasProvider && agents[0] && (
 					<div className="border-t border-sidebar-line p-2">
 						<button
+							type="button"
 							onClick={() => setCreateOpen(true)}
 							className="w-full rounded-md bg-sidebar-selected px-3 py-2 text-sm text-sidebar-ink hover:bg-sidebar-selected/80"
 						>
@@ -265,6 +275,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 				</DndContext>
 				{hasProvider && (
 					<button
+					type="button"
 						onClick={() => setCreateOpen(true)}
 						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
 						title="New Agent"

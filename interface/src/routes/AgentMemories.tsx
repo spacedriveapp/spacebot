@@ -78,8 +78,8 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [sort, setSort] = useState<MemorySort>("recent");
 	const [typeFilter, setTypeFilter] = useState<MemoryType | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(false);
 	const isMobile = useIsMobile();
+	const [chatOpen, setChatOpen] = useState(!isMobile);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -194,6 +194,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					size="icon"
 					className={chatOpen ? "bg-app-selected text-ink" : ""}
 					title="Toggle cortex chat"
+					aria-label="Toggle cortex chat"
 				>
 					<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
 				</Button>
@@ -254,7 +255,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 										<TypeBadge type={memory.memory_type} />
 										<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
 									</div>
-									<p id={`memory-content-${memory.id}`} role="region" className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
+									<p id={`memory-content-${memory.id}`} role="region" aria-label="Memory content" className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
                                     <button
                                         type="button"
                                         aria-expanded={expandedId === memory.id}

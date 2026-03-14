@@ -8,6 +8,7 @@ import {
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
+import { useIsMobile } from "@/hooks/useViewport";
 import { formatTimeAgo } from "@/lib/format";
 import { IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -69,11 +70,12 @@ interface AgentCortexProps {
 }
 
 export function AgentCortex({ agentId }: AgentCortexProps) {
+	const isMobile = useIsMobile();
 	const [typeFilter, setTypeFilter] = useState<CortexEventType | null>(null);
 	const [groupFilter, setGroupFilter] = useState<string | null>(null);
 	const [offset, setOffset] = useState(0);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(false);
+	const [chatOpen, setChatOpen] = useState(!isMobile);
 
 	// Determine actual event_type filter from group or individual selection
 	// For groups, we pass no event_type and filter client-side (API only supports single type)
@@ -177,6 +179,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 							size="icon"
 							className={chatOpen ? "bg-app-selected text-ink" : ""}
 							title="Toggle cortex chat"
+						aria-label="Toggle cortex chat"
 						>
 							<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
 						</Button>
@@ -264,7 +267,7 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 			showSecondary={chatOpen}
 			onCloseSecondary={() => setChatOpen(false)}
 			secondaryTitle="Cortex Chat"
-			secondaryWidthClassName="w-[400px]"
+			secondaryWidthClassName="w-[min(400px,40%)]"
 		/>
 	);
 }

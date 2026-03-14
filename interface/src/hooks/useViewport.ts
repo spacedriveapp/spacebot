@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 
-const MOBILE_MAX_WIDTH = 649;
+const MOBILE_MAX_WIDTH = 639;
 const TABLET_MAX_WIDTH = 867;
 
 function getViewportWidth(): number {

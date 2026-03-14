@@ -17,7 +17,7 @@ export function ResponsiveSplitPane({
 	showSecondary,
 	onCloseSecondary,
 	secondaryTitle = "Details",
-	secondaryWidthClassName = "w-[400px]",
+	secondaryWidthClassName = "w-[min(400px,40%)]",
 }: ResponsiveSplitPaneProps) {
 	const isMobile = useIsMobile();
 

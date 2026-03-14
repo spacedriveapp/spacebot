@@ -27,7 +27,8 @@ export function AgentTabs({ agentId }: { agentId: string }) {
 		if (!container) return;
 		const active = container.querySelector<HTMLElement>("[data-active='true']");
 		if (!active) return;
-		active.scrollIntoView({ block: "nearest", inline: "center", behavior: "smooth" });
+		const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+		active.scrollIntoView({ block: "nearest", inline: "center", behavior: reducedMotion ? "instant" : "smooth" });
 	}, [pathname, agentId]);
 
 	return (
