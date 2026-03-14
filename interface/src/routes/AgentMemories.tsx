@@ -10,6 +10,7 @@ import {
 	type MemoryType,
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
+import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
 import { MemoryGraph } from "@/components/MemoryGraph";
 import {
 	Button,
@@ -22,6 +23,7 @@ import {
 	FilterButton,
 } from "@/ui";
 import { formatTimeAgo } from "@/lib/format";
+import { useViewport } from "@/hooks/useViewport";
 import { ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -77,7 +79,14 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [sort, setSort] = useState<MemorySort>("recent");
 	const [typeFilter, setTypeFilter] = useState<MemoryType | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(true);
+	const { isMobile, isTablet } = useViewport();
+	const isSinglePane = isMobile || isTablet;
+	const [chatOpen, setChatOpen] = useState(!isSinglePane);
+
+	// Sync chat pane default when viewport changes between single/multi-pane
+	useEffect(() => {
+		setChatOpen(!isSinglePane);
+	}, [isSinglePane]);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -143,8 +152,9 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	}, [debouncedQuery, sort, typeFilter]);
 
 	return (
-		<div className="flex h-full">
-			<div className="flex flex-1 flex-col overflow-hidden">
+		<ResponsiveSplitPane
+			primary={
+				<div className="flex h-full flex-col overflow-hidden">
 			{/* Toolbar */}
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				{/* Search */}
@@ -192,6 +202,8 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					size="icon"
 					className={chatOpen ? "bg-app-selected text-ink" : ""}
 					title="Toggle cortex chat"
+					aria-label="Toggle cortex chat"
+					aria-pressed={chatOpen}
 				>
 					<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
 				</Button>
@@ -225,9 +237,80 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 
 			{viewMode === "graph" ? (
 				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
+			) : isSinglePane ? (
+				isLoading ? (
+					<div className="flex flex-1 items-center justify-center">
+						<div className="flex items-center gap-2 text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							{isSearching ? "Searching..." : "Loading memories..."}
+						</div>
+					</div>
+				) : isError ? (
+					<div className="flex flex-1 items-center justify-center">
+						<p className="text-sm text-red-400">Failed to load memories</p>
+					</div>
+				) : memories.length === 0 ? (
+					<div className="flex flex-1 items-center justify-center">
+						<p className="text-sm text-ink-faint">
+							{isSearching ? "No results found" : "No memories yet"}
+						</p>
+					</div>
+				) : (
+					<div ref={parentRef} className="flex-1 overflow-y-auto">
+						<div
+							className="relative w-full px-4 py-3"
+							style={{ height: virtualizer.getTotalSize() }}
+						>
+							{virtualizer.getVirtualItems().map((virtualRow) => {
+								const memory = memories[virtualRow.index];
+								if (!memory) return null;
+								const score = scores?.[memory.id];
+								return (
+									<div
+										key={memory.id}
+										data-index={virtualRow.index}
+										ref={virtualizer.measureElement}
+										className="absolute left-0 top-0 w-full px-4 pb-2"
+										style={{ transform: `translateY(${virtualRow.start}px)` }}
+									>
+										<div className="rounded-lg border border-app-line/50 bg-app-darkBox/20 px-3 py-2">
+											<div className="mb-1 flex items-center justify-between gap-2">
+												<TypeBadge type={memory.memory_type} />
+												<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
+											</div>
+											<p id={`memory-content-${memory.id}`} className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
+											<button
+												type="button"
+												aria-expanded={expandedId === memory.id}
+												aria-controls={`memory-content-${memory.id}`}
+												onClick={() => setExpandedId(expandedId === memory.id ? null : memory.id)}
+												className="mt-1 text-tiny text-accent hover:text-accent/80"
+											>
+												{expandedId === memory.id ? "Less" : "More"}
+											</button>
+											{expandedId === memory.id && (
+												<div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-tiny text-ink-faint">
+													<span>ID: {memory.id}</span>
+													<span>Accessed: {memory.access_count}x</span>
+													<span>Last accessed: {formatTimeAgo(memory.last_accessed_at)}</span>
+													<span>Updated: {formatTimeAgo(memory.updated_at)}</span>
+													{memory.channel_id && <span>Channel: {memory.channel_id}</span>}
+													{score !== undefined && <span>Score: {score.toFixed(3)}</span>}
+												</div>
+											)}
+											<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
+												<span className="truncate">{memory.source ?? "-"}</span>
+												<span>{memory.importance.toFixed(2)}</span>
+											</div>
+										</div>
+									</div>
+								);
+							})}
+						</div>
+					</div>
+				)
 			) : (
 				<>
-					{/* Table header */}
 					<div className="grid grid-cols-[80px_1fr_100px_120px_100px] gap-3 border-b border-app-line/50 px-6 py-2 text-tiny font-medium uppercase tracking-wider text-ink-faint">
 						<span>Type</span>
 						<span>{isSearching ? "Content / Score" : "Content"}</span>
@@ -236,7 +319,6 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 						<span>Created</span>
 					</div>
 
-					{/* Virtualized rows */}
 					{isLoading ? (
 						<div className="flex flex-1 items-center justify-center">
 							<div className="flex items-center gap-2 text-ink-dull">
@@ -274,11 +356,13 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											className="absolute left-0 top-0 w-full"
 											style={{ transform: `translateY(${virtualRow.start}px)` }}
 										>
-										<Button
-											onClick={() => setExpandedId(isExpanded ? null : memory.id)}
-											variant="ghost"
-											className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
-										>
+											<Button
+												onClick={() => setExpandedId(isExpanded ? null : memory.id)}
+												variant="ghost"
+										aria-expanded={isExpanded}
+										aria-controls={`details-${memory.id}`}
+												className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
+											>
 												<TypeBadge type={memory.memory_type} />
 												<div className="min-w-0">
 													<p className="truncate text-sm text-ink-dull">
@@ -299,7 +383,6 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 												</span>
 											</Button>
 
-											{/* Expanded detail */}
 											<AnimatePresence>
 												{isExpanded && (
 													<motion.div
@@ -307,7 +390,8 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 														animate={{ height: "auto", opacity: 1 }}
 														exit={{ height: 0, opacity: 0 }}
 														transition={{ type: "spring", stiffness: 500, damping: 35 }}
-														className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
+														id={`details-${memory.id}`}
+																className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
 													>
 														<div className="py-4">
 															<p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
@@ -334,27 +418,17 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					)}
 				</>
 			)}
-			</div>
-
-			{/* Cortex chat panel */}
-			<AnimatePresence>
-				{chatOpen && (
-					<motion.div
-						initial={{ width: 0, opacity: 0 }}
-						animate={{ width: 400, opacity: 1 }}
-						exit={{ width: 0, opacity: 0 }}
-						transition={{ type: "spring", stiffness: 400, damping: 30 }}
-						className="flex-shrink-0 overflow-hidden border-l border-app-line/50"
-					>
-						<div className="h-full w-[400px]">
-							<CortexChatPanel
-								agentId={agentId}
-								onClose={() => setChatOpen(false)}
-							/>
-						</div>
-					</motion.div>
-				)}
-			</AnimatePresence>
-		</div>
+				</div>
+			}
+			secondary={
+				<CortexChatPanel
+					agentId={agentId}
+					onClose={() => setChatOpen(false)}
+				/>
+			}
+			showSecondary={chatOpen}
+			onCloseSecondary={() => setChatOpen(false)}
+			secondaryTitle="Cortex Chat"
+		/>
 	);
 }

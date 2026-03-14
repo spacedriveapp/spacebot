@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -21,13 +21,16 @@ import { CSS } from "@dnd-kit/utilities";
 import { api } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { DashboardSquare01Icon, Settings01Icon, Cancel01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
+	isMobile?: boolean;
+	mobileOpen?: boolean;
+	onCloseMobile?: () => void;
 }
 
 interface SortableAgentItemProps {
@@ -52,7 +55,7 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 		transform: CSS.Transform.toString(transform),
 		transition,
 		opacity: isDragging ? 0.5 : 1,
-		cursor: isDragging ? 'grabbing' : 'grab',
+		cursor: isDragging ? "grabbing" : "grab",
 	};
 
 	return (
@@ -61,7 +64,7 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 				to="/agents/$agentId"
 				params={{ agentId }}
 				className="flex h-8 w-8 items-center justify-center"
-				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
+				style={{ pointerEvents: isDragging ? "none" : "auto" }}
 				title={displayName ?? agentId}
 			>
 				<ProfileAvatar
@@ -77,25 +80,72 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 	);
 }
 
-export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
+export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen = false, onCloseMobile }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
+	const navRef = useRef<HTMLElement>(null);
+	const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+	// Focus close button when drawer opens
+	useEffect(() => {
+		if (isMobile && mobileOpen) {
+			closeButtonRef.current?.focus();
+		}
+	}, [isMobile, mobileOpen]);
+
+	// Reset createOpen when drawer closes
+	useEffect(() => {
+		if (!mobileOpen) setCreateOpen(false);
+	}, [mobileOpen]);
+
+	// Escape key + Tab focus trap (disabled while CreateAgentDialog is open)
+	useEffect(() => {
+		if (!isMobile || !mobileOpen || createOpen) return;
+		const onKeyDown = (e: KeyboardEvent) => {
+			if (e.key === "Escape") {
+				onCloseMobile?.();
+				return;
+			}
+			if (e.key === "Tab") {
+				const nav = navRef.current;
+				if (!nav) return;
+				const focusable = Array.from(
+					nav.querySelectorAll<HTMLElement>(
+						'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+					),
+				);
+				const first = focusable[0];
+				const last = focusable[focusable.length - 1];
+				if (!e.shiftKey && document.activeElement === last) {
+					e.preventDefault();
+					first?.focus();
+				} else if (e.shiftKey && document.activeElement === first) {
+					e.preventDefault();
+					last?.focus();
+				}
+			}
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+	}, [isMobile, mobileOpen, onCloseMobile, createOpen]);
+
+	const isDrawerHidden = isMobile && !mobileOpen;
 
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,
-		refetchInterval: 30_000,
+		enabled: !isDrawerHidden,
+		refetchInterval: isDrawerHidden ? false : 30_000,
 	});
 
 	const { data: providersData } = useQuery({
 		queryKey: ["providers"],
 		queryFn: api.providers,
+		enabled: !isDrawerHidden,
 		staleTime: 10_000,
 	});
 
 	const hasProvider = providersData?.has_any ?? false;
-
 	const agents = agentsData?.agents ?? [];
-
 	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
 	const agentDisplayNames = useMemo(() => {
 		const map: Record<string, string | undefined> = {};
@@ -122,7 +172,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 		}),
 		useSensor(KeyboardSensor, {
 			coordinateGetter: sortableKeyboardCoordinates,
-		})
+		}),
 	);
 
 	const handleDragEnd = (event: DragEndEvent) => {
@@ -134,9 +184,91 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 		}
 	};
 
+	if (isMobile) {
+		if (!mobileOpen) return null;
+		return (
+			<>
+				<div className="fixed inset-0 z-40 bg-black/40" onClick={onCloseMobile} />
+				<nav ref={navRef} role="dialog" aria-modal="true" aria-label="Navigation" className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r border-sidebar-line bg-sidebar">
+					<div className="flex h-12 items-center justify-between border-b border-sidebar-line px-3">
+						<span className="font-plex text-sm font-medium text-sidebar-ink">Navigation</span>
+						<button
+							ref={closeButtonRef}
+							type="button"
+							onClick={onCloseMobile}
+							aria-label="Close navigation"
+							className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkDull hover:bg-sidebar-selected/50 hover:text-sidebar-ink"
+						>
+							<HugeiconsIcon icon={Cancel01Icon} className="h-4 w-4" />
+						</button>
+					</div>
+					<div className="flex flex-col gap-1 px-2 py-2">
+						<Link
+							to="/"
+							onClick={onCloseMobile}
+							className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${isOverview ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"}`}
+						>
+							<HugeiconsIcon icon={DashboardSquare01Icon} className="h-4 w-4" />
+							Overview
+						</Link>
+						<Link
+							to="/settings"
+							onClick={onCloseMobile}
+							className={`flex items-center gap-2 rounded-md px-3 py-2 text-sm ${isSettings ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"}`}
+						>
+							<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
+							Settings
+						</Link>
+					</div>
+					<div className="mx-3 my-1 h-px bg-sidebar-line" />
+					<div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+						<div className="mb-2 px-1 text-tiny uppercase tracking-wider text-sidebar-inkFaint">Agents</div>
+						<div className="flex flex-col gap-1">
+							{agentOrder.map((agentId) => {
+								const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
+								return (
+									<Link
+										key={agentId}
+										to="/agents/$agentId"
+										params={{ agentId }}
+										onClick={onCloseMobile}
+										className={`flex items-center gap-2 rounded-md px-2 py-1.5 ${isActive ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"}`}
+									>
+										<ProfileAvatar
+											seed={agentId}
+											name={agentDisplayNames[agentId] ?? agentId}
+											size={22}
+											className="rounded-full"
+											gradientStart={agentGradients[agentId]?.start}
+											gradientEnd={agentGradients[agentId]?.end}
+										/>
+										<span className="min-w-0 flex-1 truncate text-sm">{agentDisplayNames[agentId] ?? agentId}</span>
+									</Link>
+								);
+							})}
+						</div>
+					</div>
+				{hasProvider && agents[0] && (
+					<div className="border-t border-sidebar-line p-2">
+						<button
+							type="button"
+							onClick={() => setCreateOpen(true)}
+							className="w-full rounded-md bg-sidebar-selected px-3 py-2 text-sm text-sidebar-ink hover:bg-sidebar-selected/80"
+						>
+							New Agent
+						</button>
+					</div>
+				)}
+			</nav>
+			{agents[0] && (
+				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
+			)}
+			</>
+		);
+	}
+
 	return (
 		<nav className="flex w-14 shrink-0 flex-col items-center overflow-hidden border-r border-sidebar-line bg-sidebar">
-			{/* Icon nav */}
 			<div className="flex flex-col items-center gap-1 pt-2">
 				<Link
 					to="/"
@@ -180,6 +312,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 				</DndContext>
 				{hasProvider && (
 					<button
+						type="button"
 						onClick={() => setCreateOpen(true)}
 						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
 						title="New Agent"

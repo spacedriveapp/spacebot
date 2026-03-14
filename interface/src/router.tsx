@@ -5,6 +5,7 @@ import {
 	Outlet,
 } from "@tanstack/react-router";
 import {useQuery} from "@tanstack/react-query";
+import {useState} from "react";
 import {api, BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
 import {TopBar, TopBarProvider, useSetTopBar} from "@/components/TopBar";
@@ -26,23 +27,34 @@ import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
+import {useIsMobile} from "@/hooks/useViewport";
 
 // ── Root layout ──────────────────────────────────────────────────────────
 
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
+	const isMobile = useIsMobile();
+	const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
 	return (
 		<TopBarProvider>
 			<div className="flex h-screen flex-col bg-app">
-				<TopBar />
+				<TopBar isMobile={isMobile} onOpenMobileNav={() => setMobileNavOpen(true)} />
 				<ConnectionBanner state={connectionState} hasData={hasData} />
 				<div className="flex min-h-0 flex-1">
-					<Sidebar liveStates={liveStates} />
+					{!isMobile && <Sidebar liveStates={liveStates} />}
 					<div className="flex min-w-0 flex-1 flex-col overflow-hidden">
 						<Outlet />
 					</div>
 				</div>
+				{isMobile && (
+					<Sidebar
+						liveStates={liveStates}
+						isMobile
+						mobileOpen={mobileNavOpen}
+						onCloseMobile={() => setMobileNavOpen(false)}
+					/>
+				)}
 			</div>
 		</TopBarProvider>
 	);
@@ -60,13 +72,13 @@ function AgentTopBar({agentId}: {agentId: string}) {
 	const displayName = agent?.display_name;
 
 	useSetTopBar(
-		<div className="flex h-full flex-col">
-			<div className="flex flex-1 items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">
+		<div className="flex h-full min-w-0 flex-col">
+			<div className="flex min-w-0 flex-1 items-center px-3 sm:px-6">
+				<h1 className="truncate font-plex text-sm font-medium text-ink">
 					{displayName ? (
 						<>
 							{displayName}
-							<span className="ml-2 text-ink-faint">{agentId}</span>
+							<span className="ml-2 truncate text-ink-faint">{agentId}</span>
 						</>
 					) : (
 						agentId
@@ -112,8 +124,8 @@ const logsRoute = createRoute({
 	path: "/logs",
 	component: function LogsPage() {
 		useSetTopBar(
-			<div className="flex h-full items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">Logs</h1>
+			<div className="flex h-full min-w-0 items-center px-3 sm:px-6">
+				<h1 className="truncate font-plex text-sm font-medium text-ink">Logs</h1>
 			</div>,
 		);
 		return (
@@ -133,7 +145,7 @@ const agentRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentDetail agentId={agentId} liveStates={liveStates} />
 				</div>
 			</div>
@@ -149,7 +161,7 @@ const agentChatRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentChat agentId={agentId} />
 				</div>
 			</div>
@@ -166,7 +178,7 @@ const agentChannelsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentChannels agentId={agentId} liveStates={liveStates} />
 				</div>
 			</div>
@@ -182,7 +194,7 @@ const agentMemoriesRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentMemories agentId={agentId} />
 				</div>
 			</div>
@@ -198,7 +210,7 @@ const agentIngestRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentIngest agentId={agentId} />
 				</div>
 			</div>
@@ -217,7 +229,7 @@ const agentWorkersRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentWorkers agentId={agentId} />
 				</div>
 			</div>
@@ -233,7 +245,7 @@ const agentProjectsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentProjects agentId={agentId} />
 				</div>
 			</div>
@@ -249,7 +261,7 @@ const agentTasksRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentTasks agentId={agentId} />
 				</div>
 			</div>
@@ -265,7 +277,7 @@ const agentCronRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentCron agentId={agentId} />
 				</div>
 			</div>
@@ -286,7 +298,7 @@ const agentConfigRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentConfig agentId={agentId} />
 				</div>
 			</div>
@@ -302,7 +314,7 @@ const agentCortexRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentCortex agentId={agentId} />
 				</div>
 			</div>
@@ -318,7 +330,7 @@ const agentSkillsRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<AgentSkills agentId={agentId} />
 				</div>
 			</div>
@@ -336,7 +348,7 @@ const channelRoute = createRoute({
 		return (
 			<div className="flex h-full flex-col">
 				<AgentTopBar agentId={agentId} />
-				<div className="flex-1 overflow-hidden">
+				<div className="min-h-0 flex-1 overflow-hidden">
 					<ChannelDetail
 						agentId={agentId}
 						channelId={channelId}
