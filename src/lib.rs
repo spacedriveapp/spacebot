@@ -34,6 +34,7 @@ pub mod telemetry;
 pub mod tools;
 pub mod update;
 pub mod upgrade;
+pub mod watchdog;
 
 pub use error::{Error, Result};
 
