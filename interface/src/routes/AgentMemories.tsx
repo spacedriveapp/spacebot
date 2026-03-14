@@ -83,6 +83,11 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const isSinglePane = isMobile || isTablet;
 	const [chatOpen, setChatOpen] = useState(!isSinglePane);
 
+	// Sync chat pane default when viewport changes between single/multi-pane
+	useEffect(() => {
+		setChatOpen(!isSinglePane);
+	}, [isSinglePane]);
+
 	const parentRef = useRef<HTMLDivElement>(null);
 
 	// Debounce search input
@@ -198,6 +203,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					className={chatOpen ? "bg-app-selected text-ink" : ""}
 					title="Toggle cortex chat"
 					aria-label="Toggle cortex chat"
+					aria-pressed={chatOpen}
 				>
 					<HugeiconsIcon icon={IdeaIcon} className="h-4 w-4" />
 				</Button>
@@ -258,6 +264,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 							{virtualizer.getVirtualItems().map((virtualRow) => {
 								const memory = memories[virtualRow.index];
 								if (!memory) return null;
+								const score = scores?.[memory.id];
 								return (
 									<div
 										key={memory.id}
@@ -281,6 +288,16 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											>
 												{expandedId === memory.id ? "Less" : "More"}
 											</button>
+											{expandedId === memory.id && (
+												<div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-tiny text-ink-faint">
+													<span>ID: {memory.id}</span>
+													<span>Accessed: {memory.access_count}x</span>
+													<span>Last accessed: {formatTimeAgo(memory.last_accessed_at)}</span>
+													<span>Updated: {formatTimeAgo(memory.updated_at)}</span>
+													{memory.channel_id && <span>Channel: {memory.channel_id}</span>}
+													{score !== undefined && <span>Score: {score.toFixed(3)}</span>}
+												</div>
+											)}
 											<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
 												<span className="truncate">{memory.source ?? "-"}</span>
 												<span>{memory.importance.toFixed(2)}</span>
