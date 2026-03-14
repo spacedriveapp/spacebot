@@ -911,6 +911,7 @@ export interface CronExecutionsParams {
 
 export interface ProviderStatus {
 	anthropic: boolean;
+	anthropic_oauth: boolean;
 	openai: boolean;
 	openai_chatgpt: boolean;
 	openrouter: boolean;
@@ -964,6 +965,28 @@ export interface OpenAiOAuthBrowserStatusResponse {
 	done: boolean;
 	success: boolean;
 	message: string | null;
+}
+
+export interface ClaudeCliStatusResponse {
+	claude_folder_exists: boolean;
+	credentials_file_exists: boolean;
+	cli_installed: boolean;
+	cli_version: string | null;
+	authenticated: boolean;
+	email: string | null;
+	oauth_configured: boolean;
+}
+
+export interface AnthropicOAuthStartResponse {
+	success: boolean;
+	message: string;
+	authorize_url: string | null;
+	state: string | null;
+}
+
+export interface AnthropicOAuthExchangeResponse {
+	success: boolean;
+	message: string;
 }
 
 // -- Model Types --
@@ -1950,6 +1973,29 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<ProviderModelTestResponse>;
+	},
+	claudeCliStatus: () => fetchJson<ClaudeCliStatusResponse>("/providers/anthropic/oauth/cli-status"),
+	startAnthropicOAuth: async (params: { model: string; mode?: string }) => {
+		const response = await fetch(`${API_BASE}/providers/anthropic/oauth/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(params),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<AnthropicOAuthStartResponse>;
+	},
+	exchangeAnthropicOAuth: async (params: { code: string; state: string }) => {
+		const response = await fetch(`${API_BASE}/providers/anthropic/oauth/exchange`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify(params),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<AnthropicOAuthExchangeResponse>;
 	},
 	startOpenAiOAuthBrowser: async (params: {model: string}) => {
 		const response = await fetch(`${API_BASE}/providers/openai/oauth/browser/start`, {

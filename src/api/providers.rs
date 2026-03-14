@@ -24,6 +24,17 @@ const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
 static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
+/// Active Anthropic OAuth PKCE sessions: state_key → (pkce_verifier, model, expires_at).
+static ANTHROPIC_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, AnthropicOAuthSession>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+#[derive(Clone, Debug)]
+struct AnthropicOAuthSession {
+    verifier: String,
+    model: String,
+    expires_at: i64,
+}
+
 #[derive(Clone, Debug)]
 struct DeviceOAuthSession {
     expires_at: i64,
@@ -40,6 +51,7 @@ enum DeviceOAuthSessionStatus {
 #[derive(Serialize)]
 pub(super) struct ProviderStatus {
     anthropic: bool,
+    anthropic_oauth: bool,
     openai: bool,
     openai_chatgpt: bool,
     openrouter: bool,
@@ -96,6 +108,55 @@ pub(super) struct ProviderModelTestResponse {
     model: String,
     sample: Option<String>,
 }
+
+// ── Anthropic OAuth types ────────────────────────────────────────────────
+
+#[derive(Serialize)]
+pub(super) struct ClaudeCliStatusResponse {
+    /// Whether the `~/.claude/` folder exists (CLI has been used).
+    pub claude_folder_exists: bool,
+    /// Whether `~/.claude/credentials.json` exists (CLI has stored credentials).
+    pub credentials_file_exists: bool,
+    /// Whether the `claude` binary was found on the system.
+    pub cli_installed: bool,
+    /// CLI version string if the binary was found and `--version` succeeded.
+    pub cli_version: Option<String>,
+    /// Whether the CLI reports being authenticated.
+    pub authenticated: bool,
+    /// Email from `claude auth status`, if available.
+    pub email: Option<String>,
+    /// Whether Anthropic OAuth is already configured in this spacebot instance.
+    pub oauth_configured: bool,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AnthropicOAuthStartRequest {
+    model: String,
+    #[serde(default)]
+    mode: Option<String>,
+}
+
+#[derive(Serialize)]
+pub(super) struct AnthropicOAuthStartResponse {
+    pub success: bool,
+    pub message: String,
+    pub authorize_url: Option<String>,
+    pub state: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct AnthropicOAuthExchangeRequest {
+    code: String,
+    state: String,
+}
+
+#[derive(Serialize)]
+pub(super) struct AnthropicOAuthExchangeResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+// ── OpenAI OAuth types ──────────────────────────────────────────────────
 
 #[derive(Deserialize)]
 pub(super) struct OpenAiOAuthBrowserStartRequest {
@@ -345,6 +406,7 @@ pub(super) async fn get_providers(
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
+    let anthropic_oauth_configured = crate::auth::credentials_path(&instance_dir).exists();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
 
     let (
@@ -442,6 +504,7 @@ pub(super) async fn get_providers(
 
     let providers = ProviderStatus {
         anthropic,
+        anthropic_oauth: anthropic_oauth_configured,
         openai,
         openai_chatgpt,
         openrouter,
@@ -464,6 +527,7 @@ pub(super) async fn get_providers(
         zai_coding_plan,
     };
     let has_any = providers.anthropic
+        || providers.anthropic_oauth
         || providers.openai
         || providers.openai_chatgpt
         || providers.openrouter
@@ -895,6 +959,24 @@ pub(super) async fn delete_provider(
     axum::extract::Path(provider): axum::extract::Path<String>,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
     let provider = provider.trim().to_lowercase();
+    // Anthropic OAuth credentials are stored as a separate JSON file.
+    if provider == "anthropic-oauth" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::auth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(mgr) = state.llm_manager.read().await.as_ref() {
+            mgr.clear_anthropic_oauth_credentials().await;
+        }
+        return Ok(Json(ProviderUpdateResponse {
+            success: true,
+            message: "Anthropic OAuth credentials removed".into(),
+        }));
+    }
+
     // OpenAI ChatGPT OAuth credentials are stored as a separate JSON file,
     // not in the TOML config, so handle removal separately.
     if provider == "openai-chatgpt" {
@@ -950,6 +1032,302 @@ pub(super) async fn delete_provider(
     Ok(Json(ProviderUpdateResponse {
         success: true,
         message: format!("Provider '{}' removed", provider),
+    }))
+}
+
+// ── Anthropic OAuth / CLI detection handlers ────────────────────────────
+
+/// Detect whether the Claude Code CLI is installed and authenticated on
+/// the local machine by inspecting `~/.claude/` and running the binary.
+pub(super) async fn claude_cli_status(
+    State(state): State<Arc<ApiState>>,
+) -> Result<Json<ClaudeCliStatusResponse>, StatusCode> {
+    let instance_dir = (**state.instance_dir.load()).clone();
+    let oauth_configured = crate::auth::credentials_path(&instance_dir).exists();
+
+    let home = dirs::home_dir().unwrap_or_default();
+    let claude_dir = home.join(".claude");
+    let claude_folder_exists = claude_dir.is_dir();
+    let credentials_file_exists = claude_dir.join("credentials.json").is_file();
+
+    // Try to find the `claude` binary.
+    let (cli_installed, cli_version, authenticated, email) =
+        tokio::task::spawn_blocking(move || detect_claude_cli())
+            .await
+            .unwrap_or((false, None, false, None));
+
+    Ok(Json(ClaudeCliStatusResponse {
+        claude_folder_exists,
+        credentials_file_exists,
+        cli_installed,
+        cli_version,
+        authenticated,
+        email,
+        oauth_configured,
+    }))
+}
+
+/// Blocking helper: find the `claude` binary, run `--version` and `auth status`.
+fn detect_claude_cli() -> (bool, Option<String>, bool, Option<String>) {
+    let claude_path = find_claude_binary();
+    let Some(claude_path) = claude_path else {
+        return (false, None, false, None);
+    };
+
+    // Strip env vars that make the CLI think it's inside a nested session.
+    let clean_env: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| k != "CLAUDECODE" && k != "CLAUDE_CODE_ENTRYPOINT")
+        .collect();
+
+    // Version check
+    let version = std::process::Command::new(&claude_path)
+        .arg("--version")
+        .env_clear()
+        .envs(clean_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+        .ok()
+        .and_then(|output| {
+            if output.status.success() {
+                Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    if version.is_none() {
+        return (false, None, false, None);
+    }
+
+    // Auth status check
+    let auth_result = std::process::Command::new(&claude_path)
+        .args(["auth", "status"])
+        .env_clear()
+        .envs(clean_env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output();
+
+    let (authenticated, email) = match auth_result {
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<serde_json::Value>(stdout.trim()) {
+                Ok(json) => {
+                    let logged_in = json
+                        .get("loggedIn")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let email = json
+                        .get("email")
+                        .and_then(|v| v.as_str())
+                        .map(String::from);
+                    (logged_in, email)
+                }
+                Err(_) => {
+                    // Older CLI versions may not return JSON — assume authed if
+                    // --version worked and the binary didn't error.
+                    (true, None)
+                }
+            }
+        }
+        Ok(_) => (false, None),
+        Err(_) => {
+            // Command failed to run but binary exists — assume authed (older CLI).
+            (true, None)
+        }
+    };
+
+    (true, version, authenticated, email)
+}
+
+/// Locate the `claude` binary on the system.
+fn find_claude_binary() -> Option<String> {
+    let which_cmd = if cfg!(windows) { "where" } else { "which" };
+    if let Ok(output) = std::process::Command::new(which_cmd)
+        .arg("claude")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    // Fallback paths
+    let home = dirs::home_dir()?;
+    let candidates: Vec<std::path::PathBuf> = if cfg!(windows) {
+        vec![
+            home.join(".local").join("bin").join("claude.exe"),
+            home.join("AppData")
+                .join("Local")
+                .join("Programs")
+                .join("claude")
+                .join("claude.exe"),
+        ]
+    } else {
+        vec![
+            home.join(".local").join("bin").join("claude"),
+            std::path::PathBuf::from("/usr/local/bin/claude"),
+        ]
+    };
+
+    for candidate in candidates {
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().to_string());
+        }
+    }
+
+    None
+}
+
+/// Start the Anthropic OAuth PKCE flow. Returns an authorization URL the
+/// frontend should open in a popup/tab so the user can authorize.
+pub(super) async fn start_anthropic_oauth(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<AnthropicOAuthStartRequest>,
+) -> Result<Json<AnthropicOAuthStartResponse>, StatusCode> {
+    let model = request.model.trim().to_string();
+    if model.is_empty() {
+        return Ok(Json(AnthropicOAuthStartResponse {
+            success: false,
+            message: "Model cannot be empty".to_string(),
+            authorize_url: None,
+            state: None,
+        }));
+    }
+
+    let mode = match request.mode.as_deref() {
+        Some("console") => crate::auth::AuthMode::Console,
+        _ => crate::auth::AuthMode::Max,
+    };
+
+    let (url, verifier) = crate::auth::authorize_url(mode);
+    let state_key = Uuid::new_v4().to_string();
+    let expires_at = chrono::Utc::now().timestamp() + 10 * 60; // 10 minute TTL
+
+    // Insert the new session and prune expired ones in a single lock acquisition.
+    let now = chrono::Utc::now().timestamp();
+    let mut sessions = ANTHROPIC_OAUTH_SESSIONS.write().await;
+    sessions.insert(
+        state_key.clone(),
+        AnthropicOAuthSession {
+            verifier,
+            model,
+            expires_at,
+        },
+    );
+    sessions.retain(|_, s| s.expires_at > now);
+    drop(sessions);
+
+    Ok(Json(AnthropicOAuthStartResponse {
+        success: true,
+        message: "Authorization URL generated".to_string(),
+        authorize_url: Some(url),
+        state: Some(state_key),
+    }))
+}
+
+/// Exchange the authorization code from the Anthropic OAuth callback for
+/// access and refresh tokens, save them, and update routing.
+pub(super) async fn exchange_anthropic_oauth(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<AnthropicOAuthExchangeRequest>,
+) -> Result<Json<AnthropicOAuthExchangeResponse>, StatusCode> {
+    let state_key = request.state.trim().to_string();
+    let code = request.code.trim().to_string();
+
+    if state_key.is_empty() || code.is_empty() {
+        return Ok(Json(AnthropicOAuthExchangeResponse {
+            success: false,
+            message: "State and code are required".to_string(),
+        }));
+    }
+
+    // Look up the session
+    let session = ANTHROPIC_OAUTH_SESSIONS.write().await.remove(&state_key);
+    let Some(session) = session else {
+        return Ok(Json(AnthropicOAuthExchangeResponse {
+            success: false,
+            message: "OAuth session not found or expired. Please try again.".to_string(),
+        }));
+    };
+
+    let now = chrono::Utc::now().timestamp();
+    if now >= session.expires_at {
+        return Ok(Json(AnthropicOAuthExchangeResponse {
+            success: false,
+            message: "OAuth session expired. Please try again.".to_string(),
+        }));
+    }
+
+    // Exchange code for tokens
+    let credentials = match crate::auth::exchange_code(&code, &session.verifier).await {
+        Ok(creds) => creds,
+        Err(error) => {
+            return Ok(Json(AnthropicOAuthExchangeResponse {
+                success: false,
+                message: format!("Token exchange failed: {error}"),
+            }));
+        }
+    };
+
+    // Save credentials to disk
+    let instance_dir = (**state.instance_dir.load()).clone();
+    if let Err(error) = crate::auth::save_credentials(&instance_dir, &credentials) {
+        tracing::warn!(%error, "failed to save Anthropic OAuth credentials");
+        return Ok(Json(AnthropicOAuthExchangeResponse {
+            success: false,
+            message: format!("Failed to save credentials: {error}"),
+        }));
+    }
+
+    // Update the LLM manager
+    if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
+        llm_manager
+            .set_anthropic_oauth_credentials(credentials)
+            .await;
+    }
+
+    // Update model routing in config.toml
+    let config_path = state.config_path.read().await.clone();
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+
+    if let Ok(mut doc) = content.parse::<toml_edit::DocumentMut>() {
+        apply_model_routing(&mut doc, &session.model);
+        if let Err(error) = tokio::fs::write(&config_path, doc.to_string()).await {
+            tracing::warn!(%error, "failed to write config.toml after Anthropic OAuth");
+        }
+    }
+
+    refresh_defaults_config(&state).await;
+
+    state
+        .provider_setup_tx
+        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
+        .ok();
+
+    Ok(Json(AnthropicOAuthExchangeResponse {
+        success: true,
+        message: format!(
+            "Anthropic OAuth configured. Model '{}' applied to routing.",
+            session.model
+        ),
     }))
 }
 

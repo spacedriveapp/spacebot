@@ -228,6 +228,18 @@ pub async fn start_http_server(
             get(providers::get_providers).put(providers::update_provider),
         )
         .route(
+            "/providers/anthropic/oauth/cli-status",
+            get(providers::claude_cli_status),
+        )
+        .route(
+            "/providers/anthropic/oauth/start",
+            post(providers::start_anthropic_oauth),
+        )
+        .route(
+            "/providers/anthropic/oauth/exchange",
+            post(providers::exchange_anthropic_oauth),
+        )
+        .route(
             "/providers/openai/oauth/browser/start",
             post(providers::start_openai_browser_oauth),
         )
