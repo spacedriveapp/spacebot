@@ -79,7 +79,6 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 
 export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
-
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,

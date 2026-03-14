@@ -1,5 +1,6 @@
 import { Banner } from "@/ui";
 import type { ConnectionState } from "@/hooks/useEventSource";
+import { useDesktopInstance } from "@/hooks/useDesktopInstance";
 
 const stateConfig: Record<Exclude<ConnectionState, "connected">, { label: string; variant: "info" | "warning" | "error" }> = {
 	connecting: { label: "Connecting...", variant: "info" },
@@ -8,6 +9,7 @@ const stateConfig: Record<Exclude<ConnectionState, "connected">, { label: string
 };
 
 export function ConnectionBanner({ state, hasData }: { state: ConnectionState; hasData: boolean }) {
+	const { currentUrl, isDesktop, openDialog } = useDesktopInstance();
 	// Don't show "Connecting..." if we already have data loaded
 	if (state === "connecting" && hasData) return null;
 	
@@ -17,7 +19,18 @@ export function ConnectionBanner({ state, hasData }: { state: ConnectionState; h
 
 	return (
 		<Banner variant={variant} dot="pulse">
-			{label}
+			<div className="flex w-full items-center justify-between gap-4">
+				<span>{label}</span>
+				{isDesktop ? (
+					<button
+						type="button"
+						onClick={openDialog}
+						className="shrink-0 text-xs text-current underline underline-offset-4 opacity-90 hover:opacity-100"
+					>
+						{currentUrl}
+					</button>
+				) : null}
+			</div>
 		</Banner>
 	);
 }

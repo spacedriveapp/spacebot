@@ -1,6 +1,9 @@
 import { createContext, useContext, useRef, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
 import { Link } from "@tanstack/react-router";
+import { LinkSquare02Icon } from "@hugeicons/core-free-icons";
+import { HugeiconsIcon } from "@hugeicons/react";
 import { BASE_PATH, IS_TAURI } from "@/api/client";
+import { useDesktopInstance } from "@/hooks/useDesktopInstance";
 
 // ── Context ──────────────────────────────────────────────────────────────
 
@@ -68,6 +71,7 @@ export function useSetTopBar(node: ReactNode) {
 export function TopBar() {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("TopBar must be used within TopBarProvider");
+	const { currentLabel, isDesktop, openDialog } = useDesktopInstance();
 
 	const content = useSyncExternalStore(
 		store.subscribe,
@@ -113,6 +117,19 @@ export function TopBar() {
 			<div className="flex min-w-0 flex-1 items-center">
 				{content}
 			</div>
+
+			{isDesktop ? (
+				<div className="mr-3 flex shrink-0 items-center">
+					<button
+						type="button"
+						onClick={openDialog}
+						className="flex items-center gap-2 rounded-lg border border-app-line bg-app-box/70 px-3 py-1.5 text-xs text-ink-dull transition-colors hover:border-accent/40 hover:text-ink"
+					>
+						<HugeiconsIcon icon={LinkSquare02Icon} size={14} />
+						<span className="max-w-[180px] truncate">{currentLabel}</span>
+					</button>
+				</div>
+			) : null}
 		</div>
 	);
 }

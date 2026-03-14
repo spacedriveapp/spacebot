@@ -1,6 +1,8 @@
-export const BASE_PATH: string = (window as any).__SPACEBOT_BASE_PATH || "";
-export const IS_TAURI: boolean = !!(window as any).__TAURI_INTERNALS__;
-const API_BASE = BASE_PATH + "/api";
+import { assetUrl, getApiBaseUrl, isTauriDesktop } from "@/lib/backend";
+
+export const BASE_PATH: string = assetUrl("").replace(/\/$/, "");
+export const IS_TAURI: boolean = isTauriDesktop();
+const API_BASE = getApiBaseUrl();
 
 export interface StatusResponse {
 	status: string;

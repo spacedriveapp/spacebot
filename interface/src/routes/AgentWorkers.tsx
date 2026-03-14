@@ -18,6 +18,7 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 import {cx} from "@/ui/utils";
 import {badgeStyles} from "@/ui/Badge";
 import {ProviderIcon} from "@/lib/providerIcons";
+import { getApiBaseUrl, assetUrl } from "@/lib/backend";
 
 /** RFC 4648 base64url encoding (no padding), matching OpenCode's directory encoding. */
 export function base64UrlEncode(value: string): string {
@@ -628,7 +629,7 @@ function OpenCodeDirectLink({
 		if (initialDirectory) return;
 		// Fetch directory from the OpenCode session API as fallback.
 		const controller = new AbortController();
-		fetch(`/api/opencode/${port}/session/${sessionId}`, {
+		fetch(`${getApiBaseUrl()}/opencode/${port}/session/${sessionId}`, {
 			signal: controller.signal,
 		})
 			.then((r) => (r.ok ? r.json() : null))
@@ -640,8 +641,8 @@ function OpenCodeDirectLink({
 	}, [port, sessionId, initialDirectory]);
 
 	const href = directory
-		? `/api/opencode/${port}/${base64UrlEncode(directory)}/session/${sessionId}`
-		: `/api/opencode/${port}`;
+		? `${getApiBaseUrl()}/opencode/${port}/${base64UrlEncode(directory)}/session/${sessionId}`
+		: `${getApiBaseUrl()}/opencode/${port}`;
 
 	return (
 		<a
@@ -688,7 +689,7 @@ function loadEmbedAssets() {
 	if (embedAssetsPromise) return embedAssetsPromise;
 	embedAssetsPromise = (async () => {
 		// Load the manifest to find hashed asset filenames
-		const manifestRes = await fetch("/opencode-embed/manifest.json");
+		const manifestRes = await fetch(assetUrl("/opencode-embed/manifest.json"));
 		if (!manifestRes.ok) throw new Error("Failed to load opencode-embed manifest");
 		const manifest: { js: string; css: string } = await manifestRes.json();
 
@@ -702,8 +703,8 @@ function loadEmbedAssets() {
 		// Load JS via <script> tag (required for /public files in Vite dev)
 		// and CSS via fetch (to inject into Shadow DOM) in parallel
 		const [, cssRes] = await Promise.all([
-			loadScript(`/opencode-embed/${manifest.js}`),
-			fetch(`/opencode-embed/${manifest.css}`),
+			loadScript(assetUrl(`/opencode-embed/${manifest.js}`)),
+			fetch(assetUrl(`/opencode-embed/${manifest.css}`)),
 		]);
 
 		if (!cssRes.ok) throw new Error("Failed to load opencode-embed CSS");
@@ -740,7 +741,7 @@ function OpenCodeEmbed({
 	// users, not just local dev. The proxy handles forwarding to the
 	// actual OpenCode instance. In local dev the Vite proxy forwards
 	// /api/* to the Rust backend at 19898; in production it's same-origin.
-	const serverUrl = `/api/opencode/${port}`;
+	const serverUrl = `${getApiBaseUrl()}/opencode/${port}`;
 
 	// Discover the event directory from the OpenCode server.
 	// OpenCode tags SSE events with Instance.directory (the process CWD),
@@ -1085,5 +1086,4 @@ function OpenCodePartView({part}: {part: OpenCodePart}) {
 			return null;
 	}
 }
-
 
