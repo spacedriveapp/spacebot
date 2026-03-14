@@ -2,7 +2,8 @@ const DEFAULT_DESKTOP_INSTANCE_URL = "http://127.0.0.1:19898";
 const DESKTOP_INSTANCE_STORAGE_KEY = "spacebot-desktop-instance-url";
 
 function basePath(): string {
-	return (window as any).__SPACEBOT_BASE_PATH || "";
+	if (typeof window === "undefined") return "";
+	return ((window as any).__SPACEBOT_BASE_PATH || "").replace(/\/$/, "");
 }
 
 export function isTauriDesktop(): boolean {
@@ -40,9 +41,9 @@ export function getDesktopInstanceUrl(): string {
 
 export function hasSavedDesktopInstanceUrl(): boolean {
 	if (!isTauriDesktop() || typeof window === "undefined") return false;
-	const stored = localStorage.getItem(DESKTOP_INSTANCE_STORAGE_KEY);
-	if (!stored) return false;
 	try {
+		const stored = localStorage.getItem(DESKTOP_INSTANCE_STORAGE_KEY);
+		if (!stored) return false;
 		normalizeDesktopInstanceUrl(stored);
 		return true;
 	} catch {

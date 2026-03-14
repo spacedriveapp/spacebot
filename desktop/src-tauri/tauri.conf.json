@@ -5,8 +5,8 @@
   "identifier": "sh.spacebot.desktop",
   "build": {
     "devUrl": "http://localhost:19840",
-    "beforeDevCommand": "sh -c 'cd ../interface && bun run dev --host 127.0.0.1 --strictPort'",
-    "beforeBuildCommand": "sh -c 'cd ../interface && bun run build && cd .. && ./scripts/build-opencode-embed.sh'",
+    "beforeDevCommand": "bun run --cwd ../interface dev --host 127.0.0.1 --strictPort",
+    "beforeBuildCommand": "bun run --cwd ../interface build && ./scripts/build-opencode-embed.sh",
     "frontendDist": "../../interface/dist"
   },
   "app": {

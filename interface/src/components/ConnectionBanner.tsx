@@ -9,7 +9,7 @@ const stateConfig: Record<Exclude<ConnectionState, "connected">, { label: string
 };
 
 export function ConnectionBanner({ state, hasData }: { state: ConnectionState; hasData: boolean }) {
-	const { currentUrl, isDesktop, openDialog } = useDesktopInstance();
+	const { currentLabel, isDesktop, openDialog } = useDesktopInstance();
 	// Don't show "Connecting..." if we already have data loaded
 	if (state === "connecting" && hasData) return null;
 	
@@ -27,7 +27,7 @@ export function ConnectionBanner({ state, hasData }: { state: ConnectionState; h
 						onClick={openDialog}
 						className="shrink-0 text-xs text-current underline underline-offset-4 opacity-90 hover:opacity-100"
 					>
-						{currentUrl}
+						{currentLabel}
 					</button>
 				) : null}
 			</div>

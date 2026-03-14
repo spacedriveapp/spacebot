@@ -38,16 +38,26 @@ function ConnectForm({ onCancel }: { onCancel?: () => void }) {
 	return (
 		<form className="space-y-5" onSubmit={handleSubmit}>
 			<div className="space-y-2">
+				<label htmlFor="desktop-instance-url" className="sr-only">
+					Spacebot server URL
+				</label>
 				<Input
 					id="desktop-instance-url"
+					type="url"
 					value={value}
 					onChange={(event) => setValue(event.target.value)}
 					placeholder="http://127.0.0.1:19898"
 					icon={<HugeiconsIcon icon={LinkSquare02Icon} size={14} />}
 					size="md"
 					autoFocus
+					aria-invalid={!!error}
+					aria-describedby={error ? "desktop-instance-url-error" : undefined}
 				/>
-				{error ? <p className="text-xs text-red-400">{error}</p> : null}
+				{error ? (
+					<p id="desktop-instance-url-error" className="text-xs text-red-400">
+						{error}
+					</p>
+				) : null}
 			</div>
 
 			<div className="flex items-center justify-end gap-2">
