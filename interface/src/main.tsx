@@ -7,11 +7,6 @@ import "@fontsource/ibm-plex-sans/500.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-sans/700.css";
 
-// WKWebView renders at a slightly smaller effective scale than browsers
-if ((window as any).__TAURI_INTERNALS__) {
-	document.body.style.zoom = "1.1";
-}
-
 ReactDOM.createRoot(document.getElementById("root")!).render(
 	<React.StrictMode>
 		<App />

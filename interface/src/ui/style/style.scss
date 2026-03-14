@@ -21,8 +21,14 @@ html {
 	background: hsla(var(--color-app), 1);
 }
 
+html, body, #root {
+	height: 100%;
+}
+
 body {
 	@apply font-plex text-ink bg-app;
+	margin: 0;
+	overflow: hidden;
 }
 
 /* Markdown prose styling for message content */

@@ -5,7 +5,9 @@
   "identifier": "sh.spacebot.desktop",
   "build": {
     "devUrl": "http://localhost:19840",
-    "frontendDist": "http://localhost:19898"
+    "beforeDevCommand": "bun run --cwd ../interface dev --host 127.0.0.1 --strictPort",
+    "beforeBuildCommand": "bun run --cwd ../interface build && ./scripts/build-opencode-embed.sh",
+    "frontendDist": "../../interface/dist"
   },
   "app": {
     "macOSPrivateApi": true,
