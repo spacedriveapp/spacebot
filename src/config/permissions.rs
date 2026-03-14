@@ -1,7 +1,7 @@
 use super::{
-    Binding, DiscordConfig, DiscordInstanceConfig, SignalConfig, SignalInstanceConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TwitchConfig,
-    TwitchInstanceConfig,
+    Binding, DiscordConfig, DiscordInstanceConfig, MattermostConfig, MattermostInstanceConfig,
+    SignalConfig, SignalInstanceConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
+    TelegramInstanceConfig, TwitchConfig, TwitchInstanceConfig,
 };
 use std::collections::HashMap;
 
@@ -450,6 +450,84 @@ impl SignalPermissions {
             } else {
                 group_users
             },
+        }
+    }
+}
+
+/// Per-adapter permissions for the Mattermost platform.
+#[derive(Debug, Clone, Default)]
+pub struct MattermostPermissions {
+    pub team_filter: Option<Vec<String>>,
+    pub channel_filter: HashMap<String, Vec<String>>,
+    pub dm_allowed_users: Vec<String>,
+}
+
+impl MattermostPermissions {
+    pub fn from_config(config: &MattermostConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(config.dm_allowed_users.clone(), bindings, None)
+    }
+
+    pub fn from_instance_config(instance: &MattermostInstanceConfig, bindings: &[Binding]) -> Self {
+        Self::from_bindings_for_adapter(
+            instance.dm_allowed_users.clone(),
+            bindings,
+            Some(instance.name.as_str()),
+        )
+    }
+
+    fn from_bindings_for_adapter(
+        seed_dm_allowed_users: Vec<String>,
+        bindings: &[Binding],
+        adapter_selector: Option<&str>,
+    ) -> Self {
+        let mm_bindings: Vec<&Binding> = bindings
+            .iter()
+            .filter(|b| {
+                b.channel == "mattermost"
+                    && binding_adapter_selector_matches(b, adapter_selector)
+            })
+            .collect();
+
+        let team_filter = {
+            let team_ids: Vec<String> = mm_bindings
+                .iter()
+                .filter_map(|b| b.team_id.clone())
+                .collect();
+            if team_ids.is_empty() {
+                None
+            } else {
+                Some(team_ids)
+            }
+        };
+
+        let channel_filter = {
+            let mut filter: HashMap<String, Vec<String>> = HashMap::new();
+            for binding in &mm_bindings {
+                if let Some(team_id) = &binding.team_id
+                    && !binding.channel_ids.is_empty()
+                {
+                    filter
+                        .entry(team_id.clone())
+                        .or_default()
+                        .extend(binding.channel_ids.clone());
+                }
+            }
+            filter
+        };
+
+        let mut dm_allowed_users = seed_dm_allowed_users;
+        for binding in &mm_bindings {
+            for id in &binding.dm_allowed_users {
+                if !dm_allowed_users.contains(id) {
+                    dm_allowed_users.push(id.clone());
+                }
+            }
+        }
+
+        Self {
+            team_filter,
+            channel_filter,
+            dm_allowed_users,
         }
     }
 }

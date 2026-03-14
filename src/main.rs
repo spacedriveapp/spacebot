@@ -1651,6 +1651,7 @@ async fn run(
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
+        let mut mattermost_permissions = None;
         let mut signal_permissions = None;
         initialize_agents(
             &config,
@@ -1669,6 +1670,7 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            &mut mattermost_permissions,
             &mut signal_permissions,
             agent_links.clone(),
             agent_humans.clone(),
@@ -1688,6 +1690,7 @@ async fn run(
             slack_permissions,
             telegram_permissions,
             twitch_permissions,
+            mattermost_permissions,
             signal_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
@@ -1701,11 +1704,12 @@ async fn run(
             config_path.clone(),
             config.instance_dir.clone(),
             Vec::new(),
-            None,
-            None,
-            None,
-            None,
-            None,
+            None, // discord_permissions
+            None, // slack_permissions
+            None, // telegram_permissions
+            None, // twitch_permissions
+            None, // mattermost_permissions
+            None, // signal_permissions
             bindings.clone(),
             None,
             llm_manager.clone(),
@@ -2242,6 +2246,7 @@ async fn run(
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
+                                let mut new_mattermost_permissions = None;
                                 let mut new_signal_permissions = None;
                                 match initialize_agents(
                                     &new_config,
@@ -2260,6 +2265,7 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    &mut new_mattermost_permissions,
                                     &mut new_signal_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
@@ -2278,6 +2284,7 @@ async fn run(
                                             new_slack_permissions,
                                             new_telegram_permissions,
                                             new_twitch_permissions,
+                                            new_mattermost_permissions,
                                             new_signal_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
@@ -2401,6 +2408,7 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    mattermost_permissions: &mut Option<Arc<ArcSwap<spacebot::config::MattermostPermissions>>>,
     signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
@@ -3099,6 +3107,68 @@ async fn initialize_agents(
                 perms,
             );
             new_messaging_manager.register(adapter).await;
+        }
+    }
+
+    // Shared Mattermost permissions (hot-reloadable via file watcher)
+    *mattermost_permissions = config.messaging.mattermost.as_ref().map(|mattermost_config| {
+        let perms = spacebot::config::MattermostPermissions::from_config(mattermost_config, &config.bindings);
+        Arc::new(ArcSwap::from_pointee(perms))
+    });
+
+    if let Some(mattermost_config) = &config.messaging.mattermost
+        && mattermost_config.enabled
+    {
+        if !mattermost_config.base_url.is_empty() && !mattermost_config.token.is_empty() {
+            match spacebot::messaging::mattermost::MattermostAdapter::new(
+                "mattermost",
+                &mattermost_config.base_url,
+                mattermost_config.token.as_str(),
+                mattermost_config.team_id.as_deref().map(Arc::from),
+                mattermost_config.max_attachment_bytes,
+                mattermost_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!("mattermost permissions not initialized when mattermost is enabled")
+                })?,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to create mattermost adapter");
+                }
+            }
+        }
+
+        for instance in mattermost_config.instances.iter().filter(|instance| instance.enabled) {
+            if instance.base_url.is_empty() || instance.token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled mattermost instance with missing credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "mattermost",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::MattermostPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            match spacebot::messaging::mattermost::MattermostAdapter::new(
+                runtime_key,
+                &instance.base_url,
+                instance.token.as_str(),
+                instance.team_id.as_deref().map(Arc::from),
+                instance.max_attachment_bytes,
+                perms,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, adapter = %instance.name, "failed to create named mattermost adapter");
+                }
+            }
         }
     }
 

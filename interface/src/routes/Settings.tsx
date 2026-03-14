@@ -884,7 +884,7 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
 	);
 }
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost";
 
 function ChannelsSection() {
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
