@@ -28,6 +28,10 @@ These environment variables control instance-level behavior and are not set in `
 | `SPACEBOT_USER_TIMEZONE` | inherits cron | Default timezone for channel/worker temporal context. Overridden by config equivalents. |
 | `SPACEBOT_CHANNEL_MODEL` | `anthropic/claude-sonnet-4-20250514` | Default channel model (env-only mode). |
 | `SPACEBOT_WORKER_MODEL` | `anthropic/claude-haiku-4.5-20250514` | Default worker model (env-only mode). |
+| `SPACEBOT_VOICE_MODEL` | None | Voice transcription model (e.g. `groq/whisper-large-v3-turbo`). |
+| `SPACEBOT_VOICE_LANGUAGE` | None | Language hint for voice transcription (ISO 639-1, e.g. `en`, `es`). |
+| `SPACEBOT_VOICE_TRANSLATE` | `false` | Set to `true` to translate audio to English instead of transcribing. |
+| `SPACEBOT_STT_PROVIDER` | None | Override which provider handles speech-to-text (e.g. `groq`, `openai`). |
 
 ## Full Reference
 
@@ -85,6 +89,10 @@ branch = "anthropic/claude-sonnet-4-20250514"
 worker = "anthropic/claude-haiku-4.5-20250514"
 compactor = "anthropic/claude-haiku-4.5-20250514"
 cortex = "anthropic/claude-haiku-4.5-20250514"
+voice = "groq/whisper-large-v3-turbo"  # STT model (provider/model)
+voice_language = "en"                   # optional language hint
+# voice_translate = false               # set true to translate to English
+# stt_provider = "groq"                 # optional provider override
 rate_limit_cooldown_secs = 60
 
 # Task-type overrides for workers/branches.
@@ -462,6 +470,10 @@ At least one provider (legacy key or custom provider) must be configured.
 | `worker` | string | `anthropic/claude-haiku-4.5-20250514` | Model for task workers |
 | `compactor` | string | `anthropic/claude-haiku-4.5-20250514` | Model for summarization |
 | `cortex` | string | `anthropic/claude-haiku-4.5-20250514` | Model for system observation |
+| `voice` | string | Provider-dependent | STT model for audio transcription (e.g. `groq/whisper-large-v3-turbo`). Empty disables voice. See [Voice Transcription](/docs/voice-transcription). |
+| `voice_language` | string | None | ISO 639-1 language hint for transcription accuracy (e.g. `en`, `es`, `ja`). Ignored in translation mode. |
+| `voice_translate` | bool | `false` | When `true`, translates audio to English via `/v1/audio/translations` instead of transcribing in the source language. |
+| `stt_provider` | string | None | Override which provider handles STT. When absent, the provider is extracted from the `voice` model prefix. |
 | `rate_limit_cooldown_secs` | integer | 60 | How long to deprioritize a rate-limited model |
 
 Routing selects providers by the prefix before the first `/` in the model name.

@@ -111,6 +111,10 @@ pub struct RoutingConfig {
     pub worker: String,
     pub compactor: String,
     pub cortex: String,
+    pub voice: String,
+    pub voice_language: Option<String>,
+    pub voice_translate: bool,
+    pub stt_provider: Option<String>,
     pub task_overrides: HashMap<String, String>,
     pub fallbacks: HashMap<String, Vec<String>>,
     pub rate_limit_cooldown_secs: u64,
@@ -211,6 +215,42 @@ pub struct LlmManager {
 ```
 
 Rate limit state is shared across all agents (it's provider-level, not agent-level). When a 429 is received, the model is marked with the current timestamp. Future routing decisions can check `is_rate_limited()` to proactively skip models in cooldown.
+
+## Voice Transcription Routing
+
+Voice transcription (speech-to-text) uses a separate routing path from the main LLM models. When a user sends an audio attachment (e.g. a Telegram voice message), Spacebot transcribes it to text using a Whisper-compatible API before the channel LLM ever sees it.
+
+Voice routing is independent from the main process-type routing. You can use Anthropic for chat and Groq for transcription.
+
+```toml
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4-20250514"   # chat
+voice = "groq/whisper-large-v3-turbo"             # transcription (different provider)
+```
+
+### How It Routes
+
+1. `stt_provider` override (if set) determines the provider
+2. Otherwise, the provider prefix in `voice` is used (e.g. `groq/` in `groq/whisper-large-v3-turbo`)
+3. The provider must support the Whisper-compatible `/v1/audio/transcriptions` endpoint
+
+### Supported STT Providers
+
+| Provider | Default Voice Model | Endpoint |
+|----------|-------------------|----------|
+| OpenAI | `openai/whisper-1` | `/v1/audio/transcriptions` |
+| Groq | `groq/whisper-large-v3-turbo` | `/openai/v1/audio/transcriptions` |
+| Gemini | `gemini/gemini-2.5-flash` | `/v1/audio/transcriptions` (OpenAI-compatible) |
+
+Providers without native STT (Anthropic, OpenRouter, DeepSeek, etc.) require configuring a separate STT provider:
+
+```toml
+[defaults.routing]
+channel = "openrouter/anthropic/claude-sonnet-4"   # chat via OpenRouter
+voice = "groq/whisper-large-v3-turbo"               # STT via Groq
+```
+
+See [Voice Transcription](/docs/voice-transcription) for the full feature reference including language hints, translation mode, and configuration examples.
 
 ## What We Don't Do
 

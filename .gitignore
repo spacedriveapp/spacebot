@@ -7,7 +7,28 @@
 interface/node_modules/
 interface/dist/
 interface/public/opencode-embed/
-.opencode-build-cache/
+
+# OpenCode
+.opencode*/
+
+# Rust
+/target
+.Cargo.lock
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+.venv
+venv/
+.env.local
+
+# Node
+node_modules/
+dist/
+build/
 
 .idea
 list/

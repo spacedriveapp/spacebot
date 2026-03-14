@@ -316,6 +316,9 @@ pub(super) fn resolve_routing(
         compactor: t.compactor.unwrap_or_else(|| base.compactor.clone()),
         cortex: t.cortex.unwrap_or_else(|| base.cortex.clone()),
         voice: t.voice.unwrap_or_else(|| base.voice.clone()),
+        voice_language: t.voice_language.or(base.voice_language.clone()),
+        voice_translate: t.voice_translate.unwrap_or(base.voice_translate),
+        stt_provider: t.stt_provider.or(base.stt_provider.clone()),
         task_overrides,
         fallbacks,
         rate_limit_cooldown_secs: t
