@@ -390,7 +390,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			{chatOpen && (
 				<div
 					className={`overflow-hidden border-l border-app-line/50 ${
-						isSinglePane ? "flex min-w-0 flex-1 flex-col" : "w-[400px] flex-shrink-0"
+						isSinglePane ? "flex min-w-0 flex-1 flex-col" : "w-[min(400px,40%)] flex-shrink-0"
 					}`}
 				>
 					{isSinglePane && (
@@ -404,7 +404,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 							</button>
 						</div>
 					)}
-					<div className={isSinglePane ? "min-h-0 flex-1" : "h-full w-[400px]"}>
+					<div className={isSinglePane ? "min-h-0 flex-1" : "h-full"}>
 						<CortexChatPanel
 							agentId={agentId}
 							onClose={() => setChatOpen(false)}

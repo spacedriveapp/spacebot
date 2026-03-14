@@ -307,7 +307,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 				</DndContext>
 				{hasProvider && (
 					<button
-					type="button"
+						type="button"
 						onClick={() => setCreateOpen(true)}
 						className="flex h-8 w-8 items-center justify-center rounded-md text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
 						title="New Agent"
