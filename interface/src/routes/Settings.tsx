@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState } from "@/api/client";
+import { api, type GlobalSettingsResponse, type UpdateStatus, type SecretCategory, type SecretListItem, type StoreState, type ClaudeCliStatusResponse } from "@/api/client";
 import { Badge, Button, Input, SettingSidebarButton, Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter, Select, SelectTrigger, SelectValue, SelectContent, SelectItem, Toggle } from "@/ui";
 import { useSearch, useNavigate } from "@tanstack/react-router";
 import { PlatformCatalog, InstanceCard, AddInstanceCard } from "@/components/ChannelSettingCard";
@@ -289,6 +289,14 @@ export function Settings() {
 		message: string;
 		sample?: string | null;
 	} | null>(null);
+	const [anthropicOAuthDialogOpen, setAnthropicOAuthDialogOpen] = useState(false);
+	const [anthropicOAuthModel, setAnthropicOAuthModel] = useState("");
+	const [anthropicOAuthMessage, setAnthropicOAuthMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
+	const [anthropicOAuthState, setAnthropicOAuthState] = useState<string | null>(null);
+	const [anthropicOAuthCodeInput, setAnthropicOAuthCodeInput] = useState("");
 	const [isPollingOpenAiBrowserOAuth, setIsPollingOpenAiBrowserOAuth] = useState(false);
 	const [openAiBrowserOAuthMessage, setOpenAiBrowserOAuthMessage] = useState<{
 		text: string;
@@ -351,6 +359,21 @@ export function Settings() {
 		mutationFn: ({ provider, apiKey, model }: { provider: string; apiKey: string; model: string }) =>
 			api.testProviderModel(provider, apiKey, model),
 	});
+	const { data: cliStatus } = useQuery({
+		queryKey: ["claude-cli-status"],
+		queryFn: api.claudeCliStatus,
+		staleTime: 60_000,
+		enabled: activeSection === "providers",
+	});
+
+	const startAnthropicOAuthMutation = useMutation({
+		mutationFn: (params: { model: string; mode?: string }) => api.startAnthropicOAuth(params),
+	});
+
+	const exchangeAnthropicOAuthMutation = useMutation({
+		mutationFn: (params: { code: string; state: string }) => api.exchangeAnthropicOAuth(params),
+	});
+
 	const startOpenAiBrowserOAuthMutation = useMutation({
 		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
 	});
@@ -559,6 +582,71 @@ export function Settings() {
 		);
 	};
 
+	const handleStartAnthropicOAuth = async () => {
+		if (!anthropicOAuthModel.trim()) {
+			setAnthropicOAuthMessage({ text: "Please select a model first", type: "error" });
+			return;
+		}
+		setAnthropicOAuthMessage(null);
+		setAnthropicOAuthState(null);
+		setAnthropicOAuthCodeInput("");
+		try {
+			const result = await startAnthropicOAuthMutation.mutateAsync({
+				model: anthropicOAuthModel.trim(),
+			});
+			if (!result.success || !result.authorize_url || !result.state) {
+				setAnthropicOAuthMessage({
+					text: result.message || "Failed to start OAuth flow",
+					type: "error",
+				});
+				return;
+			}
+			setAnthropicOAuthState(result.state);
+			window.open(
+				result.authorize_url,
+				"spacebot-anthropic-oauth",
+				"popup=true,width=780,height=960,noopener,noreferrer",
+			);
+		} catch (error: any) {
+			setAnthropicOAuthMessage({ text: `Failed: ${error.message}`, type: "error" });
+		}
+	};
+
+	const handleExchangeAnthropicOAuth = async () => {
+		if (!anthropicOAuthState || !anthropicOAuthCodeInput.trim()) return;
+		setAnthropicOAuthMessage(null);
+		try {
+			const result = await exchangeAnthropicOAuthMutation.mutateAsync({
+				code: anthropicOAuthCodeInput.trim(),
+				state: anthropicOAuthState,
+			});
+			if (result.success) {
+				setAnthropicOAuthMessage({ text: result.message, type: "success" });
+				setAnthropicOAuthState(null);
+				setAnthropicOAuthCodeInput("");
+				queryClient.invalidateQueries({ queryKey: ["providers"] });
+				queryClient.invalidateQueries({ queryKey: ["claude-cli-status"] });
+				setTimeout(() => {
+					queryClient.invalidateQueries({ queryKey: ["agents"] });
+					queryClient.invalidateQueries({ queryKey: ["overview"] });
+				}, 3000);
+			} else {
+				setAnthropicOAuthMessage({ text: result.message, type: "error" });
+			}
+		} catch (error: any) {
+			setAnthropicOAuthMessage({ text: `Failed: ${error.message}`, type: "error" });
+		}
+	};
+
+	useEffect(() => {
+		if (!anthropicOAuthDialogOpen) {
+			setAnthropicOAuthMessage(null);
+			setAnthropicOAuthState(null);
+			setAnthropicOAuthCodeInput("");
+			setAnthropicOAuthModel("");
+		}
+	}, [anthropicOAuthDialogOpen]);
+
 	const handleClose = () => {
 		setEditingProvider(null);
 		setKeyInput("");
@@ -657,6 +745,16 @@ export function Settings() {
 												onRemove={() => removeMutation.mutate(provider.id)}
 												removing={removeMutation.isPending}
 											/>,
+											provider.id === "anthropic" ? (
+												<AnthropicOAuthProviderCard
+													key="anthropic-oauth"
+													configured={isConfigured("anthropic-oauth")}
+													cliStatus={cliStatus}
+													onSignIn={() => setAnthropicOAuthDialogOpen(true)}
+													onRemove={() => removeMutation.mutate("anthropic-oauth")}
+													removing={removeMutation.isPending}
+												/>
+											) : null,
 											provider.id === "openai" ? (
 												<ProviderCard
 													key="openai-chatgpt"
@@ -692,6 +790,22 @@ export function Settings() {
 									, etc.).
 								</p>
 							</div>
+
+							<AnthropicOAuthDialog
+								open={anthropicOAuthDialogOpen}
+								onOpenChange={setAnthropicOAuthDialogOpen}
+								isRequesting={startAnthropicOAuthMutation.isPending}
+								isExchanging={exchangeAnthropicOAuthMutation.isPending}
+								message={anthropicOAuthMessage}
+								hasState={!!anthropicOAuthState}
+								codeInput={anthropicOAuthCodeInput}
+								onCodeInputChange={setAnthropicOAuthCodeInput}
+								onStartOAuth={handleStartAnthropicOAuth}
+								onExchangeCode={handleExchangeAnthropicOAuth}
+								cliStatus={cliStatus}
+								modelValue={anthropicOAuthModel}
+								onModelChange={setAnthropicOAuthModel}
+							/>
 
 							<ChatGptOAuthDialog
 								open={openAiOAuthDialogOpen}
@@ -2823,6 +2937,224 @@ function ConfigFileSection() {
 		</div>
 	);
 }
+
+// ── Anthropic OAuth Provider Card ────────────────────────────────────────
+
+function AnthropicOAuthProviderCard({
+	configured,
+	cliStatus,
+	onSignIn,
+	onRemove,
+	removing,
+}: {
+	configured: boolean;
+	cliStatus: ClaudeCliStatusResponse | undefined;
+	onSignIn: () => void;
+	onRemove: () => void;
+	removing: boolean;
+}) {
+	const cliDetected = cliStatus?.cli_installed && cliStatus?.authenticated;
+
+	return (
+		<div className="rounded-lg border border-app-line bg-app-box p-4">
+			<div className="flex items-center gap-3">
+				<ProviderIcon provider="anthropic" size={32} />
+				<div className="flex-1">
+					<div className="flex items-center gap-2">
+						<span className="text-sm font-medium text-ink">Claude Code CLI (OAuth)</span>
+						{configured && (
+							<span className="inline-flex items-center">
+								<span className="h-2 w-2 rounded-full bg-green-400" aria-hidden="true" />
+								<span className="sr-only">Configured</span>
+							</span>
+						)}
+					</div>
+					<p className="mt-0.5 text-sm text-ink-dull">
+						Use your Claude Pro/Max subscription via OAuth instead of an API key.
+					</p>
+					{cliDetected && !configured && (
+						<p className="mt-1 text-tiny text-green-400">
+							Claude Code CLI detected{cliStatus?.email ? ` (${cliStatus.email})` : ""} — you can sign in with your existing account.
+						</p>
+					)}
+					{cliStatus && !cliDetected && !configured && (
+						<p className="mt-1 text-tiny text-ink-faint">
+							Claude Code CLI not detected. You can still sign in via browser.
+						</p>
+					)}
+					<p className="mt-1 text-tiny text-ink-faint">
+						Model selected during sign-in is applied to routing.
+					</p>
+				</div>
+				<div className="flex gap-2">
+					<Button onClick={onSignIn} variant="outline" size="sm">
+						{configured ? "Update" : "Sign in"}
+					</Button>
+					{configured && (
+						<Button onClick={onRemove} variant="outline" size="sm" loading={removing}>
+							Remove
+						</Button>
+					)}
+				</div>
+			</div>
+		</div>
+	);
+}
+
+// ── Anthropic OAuth Dialog ──────────────────────────────────────────────
+
+function AnthropicOAuthDialog({
+	open,
+	onOpenChange,
+	isRequesting,
+	isExchanging,
+	message,
+	hasState,
+	codeInput,
+	onCodeInputChange,
+	onStartOAuth,
+	onExchangeCode,
+	cliStatus,
+	modelValue,
+	onModelChange,
+}: {
+	open: boolean;
+	onOpenChange: (open: boolean) => void;
+	isRequesting: boolean;
+	isExchanging: boolean;
+	message: { text: string; type: "success" | "error" } | null;
+	hasState: boolean;
+	codeInput: string;
+	onCodeInputChange: (value: string) => void;
+	onStartOAuth: () => void;
+	onExchangeCode: () => void;
+	cliStatus: ClaudeCliStatusResponse | undefined;
+	modelValue: string;
+	onModelChange: (value: string) => void;
+}) {
+	const cliDetected = cliStatus?.cli_installed && cliStatus?.authenticated;
+
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<ProviderIcon provider="anthropic" size={20} />
+						Sign in with Anthropic OAuth
+					</DialogTitle>
+					{!message && (
+						<DialogDescription>
+							{cliDetected
+								? `Claude Code CLI detected${cliStatus?.email ? ` (${cliStatus.email})` : ""}. Click below to authorize this app — since you're already signed in, it should be quick.`
+								: "Sign in with your Anthropic account (Claude Pro, Max, or API console) to use OAuth instead of an API key."
+							}
+						</DialogDescription>
+					)}
+				</DialogHeader>
+
+				<div className="space-y-4">
+					{message && !hasState && (
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+								? "border-green-500/20 bg-green-500/10 text-green-400"
+								: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					)}
+
+					{!hasState && !message && (
+						<div className="space-y-3">
+							<p className="text-sm text-ink-dull">
+								Choose the model to use, then authorize access in a browser window.
+							</p>
+							<ModelSelect
+								label="Model"
+								description="Pick the model to apply to routing"
+								value={modelValue}
+								onChange={onModelChange}
+								provider="anthropic"
+							/>
+							<Button
+								onClick={onStartOAuth}
+								disabled={!modelValue.trim()}
+								loading={isRequesting}
+								variant="outline"
+								size="sm"
+							>
+								Open authorization page
+							</Button>
+						</div>
+					)}
+
+					{hasState && (
+						<div className="space-y-4">
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
+									<p className="text-sm text-ink-dull">Approve access in the browser window that opened</p>
+								</div>
+							</div>
+
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
+									<p className="text-sm text-ink-dull">Paste the authorization code below</p>
+								</div>
+								<div className="mt-2.5 flex items-center gap-2 pl-7">
+									<Input
+										type="text"
+										value={codeInput}
+										onChange={(e) => onCodeInputChange(e.target.value)}
+										placeholder="Paste code here..."
+										onKeyDown={(e) => {
+											if (e.key === "Enter") onExchangeCode();
+										}}
+										autoFocus
+									/>
+									<Button
+										onClick={onExchangeCode}
+										disabled={!codeInput.trim()}
+										loading={isExchanging}
+										size="sm"
+									>
+										Submit
+									</Button>
+								</div>
+							</div>
+
+							{message && (
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
+								</div>
+							)}
+						</div>
+					)}
+				</div>
+
+				<DialogFooter>
+					{message?.type === "success" ? (
+						<Button onClick={() => onOpenChange(false)} size="sm">
+							Done
+						</Button>
+					) : hasState ? (
+						<Button onClick={onStartOAuth} variant="ghost" size="sm" loading={isRequesting}>
+							Restart
+						</Button>
+					) : null}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+// ── Provider Card ───────────────────────────────────────────────────────
 
 interface ProviderCardProps {
 	provider: string;

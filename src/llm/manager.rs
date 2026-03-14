@@ -229,6 +229,16 @@ impl LlmManager {
         }
     }
 
+    /// Set Anthropic OAuth credentials in memory after successful auth.
+    pub async fn set_anthropic_oauth_credentials(&self, creds: AnthropicOAuthCredentials) {
+        *self.anthropic_oauth_credentials.write().await = Some(creds);
+    }
+
+    /// Clear Anthropic OAuth credentials from memory.
+    pub async fn clear_anthropic_oauth_credentials(&self) {
+        *self.anthropic_oauth_credentials.write().await = None;
+    }
+
     /// Set OpenAI OAuth credentials in memory after successful auth.
     pub async fn set_openai_oauth_credentials(&self, creds: OpenAiOAuthCredentials) {
         *self.openai_oauth_credentials.write().await = Some(creds);
