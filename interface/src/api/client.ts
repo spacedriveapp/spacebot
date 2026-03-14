@@ -1207,6 +1207,9 @@ export interface CreateMessagingInstanceRequest {
 		webhook_port?: number;
 		webhook_bind?: string;
 		webhook_auth_token?: string;
+		signal_http_url?: string;
+		signal_account?: string;
+		signal_dm_allowed_users?: string;
 	};
 }
 

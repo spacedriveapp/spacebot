@@ -873,10 +873,13 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     });
 
     // Send the cron job prompt as a synthetic message
+    // Use the delivery target's adapter as the source adapter so the channel
+    // correctly identifies as being "from" that messaging platform (e.g., signal:gvoice1).
+    // This ensures tools like reply and send_message resolve to the correct adapter instance.
     let message = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
         source: "cron".into(),
-        adapter: None,
+        adapter: Some(job.delivery_target.adapter.clone()),
         conversation_id: format!("cron:{}", job.id),
         sender_id: "system".into(),
         agent_id: Some(context.deps.agent_id.clone()),

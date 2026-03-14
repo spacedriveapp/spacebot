@@ -6,6 +6,9 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
+// Re-export E.164 validation from messaging target module
+pub use crate::messaging::target::is_valid_e164;
+
 #[derive(Serialize, Clone)]
 pub(super) struct PlatformStatus {
     configured: bool,
@@ -31,6 +34,7 @@ pub(super) struct MessagingStatusResponse {
     email: PlatformStatus,
     webhook: PlatformStatus,
     twitch: PlatformStatus,
+    signal: PlatformStatus,
     instances: Vec<AdapterInstanceStatus>,
 }
 
@@ -95,6 +99,13 @@ pub(super) struct InstanceCredentials {
     webhook_bind: Option<String>,
     #[serde(default)]
     webhook_auth_token: Option<String>,
+    // Signal credentials
+    #[serde(default)]
+    signal_http_url: Option<String>,
+    #[serde(default)]
+    signal_account: Option<String>,
+    #[serde(default)]
+    signal_dm_allowed_users: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -180,13 +191,127 @@ fn push_instance_status(
     });
 }
 
+/// Parse and validate Signal credentials from the request.
+/// Returns (http_url, account, dm_allowed_users) on success, or an error response on failure.
+fn parse_signal_credentials(
+    credentials: &InstanceCredentials,
+) -> Result<(String, String, Option<Vec<String>>), MessagingInstanceActionResponse> {
+    // Validate required fields
+    let http_url = match credentials
+        .signal_http_url
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(url_str) => match reqwest::Url::parse(url_str) {
+            Ok(url) => {
+                // Validate URL scheme is http or https
+                let scheme = url.scheme();
+                if scheme != "http" && scheme != "https" {
+                    return Err(MessagingInstanceActionResponse {
+                        success: false,
+                        message: format!(
+                            "signal: URL scheme must be 'http' or 'https', got '{}'",
+                            scheme
+                        ),
+                    });
+                }
+                url.to_string()
+            }
+            Err(e) => {
+                tracing::warn!(%e, url = %url_str, "signal: invalid http_url format");
+                return Err(MessagingInstanceActionResponse {
+                    success: false,
+                    message: format!("signal: invalid http_url format: {}", e),
+                });
+            }
+        },
+        None => {
+            tracing::warn!("signal: http_url is required");
+            return Err(MessagingInstanceActionResponse {
+                success: false,
+                message: "signal: http_url is required (e.g., http://127.0.0.1:8686)".to_string(),
+            });
+        }
+    };
+
+    let account = match credentials
+        .signal_account
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        Some(account) => account,
+        None => {
+            tracing::warn!("signal: account is required");
+            return Err(MessagingInstanceActionResponse {
+                success: false,
+                message: "signal: account is required".to_string(),
+            });
+        }
+    };
+
+    // Validate E.164 format
+    if !is_valid_e164(account) {
+        return Err(MessagingInstanceActionResponse {
+            success: false,
+            message: format!(
+                "Invalid Signal account format: '{}'. Must be E.164 format (+1234567890, 6-15 digits after '+', first digit cannot be 0)",
+                account
+            ),
+        });
+    }
+
+    // Parse and validate dm_allowed_users if provided
+    let dm_users = if let Some(dm_str) = credentials.signal_dm_allowed_users.as_ref() {
+        let entries: Vec<String> = dm_str
+            .split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+
+        // Validate each entry is a valid Signal target format
+        let invalid_entries: Vec<&String> = entries
+            .iter()
+            .filter(|entry| {
+                // Valid formats: uuid:xxx, group:xxx, +E.164
+                !(entry.starts_with("uuid:") || entry.starts_with("group:") || is_valid_e164(entry))
+            })
+            .collect();
+
+        if !invalid_entries.is_empty() {
+            let invalid_list: String = invalid_entries
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(MessagingInstanceActionResponse {
+                success: false,
+                message: format!(
+                    "Invalid DM allow-list entries: {}. Must be 'uuid:xxx', 'group:xxx', or E.164 phone number (+1234567890)",
+                    invalid_list
+                ),
+            });
+        }
+
+        Some(entries)
+    } else {
+        None
+    };
+
+    Ok((http_url, account.to_string(), dm_users))
+}
+
 /// Get which messaging platforms are configured and enabled.
 pub(super) async fn messaging_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<MessagingStatusResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
 
-    let (discord, slack, telegram, email, webhook, twitch, instances) = if config_path.exists() {
+    let (discord, slack, telegram, email, webhook, twitch, signal, instances) = if config_path
+        .exists()
+    {
         let content = tokio::fs::read_to_string(&config_path)
             .await
             .map_err(|error| {
@@ -510,6 +635,73 @@ pub(super) async fn messaging_status(
                 enabled: false,
             });
 
+        // Signal status and instances
+        let signal_status = doc
+            .get("messaging")
+            .and_then(|m| m.get("signal"))
+            .map(|s| {
+                let has_http_url = s
+                    .get("http_url")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let has_account = s
+                    .get("account")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty());
+                let enabled = s.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+
+                if has_http_url && has_account {
+                    push_instance_status(&mut instances, bindings, "signal", None, true, enabled);
+                }
+
+                if let Some(named_instances) = s
+                    .get("instances")
+                    .and_then(|value| value.as_array_of_tables())
+                {
+                    for instance in named_instances {
+                        let instance_name = normalize_adapter_selector(
+                            instance.get("name").and_then(|value| value.as_str()),
+                        );
+                        let instance_enabled = instance
+                            .get("enabled")
+                            .and_then(|value| value.as_bool())
+                            .unwrap_or(true)
+                            && enabled;
+                        let instance_has_http_url = instance
+                            .get("http_url")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| !value.is_empty());
+                        let instance_has_account = instance
+                            .get("account")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| !value.is_empty());
+
+                        if let Some(instance_name) = instance_name
+                            && instance_has_http_url
+                            && instance_has_account
+                        {
+                            push_instance_status(
+                                &mut instances,
+                                bindings,
+                                "signal",
+                                Some(instance_name),
+                                true,
+                                instance_enabled,
+                            );
+                        }
+                    }
+                }
+
+                PlatformStatus {
+                    configured: has_http_url && has_account,
+                    enabled: has_http_url && has_account && enabled,
+                }
+            })
+            .unwrap_or(PlatformStatus {
+                configured: false,
+                enabled: false,
+            });
+
         (
             discord_status,
             slack_status,
@@ -517,6 +709,7 @@ pub(super) async fn messaging_status(
             email_status,
             webhook_status,
             twitch_status,
+            signal_status,
             instances,
         )
     } else {
@@ -530,7 +723,8 @@ pub(super) async fn messaging_status(
             default.clone(),
             default.clone(),
             default.clone(),
-            default,
+            default.clone(),
+            default.clone(),
             Vec::new(),
         )
     };
@@ -542,6 +736,7 @@ pub(super) async fn messaging_status(
         email,
         webhook,
         twitch,
+        signal,
         instances,
     }))
 }
@@ -1086,6 +1281,127 @@ pub(super) async fn toggle_platform(
                         }
                     }
                 }
+                "signal" => {
+                    if let Some(signal_config) = &new_config.messaging.signal {
+                        match request.adapter.as_ref() {
+                            None => {
+                                // Toggle default adapter only
+                                if !signal_config.http_url.is_empty()
+                                    && !signal_config.account.is_empty()
+                                {
+                                    let permissions = {
+                                        let perms_guard = state.signal_permissions.read().await;
+                                        match perms_guard.as_ref() {
+                                            Some(existing) => {
+                                                // Update existing ArcSwap pointee
+                                                let perms =
+                                                    crate::config::SignalPermissions::from_config(
+                                                        signal_config,
+                                                    );
+                                                existing.store(std::sync::Arc::new(perms));
+                                                existing.clone()
+                                            }
+                                            None => {
+                                                drop(perms_guard);
+                                                let perms =
+                                                    crate::config::SignalPermissions::from_config(
+                                                        signal_config,
+                                                    );
+                                                let arc_swap = std::sync::Arc::new(
+                                                    arc_swap::ArcSwap::from_pointee(perms),
+                                                );
+                                                state
+                                                    .set_signal_permissions(arc_swap.clone())
+                                                    .await;
+                                                arc_swap
+                                            }
+                                        }
+                                    };
+                                    let instance_dir = state.instance_dir.load();
+                                    let tmp_dir = instance_dir.join("tmp");
+                                    let adapter = crate::messaging::signal::SignalAdapter::new(
+                                        "signal",
+                                        &signal_config.http_url,
+                                        &signal_config.account,
+                                        signal_config.ignore_stories,
+                                        permissions,
+                                        tmp_dir,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, "failed to start signal adapter on toggle");
+                                    }
+                                }
+
+                                // Also start all enabled named instances
+                                for instance in signal_config
+                                    .instances
+                                    .iter()
+                                    .filter(|instance| instance.enabled)
+                                {
+                                    let runtime_key = crate::config::binding_runtime_adapter_key(
+                                        "signal",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        continue;
+                                    }
+                                    let permissions =
+                                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                                            crate::config::SignalPermissions::from_instance_config(
+                                                instance,
+                                            ),
+                                        ));
+                                    let instance_dir = state.instance_dir.load();
+                                    let tmp_dir = instance_dir.join("tmp");
+                                    let adapter = crate::messaging::signal::SignalAdapter::new(
+                                        runtime_key,
+                                        &instance.http_url,
+                                        &instance.account,
+                                        instance.ignore_stories,
+                                        permissions,
+                                        tmp_dir,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, adapter = %instance.name, "failed to start named signal adapter on toggle");
+                                    }
+                                }
+                            }
+                            Some(adapter_name) => {
+                                // Toggle specific named instance only
+                                let adapter_key = adapter_name.trim();
+                                if let Some(instance) =
+                                    signal_config.instances.iter().find(|instance| {
+                                        instance.name == adapter_key && instance.enabled
+                                    })
+                                {
+                                    let runtime_key = crate::config::binding_runtime_adapter_key(
+                                        "signal",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    let permissions =
+                                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
+                                            crate::config::SignalPermissions::from_instance_config(
+                                                instance,
+                                            ),
+                                        ));
+                                    let instance_dir = state.instance_dir.load();
+                                    let tmp_dir = instance_dir.join("tmp");
+                                    let adapter = crate::messaging::signal::SignalAdapter::new(
+                                        runtime_key,
+                                        &instance.http_url,
+                                        &instance.account,
+                                        instance.ignore_stories,
+                                        permissions,
+                                        tmp_dir,
+                                    );
+                                    if let Err(error) = manager.register_and_start(adapter).await {
+                                        tracing::error!(%error, adapter = %instance.name, "failed to start named signal adapter on toggle");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1128,7 +1444,7 @@ pub(super) async fn create_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "signal"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1149,6 +1465,16 @@ pub(super) async fn create_messaging_instance(
             return Ok(Json(MessagingInstanceActionResponse {
                 success: false,
                 message: "instance name cannot contain ':' or spaces".to_string(),
+            }));
+        }
+        // Validate instance name format (rejects all-digits, Slack-style IDs, etc.)
+        if !crate::messaging::target::is_valid_instance_name(trimmed) {
+            return Ok(Json(MessagingInstanceActionResponse {
+                success: false,
+                message: format!(
+                    "instance name '{}' is invalid. Names must: not be all digits, not match Slack workspace IDs (Txxxxx/Cxxxxx), be 1-20 characters, and contain only alphanumeric characters, underscores, or hyphens",
+                    trimmed
+                ),
             }));
         }
     }
@@ -1269,6 +1595,32 @@ pub(super) async fn create_messaging_instance(
                         platform_table["auth_token"] = toml_edit::value(token.as_str());
                     }
                 }
+                "signal" => {
+                    // Use helper function to parse and validate Signal credentials
+                    let (http_url, account, dm_users) = match parse_signal_credentials(credentials)
+                    {
+                        Ok(result) => result,
+                        Err(response) => return Ok(Json(response)),
+                    };
+
+                    // Store normalized URL (strip trailing slash)
+                    platform_table["http_url"] = toml_edit::value(http_url.trim_end_matches('/'));
+                    platform_table["account"] = toml_edit::value(account);
+
+                    // Store dm_allowed_users if provided, remove if empty/cleared
+                    if let Some(dm_users) = dm_users
+                        && !dm_users.is_empty()
+                    {
+                        let mut dm_array = toml_edit::Array::new();
+                        for user in dm_users {
+                            dm_array.push(user);
+                        }
+                        platform_table["dm_allowed_users"] = toml_edit::value(dm_array);
+                    } else {
+                        // Remove the key if dm_users is empty or None (cleared by user)
+                        platform_table.remove("dm_allowed_users");
+                    }
+                }
                 _ => {}
             }
             platform_table["enabled"] = toml_edit::value(enabled);
@@ -1378,6 +1730,32 @@ pub(super) async fn create_messaging_instance(
                         instance_table["auth_token"] = toml_edit::value(token.as_str());
                     }
                 }
+                "signal" => {
+                    // Use helper function to parse and validate Signal credentials
+                    let (http_url, account, dm_users) = match parse_signal_credentials(credentials)
+                    {
+                        Ok(result) => result,
+                        Err(response) => return Ok(Json(response)),
+                    };
+
+                    // Store normalized URL (strip trailing slash)
+                    instance_table["http_url"] = toml_edit::value(http_url.trim_end_matches('/'));
+                    instance_table["account"] = toml_edit::value(account);
+
+                    // Store dm_allowed_users if provided, remove if empty/cleared
+                    if let Some(dm_users) = dm_users
+                        && !dm_users.is_empty()
+                    {
+                        let mut dm_array = toml_edit::Array::new();
+                        for user in dm_users {
+                            dm_array.push(user);
+                        }
+                        instance_table["dm_allowed_users"] = toml_edit::value(dm_array);
+                    } else {
+                        // Remove the key if dm_users is empty or None (cleared by user)
+                        instance_table.remove("dm_allowed_users");
+                    }
+                }
                 _ => {}
             }
 
@@ -1443,7 +1821,7 @@ pub(super) async fn delete_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "signal"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1540,6 +1918,14 @@ pub(super) async fn delete_messaging_instance(
                     table.remove("bind");
                     table.remove("auth_token");
                 }
+                "signal" => {
+                    table.remove("http_url");
+                    table.remove("account");
+                    table.remove("dm_allowed_users");
+                    table.remove("group_ids");
+                    table.remove("group_allowed_users");
+                    table.remove("ignore_stories");
+                }
                 _ => {}
             }
         }
@@ -1632,4 +2018,50 @@ pub(super) async fn delete_messaging_instance(
         success: true,
         message: format!("{runtime_key} instance deleted"),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_valid_e164_valid_numbers() {
+        // Valid E.164 numbers (6-15 digits after +, 7-16 total)
+        assert!(is_valid_e164("+1234567890"));
+        assert!(is_valid_e164("+123456")); // Minimum: 6 digits after +
+        assert!(is_valid_e164("+14155552671"));
+        assert!(is_valid_e164("+12345678901234")); // 14 digits after +
+        assert!(is_valid_e164("+123456789012345")); // Maximum: 15 digits after +
+    }
+
+    #[test]
+    fn test_is_valid_e164_invalid_numbers() {
+        // Missing +
+        assert!(!is_valid_e164("1234567890"));
+
+        // Too short (less than 6 digits after +)
+        assert!(!is_valid_e164("+12345"));
+        assert!(!is_valid_e164("+123"));
+
+        // Empty or just +
+        assert!(!is_valid_e164("+"));
+        assert!(!is_valid_e164(""));
+
+        // Non-digit characters
+        assert!(!is_valid_e164("+1234567890a"));
+        assert!(!is_valid_e164("+123-456-7890"));
+        assert!(!is_valid_e164("+123 456 7890"));
+
+        // Spaces
+        assert!(!is_valid_e164(" +1234567890"));
+        assert!(!is_valid_e164("+1234567890 "));
+
+        // First digit is 0 (E.164 requires 1-9)
+        assert!(!is_valid_e164("+0123456"));
+        assert!(!is_valid_e164("+01234567890"));
+
+        // Too long (more than 15 digits after +)
+        assert!(!is_valid_e164("+1234567890123456"));
+        assert!(!is_valid_e164("+12345678901234567"));
+    }
 }

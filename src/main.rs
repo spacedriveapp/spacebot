@@ -3107,6 +3107,9 @@ async fn initialize_agents(
         let perms = spacebot::config::SignalPermissions::from_config(signal_config);
         Arc::new(ArcSwap::from_pointee(perms))
     });
+    if let Some(perms) = &*signal_permissions {
+        api_state.set_signal_permissions(perms.clone()).await;
+    }
 
     if let Some(signal_config) = &config.messaging.signal
         && signal_config.enabled

@@ -16,7 +16,26 @@ impl std::fmt::Display for BroadcastTarget {
 }
 
 /// Parse and normalize a delivery target in `adapter:target` format.
+///
+/// Signal targets may contain named instance prefixes (e.g.,
+/// `signal:gvoice1:uuid:xxx`). The generic `split_once(':')` approach
+/// cannot distinguish the instance segment from the target, so we
+/// delegate to `parse_signal_target_parts` which already handles this.
 pub fn parse_delivery_target(raw: &str) -> Option<BroadcastTarget> {
+    // Signal needs special handling because named instances add an extra
+    // colon-separated segment that the generic parser can't distinguish.
+    if raw.starts_with("signal:") {
+        let parts: Vec<&str> = raw.split(':').collect();
+        return parse_signal_target_parts(parts.get(1..).unwrap_or(&[]));
+    }
+
+    // Handle other platforms with named instances (telegram, discord, slack)
+    // Format: platform:<instance>:<target> or platform:<target>
+    if raw.starts_with("telegram:") || raw.starts_with("discord:") || raw.starts_with("slack:") {
+        let parts: Vec<&str> = raw.split(':').collect();
+        return parse_named_instance_target(&parts);
+    }
+
     let (adapter, raw_target) = raw.split_once(':')?;
     if adapter.is_empty() || raw_target.is_empty() {
         return None;
@@ -258,6 +277,29 @@ fn normalize_email_target(raw_target: &str) -> Option<String> {
     None
 }
 
+/// Validate E.164 phone number format.
+///
+/// Requirements:
+/// - Must start with '+'
+/// - First digit after '+' must be 1-9 (not 0)
+/// - Minimum 7 digits total (6 after '+')
+/// - Maximum 16 digits total (15 after '+', E.164 standard)
+/// - All characters after '+' must be ASCII digits
+pub fn is_valid_e164(phone: &str) -> bool {
+    if let Some(digits) = phone.strip_prefix('+') {
+        if digits.len() < 6 || digits.len() > 15 {
+            return false;
+        }
+        // First digit must be 1-9 (not 0)
+        if digits.chars().next().map(|c| c == '0').unwrap_or(true) {
+            return false;
+        }
+        digits.chars().all(|c| c.is_ascii_digit())
+    } else {
+        false
+    }
+}
+
 fn normalize_signal_target(raw_target: &str) -> Option<String> {
     let target = strip_repeated_prefix(raw_target, "signal");
 
@@ -277,18 +319,18 @@ fn normalize_signal_target(raw_target: &str) -> Option<String> {
         return None;
     }
 
-    // Handle e164:+123 or bare +123 format
+    // Handle e164:+123 format
     if let Some(phone) = target.strip_prefix("e164:") {
-        let phone = phone.trim_start_matches('+');
-        if !phone.is_empty() && phone.len() >= 7 && phone.chars().all(|c| c.is_ascii_digit()) {
-            return Some(format!("+{phone}"));
+        let normalized = format!("+{}", phone.trim_start_matches('+'));
+        if is_valid_e164(&normalized) {
+            return Some(normalized);
         }
         return None;
     }
 
     // Bare +123 format
-    if let Some(phone) = target.strip_prefix('+') {
-        if !phone.is_empty() && phone.len() >= 7 && phone.chars().all(|c| c.is_ascii_digit()) {
+    if target.starts_with('+') {
+        if is_valid_e164(target) {
             return Some(target.to_string());
         }
         return None;
@@ -299,9 +341,12 @@ fn normalize_signal_target(raw_target: &str) -> Option<String> {
         return Some(format!("uuid:{target}"));
     }
 
-    // Check if it's a bare phone number (7+ digits required for E.164)
-    if target.chars().all(|c| c.is_ascii_digit()) && target.len() >= 7 {
-        return Some(format!("+{target}"));
+    // Check if it's a bare phone number (E.164 format)
+    if target.chars().all(|c| c.is_ascii_digit()) {
+        let with_plus = format!("+{target}");
+        if is_valid_e164(&with_plus) {
+            return Some(with_plus);
+        }
     }
 
     None
@@ -365,62 +410,160 @@ fn extract_signal_adapter_from_channel_id(channel_id: &str) -> String {
 pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
     match parts {
         // Default adapter: signal:uuid:xxx, signal:group:xxx, signal:e164:+xxx, signal:+xxx
-        ["uuid", uuid] => Some(BroadcastTarget {
+        ["uuid", uuid] if !uuid.is_empty() => Some(BroadcastTarget {
             adapter: "signal".to_string(),
             target: format!("uuid:{uuid}"),
         }),
-        ["group", group_id] => Some(BroadcastTarget {
+        ["group", group_id] if !group_id.is_empty() => Some(BroadcastTarget {
             adapter: "signal".to_string(),
             target: format!("group:{group_id}"),
         }),
         // Use normalize_signal_target for phone/e164 to ensure consistent parsing
-        ["e164", phone] => {
-            normalize_signal_target(&format!("e164:{phone}")).map(|target| BroadcastTarget {
+        ["e164", phone] if !phone.is_empty() => normalize_signal_target(&format!("e164:{phone}"))
+            .map(|target| BroadcastTarget {
                 adapter: "signal".to_string(),
                 target,
-            })
-        }
-        [phone] if phone.starts_with('+') => {
-            normalize_signal_target(phone).map(|target| BroadcastTarget {
+            }),
+        [phone] if phone.starts_with('+') && !phone.is_empty() => normalize_signal_target(phone)
+            .map(|target| BroadcastTarget {
                 adapter: "signal".to_string(),
                 target,
-            })
-        }
+            }),
         // Single-part targets: delegate to normalize_signal_target for bare UUIDs/phones
-        [single] => normalize_signal_target(single).map(|target| BroadcastTarget {
-            adapter: "signal".to_string(),
-            target,
-        }),
+        [single] if !single.is_empty() => {
+            normalize_signal_target(single).map(|target| BroadcastTarget {
+                adapter: "signal".to_string(),
+                target,
+            })
+        }
         // Named adapter: signal:instance:uuid:xxx, signal:instance:group:xxx
-        [instance, "uuid", uuid] => Some(BroadcastTarget {
-            adapter: format!("signal:{instance}"),
-            target: format!("uuid:{uuid}"),
-        }),
-        [instance, "group", group_id] => Some(BroadcastTarget {
-            adapter: format!("signal:{instance}"),
-            target: format!("group:{group_id}"),
-        }),
+        [instance, "uuid", uuid] if !instance.is_empty() && !uuid.is_empty() => {
+            Some(BroadcastTarget {
+                adapter: format!("signal:{instance}"),
+                target: format!("uuid:{uuid}"),
+            })
+        }
+        [instance, "group", group_id] if !instance.is_empty() && !group_id.is_empty() => {
+            Some(BroadcastTarget {
+                adapter: format!("signal:{instance}"),
+                target: format!("group:{group_id}"),
+            })
+        }
         // Named adapter: signal:instance:e164:+xxx - use normalize_signal_target
-        [instance, "e164", phone] => {
+        [instance, "e164", phone] if !instance.is_empty() && !phone.is_empty() => {
             normalize_signal_target(&format!("e164:{phone}")).map(|target| BroadcastTarget {
                 adapter: format!("signal:{instance}"),
                 target,
             })
         }
         // Named adapter: signal:instance:+xxx - use normalize_signal_target
-        [instance, phone] if phone.starts_with('+') => {
+        [instance, phone]
+            if !instance.is_empty() && phone.starts_with('+') && !phone.is_empty() =>
+        {
             normalize_signal_target(phone).map(|target| BroadcastTarget {
                 adapter: format!("signal:{instance}"),
                 target,
             })
         }
         // Named adapter with single-part target: delegate to normalize_signal_target
-        [instance, single] => normalize_signal_target(single).map(|target| BroadcastTarget {
-            adapter: format!("signal:{instance}"),
-            target,
+        // Reject all-digit identifiers to avoid misinterpreting numeric IDs as phone numbers
+        [instance, single]
+            if !instance.is_empty()
+                && !single.is_empty()
+                && !single.chars().all(|c| c.is_ascii_digit()) =>
+        {
+            normalize_signal_target(single).map(|target| BroadcastTarget {
+                adapter: format!("signal:{instance}"),
+                target,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Parse targets for platforms with named instance support (telegram, discord, slack).
+///
+/// Handles formats:
+/// - Default adapter: ["telegram", target], ["discord", target], ["slack", target]
+/// - Legacy format: ["discord", guild_id, channel_id], ["slack", workspace_id, channel_id]
+/// - Named adapter: ["telegram", instance, target], ["discord", instance, target], ["slack", instance, target]
+///
+/// Returns None for invalid formats.
+fn parse_named_instance_target(parts: &[&str]) -> Option<BroadcastTarget> {
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let platform = parts[0];
+    let is_telegram = platform == "telegram";
+    let is_discord = platform == "discord";
+    let is_slack = platform == "slack";
+
+    if !is_telegram && !is_discord && !is_slack {
+        return None;
+    }
+
+    // Reject any cases with empty parts
+    if parts.iter().any(|part| part.is_empty()) {
+        return None;
+    }
+
+    match parts {
+        // Named adapter: platform:instance:target
+        // Heuristic: instance names are simple alphanumeric identifiers (not all digits like guild IDs)
+        // Reject "dm" as instance name for Discord/Slack (reserved for DM format)
+        [platform, instance, target, ..]
+            if parts.len() >= 3
+                && !instance.is_empty()
+                && !target.is_empty()
+                && is_valid_instance_name(instance)
+                && !((*platform == "discord" || *platform == "slack") && *instance == "dm") =>
+        {
+            // Reconstruct target from remaining parts (in case target contains colons)
+            let full_target = parts[2..].join(":");
+            if full_target.is_empty() {
+                return None;
+            }
+            Some(BroadcastTarget {
+                adapter: format!("{}:{}", platform, instance),
+                target: full_target,
+            })
+        }
+        // Legacy multi-part format: platform:workspace_id:target_id (use last part as target)
+        [platform, .., target] if parts.len() > 2 && !target.is_empty() => Some(BroadcastTarget {
+            adapter: (*platform).to_string(),
+            target: (*target).to_string(),
+        }),
+        // Default adapter: platform:target
+        [platform, target] if !target.is_empty() => Some(BroadcastTarget {
+            adapter: (*platform).to_string(),
+            target: (*target).to_string(),
         }),
         _ => None,
     }
+}
+
+/// Check if a string looks like a valid instance name (not an ID).
+/// Instance names are short identifiers, not numeric IDs or workspace identifiers.
+pub fn is_valid_instance_name(name: &str) -> bool {
+    // Must not be all digits (Discord guild ID, etc.)
+    if name.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    // Must not look like a Slack workspace ID (Txxxxx, Cxxxxx, etc.)
+    if name.len() > 6
+        && name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name[1..].chars().all(|c| c.is_ascii_digit())
+    {
+        return false;
+    }
+    // Must be reasonably short (instance names are short, not long IDs)
+    if name.len() > 20 {
+        return false;
+    }
+    // Must contain only alphanumeric characters, underscores, and hyphens
+    name.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 #[cfg(test)]
@@ -702,5 +845,141 @@ mod tests {
         assert!(super::parse_signal_target_parts(&["unknown"]).is_none());
         assert!(super::parse_signal_target_parts(&["uuid"]).is_none()); // missing UUID value
         assert!(super::parse_signal_target_parts(&["gvoice1", "unknown"]).is_none());
+    }
+
+    // Tests for parse_named_instance_target
+    #[test]
+    fn parse_named_instance_target_telegram() {
+        let parsed = super::parse_named_instance_target(&["telegram", "mybot", "12345"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "telegram:mybot".to_string(),
+                target: "12345".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_discord_named() {
+        // Named instance: discord:myinstance:channel_id
+        let parsed = super::parse_named_instance_target(&["discord", "myinstance", "987654321"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "discord:myinstance".to_string(),
+                target: "987654321".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_discord_legacy() {
+        // Legacy format: discord:guild_id:channel_id (all digits = not a named instance)
+        let parsed = super::parse_named_instance_target(&["discord", "123456789", "987654321"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "discord".to_string(),
+                target: "987654321".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_slack_named() {
+        // Named instance: slack:work:channel_id
+        let parsed = super::parse_named_instance_target(&["slack", "work", "C012345"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "slack:work".to_string(),
+                target: "C012345".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_slack_legacy() {
+        // Legacy format: slack:workspace_id:channel_id (workspace_id pattern = not named)
+        let parsed = super::parse_named_instance_target(&["slack", "T012345", "C012345"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "slack".to_string(),
+                target: "C012345".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_default_adapter() {
+        // Default adapter (2 parts): telegram:target
+        let parsed = super::parse_named_instance_target(&["telegram", "12345"]);
+        assert_eq!(
+            parsed,
+            Some(super::BroadcastTarget {
+                adapter: "telegram".to_string(),
+                target: "12345".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_named_instance_target_invalid() {
+        // Too few parts
+        assert!(super::parse_named_instance_target(&["telegram"]).is_none());
+        // Empty instance name
+        assert!(super::parse_named_instance_target(&["telegram", "", "12345"]).is_none());
+        // Empty target
+        assert!(super::parse_named_instance_target(&["telegram", "work", ""]).is_none());
+        // Unsupported platform
+        assert!(super::parse_named_instance_target(&["unknown", "work", "12345"]).is_none());
+    }
+
+    // Tests for is_valid_instance_name
+    #[test]
+    fn is_valid_instance_name_valid() {
+        assert!(super::is_valid_instance_name("work"));
+        assert!(super::is_valid_instance_name("my_bot"));
+        assert!(super::is_valid_instance_name("my-bot"));
+        assert!(super::is_valid_instance_name("instance123"));
+        assert!(super::is_valid_instance_name("a"));
+    }
+
+    #[test]
+    fn is_valid_instance_name_invalid_all_digits() {
+        // All digits = numeric ID, not an instance name
+        assert!(!super::is_valid_instance_name("12345"));
+        assert!(!super::is_valid_instance_name("123456789"));
+    }
+
+    #[test]
+    fn is_valid_instance_name_invalid_slack_workspace() {
+        // Slack workspace ID pattern
+        assert!(!super::is_valid_instance_name("T012345"));
+        assert!(!super::is_valid_instance_name("C012345"));
+    }
+
+    #[test]
+    fn is_valid_instance_name_invalid_length() {
+        // Too long (>20 chars)
+        assert!(!super::is_valid_instance_name(
+            "this_is_a_very_long_instance_name"
+        ));
+    }
+
+    #[test]
+    fn is_valid_instance_name_invalid_empty() {
+        // Empty string
+        assert!(!super::is_valid_instance_name(""));
+    }
+
+    #[test]
+    fn is_valid_instance_name_edge_cases() {
+        // Exactly 20 characters (boundary)
+        assert!(super::is_valid_instance_name("exactly_twenty_chars"));
+        // 21 characters (over boundary)
+        assert!(!super::is_valid_instance_name("exactly_twenty_chars_"));
     }
 }

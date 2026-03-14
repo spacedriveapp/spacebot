@@ -57,3 +57,25 @@ export function platformColor(platform: string): string {
 		default: return "bg-gray-500/20 text-gray-400";
 	}
 }
+
+// E.164 Phone Number Validation
+// Validates international phone numbers in format: + followed by country code and 6-15 digits
+export const E164_REGEX = /^\+[1-9]\d{5,14}$/;
+
+export const E164_ERROR_TEXT = 
+	"Phone number must be in E.164 format: + followed by country code and 6-15 digits (e.g., +1234567890)";
+
+export function isValidE164(phoneNumber: string): boolean {
+	return E164_REGEX.test(phoneNumber.trim());
+}
+
+export function validateE164(phoneNumber: string): { valid: boolean; error?: string } {
+	const trimmed = phoneNumber.trim();
+	if (!trimmed) {
+		return { valid: false, error: "Phone number is required" };
+	}
+	if (!E164_REGEX.test(trimmed)) {
+		return { valid: false, error: E164_ERROR_TEXT };
+	}
+	return { valid: true };
+}
