@@ -92,9 +92,14 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 		}
 	}, [isMobile, mobileOpen]);
 
-	// Escape key + Tab focus trap
+	// Reset createOpen when drawer closes
 	useEffect(() => {
-		if (!isMobile || !mobileOpen) return;
+		if (!mobileOpen) setCreateOpen(false);
+	}, [mobileOpen]);
+
+	// Escape key + Tab focus trap (disabled while CreateAgentDialog is open)
+	useEffect(() => {
+		if (!isMobile || !mobileOpen || createOpen) return;
 		const onKeyDown = (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
 				onCloseMobile?.();
@@ -121,7 +126,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 		};
 		document.addEventListener("keydown", onKeyDown);
 		return () => document.removeEventListener("keydown", onKeyDown);
-	}, [isMobile, mobileOpen, onCloseMobile]);
+	}, [isMobile, mobileOpen, onCloseMobile, createOpen]);
 
 	const isDrawerHidden = isMobile && !mobileOpen;
 
@@ -250,7 +255,7 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 							onClick={() => setCreateOpen(true)}
 							className="w-full rounded-md bg-sidebar-selected px-3 py-2 text-sm text-sidebar-ink hover:bg-sidebar-selected/80"
 						>
-							 New Agent
+							New Agent
 						</button>
 					</div>
 				)}

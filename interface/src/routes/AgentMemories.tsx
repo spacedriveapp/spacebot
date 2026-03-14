@@ -10,6 +10,7 @@ import {
 	type MemoryType,
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
+import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
 import { MemoryGraph } from "@/components/MemoryGraph";
 import {
 	Button,
@@ -146,8 +147,9 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	}, [debouncedQuery, sort, typeFilter]);
 
 	return (
-		<div className="flex h-full">
-			<div className={`flex flex-1 flex-col overflow-hidden ${isSinglePane && chatOpen ? "hidden" : ""}`}>
+		<ResponsiveSplitPane
+			primary={
+				<div className="flex h-full flex-col overflow-hidden">
 			{/* Toolbar */}
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				{/* Search */}
@@ -248,30 +250,45 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 						</p>
 					</div>
 				) : (
-					<div className="flex-1 overflow-y-auto px-4 py-3">
-						<div className="flex flex-col gap-2">
-							{memories.map((memory) => (
-								<div key={memory.id} className="rounded-lg border border-app-line/50 bg-app-darkBox/20 px-3 py-2">
-									<div className="mb-1 flex items-center justify-between gap-2">
-										<TypeBadge type={memory.memory_type} />
-										<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
+					<div ref={parentRef} className="flex-1 overflow-y-auto">
+						<div
+							className="relative w-full px-4 py-3"
+							style={{ height: virtualizer.getTotalSize() }}
+						>
+							{virtualizer.getVirtualItems().map((virtualRow) => {
+								const memory = memories[virtualRow.index];
+								if (!memory) return null;
+								return (
+									<div
+										key={memory.id}
+										data-index={virtualRow.index}
+										ref={virtualizer.measureElement}
+										className="absolute left-0 top-0 w-full px-4 pb-2"
+										style={{ transform: `translateY(${virtualRow.start}px)` }}
+									>
+										<div className="rounded-lg border border-app-line/50 bg-app-darkBox/20 px-3 py-2">
+											<div className="mb-1 flex items-center justify-between gap-2">
+												<TypeBadge type={memory.memory_type} />
+												<span className="text-tiny text-ink-faint">{formatTimeAgo(memory.created_at)}</span>
+											</div>
+											<p id={`memory-content-${memory.id}`} className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
+											<button
+												type="button"
+												aria-expanded={expandedId === memory.id}
+												aria-controls={`memory-content-${memory.id}`}
+												onClick={() => setExpandedId(expandedId === memory.id ? null : memory.id)}
+												className="mt-1 text-tiny text-accent hover:text-accent/80"
+											>
+												{expandedId === memory.id ? "Less" : "More"}
+											</button>
+											<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
+												<span className="truncate">{memory.source ?? "-"}</span>
+												<span>{memory.importance.toFixed(2)}</span>
+											</div>
+										</div>
 									</div>
-									<p id={`memory-content-${memory.id}`} role="region" aria-label="Memory content" className={`${expandedId === memory.id ? "" : "line-clamp-3 "}text-sm text-ink-dull`}>{memory.content}</p>
-                                    <button
-                                        type="button"
-                                        aria-expanded={expandedId === memory.id}
-                                        aria-controls={`memory-content-${memory.id}`}
-                                        onClick={() => setExpandedId(expandedId === memory.id ? null : memory.id)}
-                                        className="mt-1 text-tiny text-accent hover:text-accent/80"
-                                    >
-                                        {expandedId === memory.id ? "Less" : "More"}
-                                    </button>
-									<div className="mt-2 flex items-center justify-between text-tiny text-ink-faint">
-										<span className="truncate">{memory.source ?? "-"}</span>
-										<span>{memory.importance.toFixed(2)}</span>
-									</div>
-								</div>
-							))}
+								);
+							})}
 						</div>
 					</div>
 				)
@@ -384,34 +401,17 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 					)}
 				</>
 			)}
-			</div>
-
-			{/* Cortex chat panel */}
-			{chatOpen && (
-				<div
-					className={`overflow-hidden border-l border-app-line/50 ${
-						isSinglePane ? "flex min-w-0 flex-1 flex-col" : "w-[min(400px,40%)] flex-shrink-0"
-					}`}
-				>
-					{isSinglePane && (
-						<div className="border-b border-app-line/50 px-4 py-2">
-							<button
-								type="button"
-								onClick={() => setChatOpen(false)}
-								className="rounded-md border border-app-line px-2 py-1 text-xs text-ink-faint hover:text-ink-dull"
-							>
-								Back to memories
-							</button>
-						</div>
-					)}
-					<div className={isSinglePane ? "min-h-0 flex-1" : "h-full"}>
-						<CortexChatPanel
-							agentId={agentId}
-							onClose={() => setChatOpen(false)}
-						/>
-					</div>
 				</div>
-			)}
-		</div>
+			}
+			secondary={
+				<CortexChatPanel
+					agentId={agentId}
+					onClose={() => setChatOpen(false)}
+				/>
+			}
+			showSecondary={chatOpen}
+			onCloseSecondary={() => setChatOpen(false)}
+			secondaryTitle="Cortex Chat"
+		/>
 	);
 }
