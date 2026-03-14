@@ -22,7 +22,7 @@ import {
 	FilterButton,
 } from "@/ui";
 import { formatTimeAgo } from "@/lib/format";
-import { useIsMobile } from "@/hooks/useViewport";
+import { useViewport } from "@/hooks/useViewport";
 import { ArrowDown01Icon, LeftToRightListBulletIcon, WorkflowSquare01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
@@ -78,8 +78,9 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 	const [sort, setSort] = useState<MemorySort>("recent");
 	const [typeFilter, setTypeFilter] = useState<MemoryType | null>(null);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const isMobile = useIsMobile();
-	const [chatOpen, setChatOpen] = useState(!isMobile);
+	const { isMobile, isTablet } = useViewport();
+	const isSinglePane = isMobile || isTablet;
+	const [chatOpen, setChatOpen] = useState(!isSinglePane);
 
 	const parentRef = useRef<HTMLDivElement>(null);
 
@@ -146,7 +147,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 
 	return (
 		<div className="flex h-full">
-			<div className={`flex flex-1 flex-col overflow-hidden ${isMobile && chatOpen ? "hidden" : ""}`}>
+			<div className={`flex flex-1 flex-col overflow-hidden ${isSinglePane && chatOpen ? "hidden" : ""}`}>
 			{/* Toolbar */}
 			<div className="flex items-center gap-3 border-b border-app-line/50 bg-app-darkBox/20 px-6 py-3">
 				{/* Search */}
@@ -228,7 +229,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 
 			{viewMode === "graph" ? (
 				<MemoryGraph agentId={agentId} sort={sort} typeFilter={typeFilter} />
-			) : isMobile ? (
+			) : isSinglePane ? (
 				isLoading ? (
 					<div className="flex flex-1 items-center justify-center">
 						<div className="flex items-center gap-2 text-ink-dull">
@@ -324,6 +325,8 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 											<Button
 												onClick={() => setExpandedId(isExpanded ? null : memory.id)}
 												variant="ghost"
+										aria-expanded={isExpanded}
+										aria-controls={`details-${memory.id}`}
 												className="grid h-auto w-full grid-cols-[80px_1fr_100px_120px_100px] items-center gap-3 rounded-none px-6 py-3 text-left hover:bg-app-darkBox/30"
 											>
 												<TypeBadge type={memory.memory_type} />
@@ -353,7 +356,8 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 														animate={{ height: "auto", opacity: 1 }}
 														exit={{ height: 0, opacity: 0 }}
 														transition={{ type: "spring", stiffness: 500, damping: 35 }}
-														className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
+														id={`details-${memory.id}`}
+																className="overflow-hidden border-t border-app-line/30 bg-app-darkBox/20 px-6"
 													>
 														<div className="py-4">
 															<p className="whitespace-pre-wrap text-sm leading-relaxed text-ink-dull">
@@ -386,10 +390,10 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 			{chatOpen && (
 				<div
 					className={`overflow-hidden border-l border-app-line/50 ${
-						isMobile ? "flex min-w-0 flex-1 flex-col" : "w-[400px] flex-shrink-0"
+						isSinglePane ? "flex min-w-0 flex-1 flex-col" : "w-[400px] flex-shrink-0"
 					}`}
 				>
-					{isMobile && (
+					{isSinglePane && (
 						<div className="border-b border-app-line/50 px-4 py-2">
 							<button
 								type="button"
@@ -400,7 +404,7 @@ export function AgentMemories({ agentId }: AgentMemoriesProps) {
 							</button>
 						</div>
 					)}
-					<div className={isMobile ? "min-h-0 flex-1" : "h-full w-[400px]"}>
+					<div className={isSinglePane ? "min-h-0 flex-1" : "h-full w-[400px]"}>
 						<CortexChatPanel
 							agentId={agentId}
 							onClose={() => setChatOpen(false)}

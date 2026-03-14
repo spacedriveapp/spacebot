@@ -8,7 +8,7 @@ import {
 } from "@/api/client";
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { ResponsiveSplitPane } from "@/components/ResponsiveSplitPane";
-import { useIsMobile } from "@/hooks/useViewport";
+import { useViewport } from "@/hooks/useViewport";
 import { formatTimeAgo } from "@/lib/format";
 import { IdeaIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
@@ -70,12 +70,12 @@ interface AgentCortexProps {
 }
 
 export function AgentCortex({ agentId }: AgentCortexProps) {
-	const isMobile = useIsMobile();
+	const { isMobile, isTablet } = useViewport();
 	const [typeFilter, setTypeFilter] = useState<CortexEventType | null>(null);
 	const [groupFilter, setGroupFilter] = useState<string | null>(null);
 	const [offset, setOffset] = useState(0);
 	const [expandedId, setExpandedId] = useState<string | null>(null);
-	const [chatOpen, setChatOpen] = useState(!isMobile);
+	const [chatOpen, setChatOpen] = useState(!(isMobile || isTablet));
 
 	// Determine actual event_type filter from group or individual selection
 	// For groups, we pass no event_type and filter client-side (API only supports single type)
@@ -98,17 +98,18 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 	});
 
 	// Client-side filter for group selections
+	// Group mode fetches latest 200 from server then filters client-side — pagination is
+	// disabled and a banner is shown to make the "latest 200" snapshot behavior explicit.
 	let events: CortexEvent[] = data?.events ?? [];
 	let total = data?.total ?? 0;
 
 	if (isGroupFiltering) {
 		events = events.filter((event) => activeGroupTypes.includes(event.event_type));
 		total = events.length;
-		events = events.slice(offset, offset + PAGE_SIZE);
 	}
 
-	const hasNext = offset + PAGE_SIZE < total;
-	const hasPrev = offset > 0;
+	const hasNext = isGroupFiltering ? false : offset + PAGE_SIZE < total;
+	const hasPrev = isGroupFiltering ? false : offset > 0;
 
 	const handleFilterChange = (group: string | null, type_: CortexEventType | null) => {
 		setGroupFilter(group);
@@ -149,7 +150,11 @@ export function AgentCortex({ agentId }: AgentCortexProps) {
 
 					{/* Count + pagination + chat toggle */}
 					<div className="flex w-full items-center justify-between gap-2 sm:ml-auto sm:w-auto sm:justify-end sm:gap-3">
-						{total > 0 && (
+						{isGroupFiltering ? (
+							<span className="text-tiny text-ink-faint">
+								Latest 200 events ({total} matching)
+							</span>
+						) : total > 0 && (
 							<span className="text-tiny text-ink-faint">
 								{offset + 1}-{Math.min(offset + PAGE_SIZE, total)} of {total}
 							</span>

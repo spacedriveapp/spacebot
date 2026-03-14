@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useIsMobile } from "@/hooks/useViewport";
+import { useViewport } from "@/hooks/useViewport";
 import { Button } from "@/ui";
 
 interface ResponsiveSplitPaneProps {
@@ -19,9 +19,10 @@ export function ResponsiveSplitPane({
 	secondaryTitle = "Details",
 	secondaryWidthClassName = "w-[min(400px,40%)]",
 }: ResponsiveSplitPaneProps) {
-	const isMobile = useIsMobile();
+	const { isMobile, isTablet } = useViewport();
+	const isSinglePane = isMobile || isTablet;
 
-	if (!isMobile) {
+	if (!isSinglePane) {
 		return (
 			<div className="flex h-full">
 				<div className="min-w-0 flex-1">{primary}</div>

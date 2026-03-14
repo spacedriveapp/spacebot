@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
 import {
@@ -82,11 +82,42 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, i
 
 export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen = false, onCloseMobile }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
+	const navRef = useRef<HTMLElement>(null);
+	const closeButtonRef = useRef<HTMLButtonElement>(null);
 
+	// Focus close button when drawer opens
+	useEffect(() => {
+		if (isMobile && mobileOpen) {
+			closeButtonRef.current?.focus();
+		}
+	}, [isMobile, mobileOpen]);
+
+	// Escape key + Tab focus trap
 	useEffect(() => {
 		if (!isMobile || !mobileOpen) return;
 		const onKeyDown = (e: KeyboardEvent) => {
-			if (e.key === "Escape") onCloseMobile?.();
+			if (e.key === "Escape") {
+				onCloseMobile?.();
+				return;
+			}
+			if (e.key === "Tab") {
+				const nav = navRef.current;
+				if (!nav) return;
+				const focusable = Array.from(
+					nav.querySelectorAll<HTMLElement>(
+						'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+					),
+				);
+				const first = focusable[0];
+				const last = focusable[focusable.length - 1];
+				if (!e.shiftKey && document.activeElement === last) {
+					e.preventDefault();
+					first?.focus();
+				} else if (e.shiftKey && document.activeElement === first) {
+					e.preventDefault();
+					last?.focus();
+				}
+			}
 		};
 		document.addEventListener("keydown", onKeyDown);
 		return () => document.removeEventListener("keydown", onKeyDown);
@@ -153,10 +184,11 @@ export function Sidebar({ liveStates: _liveStates, isMobile = false, mobileOpen 
 		return (
 			<>
 				<div className="fixed inset-0 z-40 bg-black/40" onClick={onCloseMobile} />
-				<nav className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r border-sidebar-line bg-sidebar">
+				<nav ref={navRef} role="dialog" aria-modal="true" aria-label="Navigation" className="fixed inset-y-0 left-0 z-50 flex w-72 flex-col border-r border-sidebar-line bg-sidebar">
 					<div className="flex h-12 items-center justify-between border-b border-sidebar-line px-3">
 						<span className="font-plex text-sm font-medium text-sidebar-ink">Navigation</span>
 						<button
+							ref={closeButtonRef}
 							type="button"
 							onClick={onCloseMobile}
 							aria-label="Close navigation"
