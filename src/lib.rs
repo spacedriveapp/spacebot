@@ -447,6 +447,12 @@ pub mod metadata_keys {
     /// Reply target message ID for outbound reply threading.
     /// Set on retrigger metadata when a branch/worker completes.
     pub const REPLY_TO_MESSAGE_ID: &str = "reply_to_message_id";
+    /// Hint to attach the outbound message as a native reply to the triggering
+    /// message when the platform supports it.
+    pub const REPLY_TO_TRIGGER: &str = "reply_to_trigger";
+    /// Hint controlling whether a native reply should ping the triggering user.
+    /// Ignored by platforms that do not support this behavior.
+    pub const REPLY_PING_USER: &str = "reply_ping_user";
     /// Quoted reply text preview from the message being replied to.
     pub const REPLY_TO_TEXT: &str = "reply_to_text";
 }
@@ -620,12 +626,19 @@ impl RoutedSender {
         &self,
         response: OutboundResponse,
     ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
-        self.inner
-            .send(RoutedResponse {
-                response,
-                target: self.target.clone(),
-            })
+        self.send_with_metadata_overrides(response, std::iter::empty())
             .await
+    }
+
+    pub async fn send_with_metadata_overrides(
+        &self,
+        response: OutboundResponse,
+        metadata_overrides: impl IntoIterator<Item = (String, serde_json::Value)>,
+    ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
+        let mut target = self.target.clone();
+        target.metadata.extend(metadata_overrides);
+
+        self.inner.send(RoutedResponse { response, target }).await
     }
 }
 

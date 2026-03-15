@@ -78,6 +78,14 @@ pub struct ReplyError(String);
 pub struct ReplyArgs {
     /// The message content to send to the user.
     pub content: String,
+    /// Optional: attach the message as a native reply to the triggering message
+    /// when the platform supports it.
+    #[serde(default)]
+    pub reply_to_trigger: Option<bool>,
+    /// Optional: when sending a native reply, control whether the triggering
+    /// user gets pinged by the reply.
+    #[serde(default)]
+    pub reply_ping_user: Option<bool>,
     /// Optional: create a new thread with this name and reply inside it.
     /// When set, a public thread is created in the current channel and the
     /// reply is posted there. Thread names are capped at 100 characters.
@@ -259,6 +267,14 @@ impl Tool for ReplyTool {
                     "type": "string",
                     "description": "The content to send to the user. Can be markdown formatted."
                 },
+                "reply_to_trigger": {
+                    "type": "boolean",
+                    "description": "Controls whether the message should attach as a native reply to the triggering message when the platform supports it. Defaults to true for direct replies; set false for a normal channel message."
+                },
+                "reply_ping_user": {
+                    "type": "boolean",
+                    "description": "When sending a native reply, controls whether the triggering user gets pinged by the reply. Defaults to false; set true only if the user explicitly wants a ping."
+                },
                 "thread_name": {
                     "type": "string",
                     "description": "If provided, creates a new public thread with this name and posts the reply inside it. Max 100 characters."
@@ -437,8 +453,22 @@ impl Tool for ReplyTool {
             OutboundResponse::Text(converted_content.clone())
         };
 
+        let mut metadata_overrides = Vec::new();
+        if let Some(reply_to_trigger) = args.reply_to_trigger {
+            metadata_overrides.push((
+                crate::metadata_keys::REPLY_TO_TRIGGER.to_string(),
+                reply_to_trigger.into(),
+            ));
+        }
+        if let Some(reply_ping_user) = args.reply_ping_user {
+            metadata_overrides.push((
+                crate::metadata_keys::REPLY_PING_USER.to_string(),
+                reply_ping_user.into(),
+            ));
+        }
+
         self.response_tx
-            .send(response)
+            .send_with_metadata_overrides(response, metadata_overrides)
             .await
             .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 
