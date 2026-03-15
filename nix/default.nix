@@ -149,13 +149,6 @@
     '';
   };
 
-  commonArgs = {
-    src = cargoSrc;
-    inherit nativeBuildInputs buildInputs;
-    strictDeps = true;
-    cargoExtraArgs = "";
-  };
-
   commonRustBuildEnv = ''
     export ORT_LIB_LOCATION=${onnxruntime}/lib
     export CARGO_PROFILE_RELEASE_LTO=off
@@ -180,80 +173,89 @@
 
   commonBuildEnvWithLinker = commonRustBuildEnvWithLinker + commonBuildEnv;
 
-  dummyRustSource = pkgs.writeText "dummy.rs" ''
-    fn main() {}
+  # Post-patch hook that replaces the vendored imap-proto with our patched version
+  postPatchImapProto = ''
+    # Find and replace imap-proto in cargo vendor directories
+    find /build -type d -name "imap-proto-*" 2>/dev/null | while read dir; do
+      echo "Found imap-proto at: $dir"
+      if [ -f "$dir/Cargo.toml" ]; then
+        echo "Replacing with patched version"
+        rm -rf "$dir"
+        cp -r ${cargoSrc}/vendor/imap-proto-0.10.2 "$dir"
+        chmod -R u+w "$dir"
+      fi
+    done
+
+    # Also check cargo home
+    if [ -d "$CARGO_HOME/registry/src" ]; then
+      find "$CARGO_HOME/registry/src" -type d -name "imap-proto-*" 2>/dev/null | while read dir; do
+        echo "Found registry imap-proto at: $dir"
+        rm -rf "$dir"
+        cp -r ${cargoSrc}/vendor/imap-proto-0.10.2 "$dir"
+        chmod -R u+w "$dir"
+      done
+    fi
+
+    # Check in cargo vendor dir if set
+    if [ -n "''${cargoVendorDir:-}" ] && [ -d "$cargoVendorDir" ]; then
+      find "$cargoVendorDir" -type d -name "imap-proto-*" 2>/dev/null | while read dir; do
+        echo "Found vendor dir imap-proto at: $dir"
+        rm -rf "$dir"
+        cp -r ${cargoSrc}/vendor/imap-proto-0.10.2 "$dir"
+        chmod -R u+w "$dir"
+      done
+    fi
   '';
 
-  spacebotCargoArtifacts = craneLib.buildDepsOnly (commonArgs
-    // {
-      cargoExtraArgs = "--bin spacebot";
-      doCheck = false;
-      cargoCheckCommand = "true";
-      src = craneLib.mkDummySrc {
-        src = cargoSrc;
-        dummyrs = dummyRustSource;
-        dummyBuildrs = "build.rs";
-        extraDummyScript = ''
-          cp ${dummyRustSource} $out/build.rs
-        '';
+  spacebot = craneLib.buildPackage {
+    src = cargoSrc;
+    inherit nativeBuildInputs buildInputs;
+    strictDeps = true;
+    cargoExtraArgs = "";
+
+    doCheck = false;
+    cargoBuildCommand = "cargo build --release --bin spacebot";
+
+    postPatch = postPatchImapProto;
+
+    preBuild = commonBuildEnvWithLinker;
+
+    postInstall = ''
+      mkdir -p $out/share/spacebot
+      cp -r ${runtimeAssetsSrc}/prompts $out/share/spacebot/
+      cp -r ${runtimeAssetsSrc}/migrations $out/share/spacebot/
+      chmod -R u+w $out/share/spacebot
+    '';
+
+    meta = with lib; {
+      description = "An AI agent for teams, communities, and multi-user environments";
+      homepage = "https://spacebot.sh";
+      license = {
+        shortName = "FSL-1.1-ALv2";
+        fullName = "Functional Source License, Version 1.1, ALv2 Future License";
+        url = "https://fsl.software/";
+        free = true;
+        redistributable = true;
       };
-      preBuild = commonRustBuildEnvWithLinker;
-    });
+      platforms = platforms.linux ++ platforms.darwin;
+      mainProgram = "spacebot";
+    };
+  };
 
-  spacebotTestsCargoArtifacts = craneLib.buildDepsOnly (commonArgs
-    // {
-      doCheck = false;
-      cargoCheckCommand = "true";
-      src = craneLib.mkDummySrc {
-        src = cargoSrc;
-        dummyrs = dummyRustSource;
-        dummyBuildrs = "build.rs";
-        extraDummyScript = ''
-          cp ${dummyRustSource} $out/build.rs
-        '';
-      };
-      preBuild = commonRustBuildEnvWithLinker;
-    });
+  spacebot-tests = craneLib.cargoTest {
+    src = cargoSrc;
+    inherit nativeBuildInputs buildInputs;
+    strictDeps = true;
 
-  spacebot = craneLib.buildPackage (commonArgs
-    // {
-      cargoArtifacts = spacebotCargoArtifacts;
-      doCheck = false;
-      cargoExtraArgs = "--bin spacebot";
+    doCheck = false;
 
-      preBuild = commonBuildEnvWithLinker;
+    postPatch = postPatchImapProto;
 
-      postInstall = ''
-        mkdir -p $out/share/spacebot
-        cp -r ${runtimeAssetsSrc}/prompts $out/share/spacebot/
-        cp -r ${runtimeAssetsSrc}/migrations $out/share/spacebot/
-        chmod -R u+w $out/share/spacebot
-      '';
+    # Skip tests that require ONNX model file and known flaky suites in Nix builds
+    cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
 
-      meta = with lib; {
-        description = "An AI agent for teams, communities, and multi-user environments";
-        homepage = "https://spacebot.sh";
-        license = {
-          shortName = "FSL-1.1-ALv2";
-          fullName = "Functional Source License, Version 1.1, ALv2 Future License";
-          url = "https://fsl.software/";
-          free = true;
-          redistributable = true;
-        };
-        platforms = platforms.linux ++ platforms.darwin;
-        mainProgram = "spacebot";
-      };
-    });
-
-  spacebot-tests = craneLib.cargoTest (commonArgs
-    // {
-      cargoArtifacts = spacebotTestsCargoArtifacts;
-
-      # Skip tests that require ONNX model file and known flaky suites in Nix builds
-      cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
-
-      preBuild = commonBuildEnvWithLinker;
-    });
+    preBuild = commonBuildEnvWithLinker;
+  };
 
   spacebot-full = pkgs.symlinkJoin {
     name = "spacebot-full";

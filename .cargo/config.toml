@@ -1,2 +1,2 @@
-[alias]
-bump = "run --quiet --bin cargo-bump --"
+[registries.crates-io]
+index = "https://github.com/rust-lang/crates.io-index"

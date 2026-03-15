@@ -35,6 +35,17 @@
             ./src
             ./migrations
             ./prompts
+            ./presets
+            ./docs/content
+            ./docs/README.md
+            ./docs/docker.md
+            ./docs/metrics.md
+            ./AGENTS.md
+            ./README.md
+            ./CHANGELOG.md
+            ./.cargo/config.toml
+            (pkgs.lib.fileset.maybeMissing ./interface/dist)
+            ./vendor
           ];
         };
 
