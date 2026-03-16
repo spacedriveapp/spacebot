@@ -1,0 +1,5 @@
+[target.aarch64-unknown-linux-gnu]
+dockerfile = { file = "Dockerfile.cross-aarch64", context = "." }
+
+[build.env]
+passthrough = ["SPACEBOT_SKIP_FRONTEND_BUILD"]

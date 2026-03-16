@@ -432,6 +432,22 @@ cd spacebot
 cargo build --release
 ```
 
+#### Cross-compile for ARM (aarch64)
+
+To build for Raspberry Pi or other aarch64 Linux machines from an x86_64 host:
+
+```bash
+# Install cross (once)
+cargo install cross --locked
+
+# Build (frontend is skipped automatically)
+just build-aarch64
+# Output: target/aarch64-unknown-linux-gnu/release/spacebot
+```
+
+The included `Dockerfile.cross-aarch64` provides the aarch64 cross-toolchain
+and sysroot libraries. CI uses native ARM runners — this is for local builds.
+
 ### Minimal Config
 
 Create `config.toml`:
