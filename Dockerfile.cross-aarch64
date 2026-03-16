@@ -2,8 +2,11 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# Host (amd64) cross-compilation toolchain + build tools
+# Host (amd64) compiler + cross-compilation toolchain + build tools
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    g++ \
+    libc6-dev \
     gcc-aarch64-linux-gnu \
     g++-aarch64-linux-gnu \
     libc6-dev-arm64-cross \
@@ -41,6 +44,6 @@ ENV CROSS_TOOLCHAIN_PREFIX=aarch64-linux-gnu- \
     PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
     OPENSSL_NO_VENDOR=1 \
     OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
-    OPENSSL_INCLUDE_DIR=/usr/aarch64-linux-gnu/usr/include \
+    OPENSSL_INCLUDE_DIR=/usr/include \
     SQLITE3_LIB_DIR=/usr/lib/aarch64-linux-gnu \
-    SQLITE3_INCLUDE_DIR=/usr/aarch64-linux-gnu/usr/include
+    SQLITE3_INCLUDE_DIR=/usr/include
