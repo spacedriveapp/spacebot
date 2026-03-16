@@ -1,0 +1,46 @@
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Host (amd64) cross-compilation toolchain + build tools
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc-aarch64-linux-gnu \
+    g++-aarch64-linux-gnu \
+    libc6-dev-arm64-cross \
+    libstdc++-12-dev-arm64-cross \
+    pkg-config \
+    cmake \
+    make \
+    curl \
+    unzip \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+# ARM64 sysroot libraries (arm64 packages come from ports.ubuntu.com)
+RUN dpkg --add-architecture arm64 \
+    && sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list \
+    && echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse" >> /etc/apt/sources.list \
+    && echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse" >> /etc/apt/sources.list \
+    && echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse" >> /etc/apt/sources.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends libssl-dev:arm64 libsqlite3-dev:arm64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# protoc (x86_64 host binary for prost/lancedb build-time codegen)
+RUN curl -fsSL -o /tmp/protoc.zip \
+        https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip \
+    && unzip /tmp/protoc.zip -d /usr/local \
+    && chmod +x /usr/local/bin/protoc \
+    && rm /tmp/protoc.zip
+
+# Cross-compilation environment
+ENV CROSS_TOOLCHAIN_PREFIX=aarch64-linux-gnu- \
+    CROSS_SYSROOT=/usr/aarch64-linux-gnu \
+    CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+    OPENSSL_NO_VENDOR=1 \
+    OPENSSL_LIB_DIR=/usr/lib/aarch64-linux-gnu \
+    OPENSSL_INCLUDE_DIR=/usr/aarch64-linux-gnu/usr/include \
+    SQLITE3_LIB_DIR=/usr/lib/aarch64-linux-gnu \
+    SQLITE3_INCLUDE_DIR=/usr/aarch64-linux-gnu/usr/include
