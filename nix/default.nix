@@ -267,7 +267,8 @@
       wrapProgram $out/bin/spacebot \
         --set CHROME_PATH "${pkgs.chromium}/bin/chromium" \
         --set CHROME_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
-        --set ORT_LIB_LOCATION "${onnxruntime}/lib"
+        --set ORT_LIB_LOCATION "${onnxruntime}/lib" \
+        --prefix LD_LIBRARY_PATH : ${onnxruntime}/lib
     '';
 
     meta =
