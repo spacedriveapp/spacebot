@@ -16,6 +16,26 @@ use std::sync::Arc;
 use tokio::sync::broadcast;
 use tracing::Instrument as _;
 
+/// Worker type for queued spawns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QueuedWorkerType {
+    Builtin,
+    OpenCode,
+}
+
+/// A spawn request queued because the worker limit was reached.
+#[derive(Debug, Clone)]
+pub struct QueuedWorkerSpawn {
+    pub task: String,
+    pub interactive: bool,
+    pub suggested_skills: Vec<String>,
+    pub worker_type: QueuedWorkerType,
+    pub directory: Option<String>,
+    pub project_id: Option<String>,
+    pub worktree_id: Option<String>,
+    pub queued_at: chrono::DateTime<chrono::Utc>,
+}
+
 /// Validate worker capacity for a channel based on current active worker count.
 pub(crate) fn reserve_worker_slot_local(
     active_worker_count: usize,
@@ -613,6 +633,168 @@ pub async fn spawn_opencode_worker_from_state(
     release_task_reservation(state, &task).await;
 
     result
+}
+
+/// Try to spawn a worker. If the limit is reached, evict an idle worker to
+/// make room. If no idle workers can be evicted, queue the request instead
+/// of returning an error. Returns `Ok(Some(worker_id))` on immediate spawn,
+/// `Ok(None)` when queued, or an error for non-limit failures.
+pub async fn spawn_or_queue_worker(
+    state: &ChannelState,
+    request: QueuedWorkerSpawn,
+) -> std::result::Result<Option<WorkerId>, AgentError> {
+    // If limit not reached, try the normal spawn path.
+    if check_worker_limit(state).await.is_ok() {
+        return do_spawn(state, &request).await.map(Some);
+    }
+
+    // Limit reached — try to evict an idle worker to free a slot.
+    if let Some(evicted_id) = find_oldest_idle_worker(state).await {
+        tracing::info!(
+            evicted_worker_id = %evicted_id,
+            new_task = %request.task,
+            "evicting idle worker to make room for new task"
+        );
+        if state
+            .cancel_worker_with_reason(evicted_id, "evicted: idle worker displaced by new task")
+            .await
+            .is_ok()
+        {
+            // Slot freed — try spawning now.
+            if check_worker_limit(state).await.is_ok() {
+                return do_spawn(state, &request).await.map(Some);
+            }
+        }
+    }
+
+    // No idle workers to evict (or eviction didn't free a slot) — queue.
+    // Check for duplicates before queuing.
+    let normalized = request
+        .task
+        .strip_prefix("[opencode] ")
+        .unwrap_or(&request.task)
+        .to_string();
+
+    {
+        let status = state.status_block.read().await;
+        if let Some(existing_id) = status.find_duplicate_worker_task(&request.task) {
+            return Err(AgentError::DuplicateWorkerTask {
+                channel_id: state.channel_id.to_string(),
+                existing_worker_id: existing_id.to_string(),
+            });
+        }
+    }
+    {
+        let queue = state.worker_queue.read().await;
+        if queue.iter().any(|q| {
+            let q_norm = q
+                .task
+                .strip_prefix("[opencode] ")
+                .unwrap_or(&q.task);
+            q_norm == normalized
+        }) {
+            return Err(AgentError::DuplicateWorkerTask {
+                channel_id: state.channel_id.to_string(),
+                existing_worker_id: "queued".to_string(),
+            });
+        }
+    }
+
+    // Add to queue and update StatusBlock for visibility.
+    let queued_info = crate::agent::status::QueuedWorkerInfo {
+        task: request.task.clone(),
+        queued_at: request.queued_at,
+    };
+    state.worker_queue.write().await.push_back(request);
+    state.status_block.write().await.queued_workers.push(queued_info);
+    Ok(None)
+}
+
+/// Find the oldest idle worker in the channel's StatusBlock.
+async fn find_oldest_idle_worker(state: &ChannelState) -> Option<WorkerId> {
+    let status = state.status_block.read().await;
+    status
+        .active_workers
+        .iter()
+        .filter(|w| w.status == "idle")
+        .min_by_key(|w| w.started_at)
+        .map(|w| w.id)
+}
+
+/// Execute the actual spawn for a `QueuedWorkerSpawn` request.
+async fn do_spawn(
+    state: &ChannelState,
+    request: &QueuedWorkerSpawn,
+) -> std::result::Result<WorkerId, AgentError> {
+    match request.worker_type {
+        QueuedWorkerType::OpenCode => {
+            let dir = request.directory.as_deref().ok_or_else(|| {
+                AgentError::Other(anyhow::anyhow!(
+                    "directory required for opencode workers"
+                ))
+            })?;
+            spawn_opencode_worker_from_state(state, &request.task, dir, true).await
+        }
+        QueuedWorkerType::Builtin => {
+            let skills: Vec<&str> =
+                request.suggested_skills.iter().map(|s| s.as_str()).collect();
+            spawn_worker_from_state(
+                state,
+                &request.task,
+                request.interactive,
+                &skills,
+            )
+            .await
+        }
+    }
+}
+
+/// Try to spawn the next queued worker after a slot opens.
+/// Returns `Some((worker_id, task))` if a queued task was spawned.
+pub async fn drain_worker_queue(state: &ChannelState) -> Option<(WorkerId, String)> {
+    // Check if there's capacity.
+    if check_worker_limit(state).await.is_err() {
+        return None;
+    }
+
+    let request = state.worker_queue.write().await.pop_front()?;
+    let task_description = request.task.clone();
+
+    // Remove from StatusBlock's queued list.
+    {
+        let mut status = state.status_block.write().await;
+        if let Some(pos) = status
+            .queued_workers
+            .iter()
+            .position(|q| q.task == task_description)
+        {
+            status.queued_workers.remove(pos);
+        }
+    }
+
+    let result = match request.worker_type {
+        QueuedWorkerType::OpenCode => {
+            let dir = request.directory.as_deref().unwrap_or(".");
+            spawn_opencode_worker_from_state(state, &request.task, dir, true).await
+        }
+        QueuedWorkerType::Builtin => {
+            let skills: Vec<&str> =
+                request.suggested_skills.iter().map(|s| s.as_str()).collect();
+            spawn_worker_from_state(state, &request.task, request.interactive, &skills).await
+        }
+    };
+
+    match result {
+        Ok(worker_id) => Some((worker_id, task_description)),
+        Err(e) => {
+            tracing::warn!(
+                task = %task_description,
+                error = %e,
+                "queued worker spawn failed, dropping"
+            );
+            None
+        }
+    }
 }
 
 /// Inner implementation of OpenCode worker spawning, separated so the

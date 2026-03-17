@@ -134,10 +134,19 @@ pub struct StatusBlock {
     pub active_branches: Vec<BranchStatus>,
     /// Currently running workers.
     pub active_workers: Vec<WorkerStatus>,
+    /// Workers queued because the worker limit was reached.
+    pub queued_workers: Vec<QueuedWorkerInfo>,
     /// Recently completed work.
     pub completed_items: Vec<CompletedItem>,
     /// Active link conversations with other agents.
     pub active_link_conversations: Vec<LinkConversationStatus>,
+}
+
+/// Info about a queued worker spawn.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct QueuedWorkerInfo {
+    pub task: String,
+    pub queued_at: DateTime<Utc>,
 }
 
 /// Status of an active branch.
@@ -392,6 +401,20 @@ impl StatusBlock {
                     worker.started_at.format("%H:%M"),
                     tool_calls_str,
                     worker.status
+                ));
+            }
+            output.push('\n');
+        }
+
+        // Queued workers (waiting for a slot)
+        if !self.queued_workers.is_empty() {
+            output.push_str("## Queued Workers\n");
+            for (i, queued) in self.queued_workers.iter().enumerate() {
+                output.push_str(&format!(
+                    "- [{}] {} (queued {})\n",
+                    i + 1,
+                    queued.task,
+                    queued.queued_at.format("%H:%M"),
                 ));
             }
             output.push('\n');

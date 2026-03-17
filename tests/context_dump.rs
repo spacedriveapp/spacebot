@@ -238,6 +238,7 @@ async fn dump_channel_context() {
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        worker_queue: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::new())),
         status_block,
         deps: deps.clone(),
         conversation_logger,
@@ -476,6 +477,7 @@ async fn dump_all_contexts() {
         worker_inputs: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         worker_injections: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
         reserved_tasks: Arc::new(tokio::sync::RwLock::new(std::collections::HashSet::new())),
+        worker_queue: Arc::new(tokio::sync::RwLock::new(std::collections::VecDeque::new())),
         status_block: Arc::new(tokio::sync::RwLock::new(
             spacebot::agent::status::StatusBlock::new(),
         )),

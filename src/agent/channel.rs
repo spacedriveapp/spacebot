@@ -104,6 +104,9 @@ pub struct ChannelState {
     /// claimed under a write lock before any async spawn work and released
     /// when the worker is registered in the status block or the spawn fails.
     pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
+    /// Spawn requests queued because the worker limit was reached. Drained
+    /// automatically when a worker completes and a slot opens.
+    pub worker_queue: Arc<RwLock<std::collections::VecDeque<crate::agent::channel_dispatch::QueuedWorkerSpawn>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,
@@ -521,6 +524,7 @@ impl Channel {
             worker_inputs: Arc::new(RwLock::new(HashMap::new())),
             worker_injections: Arc::new(RwLock::new(HashMap::new())),
             reserved_tasks: Arc::new(RwLock::new(HashSet::new())),
+            worker_queue: Arc::new(RwLock::new(std::collections::VecDeque::new())),
             status_block: status_block.clone(),
             deps: deps.clone(),
             conversation_logger,
@@ -2874,6 +2878,17 @@ impl Channel {
                 }
 
                 tracing::info!(worker_id = %worker_id, "worker completed, result queued for retrigger");
+
+                // Drain the worker queue now that a slot opened.
+                if let Some((queued_worker_id, queued_task)) =
+                    crate::agent::channel_dispatch::drain_worker_queue(&self.state).await
+                {
+                    tracing::info!(
+                        worker_id = %queued_worker_id,
+                        task = %queued_task,
+                        "auto-spawned queued worker after slot opened"
+                    );
+                }
             }
             ProcessEvent::OpenCodeSessionCreated {
                 worker_id,

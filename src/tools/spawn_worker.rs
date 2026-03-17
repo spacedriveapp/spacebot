@@ -7,7 +7,6 @@
 
 use crate::WorkerId;
 use crate::agent::channel::ChannelState;
-use crate::agent::channel_dispatch::{spawn_opencode_worker_from_state, spawn_worker_from_state};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -78,6 +77,8 @@ pub struct SpawnWorkerOutput {
     pub spawned: bool,
     /// Whether this is an interactive worker.
     pub interactive: bool,
+    /// Whether the spawn was queued (limit reached, will auto-spawn when a slot opens).
+    pub queued: bool,
     /// Status message.
     pub message: String,
 }
@@ -192,6 +193,7 @@ impl Tool for SpawnWorkerTool {
                     worker_id: existing_id,
                     spawned: false,
                     interactive: args.interactive,
+                    queued: false,
                     message: format!(
                         "A worker is already running this task (worker {existing_id}). \
                          Use route to send additional context to the running worker instead."
@@ -209,74 +211,99 @@ impl Tool for SpawnWorkerTool {
         )
         .await;
 
-        let worker_id = if is_opencode {
-            let directory = resolved_directory.as_deref().ok_or_else(|| {
-                SpawnWorkerError(
-                    "directory is required for opencode workers (set directory, project_id, or worktree_id)".into(),
-                )
-            })?;
-
-            // OpenCode workers are always interactive — ignore args.interactive.
-            spawn_opencode_worker_from_state(&self.state, &args.task, directory, true)
-                .await
-                .map_err(|e| SpawnWorkerError(format!("{e}")))?
-        } else {
-            spawn_worker_from_state(
-                &self.state,
-                &args.task,
-                args.interactive,
-                &args
-                    .suggested_skills
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-            )
-            .await
-            .map_err(|e| SpawnWorkerError(format!("{e}")))?
-        };
-
-        // Link the worker to project/worktree if specified (fire-and-forget update).
-        if args.project_id.is_some() || args.worktree_id.is_some() {
-            self.state.process_run_logger.log_worker_project_link(
-                worker_id,
-                args.project_id.as_deref(),
-                args.worktree_id.as_deref(),
-            );
+        // Validate directory requirement for opencode workers before queueing.
+        if is_opencode && resolved_directory.is_none() {
+            return Err(SpawnWorkerError(
+                "directory is required for opencode workers (set directory, project_id, or worktree_id)".into(),
+            ));
         }
 
-        let worker_type_label = if is_opencode { "OpenCode" } else { "builtin" };
-        // OpenCode workers are always interactive regardless of args.interactive.
-        let effectively_interactive = args.interactive || is_opencode;
-        let message = if effectively_interactive {
-            format!(
-                "Interactive {worker_type_label} worker {worker_id} spawned for: {}. Route follow-ups with route_to_worker.",
-                args.task
-            )
-        } else {
-            format!(
-                "{worker_type_label} worker {worker_id} spawned for: {}. It will report back when done.",
-                args.task
-            )
-        };
-        let readiness_note = if readiness.ready {
-            String::new()
-        } else {
-            let reason = readiness
-                .reason
-                .map(|value| value.as_str())
-                .unwrap_or("unknown");
-            format!(
-                " Readiness note: warmup is not fully ready ({reason}, state: {:?}); a warmup pass may already be running or was queued in the background.",
-                readiness.warmup_state
-            )
+        // Build the queue request and try to spawn (or queue if limit reached).
+        let request = crate::agent::channel_dispatch::QueuedWorkerSpawn {
+            task: args.task.clone(),
+            interactive: args.interactive,
+            suggested_skills: args.suggested_skills.clone(),
+            worker_type: if is_opencode {
+                crate::agent::channel_dispatch::QueuedWorkerType::OpenCode
+            } else {
+                crate::agent::channel_dispatch::QueuedWorkerType::Builtin
+            },
+            directory: resolved_directory,
+            project_id: args.project_id.clone(),
+            worktree_id: args.worktree_id.clone(),
+            queued_at: chrono::Utc::now(),
         };
 
-        Ok(SpawnWorkerOutput {
-            worker_id,
-            spawned: true,
-            interactive: effectively_interactive,
-            message: format!("{message}{readiness_note}"),
-        })
+        let spawn_result = crate::agent::channel_dispatch::spawn_or_queue_worker(
+            &self.state,
+            request,
+        )
+        .await
+        .map_err(|e| SpawnWorkerError(format!("{e}")))?;
+
+        match spawn_result {
+            Some(worker_id) => {
+                // Worker spawned immediately.
+                // Link the worker to project/worktree if specified.
+                if args.project_id.is_some() || args.worktree_id.is_some() {
+                    self.state.process_run_logger.log_worker_project_link(
+                        worker_id,
+                        args.project_id.as_deref(),
+                        args.worktree_id.as_deref(),
+                    );
+                }
+
+                let worker_type_label = if is_opencode { "OpenCode" } else { "builtin" };
+                let effectively_interactive = args.interactive || is_opencode;
+                let message = if effectively_interactive {
+                    format!(
+                        "Interactive {worker_type_label} worker {worker_id} spawned for: {}. Route follow-ups with route_to_worker.",
+                        args.task
+                    )
+                } else {
+                    format!(
+                        "{worker_type_label} worker {worker_id} spawned for: {}. It will report back when done.",
+                        args.task
+                    )
+                };
+                let readiness_note = if readiness.ready {
+                    String::new()
+                } else {
+                    let reason = readiness
+                        .reason
+                        .map(|value| value.as_str())
+                        .unwrap_or("unknown");
+                    format!(
+                        " Readiness note: warmup is not fully ready ({reason}, state: {:?}); a warmup pass may already be running or was queued in the background.",
+                        readiness.warmup_state
+                    )
+                };
+
+                Ok(SpawnWorkerOutput {
+                    worker_id,
+                    spawned: true,
+                    interactive: effectively_interactive,
+                    queued: false,
+                    message: format!("{message}{readiness_note}"),
+                })
+            }
+            None => {
+                // Queued — worker limit reached, will auto-spawn when a slot opens.
+                let queue_len = self.state.worker_queue.read().await.len();
+                let max_workers = **self.state.deps.runtime_config.max_concurrent_workers.load();
+                Ok(SpawnWorkerOutput {
+                    worker_id: WorkerId::nil(),
+                    spawned: false,
+                    interactive: args.interactive || is_opencode,
+                    queued: true,
+                    message: format!(
+                        "Worker limit reached ({max_workers} concurrent). Task queued at position {queue_len}: \"{}\". \
+                         It will auto-spawn when a running worker completes. No action needed.",
+                        args.task
+                    ),
+                })
+            }
+        }
     }
 }
 
@@ -508,6 +535,7 @@ impl Tool for DetachedSpawnWorkerTool {
             worker_id,
             spawned: true,
             interactive: false,
+            queued: false,
             message: format!(
                 "Worker {worker_id} spawned for: {}. It will report back when done.",
                 args.task
