@@ -2097,6 +2097,37 @@ async fn run(
         }
     }
 
+    // Startup catch-up: scan for issues missed during downtime.
+    // Runs as a background task so it doesn't block the main event loop.
+    if agents_initialized {
+        let catchup_injection_tx = injection_tx.clone();
+        let catchup_agents: Vec<_> = agents
+            .iter()
+            .map(|(id, a)| (id.to_string(), a.deps.registry_store.clone()))
+            .collect();
+        tokio::spawn(async move {
+            // Small delay to let the main loop start accepting messages first
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            for (agent_id, registry_store) in &catchup_agents {
+                spacebot::watchdog::run_startup_catchup(
+                    agent_id,
+                    registry_store,
+                    &catchup_injection_tx,
+                )
+                .await;
+            }
+        });
+    }
+
+    // Health watchdog: exit if no messages are processed for 10 minutes.
+    // systemd will restart the service automatically.
+    let watchdog = spacebot::watchdog::spawn_watchdog(
+        std::time::Duration::from_secs(600),  // 10 minute timeout
+        std::time::Duration::from_secs(60),    // check every minute
+    );
+    // Ping immediately so the watchdog doesn't trigger during initial quiet period
+    watchdog.ping();
+
     // Main event loop: route inbound messages to agent channels
     loop {
         // Poll the inbound stream if it exists, otherwise yield a never-resolving future
@@ -2319,6 +2350,8 @@ async fn run(
                             "failed to forward message to channel"
                         );
                         active_channels.remove(&conversation_id);
+                    } else {
+                        watchdog.ping();
                     }
                 }
             }
@@ -2347,6 +2380,7 @@ async fn run(
                             "failed to forward injected message to channel"
                         );
                     } else {
+                        watchdog.ping();
                         tracing::info!(
                             conversation_id = %injection.conversation_id,
                             agent_id = %injection.agent_id,
@@ -2354,6 +2388,10 @@ async fn run(
                         );
                     }
                 } else {
+                    // No active channel — the catch-up message will be routed
+                    // when the next inbound message creates the channel.
+                    // Still ping watchdog since we're processing events.
+                    watchdog.ping();
                     tracing::info!(
                         conversation_id = %injection.conversation_id,
                         agent_id = %injection.agent_id,

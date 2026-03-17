@@ -143,10 +143,8 @@ pub fn build_release(
     // Cargo writes progress to stderr
     let stderr = child.stderr.take().unwrap();
     let reader = BufReader::new(stderr);
-    for line in reader.lines() {
-        if let Ok(line) = line {
-            on_line(&line);
-        }
+    for line in reader.lines().map_while(Result::ok) {
+        on_line(&line);
     }
 
     let status = child.wait()?;
