@@ -95,14 +95,6 @@ impl DiscordAdapter {
     }
 
     fn extract_reply_message_id(message: &InboundMessage) -> Option<MessageId> {
-        if let Some(reply_message_id) = message
-            .metadata
-            .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
-            .and_then(Self::parse_message_id)
-        {
-            return Some(MessageId::new(reply_message_id));
-        }
-
         let reply_to_trigger = message
             .metadata
             .get(crate::metadata_keys::REPLY_TO_TRIGGER)
@@ -110,6 +102,14 @@ impl DiscordAdapter {
             .unwrap_or(true);
         if !reply_to_trigger {
             return None;
+        }
+
+        if let Some(reply_message_id) = message
+            .metadata
+            .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
+            .and_then(Self::parse_message_id)
+        {
+            return Some(MessageId::new(reply_message_id));
         }
 
         [crate::metadata_keys::MESSAGE_ID, "discord_message_id"]
@@ -1318,6 +1318,26 @@ mod tests {
         metadata.insert(
             crate::metadata_keys::MESSAGE_ID.into(),
             serde_json::Value::String("222".into()),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_explicit_no_reply_overrides_reply_target() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_TRIGGER.into(),
+            serde_json::Value::Bool(false),
+        );
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_MESSAGE_ID.into(),
+            serde_json::Value::String("111".into()),
         );
 
         let message = inbound_message_with_metadata(metadata);
