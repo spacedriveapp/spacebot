@@ -1737,55 +1737,107 @@ pub(super) fn is_named_adapter_platform(platform: &str) -> bool {
     )
 }
 
+/// Validate channel bindings against messaging config, returning only the
+/// resolvable bindings. Unresolvable bindings (missing messaging config,
+/// missing adapter, etc.) are logged as warnings and skipped instead of
+/// causing a hard startup failure.
+/// Validate channel bindings against messaging config, returning only the
+/// resolvable bindings. When `strict` is true (config authoring/validation),
+/// unresolvable bindings cause an error. When `strict` is false (startup),
+/// they are logged as warnings and skipped so the agent can still boot.
 pub(super) fn validate_named_messaging_adapters(
     messaging: &MessagingConfig,
-    bindings: &[Binding],
-) -> Result<()> {
+    bindings: Vec<Binding>,
+    strict: bool,
+) -> Result<Vec<Binding>> {
     let adapter_states = build_adapter_validation_states(messaging)?;
+
+    let mut valid_bindings = Vec::with_capacity(bindings.len());
 
     for binding in bindings {
         if !is_named_adapter_platform(binding.channel.as_str()) {
             if binding.adapter.is_some() {
-                return Err(ConfigError::Invalid(format!(
-                    "binding for channel '{}' can't set adapter: this platform does not support named adapters",
-                    binding.channel
-                ))
-                .into());
+                let msg = format!(
+                    "binding for agent '{}' on channel '{}' can't set adapter: this platform does not support named adapters",
+                    binding.agent_id, binding.channel
+                );
+                if strict {
+                    return Err(ConfigError::Invalid(msg).into());
+                }
+                tracing::warn!(
+                    agent_id = %binding.agent_id,
+                    channel = %binding.channel,
+                    adapter = %binding.adapter.as_deref().unwrap_or("<default>"),
+                    "skipping binding: this platform does not support named adapters"
+                );
+                continue;
             }
+            valid_bindings.push(binding);
             continue;
         }
 
-        let state = adapter_states.get(binding.channel.as_str()).ok_or_else(|| {
-            ConfigError::Invalid(format!(
-                "binding for channel '{}' can't be resolved: no messaging config exists for that platform",
-                binding.channel
-            ))
-        })?;
+        let state = match adapter_states.get(binding.channel.as_str()) {
+            Some(s) => s,
+            None => {
+                let msg = format!(
+                    "binding for agent '{}' on channel '{}' can't be resolved: no messaging config exists for that platform",
+                    binding.agent_id, binding.channel
+                );
+                if strict {
+                    return Err(ConfigError::Invalid(msg).into());
+                }
+                tracing::warn!(
+                    agent_id = %binding.agent_id,
+                    channel = %binding.channel,
+                    "skipping binding: no messaging config exists for this platform"
+                );
+                continue;
+            }
+        };
 
         // adapter is already normalized at ingest time via normalize_adapter().
         match binding.adapter.as_deref() {
             Some(adapter_name) => {
                 if !state.named_instances.contains(adapter_name) {
-                    return Err(ConfigError::Invalid(format!(
-                        "binding for channel '{}' references missing adapter '{}'",
-                        binding.channel, adapter_name
-                    ))
-                    .into());
+                    let msg = format!(
+                        "binding for agent '{}' on channel '{}' references missing or disabled adapter '{}'",
+                        binding.agent_id, binding.channel, adapter_name
+                    );
+                    if strict {
+                        return Err(ConfigError::Invalid(msg).into());
+                    }
+                    tracing::warn!(
+                        agent_id = %binding.agent_id,
+                        channel = %binding.channel,
+                        adapter = %adapter_name,
+                        "skipping binding: references missing or disabled adapter"
+                    );
+                    continue;
                 }
             }
             None => {
                 if !state.default_present {
-                    return Err(ConfigError::Invalid(format!(
-                        "binding for channel '{}' requires the default adapter, but no default credentials are configured",
-                        binding.channel
-                    ))
-                    .into());
+                    let msg = format!(
+                        "binding for agent '{}' on channel '{}' requires the default adapter, but it is disabled or has no credentials configured",
+                        binding.agent_id, binding.channel
+                    );
+                    if strict {
+                        return Err(ConfigError::Invalid(msg).into());
+                    }
+                    tracing::warn!(
+                        agent_id = %binding.agent_id,
+                        channel = %binding.channel,
+                        "skipping binding: requires the default adapter, but it is disabled or has no credentials configured"
+                    );
+                    continue;
                 }
             }
         }
+
+        valid_bindings.push(binding);
     }
 
-    Ok(())
+    Ok(valid_bindings)
 }
 
 pub(super) fn build_adapter_validation_states(
@@ -1794,37 +1846,49 @@ pub(super) fn build_adapter_validation_states(
     let mut states = std::collections::HashMap::new();
 
     if let Some(discord) = &messaging.discord {
-        let named_instances = validate_instance_names(
+        // Validate ALL instance names for structural issues (duplicates, empty, etc.)
+        validate_instance_names(
             "discord",
             discord
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        validate_runtime_keys(
-            "discord",
-            !discord.token.trim().is_empty(),
-            &named_instances,
-        )?;
+        // Only include enabled instances in the resolvable set
+        let named_instances: std::collections::HashSet<String> = discord
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = discord.enabled && !discord.token.trim().is_empty();
+        validate_runtime_keys("discord", default_present, &named_instances)?;
         states.insert(
             "discord",
             AdapterValidationState {
-                default_present: !discord.token.trim().is_empty(),
+                default_present,
                 named_instances,
             },
         );
     }
 
     if let Some(slack) = &messaging.slack {
-        let named_instances = validate_instance_names(
+        validate_instance_names(
             "slack",
             slack
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present =
-            !slack.bot_token.trim().is_empty() && !slack.app_token.trim().is_empty();
+        let named_instances: std::collections::HashSet<String> = slack
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = slack.enabled
+            && !slack.bot_token.trim().is_empty()
+            && !slack.app_token.trim().is_empty();
         validate_runtime_keys("slack", default_present, &named_instances)?;
         states.insert(
             "slack",
@@ -1836,14 +1900,20 @@ pub(super) fn build_adapter_validation_states(
     }
 
     if let Some(telegram) = &messaging.telegram {
-        let named_instances = validate_instance_names(
+        validate_instance_names(
             "telegram",
             telegram
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present = !telegram.token.trim().is_empty();
+        let named_instances: std::collections::HashSet<String> = telegram
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = telegram.enabled && !telegram.token.trim().is_empty();
         validate_runtime_keys("telegram", default_present, &named_instances)?;
         states.insert(
             "telegram",
@@ -1855,15 +1925,22 @@ pub(super) fn build_adapter_validation_states(
     }
 
     if let Some(twitch) = &messaging.twitch {
-        let named_instances = validate_instance_names(
+        validate_instance_names(
             "twitch",
             twitch
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present =
-            !twitch.username.trim().is_empty() && !twitch.oauth_token.trim().is_empty();
+        let named_instances: std::collections::HashSet<String> = twitch
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = twitch.enabled
+            && !twitch.username.trim().is_empty()
+            && !twitch.oauth_token.trim().is_empty();
         validate_runtime_keys("twitch", default_present, &named_instances)?;
         states.insert(
             "twitch",
@@ -1875,14 +1952,21 @@ pub(super) fn build_adapter_validation_states(
     }
 
     if let Some(email) = &messaging.email {
-        let named_instances = validate_instance_names(
+        validate_instance_names(
             "email",
             email
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present = !email.imap_host.trim().is_empty()
+        let named_instances: std::collections::HashSet<String> = email
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = email.enabled
+            && !email.imap_host.trim().is_empty()
             && !email.imap_username.trim().is_empty()
             && !email.imap_password.trim().is_empty()
             && !email.smtp_host.trim().is_empty();
@@ -1897,15 +1981,22 @@ pub(super) fn build_adapter_validation_states(
     }
 
     if let Some(signal) = &messaging.signal {
-        let named_instances = validate_instance_names(
+        validate_instance_names(
             "signal",
             signal
                 .instances
                 .iter()
                 .map(|instance| instance.name.as_str()),
         )?;
-        let default_present =
-            !signal.http_url.trim().is_empty() && !signal.account.trim().is_empty();
+        let named_instances: std::collections::HashSet<String> = signal
+            .instances
+            .iter()
+            .filter(|i| i.enabled)
+            .map(|i| i.name.clone())
+            .collect();
+        let default_present = signal.enabled
+            && !signal.http_url.trim().is_empty()
+            && !signal.account.trim().is_empty();
         validate_runtime_keys("signal", default_present, &named_instances)?;
         states.insert(
             "signal",
