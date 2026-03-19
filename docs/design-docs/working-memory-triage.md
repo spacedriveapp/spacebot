@@ -23,20 +23,20 @@ Findings from CodeRabbit review + bug reports. Tracking resolution before merge.
 - [ ] **R5 — Dirty flag only bumps on merges** (`src/agent/cortex.rs:1958`)
   Prunes and decays also change the memory set but don't trigger knowledge synthesis re-gen. Add `report.pruned > 0 || report.decayed > 0`.
 
-- [ ] **R6 — Dirty-flag synthesis not mutex-guarded** (`src/agent/cortex.rs:2106`)
-  Can race with warmup synthesis path. Should acquire the same synthesis mutex.
+- [x] **R6 — Dirty-flag synthesis not mutex-guarded** (`src/agent/cortex.rs:2106`)
+  Can race with warmup synthesis path. **Fixed:** dirty-flag refresh now acquires `warmup_lock` before calling `generate_knowledge_synthesis`.
 
 - [ ] **R7 — Intraday/daily synthesis blocks main cortex loop** (`src/agent/cortex.rs:2166`)
   LLM calls awaited inline inside `tokio::select!`; events stop draining during synthesis. Spawn as background tasks.
 
-- [ ] **R8 — Empty sections treated as successful no-op** (`src/agent/cortex.rs:2558`)
-  Returns before tasks can contribute to synthesis; dirty flag never clears, causing infinite rescheduling.
+- [x] **R8 — Empty sections treated as successful no-op** (`src/agent/cortex.rs:2558`)
+  Returns before tasks can contribute to synthesis; dirty flag never clears, causing infinite rescheduling. **Fixed:** moved `gather_active_tasks` before the empty check; empty path now advances `knowledge_synthesis_last_version` to clear the dirty flag.
 
 - [ ] **R9 — Missing `default_max_turns(1)` + inline preambles** (`src/agent/cortex.rs:2579`)
   Three cortex agent builders lack explicit max_turns; two have inline preamble strings instead of prompt files.
 
-- [ ] **R10 — Version snapshot after async work** (`src/agent/cortex.rs:2614`)
-  `knowledge_synthesis_last_version` read after LLM call; concurrent writes can advance the version past what was actually synthesized. Snapshot before.
+- [x] **R10 — Version snapshot after async work** (`src/agent/cortex.rs:2614`)
+  `knowledge_synthesis_last_version` read after LLM call; concurrent writes can advance the version past what was actually synthesized. **Fixed:** version snapshotted before async work; snapshot stored as `last_version` on success.
 
 - [x] **R11 — Unsynthesized yesterday events dropped** (`src/agent/cortex.rs:2916`)
   Raw events that didn't hit count/time trigger before midnight are lost from daily summary. Roll them into the summary. **Fixed:** daily summary now fetches all raw events, filters to the unsynthesized tail after the last intra-day synthesis, and includes them in the LLM input.

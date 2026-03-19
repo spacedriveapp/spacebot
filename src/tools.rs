@@ -15,11 +15,12 @@
 //! - `memory_save` + `memory_recall` + `memory_delete` + `channel_recall`
 //! - `spacebot_docs` for embedded self-documentation lookup
 //! - `task_create` + `task_list` + `task_update`
+//! - `file_read` + `file_list` — read-only file access for reading worker output
 //! - `spawn_worker` is included for channel-originated branches only
 //!
 //! **Worker ToolServer** (one per worker, created at spawn time):
 //! - `shell`, `file_read`/`file_write`/`file_edit`/`file_list` — stateless, registered at creation
-//! - `task_update` — scoped to the worker's assigned task
+//! - `task_create` + `task_list` + `task_update` — full taskboard access
 //! - `set_status` — per-worker instance, registered at creation
 //!
 //! **Cortex ToolServer** (one per agent):
@@ -91,7 +92,7 @@ pub use email_search::{EmailSearchArgs, EmailSearchError, EmailSearchOutput, Ema
 pub use file::{
     FileEditArgs, FileEditTool, FileEntry, FileEntryOutput, FileError, FileListArgs, FileListTool,
     FileOutput, FileReadArgs, FileReadTool, FileType, FileWriteArgs, FileWriteTool,
-    register_file_tools,
+    register_file_tools, register_readonly_file_tools,
 };
 pub use install_skill::{
     InstallSkillArgs, InstallSkillError, InstallSkillOutput, InstallSkillTool,
@@ -515,8 +516,9 @@ fn memory_save_with_events(
 /// Create a per-branch ToolServer with memory tools.
 ///
 /// Each branch gets its own isolated ToolServer so `memory_recall` is never
-/// visible to the channel. Includes memory tools, task-board tools, and
-/// `spacebot_docs` for on-demand self-documentation lookup.
+/// visible to the channel. Includes memory tools, task-board tools, read-only
+/// file tools (`file_read`, `file_list`), and `spacebot_docs` for on-demand
+/// self-documentation lookup.
 #[allow(clippy::too_many_arguments)]
 pub fn create_branch_tool_server(
     state: Option<ChannelState>,
@@ -529,6 +531,8 @@ pub fn create_branch_tool_server(
     channel_store: crate::conversation::ChannelStore,
     run_logger: crate::conversation::history::ProcessRunLogger,
     profile: BranchToolProfile,
+    workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
 ) -> ToolServerHandle {
     let mut memory_save = memory_save_with_events(
         memory_search.clone(),
@@ -555,6 +559,8 @@ pub fn create_branch_tool_server(
         ))
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
+
+    server = register_readonly_file_tools(server, workspace, sandbox);
 
     if let BranchToolProfile::MemoryPersistence {
         contract_state,
@@ -601,6 +607,12 @@ pub fn create_worker_tool_server(
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
+        .tool(TaskCreateTool::new(
+            task_store.clone(),
+            agent_id.to_string(),
+            "worker",
+        ))
+        .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_worker(
             task_store,
             agent_id.clone(),

@@ -1,4 +1,7 @@
-//! File tools for reading, writing, editing, and listing files (task workers only).
+//! File tools for reading, writing, editing, and listing files.
+//!
+//! Workers get full access (read/write/edit/list). Branches get read-only
+//! access (`file_read`, `file_list`) via [`register_readonly_file_tools`].
 //!
 //! Provides a suite of separate tools (`file_read`, `file_write`, `file_edit`,
 //! `file_list`) backed by a shared `FileContext` that handles sandbox-aware path
@@ -600,6 +603,24 @@ pub fn register_file_tools(
             context: context.clone(),
         })
         .tool(FileEditTool {
+            context: context.clone(),
+        })
+        .tool(FileListTool { context })
+}
+
+/// Register read-only file tools (`file_read`, `file_list`) on a `ToolServer`.
+///
+/// Used by branches which need to read files produced by workers but should not
+/// write, edit, or create files (branches think, they don't execute).
+pub fn register_readonly_file_tools(
+    server: rig::tool::server::ToolServer,
+    workspace: PathBuf,
+    sandbox: Arc<Sandbox>,
+) -> rig::tool::server::ToolServer {
+    let context = FileContext::new(workspace, sandbox);
+
+    server
+        .tool(FileReadTool {
             context: context.clone(),
         })
         .tool(FileListTool { context })

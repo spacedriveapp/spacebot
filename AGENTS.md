@@ -67,7 +67,7 @@ Creating a branch is `let branch_history = channel_history.clone()`.
 
 The branch result is injected into the channel's history as a distinct message type. Then the branch is deleted. Multiple branches can run concurrently per channel (configurable limit). First done, first incorporated.
 
-**Tools:** memory_recall, memory_save, memory_delete, channel_recall, spacebot_docs, task_create, task_list, task_update, spawn_worker  
+**Tools:** memory_recall, memory_save, memory_delete, channel_recall, spacebot_docs, task_create, task_list, task_update, file_read, file_list, spawn_worker  
 **Context:** Clone of channel history at fork time  
 **Lifecycle:** Short-lived. Returns a conclusion, then deleted.
 
@@ -84,7 +84,7 @@ Workers are pluggable. A worker can be:
 - An OpenCode subprocess
 - Any external process that accepts a task and reports status
 
-**Tools:** shell, file, set_status (varies by worker type)  
+**Tools:** shell, file, task_create, task_list, task_update, set_status (varies by worker type)  
 **Context:** Fresh prompt + task description. No channel history.  
 **Lifecycle:** Fire-and-forget or long-running. Reports status via `set_status` tool.
 
@@ -177,11 +177,11 @@ src/
 │   ├── channel_recall.rs— retrieve transcript from any channel (branch only)
 │   ├── set_status.rs   — update worker status (workers only)
 │   ├── shell.rs        — execute shell commands and subprocesses (task workers)
-│   ├── file.rs         — read/write/list files (task workers)
+│   ├── file.rs         — read/write/list files (workers full, branches read-only)
 │   ├── browser.rs      — web browsing (task workers)
-│   ├── task_create.rs  — create task-board task (branch + cortex chat)
-│   ├── task_list.rs    — list task-board tasks (branch + cortex chat)
-│   ├── task_update.rs  — update task-board task (branch + cortex chat)
+│   ├── task_create.rs  — create task-board task (branch + worker + cortex chat)
+│   ├── task_list.rs    — list task-board tasks (branch + worker + cortex chat)
+│   ├── task_update.rs  — update task-board task (branch + worker + cortex chat)
 │   ├── spacebot_docs.rs — read embedded Spacebot docs/changelog (branch + cortex chat)
 │   ├── config_inspect.rs — inspect live runtime config (cortex chat)
 │   └── cron.rs         — cron management (channel only)

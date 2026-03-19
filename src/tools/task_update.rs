@@ -1,4 +1,9 @@
 //! Task update tool for branch and worker processes.
+//!
+//! Both branches and workers get full update access to all task fields.
+//! Workers were previously restricted to subtask/metadata updates on their
+//! assigned task only, but now that workers can create tasks via `task_create`
+//! they need full update access to manage the tasks they produce.
 
 use crate::tasks::{TaskPriority, TaskStatus, TaskStore, TaskSubtask, UpdateTaskInput};
 use crate::{AgentId, WorkerId};
@@ -10,7 +15,10 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub enum TaskUpdateScope {
+    /// Full update access to all task fields.
     Branch,
+    /// Full update access to all task fields. Workers can update any task
+    /// belonging to the agent, not just their assigned task.
     Worker(WorkerId),
 }
 
@@ -18,6 +26,10 @@ pub enum TaskUpdateScope {
 pub struct TaskUpdateTool {
     task_store: Arc<TaskStore>,
     agent_id: AgentId,
+    /// Retained for Debug/logging attribution. Both scopes now have identical
+    /// update permissions — the distinction exists only so logs can tell whether
+    /// an update came from a branch or a worker.
+    #[allow(dead_code)]
     scope: TaskUpdateScope,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
@@ -81,68 +93,42 @@ impl Tool for TaskUpdateTool {
     type Output = TaskUpdateOutput;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let is_worker = matches!(self.scope, TaskUpdateScope::Worker(_));
-
-        // Workers only see subtask/metadata fields; branches/cortex see everything.
-        let parameters = if is_worker {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_number": { "type": "integer", "description": "Task number reference (#N)" },
-                    "subtasks": {
-                        "type": "array",
-                        "description": "Optional full replacement of subtask list",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": { "type": "string" },
-                                "completed": { "type": "boolean" }
-                            },
-                            "required": ["title", "completed"]
-                        }
-                    },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
-                    "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" }
+        // Both branches and workers get full update access to all fields.
+        let parameters = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "task_number": { "type": "integer", "description": "Task number reference (#N)" },
+                "title": { "type": "string", "description": "Optional new title" },
+                "description": { "type": "string", "description": "Optional new description" },
+                "status": {
+                    "type": "string",
+                    "enum": crate::tasks::TaskStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+                    "description": "Optional new status"
                 },
-                "required": ["task_number"]
-            })
-        } else {
-            serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "task_number": { "type": "integer", "description": "Task number reference (#N)" },
-                    "title": { "type": "string", "description": "Optional new title" },
-                    "description": { "type": "string", "description": "Optional new description" },
-                    "status": {
-                        "type": "string",
-                        "enum": crate::tasks::TaskStatus::ALL.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
-                        "description": "Optional new status"
-                    },
-                    "priority": {
-                        "type": "string",
-                        "enum": crate::tasks::TaskPriority::ALL.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
-                        "description": "Optional new priority"
-                    },
-                    "subtasks": {
-                        "type": "array",
-                        "description": "Optional full replacement of subtask list",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "title": { "type": "string" },
-                                "completed": { "type": "boolean" }
-                            },
-                            "required": ["title", "completed"]
-                        }
-                    },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
-                    "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" },
-                    "worker_id": { "type": "string", "description": "Optional worker ID to bind to this task" },
-                    "approved_by": { "type": "string", "description": "Optional approver identifier" }
+                "priority": {
+                    "type": "string",
+                    "enum": crate::tasks::TaskPriority::ALL.iter().map(|p| p.to_string()).collect::<Vec<_>>(),
+                    "description": "Optional new priority"
                 },
-                "required": ["task_number"]
-            })
-        };
+                "subtasks": {
+                    "type": "array",
+                    "description": "Optional full replacement of subtask list",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": { "type": "string" },
+                            "completed": { "type": "boolean" }
+                        },
+                        "required": ["title", "completed"]
+                    }
+                },
+                "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
+                "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" },
+                "worker_id": { "type": "string", "description": "Optional worker ID to bind to this task" },
+                "approved_by": { "type": "string", "description": "Optional approver identifier" }
+            },
+            "required": ["task_number"]
+        });
 
         ToolDefinition {
             name: Self::NAME.to_string(),
@@ -153,41 +139,6 @@ impl Tool for TaskUpdateTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
-
-        if let TaskUpdateScope::Worker(ref worker_id) = self.scope {
-            let current = self
-                .task_store
-                .get_by_worker_id(&worker_id.to_string())
-                .await
-                .map_err(|error| TaskUpdateError(format!("{error}")))?;
-
-            let Some(task) = current else {
-                return Err(TaskUpdateError(
-                    "worker is not assigned to a task".to_string(),
-                ));
-            };
-
-            if task.task_number != task_number {
-                return Err(TaskUpdateError(format!(
-                    "worker {} can only update task #{}",
-                    worker_id, task.task_number
-                )));
-            }
-
-            // Workers can only update subtasks and metadata — not status, priority,
-            // title, description, worker binding, or approval.
-            if args.title.is_some()
-                || args.description.is_some()
-                || args.status.is_some()
-                || args.priority.is_some()
-                || args.worker_id.is_some()
-                || args.approved_by.is_some()
-            {
-                return Err(TaskUpdateError(
-                    "workers can only update subtasks and metadata".to_string(),
-                ));
-            }
-        }
 
         let status = match args.status.as_deref() {
             None => None,

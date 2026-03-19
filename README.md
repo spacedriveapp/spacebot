@@ -369,13 +369,13 @@ Channel context hits 80%
 
 ### What Each Process Gets
 
-| Process   | Type               | Tools                                     | Context                             |
-| --------- | ------------------ | ----------------------------------------- | ----------------------------------- |
-| Channel   | LLM                | Reply, branch, spawn workers, route       | Conversation + compaction summaries |
-| Branch    | LLM                | Memory recall, memory save, spawn workers | Fork of channel's context           |
-| Worker    | Pluggable          | Shell, file, exec, browser (configurable) | Fresh prompt + task description     |
-| Compactor | Programmatic       | Monitor context, trigger workers          | N/A                                 |
-| Cortex    | LLM + Programmatic | Memory, consolidation, system monitor     | Entire agent scope                  |
+| Process   | Type               | Tools                                                         | Context                             |
+| --------- | ------------------ | ------------------------------------------------------------- | ----------------------------------- |
+| Channel   | LLM                | Reply, branch, spawn workers, route                           | Conversation + compaction summaries |
+| Branch    | LLM                | Memory recall/save, file read/list, task board, spawn workers | Fork of channel's context           |
+| Worker    | Pluggable          | Shell, file, task board, browser (configurable)               | Fresh prompt + task description     |
+| Compactor | Programmatic       | Monitor context, trigger workers                              | N/A                                 |
+| Cortex    | LLM + Programmatic | Memory, consolidation, system monitor                         | Entire agent scope                  |
 
 ### Memory System
 

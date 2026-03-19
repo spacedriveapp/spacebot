@@ -1,4 +1,4 @@
-//! Task creation tool for branch processes.
+//! Task creation tool for branch and worker processes.
 
 use crate::tasks::{CreateTaskInput, TaskPriority, TaskStatus, TaskStore, TaskSubtask};
 use rig::completion::ToolDefinition;

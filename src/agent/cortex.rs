@@ -2091,12 +2091,15 @@ async fn run_cortex_loop(
                 // The old bulletin code is preserved for startup fallback only.
 
                 // Knowledge synthesis: change-driven regeneration with debounce.
+                // Acquires warmup_lock to serialize with the startup warmup path.
                 if refresh_task.is_none()
                     && should_regenerate_knowledge_synthesis(&cortex.deps)
                 {
                     let deps = cortex.deps.clone();
                     let synthesis_logger = logger.clone();
+                    let warmup_lock = cortex.deps.runtime_config.warmup_lock.clone();
                     refresh_task = Some(tokio::spawn(async move {
+                        let _guard = warmup_lock.lock().await;
                         let success = generate_knowledge_synthesis(&deps, &synthesis_logger).await;
                         if success {
                             BulletinRefreshOutcome::Generated
@@ -2532,9 +2535,26 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
     tracing::info!("cortex generating knowledge synthesis");
     let started = Instant::now();
 
+    // Snapshot the current dirty-flag version BEFORE doing any async work.
+    // If a memory write bumps the version while we're running, we must NOT
+    // mark that newer version as synthesized — it needs its own regen.
+    let version_snapshot = deps
+        .runtime_config
+        .knowledge_synthesis_version
+        .load(std::sync::atomic::Ordering::Relaxed);
+
     // Gather narrower sections (no identity, no events, no recent).
     let raw_sections = gather_sections_from_list(deps, KNOWLEDGE_SYNTHESIS_SECTIONS).await;
     let section_count = raw_sections.matches("### ").count();
+
+    // Append active tasks (same as bulletin).
+    let raw_sections = match gather_active_tasks(deps).await {
+        Ok(tasks) => format!("{raw_sections}{tasks}"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to gather active tasks for knowledge synthesis");
+            raw_sections
+        }
+    };
 
     if raw_sections.is_empty() {
         tracing::info!("no memories found for knowledge synthesis");
@@ -2545,17 +2565,13 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
         deps.runtime_config
             .memory_bulletin
             .store(Arc::new(String::new()));
+        // Advance version so the dirty flag clears — otherwise we'd
+        // reschedule synthesis every tick with the same empty result.
+        deps.runtime_config
+            .knowledge_synthesis_last_version
+            .store(version_snapshot, std::sync::atomic::Ordering::Relaxed);
         return true;
     }
-
-    // Append active tasks (same as bulletin).
-    let raw_sections = match gather_active_tasks(deps).await {
-        Ok(tasks) => format!("{raw_sections}{tasks}"),
-        Err(error) => {
-            tracing::warn!(%error, "failed to gather active tasks for knowledge synthesis");
-            raw_sections
-        }
-    };
 
     let cortex_config = **deps.runtime_config.cortex.load();
     let prompt_engine = deps.runtime_config.prompts.load();
@@ -2604,14 +2620,12 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
             deps.runtime_config
                 .memory_bulletin
                 .store(Arc::new(synthesis));
-            // Mark this version as synthesized.
-            let current = deps
-                .runtime_config
-                .knowledge_synthesis_version
-                .load(std::sync::atomic::Ordering::Relaxed);
+            // Mark the snapshotted version as synthesized. We use the
+            // pre-work snapshot so that concurrent bumps during synthesis
+            // correctly trigger a follow-up regeneration.
             deps.runtime_config
                 .knowledge_synthesis_last_version
-                .store(current, std::sync::atomic::Ordering::Relaxed);
+                .store(version_snapshot, std::sync::atomic::Ordering::Relaxed);
             // Update warmup status.
             let refresh_ms = chrono::Utc::now().timestamp_millis();
             update_warmup_status(deps, |status| {

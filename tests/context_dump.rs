@@ -333,6 +333,8 @@ async fn dump_branch_context() {
         channel_store,
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
+        deps.runtime_config.workspace_dir.clone(),
+        deps.sandbox.clone(),
     );
 
     let tool_defs = branch_tool_server
@@ -541,6 +543,8 @@ async fn dump_all_contexts() {
         channel_store,
         run_logger,
         spacebot::tools::BranchToolProfile::Default,
+        deps.runtime_config.workspace_dir.clone(),
+        deps.sandbox.clone(),
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);

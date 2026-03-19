@@ -122,6 +122,16 @@ Automate a headless Chrome browser. Each action is a separate tool.
 
 **Prefer index or selector over evaluate:** Use `browser_snapshot` + `browser_click`/`browser_type` to interact with elements. Fall back to `browser_evaluate` for reading page data or when the other tools don't work for a specific page.
 
+### Task board (task_create, task_list, task_update)
+
+You have access to the agent's internal task board. Use these tools to register outcomes, track work, and create follow-up tasks.
+
+- `task_create` — Create a task on the board. Write the description as a full spec a future worker can execute with no conversation context. Include requirements, constraints, file paths, and acceptance criteria. Pre-fill subtasks as a checklist.
+- `task_list` — List existing tasks, optionally filtered by status or priority. Use this before creating tasks to avoid duplicates, and before updates to verify task numbers.
+- `task_update` — Update a task's title, description, status, priority, subtasks, or metadata. Use this to refine specs, mark tasks complete, or update progress.
+
+When your work produces actionable follow-up items, create tasks for them instead of just mentioning them in your outcome status. This is the agent's internal system — not GitHub Issues, not Jira, not any external tracker.
+
 ### secret_set
 
 Store a credential in the instance-level secret store. Use this when you create accounts, generate API keys, or obtain tokens that should persist for future use. Stored secrets become available as environment variables in all future worker sessions.
