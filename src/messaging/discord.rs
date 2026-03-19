@@ -86,12 +86,14 @@ impl DiscordAdapter {
             .remove(&Self::channel_key(message));
     }
 
-    fn parse_message_id(value: &serde_json::Value) -> Option<u64> {
-        match value {
+    fn parse_message_id(value: &serde_json::Value) -> Option<MessageId> {
+        let id = match value {
             serde_json::Value::String(s) => s.parse::<u64>().ok(),
             serde_json::Value::Number(n) => n.as_u64(),
             _ => None,
-        }
+        }?;
+
+        (id != 0).then(|| MessageId::new(id))
     }
 
     fn extract_reply_message_id(message: &InboundMessage) -> Option<MessageId> {
@@ -109,13 +111,12 @@ impl DiscordAdapter {
             .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
             .and_then(Self::parse_message_id)
         {
-            return Some(MessageId::new(reply_message_id));
+            return Some(reply_message_id);
         }
 
         [crate::metadata_keys::MESSAGE_ID, "discord_message_id"]
             .into_iter()
             .find_map(|key| message.metadata.get(key).and_then(Self::parse_message_id))
-            .map(MessageId::new)
     }
 
     fn extract_reply_ping_user(message: &InboundMessage) -> bool {
@@ -1362,6 +1363,24 @@ mod tests {
             DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
             Some(333)
         );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_ignores_zero_ids() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_MESSAGE_ID.into(),
+            serde_json::Value::String("0".into()),
+        );
+        metadata.insert(
+            crate::metadata_keys::MESSAGE_ID.into(),
+            serde_json::Value::from(0_u64),
+        );
+        metadata.insert("discord_message_id".into(), serde_json::Value::from(0_u64));
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(DiscordAdapter::extract_reply_message_id(&message), None);
     }
 
     #[test]
