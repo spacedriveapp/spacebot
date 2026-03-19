@@ -123,6 +123,8 @@ pub struct ApiState {
     /// Cross-agent task store registry for delegation.
     pub task_store_registry:
         Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
+    /// Shared agent name map for resolving agent IDs to display names (hot-reloadable).
+    pub agent_names: Arc<ArcSwap<std::collections::HashMap<String, String>>>,
     /// Sender for cross-agent message injection.
     pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
@@ -289,6 +291,7 @@ impl ApiState {
         task_store_registry: Arc<
             ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
         >,
+        agent_names: Arc<ArcSwap<std::collections::HashMap<String, String>>>,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -328,6 +331,7 @@ impl ApiState {
             agent_tx,
             agent_remove_tx,
             task_store_registry,
+            agent_names,
             injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),

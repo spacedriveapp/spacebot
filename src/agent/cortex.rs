@@ -3380,7 +3380,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let logger = logger.clone();
     let injection_tx = deps.injection_tx.clone();
     let links = deps.links.clone();
-    let agent_names = deps.agent_names.clone();
+    let agent_names: Arc<std::collections::HashMap<String, String>> =
+        deps.agent_names.load_full();
     let sqlite_pool = deps.sqlite_pool.clone();
     let secrets_snapshot = deps.runtime_config.secrets.load().clone();
     let process_control_registry = deps.process_control_registry.clone();

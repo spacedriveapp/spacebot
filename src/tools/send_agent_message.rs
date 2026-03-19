@@ -30,7 +30,7 @@ pub struct SendAgentMessageTool {
     agent_id: crate::AgentId,
     links: Arc<ArcSwap<Vec<AgentLink>>>,
     /// Map of known agent IDs to display names, for resolving targets.
-    agent_names: Arc<HashMap<String, String>>,
+    agent_names: Arc<ArcSwap<HashMap<String, String>>>,
     /// Cross-agent task store registry for creating tasks on target agents.
     task_store_registry: Arc<ArcSwap<HashMap<String, Arc<TaskStore>>>>,
     /// Per-agent conversation logger for writing link channel audit records.
@@ -55,7 +55,7 @@ impl SendAgentMessageTool {
     pub fn new(
         agent_id: crate::AgentId,
         links: Arc<ArcSwap<Vec<AgentLink>>>,
-        agent_names: Arc<HashMap<String, String>>,
+        agent_names: Arc<ArcSwap<HashMap<String, String>>>,
         task_store_registry: Arc<ArcSwap<HashMap<String, Arc<TaskStore>>>>,
         conversation_logger: ConversationLogger,
     ) -> Self {
@@ -92,14 +92,16 @@ impl SendAgentMessageTool {
     /// Resolve an agent target string to an agent ID.
     /// Checks both IDs and display names (case-insensitive).
     fn resolve_agent_id(&self, target: &str) -> Option<String> {
+        let names = self.agent_names.load();
+
         // Direct ID match
-        if self.agent_names.contains_key(target) {
+        if names.contains_key(target) {
             return Some(target.to_string());
         }
 
         // Name match (case-insensitive)
         let target_lower = target.to_lowercase();
-        for (agent_id, name) in self.agent_names.iter() {
+        for (agent_id, name) in names.iter() {
             if name.to_lowercase() == target_lower {
                 return Some(agent_id.clone());
             }
@@ -206,6 +208,7 @@ impl Tool for SendAgentMessageTool {
 
         let target_display = self
             .agent_names
+            .load()
             .get(receiving_agent_id)
             .cloned()
             .unwrap_or_else(|| receiving_agent_id.to_string());
@@ -256,6 +259,7 @@ impl Tool for SendAgentMessageTool {
         // Log delegation record in the link channel (system message).
         let sender_display = self
             .agent_names
+            .load()
             .get(sending_agent_id)
             .cloned()
             .unwrap_or_else(|| sending_agent_id.to_string());

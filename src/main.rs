@@ -1587,6 +1587,10 @@ async fn run(
         ArcSwap<std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>>>,
     > = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
 
+    let agent_names_registry: Arc<
+        ArcSwap<std::collections::HashMap<String, String>>,
+    > = Arc::new(ArcSwap::from_pointee(std::collections::HashMap::new()));
+
     // Start HTTP API server if enabled
     let mut api_state = spacebot::api::ApiState::new_with_provider_sender(
         provider_tx,
@@ -1594,6 +1598,7 @@ async fn run(
         agent_remove_tx,
         injection_tx.clone(),
         task_store_registry.clone(),
+        agent_names_registry.clone(),
     );
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
@@ -1760,6 +1765,7 @@ async fn run(
             agent_humans.clone(),
             injection_tx.clone(),
             task_store_registry.clone(),
+            agent_names_registry.clone(),
             &bootstrapped_store,
         )
         .await?;
@@ -2352,6 +2358,7 @@ async fn run(
                                     agent_humans.clone(),
                                     injection_tx.clone(),
                                     task_store_registry.clone(),
+                                    agent_names_registry.clone(),
                                     &bootstrapped_store,
                                 ).await {
                                     Ok(()) => {
@@ -2495,20 +2502,21 @@ async fn initialize_agents(
     task_store_registry: Arc<
         ArcSwap<std::collections::HashMap<String, Arc<spacebot::tasks::TaskStore>>>,
     >,
+    agent_names_registry: Arc<ArcSwap<std::collections::HashMap<String, String>>>,
     bootstrapped_store: &Option<Arc<spacebot::secrets::store::SecretsStore>>,
 ) -> anyhow::Result<()> {
     let resolved_agents = config.resolve_agents();
 
-    // Build agent name map for inter-agent message routing
-    let agent_name_map: Arc<std::collections::HashMap<String, String>> = Arc::new(
-        resolved_agents
-            .iter()
-            .map(|a| {
-                let name = a.display_name.clone().unwrap_or_else(|| a.id.clone());
-                (a.id.clone(), name)
-            })
-            .collect(),
-    );
+    // Build agent name map and publish to the shared registry so all agents
+    // (including those already running) see the updated names immediately.
+    let agent_name_map: std::collections::HashMap<String, String> = resolved_agents
+        .iter()
+        .map(|a| {
+            let name = a.display_name.clone().unwrap_or_else(|| a.id.clone());
+            (a.id.clone(), name)
+        })
+        .collect();
+    agent_names_registry.store(Arc::new(agent_name_map));
 
     for agent_config in &resolved_agents {
         tracing::info!(agent_id = %agent_config.id, "initializing agent");
@@ -2742,7 +2750,7 @@ async fn initialize_agents(
             messaging_manager: None,
             sandbox,
             links: agent_links.clone(),
-            agent_names: agent_name_map.clone(),
+            agent_names: agent_names_registry.clone(),
             humans: agent_humans.clone(),
             task_store_registry: task_store_registry.clone(),
             process_control_registry: Arc::new(
