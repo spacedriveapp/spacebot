@@ -9,11 +9,12 @@ use anyhow::Context as _;
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
-    ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow, CreateAttachment, CreateButton,
-    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreatePoll, CreatePollAnswer, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, GetMessages,
-    Http, Interaction, Message, MessageId, ReactionType, Ready, ShardManager, User, UserId,
+    ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow, CreateAllowedMentions,
+    CreateAttachment, CreateButton, CreateEmbed, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
+    EventHandler, GatewayIntents, GetMessages, Http, Interaction, Message, MessageId, ReactionType,
+    Ready, ShardManager, User, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -85,16 +86,53 @@ impl DiscordAdapter {
             .remove(&Self::channel_key(message));
     }
 
+    fn parse_message_id(value: &serde_json::Value) -> Option<MessageId> {
+        let id = match value {
+            serde_json::Value::String(s) => s.parse::<u64>().ok(),
+            serde_json::Value::Number(n) => n.as_u64(),
+            _ => None,
+        }?;
+
+        (id != 0).then(|| MessageId::new(id))
+    }
+
     fn extract_reply_message_id(message: &InboundMessage) -> Option<MessageId> {
-        message
+        let reply_to_trigger = message
+            .metadata
+            .get(crate::metadata_keys::REPLY_TO_TRIGGER)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
+        if !reply_to_trigger {
+            return None;
+        }
+
+        if let Some(reply_message_id) = message
             .metadata
             .get(crate::metadata_keys::REPLY_TO_MESSAGE_ID)
-            .and_then(|value| match value {
-                serde_json::Value::String(s) => s.parse::<u64>().ok(),
-                serde_json::Value::Number(n) => n.as_u64(),
-                _ => None,
-            })
-            .map(MessageId::new)
+            .and_then(Self::parse_message_id)
+        {
+            return Some(reply_message_id);
+        }
+
+        [crate::metadata_keys::MESSAGE_ID, "discord_message_id"]
+            .into_iter()
+            .find_map(|key| message.metadata.get(key).and_then(Self::parse_message_id))
+    }
+
+    fn extract_reply_ping_user(message: &InboundMessage) -> bool {
+        message
+            .metadata
+            .get(crate::metadata_keys::REPLY_PING_USER)
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    }
+
+    fn build_reply_allowed_mentions(message: &InboundMessage) -> CreateAllowedMentions {
+        CreateAllowedMentions::new()
+            .replied_user(Self::extract_reply_ping_user(message))
+            .everyone(true)
+            .all_users(true)
+            .all_roles(true)
     }
 }
 
@@ -155,7 +193,9 @@ impl Messaging for DiscordAdapter {
                     if index == 0
                         && let Some(reply_message_id) = reply_to
                     {
-                        builder = builder.reference_message((channel_id, reply_message_id));
+                        builder = builder
+                            .reference_message((channel_id, reply_message_id))
+                            .allowed_mentions(Self::build_reply_allowed_mentions(message));
                     }
                     channel_id
                         .send_message(&*http, builder)
@@ -212,7 +252,9 @@ impl Messaging for DiscordAdapter {
                     if i == 0
                         && let Some(reply_message_id) = reply_to
                     {
-                        msg = msg.reference_message((channel_id, reply_message_id));
+                        msg = msg
+                            .reference_message((channel_id, reply_message_id))
+                            .allowed_mentions(Self::build_reply_allowed_mentions(message));
                     }
 
                     channel_id
@@ -289,7 +331,9 @@ impl Messaging for DiscordAdapter {
                     builder = builder.content(caption_text);
                 }
                 if let Some(reply_message_id) = reply_to {
-                    builder = builder.reference_message((channel_id, reply_message_id));
+                    builder = builder
+                        .reference_message((channel_id, reply_message_id))
+                        .allowed_mentions(Self::build_reply_allowed_mentions(message));
                 }
 
                 channel_id
@@ -1211,6 +1255,153 @@ fn build_poll(
 mod tests {
     use super::*;
     use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
+
+    fn inbound_message_with_metadata(
+        metadata: HashMap<String, serde_json::Value>,
+    ) -> crate::InboundMessage {
+        crate::InboundMessage {
+            id: "msg-1".into(),
+            source: "discord".into(),
+            adapter: None,
+            conversation_id: "discord:channel:123".into(),
+            sender_id: "user-1".into(),
+            agent_id: None,
+            content: crate::MessageContent::Text("test".into()),
+            timestamp: chrono::Utc::now(),
+            metadata,
+            formatted_author: None,
+        }
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_prefers_explicit_reply_target() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_MESSAGE_ID.into(),
+            serde_json::Value::String("111".into()),
+        );
+        metadata.insert(
+            crate::metadata_keys::MESSAGE_ID.into(),
+            serde_json::Value::String("222".into()),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            Some(111)
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_falls_back_to_message_id_by_default() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::MESSAGE_ID.into(),
+            serde_json::Value::String("222".into()),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            Some(222)
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_respects_explicit_no_reply() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_TRIGGER.into(),
+            serde_json::Value::Bool(false),
+        );
+        metadata.insert(
+            crate::metadata_keys::MESSAGE_ID.into(),
+            serde_json::Value::String("222".into()),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_explicit_no_reply_overrides_reply_target() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_TRIGGER.into(),
+            serde_json::Value::Bool(false),
+        );
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_MESSAGE_ID.into(),
+            serde_json::Value::String("111".into()),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            None
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_falls_back_to_discord_message_id_by_default() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            "discord_message_id".into(),
+            serde_json::Value::from(333_u64),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(
+            DiscordAdapter::extract_reply_message_id(&message).map(MessageId::get),
+            Some(333)
+        );
+    }
+
+    #[test]
+    fn test_extract_reply_message_id_ignores_zero_ids() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_TO_MESSAGE_ID.into(),
+            serde_json::Value::String("0".into()),
+        );
+        metadata.insert(
+            crate::metadata_keys::MESSAGE_ID.into(),
+            serde_json::Value::from(0_u64),
+        );
+        metadata.insert("discord_message_id".into(), serde_json::Value::from(0_u64));
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert_eq!(DiscordAdapter::extract_reply_message_id(&message), None);
+    }
+
+    #[test]
+    fn test_extract_reply_ping_user_reads_flag() {
+        let mut metadata = HashMap::new();
+        metadata.insert(
+            crate::metadata_keys::REPLY_PING_USER.into(),
+            serde_json::Value::Bool(false),
+        );
+
+        let message = inbound_message_with_metadata(metadata);
+
+        assert!(!DiscordAdapter::extract_reply_ping_user(&message));
+    }
+
+    #[test]
+    fn test_extract_reply_ping_user_defaults_to_false() {
+        let message = inbound_message_with_metadata(HashMap::new());
+
+        assert!(!DiscordAdapter::extract_reply_ping_user(&message));
+    }
 
     #[test]
     fn test_build_embed_limits() {
