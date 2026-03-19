@@ -341,6 +341,129 @@ async fn transcribe_audio_attachment(
     ))
 }
 
+/// Transcribe pre-loaded audio bytes using the configured voice model.
+///
+/// This is the same transcription pipeline used for platform voice messages
+/// (Telegram, Discord, etc.), but skips the HTTP download step since the
+/// caller already has the bytes (e.g. from a multipart upload).
+///
+/// Returns `Ok(transcript_text)` on success, or `Err(description)` on failure.
+pub async fn transcribe_audio_bytes(
+    llm_manager: &std::sync::Arc<crate::llm::LlmManager>,
+    runtime_config: &std::sync::Arc<crate::config::RuntimeConfig>,
+    bytes: &[u8],
+    filename: &str,
+    mime_type: &str,
+) -> std::result::Result<String, String> {
+    let routing = runtime_config.routing.load();
+    let voice_model = routing.voice.trim();
+    if voice_model.is_empty() {
+        return Err("no voice model configured in routing.voice".into());
+    }
+
+    let (provider_id, model_name) = llm_manager
+        .resolve_model(voice_model)
+        .map_err(|error| format!("invalid voice model '{}': {}", voice_model, error))?;
+
+    let provider = llm_manager
+        .get_provider(&provider_id)
+        .map_err(|error| format!("provider '{}' not configured: {}", provider_id, error))?;
+
+    if provider.api_type == ApiType::Anthropic {
+        return Err(format!(
+            "provider '{}' does not support input_audio",
+            provider_id
+        ));
+    }
+
+    let format = audio_format_from_mime(mime_type);
+
+    use base64::Engine as _;
+    let base64_audio = base64::engine::general_purpose::STANDARD.encode(bytes);
+
+    let endpoint = format!(
+        "{}/v1/chat/completions",
+        provider.base_url.trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "model": model_name,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "Transcribe this audio verbatim. Return only the transcription text."
+                },
+                {
+                    "type": "input_audio",
+                    "input_audio": {
+                        "data": base64_audio,
+                        "format": format,
+                    }
+                }
+            ]
+        }],
+        "temperature": 0
+    });
+
+    let response = llm_manager
+        .http_client()
+        .post(&endpoint)
+        .header("authorization", format!("Bearer {}", provider.api_key))
+        .header("content-type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|error| format!("voice transcription request failed: {error}"))?;
+
+    let status = response.status();
+    let response_body: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|error| format!("invalid transcription response: {error}"))?;
+
+    if !status.is_success() {
+        let message = response_body["error"]["message"]
+            .as_str()
+            .unwrap_or("unknown error");
+        return Err(format!("provider returned error: {message}"));
+    }
+
+    let transcript = extract_transcript_text(&response_body);
+    if transcript.is_empty() {
+        return Err(format!("empty transcription for {filename}"));
+    }
+
+    Ok(transcript)
+}
+
+/// Determine audio format string from MIME type for the `input_audio.format` field.
+fn audio_format_from_mime(mime: &str) -> &'static str {
+    let mime = mime.to_lowercase();
+    if mime.contains("mpeg") || mime.contains("mp3") {
+        return "mp3";
+    }
+    if mime.contains("wav") {
+        return "wav";
+    }
+    if mime.contains("flac") {
+        return "flac";
+    }
+    if mime.contains("aac") {
+        return "aac";
+    }
+    if mime.contains("ogg") {
+        return "ogg";
+    }
+    if mime.contains("mp4") || mime.contains("m4a") {
+        return "m4a";
+    }
+    if mime.contains("webm") {
+        return "webm";
+    }
+    "ogg" // safe fallback
+}
+
 fn audio_format_for_attachment(attachment: &crate::Attachment) -> &'static str {
     let mime = attachment.mime_type.to_lowercase();
     if mime.contains("mpeg") || mime.contains("mp3") {

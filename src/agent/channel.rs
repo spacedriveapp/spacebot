@@ -1459,7 +1459,7 @@ impl Channel {
         }
 
         // Run agent turn with any image/audio attachments preserved
-        let (result, skip_flag, replied_flag, _) = self
+        let (result, skip_flag, replied_flag, replied_text, _) = self
             .run_agent_turn(
                 &combined_text,
                 &system_prompt,
@@ -1472,6 +1472,15 @@ impl Channel {
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, false)
             .await;
+
+        // Generate spoken response for voice-enabled channels (batched path).
+        let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
+        if replied {
+            if let Some(full_text) = replied_text.lock().ok().and_then(|mut slot| slot.take()) {
+                self.maybe_generate_spoken_response(full_text);
+            }
+        }
+
         // Check compaction
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
@@ -1828,7 +1837,7 @@ impl Channel {
             .adapter
             .as_deref()
             .or_else(|| self.current_adapter());
-        let (result, skip_flag, replied_flag, retrigger_reply_preserved) = self
+        let (result, skip_flag, replied_flag, replied_text, retrigger_reply_preserved) = self
             .run_agent_turn(
                 &user_text,
                 &system_prompt,
@@ -1841,6 +1850,15 @@ impl Channel {
 
         self.handle_agent_result(result, &skip_flag, &replied_flag, is_retrigger)
             .await;
+
+        // If the reply tool was used and we have a voice model configured,
+        // generate a spoken response in the background (fire-and-forget).
+        let replied = replied_flag.load(std::sync::atomic::Ordering::Relaxed);
+        if replied {
+            if let Some(full_text) = replied_text.lock().ok().and_then(|mut slot| slot.take()) {
+                self.maybe_generate_spoken_response(full_text);
+            }
+        }
 
         // Safety-net: in quiet mode, explicit mention/reply should never be dropped silently.
         if should_send_quiet_mode_fallback(
@@ -2306,10 +2324,12 @@ impl Channel {
         std::result::Result<String, rig::completion::PromptError>,
         crate::tools::SkipFlag,
         crate::tools::RepliedFlag,
+        crate::tools::reply::RepliedText,
         bool,
     )> {
         let skip_flag = crate::tools::new_skip_flag();
         let replied_flag = crate::tools::new_replied_flag();
+        let replied_text = crate::tools::reply::new_replied_text();
         let allow_direct_reply = !self.suppress_plaintext_fallback();
 
         // Set the originating channel on the delegation tool so task completion
@@ -2340,6 +2360,7 @@ impl Channel {
             conversation_id,
             skip_flag.clone(),
             replied_flag.clone(),
+            replied_text.clone(),
             self.deps.cron_tool.clone(),
             send_agent_message_tool,
             allow_direct_reply,
@@ -2466,11 +2487,66 @@ impl Channel {
             tracing::warn!(%error, "failed to remove channel tools");
         }
 
-        Ok((result, skip_flag, replied_flag, retrigger_reply_preserved))
+        Ok((
+            result,
+            skip_flag,
+            replied_flag,
+            replied_text,
+            retrigger_reply_preserved,
+        ))
+    }
+
+    /// Fire-and-forget: if voice output is configured, generate a short spoken
+    /// summary of the reply and broadcast it as a `SpokenResponse` event.
+    fn maybe_generate_spoken_response(&self, full_text: String) {
+        let rc = &self.deps.runtime_config;
+        let voicebox_url = rc.voicebox_url.load();
+        // Only generate spoken responses when a Voicebox URL is configured.
+        if voicebox_url.is_empty() {
+            return;
+        }
+
+        let agent_id = self.deps.agent_id.clone();
+        let channel_id = self.state.channel_id.clone();
+        let event_tx = self.deps.event_tx.clone();
+        let llm_manager = self.deps.llm_manager.clone();
+        let routing = rc.routing.load();
+        // Use the channel model for the spoken summary LLM call. A fast model
+        // is ideal but we fall back to whatever the channel is configured with.
+        let model_name = routing.channel.clone();
+
+        tokio::spawn(async move {
+            match generate_spoken_text(&llm_manager, &model_name, &full_text).await {
+                Ok(spoken_text) => {
+                    tracing::debug!(
+                        %agent_id,
+                        %channel_id,
+                        spoken_len = spoken_text.len(),
+                        "generated spoken response"
+                    );
+                    event_tx
+                        .send(crate::ProcessEvent::SpokenResponse {
+                            agent_id,
+                            channel_id,
+                            spoken_text,
+                            full_text,
+                        })
+                        .ok();
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %agent_id,
+                        %channel_id,
+                        %error,
+                        "failed to generate spoken response"
+                    );
+                }
+            }
+        });
     }
 
     /// Send outbound text and record send metrics.
-    async fn send_outbound_text(&self, text: String, error_context: &str) {
+    async fn send_outbound_text(&self, text: String, error_context: &str) -> bool {
         match self.send_routed(OutboundResponse::Text(text)).await {
             Ok(()) => {
                 #[cfg(feature = "metrics")]
@@ -2481,6 +2557,7 @@ impl Channel {
                         .with_label_values(&[&self.deps.agent_id, channel_type])
                         .inc();
                 }
+                true
             }
             Err(error) => {
                 #[cfg(feature = "metrics")]
@@ -2492,6 +2569,7 @@ impl Channel {
                         .inc();
                 }
                 tracing::error!(%error, channel_id = %self.id, "{error_context}");
+                false
             }
         }
     }
@@ -2571,11 +2649,16 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                let spoken_source_text = final_text.clone();
+                                let sent = self
+                                    .send_outbound_text(
+                                        final_text,
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await;
+                                if sent {
+                                    self.maybe_generate_spoken_response(spoken_source_text);
+                                }
                             }
                         }
                     } else {
@@ -2636,11 +2719,16 @@ impl Channel {
                                 self.state
                                     .conversation_logger
                                     .log_bot_message(&self.state.channel_id, &final_text);
-                                self.send_outbound_text(
-                                    final_text,
-                                    "failed to send retrigger fallback reply",
-                                )
-                                .await;
+                                let spoken_source_text = final_text.clone();
+                                let sent = self
+                                    .send_outbound_text(
+                                        final_text,
+                                        "failed to send retrigger fallback reply",
+                                    )
+                                    .await;
+                                if sent {
+                                    self.maybe_generate_spoken_response(spoken_source_text);
+                                }
                             }
                         }
                     } else {
@@ -2692,8 +2780,13 @@ impl Channel {
                                 &final_text,
                                 Some(self.agent_display_name()),
                             );
-                            self.send_outbound_text(final_text, "failed to send fallback reply")
+                            let spoken_source_text = final_text.clone();
+                            let sent = self
+                                .send_outbound_text(final_text, "failed to send fallback reply")
                                 .await;
+                            if sent {
+                                self.maybe_generate_spoken_response(spoken_source_text);
+                            }
                         }
                     }
 
@@ -3478,6 +3571,58 @@ fn should_send_quiet_mode_fallback(
             message.source.as_str(),
             "discord" | "telegram" | "slack" | "twitch" | "signal"
         )
+}
+
+/// Generate a short, conversational spoken version of a full text response.
+///
+/// Uses a fast LLM call with a focused prompt that strips markdown, code
+/// blocks, and technical detail — producing 1-3 natural sentences suitable
+/// for TTS playback.
+/// Generate a short, conversational spoken version of a full text response.
+///
+/// Uses a fast LLM call with a focused prompt that strips markdown, code
+/// blocks, and technical detail — producing 1-3 natural sentences suitable
+/// for TTS playback.
+async fn generate_spoken_text(
+    llm_manager: &std::sync::Arc<crate::llm::LlmManager>,
+    model_name: &str,
+    full_text: &str,
+) -> Result<String> {
+    use rig::agent::AgentBuilder;
+    use rig::completion::{CompletionModel, Prompt};
+
+    let max_input_chars = 4000;
+    let input = if full_text.len() > max_input_chars {
+        &full_text[..full_text.floor_char_boundary(max_input_chars)]
+    } else {
+        full_text
+    };
+
+    let system = "\
+You are generating a spoken voice reply. Rewrite the following assistant response \
+as a brief, natural spoken reply (1-3 sentences max). Be conversational, warm, and \
+direct. No markdown, no code, no bullet points, no lists. Just speak naturally as \
+if you were talking to a friend. If the response contains code or technical details, \
+summarize what was done at a high level without any code syntax.";
+
+    let model = crate::llm::model::SpacebotModel::make(llm_manager, model_name);
+    let agent = AgentBuilder::new(model).preamble(system).build();
+    let prompt = format!("Full response to summarize for speech:\n\n{input}");
+
+    match agent.prompt(&prompt).await {
+        Ok(spoken) => {
+            let spoken = spoken.trim().to_string();
+            if spoken.is_empty() {
+                Err(crate::error::AgentError::Other(
+                    anyhow::anyhow!("spoken response model returned empty output").into(),
+                )
+                .into())
+            } else {
+                Ok(spoken)
+            }
+        }
+        Err(error) => Err(crate::error::AgentError::Other(error.into()).into()),
+    }
 }
 
 #[cfg(test)]

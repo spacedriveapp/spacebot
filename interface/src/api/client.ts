@@ -179,6 +179,20 @@ export interface CortexChatMessageEvent {
 	tool_calls?: CortexChatToolCall[];
 }
 
+export interface SpokenResponseEvent {
+	type: "spoken_response";
+	agent_id: string;
+	channel_id: string;
+	spoken_text: string;
+	full_text: string;
+}
+
+export interface TtsProfile {
+	id: string;
+	name?: string | null;
+	default_engine?: string | null;
+}
+
 export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
@@ -194,7 +208,8 @@ export type ApiEvent =
 	| ToolCompletedEvent
 	| OpenCodePartUpdatedEvent
 	| WorkerTextEvent
-	| CortexChatMessageEvent;
+	| CortexChatMessageEvent
+	| SpokenResponseEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
 	const response = await fetch(`${getApiBase()}${path}`);
@@ -2394,6 +2409,38 @@ export const api = {
 				message,
 			}),
 		}),
+
+	webChatSendAudio: (agentId: string, sessionId: string, audioBlob: Blob, senderName?: string) => {
+		const formData = new FormData();
+		formData.append("agent_id", agentId);
+		formData.append("session_id", sessionId);
+		formData.append("sender_name", senderName ?? "user");
+		formData.append("audio", audioBlob, "voice.webm");
+		return fetch(`${getApiBase()}/webchat/send-audio`, {
+			method: "POST",
+			body: formData,
+		});
+	},
+
+	ttsGenerate: async (text: string, options?: { profileId?: string; engine?: string; agentId?: string }): Promise<ArrayBuffer> => {
+		const response = await fetch(`${getApiBase()}/tts/generate`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({
+				text,
+				profile_id: options?.profileId,
+				engine: options?.engine,
+				agent_id: options?.agentId,
+			}),
+		});
+		if (!response.ok) throw new Error(`TTS error: ${response.status}`);
+		return response.arrayBuffer();
+	},
+
+	ttsProfiles: (agentId?: string) =>
+		fetchJson<TtsProfile[]>(
+			`/tts/profiles${agentId ? `?agent_id=${encodeURIComponent(agentId)}` : ""}`,
+		),
 
 	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
 		fetch(`${getApiBase()}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),

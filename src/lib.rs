@@ -308,6 +308,16 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         text: String,
     },
+    /// A shortened spoken version of an outbound reply, generated for voice
+    /// output. The frontend voice card uses this to trigger TTS playback.
+    SpokenResponse {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        /// The short, conversational spoken text (1-3 sentences).
+        spoken_text: String,
+        /// The full response text this was derived from.
+        full_text: String,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.

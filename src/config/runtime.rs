@@ -90,6 +90,11 @@ pub struct RuntimeConfig {
     pub projects: ArcSwap<crate::config::ProjectsConfig>,
     /// Working memory configuration for temporal context injection.
     pub working_memory: ArcSwap<crate::config::types::WorkingMemoryConfig>,
+    /// Voicebox server URL for TTS output. When non-empty, the channel
+    /// generates a spoken version of replies and broadcasts it as a
+    /// `SpokenResponse` event. Configurable via `SPACEBOT_VOICEBOX_URL` env
+    /// or `[voice] voicebox_url` in the agent config.
+    pub voicebox_url: ArcSwap<String>,
     /// Shared browser state for persistent sessions.
     ///
     /// When `browser.persist_session = true`, all workers share this handle so
@@ -160,6 +165,10 @@ impl RuntimeConfig {
             projects: ArcSwap::from_pointee(agent_config.projects.clone()),
             working_memory: ArcSwap::from_pointee(
                 crate::config::types::WorkingMemoryConfig::default(),
+            ),
+            voicebox_url: ArcSwap::from_pointee(
+                std::env::var("SPACEBOT_VOICEBOX_URL")
+                    .unwrap_or_else(|_| "http://127.0.0.1:17493".to_string()),
             ),
             shared_browser: if agent_config.browser.persist_session {
                 Some(crate::tools::browser::new_shared_browser_handle())

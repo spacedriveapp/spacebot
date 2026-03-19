@@ -45,7 +45,7 @@ export function App() {
 				<ServerProvider>
 					<AppShell />
 				</ServerProvider>
-				{import.meta.env.DEV && (
+				{import.meta.env.DEV && !window.location.pathname.endsWith("/overlay") && (
 					<ReactQueryDevtools initialIsOpen={false} buttonPosition="bottom-right" />
 				)}
 			</QueryClientProvider>
