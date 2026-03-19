@@ -456,6 +456,15 @@ impl Tool for DetachedSpawnWorkerTool {
             directory: None,
         });
 
+        self.deps
+            .working_memory
+            .emit(
+                crate::memory::WorkingMemoryEventType::WorkerSpawned,
+                format!("Worker spawned (cortex): {}", &args.task),
+            )
+            .importance(0.5)
+            .record();
+
         // Log to worker_runs directly since there's no parent channel to do it.
         let run_logger =
             crate::conversation::history::ProcessRunLogger::new(self.deps.sqlite_pool.clone());

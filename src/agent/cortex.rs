@@ -329,6 +329,7 @@ impl BulletinRefreshOutcome {
         !matches!(self, Self::Failed)
     }
 
+    #[allow(dead_code)]
     fn generated(self) -> bool {
         matches!(self, Self::Generated)
     }
@@ -895,6 +896,12 @@ impl Cortex {
     /// Process a process event and extract signals.
     pub async fn observe(&self, event: ProcessEvent) {
         self.observe_health_event(&event).await;
+
+        // Bump knowledge synthesis version on memory content changes.
+        if matches!(&event, ProcessEvent::MemorySaved { .. }) {
+            self.deps.runtime_config.bump_knowledge_synthesis_version();
+        }
+
         let Some(signal) = signal_from_event(event) else {
             return;
         };
@@ -1607,9 +1614,15 @@ pub async fn run_warmup_once(deps: &AgentDeps, logger: &CortexLogger, reason: &s
         }
     }
 
-    let bulletin_ok = generate_bulletin(deps, logger).await;
-    if !bulletin_ok {
-        errors.push("bulletin generation failed".to_string());
+    // Generate knowledge synthesis (narrower scope, replaces bulletin).
+    // This also syncs memory_bulletin for backward compatibility.
+    let synthesis_ok = generate_knowledge_synthesis(deps, logger).await;
+    if !synthesis_ok {
+        // Fall back to the broader bulletin if knowledge synthesis fails.
+        let bulletin_ok = generate_bulletin(deps, logger).await;
+        if !bulletin_ok {
+            errors.push("knowledge synthesis and bulletin fallback both failed".to_string());
+        }
     }
 
     let now_ms = chrono::Utc::now().timestamp_millis();
@@ -1674,6 +1687,9 @@ pub fn trigger_forced_warmup(deps: AgentDeps, dispatch_type: &'static str) {
     });
 }
 
+/// Preserved for fallback — the bulletin loop has been replaced by change-driven
+/// knowledge synthesis, but this function is still used at startup.
+#[allow(dead_code)]
 fn spawn_bulletin_refresh_task(
     deps: AgentDeps,
     logger: CortexLogger,
@@ -1705,13 +1721,14 @@ async fn run_cortex_loop(
     const RETRY_DELAY_SECS: u64 = 15;
     const LAG_WARNING_INTERVAL_SECS: u64 = 30;
 
-    // Run bulletin generation immediately on startup, with retries.
+    // Run knowledge synthesis immediately on startup, with retries.
+    // Falls back to the broader bulletin if synthesis fails.
     for attempt in 0..=MAX_RETRIES {
         let bulletin_outcome = maybe_generate_bulletin_under_lock(
             cortex.deps.runtime_config.warmup_lock.as_ref(),
             &cortex.deps.runtime_config.warmup,
             &cortex.deps.runtime_config.warmup_status,
-            || generate_bulletin(&cortex.deps, logger),
+            || generate_knowledge_synthesis(&cortex.deps, logger),
         )
         .await;
 
@@ -1722,12 +1739,12 @@ async fn run_cortex_loop(
             tracing::info!(
                 attempt = attempt + 1,
                 max = MAX_RETRIES,
-                "retrying bulletin generation in {RETRY_DELAY_SECS}s"
+                "retrying knowledge synthesis in {RETRY_DELAY_SECS}s"
             );
             logger.log(
-                "bulletin_failed",
+                "knowledge_synthesis_startup_retry",
                 &format!(
-                    "Bulletin generation failed, retrying (attempt {}/{})",
+                    "Knowledge synthesis failed, retrying (attempt {}/{})",
                     attempt + 1,
                     MAX_RETRIES
                 ),
@@ -1739,7 +1756,7 @@ async fn run_cortex_loop(
 
     // Generate an initial profile after startup bulletin synthesis.
     generate_profile(&cortex.deps, logger).await;
-    let mut last_bulletin_refresh = Instant::now();
+    let mut _last_bulletin_refresh = Instant::now();
     let mut tick_interval_secs = cortex
         .deps
         .runtime_config
@@ -1856,7 +1873,7 @@ async fn run_cortex_loop(
                         Ok(outcome) => {
                             let now = Instant::now();
                             if outcome.is_success() {
-                                last_bulletin_refresh = now;
+                                _last_bulletin_refresh = now;
                                 bulletin_refresh_failures = 0;
                                 bulletin_refresh_circuit_open = false;
                                 next_bulletin_refresh_allowed_at = now;
@@ -1935,6 +1952,10 @@ async fn run_cortex_loop(
                             }
                             maintenance_consecutive_failures = 0;
                             maintenance_disabled_at = None;
+                            // Merges change memory content — bump dirty flag.
+                            if report.merged > 0 {
+                                cortex.deps.runtime_config.bump_knowledge_synthesis_version();
+                            }
                             logger.log(
                                 "maintenance_completed",
                                 "Memory maintenance completed",
@@ -2047,7 +2068,7 @@ async fn run_cortex_loop(
                     }
                 }
 
-                let bulletin_interval = Duration::from_secs(cortex_config.bulletin_interval_secs.max(1));
+                let _bulletin_interval = Duration::from_secs(cortex_config.bulletin_interval_secs.max(1));
                 let now = Instant::now();
                 if maybe_close_bulletin_refresh_circuit(
                     &mut bulletin_refresh_failures,
@@ -2064,15 +2085,25 @@ async fn run_cortex_loop(
                 ) {
                     tracing::info!("cortex maintenance circuit closed; retries re-enabled");
                 }
+                // Bulletin timer-based refresh removed — knowledge synthesis
+                // is now change-driven via dirty flag + debounce. The bulletin
+                // loop was generating ~96 redundant calls/day at 15-min intervals.
+                // The old bulletin code is preserved for startup fallback only.
+
+                // Knowledge synthesis: change-driven regeneration with debounce.
                 if refresh_task.is_none()
-                    && !bulletin_refresh_circuit_open
-                    && last_bulletin_refresh.elapsed() >= bulletin_interval
-                    && now >= next_bulletin_refresh_allowed_at
+                    && should_regenerate_knowledge_synthesis(&cortex.deps)
                 {
-                    refresh_task = Some(spawn_bulletin_refresh_task(
-                        cortex.deps.clone(),
-                        logger.clone(),
-                    ));
+                    let deps = cortex.deps.clone();
+                    let synthesis_logger = logger.clone();
+                    refresh_task = Some(tokio::spawn(async move {
+                        let success = generate_knowledge_synthesis(&deps, &synthesis_logger).await;
+                        if success {
+                            BulletinRefreshOutcome::Generated
+                        } else {
+                            BulletinRefreshOutcome::Failed
+                        }
+                    }));
                 }
 
                 if last_maintenance.elapsed() >= Duration::from_secs(
@@ -2122,6 +2153,22 @@ async fn run_cortex_loop(
                     }
 
                     last_maintenance = Instant::now();
+                }
+
+                // Working memory: intra-day synthesis (cheap SQL check, LLM only on threshold).
+                if let Err(error) = maybe_synthesize_intraday_batch(&cortex.deps, logger).await {
+                    tracing::warn!(%error, "intra-day synthesis check failed");
+                }
+
+                // Working memory: daily summary for yesterday (idempotent, 1 LLM call/day max).
+                if let Err(error) = maybe_synthesize_daily_summary(&cortex.deps, logger).await {
+                    tracing::warn!(%error, "daily summary check failed");
+                }
+
+                // Working memory: prune old events (cheap SQL, runs every tick but deletes nothing most of the time).
+                let wm_config = **cortex.deps.runtime_config.working_memory.load();
+                if let Err(error) = cortex.deps.working_memory.prune_old_events(wm_config.event_retention_days).await {
+                    tracing::warn!(%error, "working memory event pruning failed");
                 }
 
                 let updated_tick_interval_secs = cortex_config.tick_interval_secs.max(1);
@@ -2431,6 +2478,530 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
             false
         }
     }
+}
+
+// -- Knowledge Synthesis --
+
+/// Sections for knowledge synthesis — narrower than the bulletin.
+/// No identity (Layer 1), no recent events (Layer 2), no per-user context (Layer 4).
+const KNOWLEDGE_SYNTHESIS_SECTIONS: &[BulletinSection] = &[
+    BulletinSection {
+        label: "Decisions",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Decision),
+        sort_by: SearchSort::Recent,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "High-Importance Context",
+        mode: SearchMode::Important,
+        memory_type: None,
+        sort_by: SearchSort::Importance,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Preferences & Patterns",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Preference),
+        sort_by: SearchSort::Importance,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Active Goals",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Goal),
+        sort_by: SearchSort::Recent,
+        max_results: 10,
+    },
+    BulletinSection {
+        label: "Observations",
+        mode: SearchMode::Typed,
+        memory_type: Some(MemoryType::Observation),
+        sort_by: SearchSort::Recent,
+        max_results: 5,
+    },
+];
+
+/// Generate a change-driven knowledge synthesis (Layer 5) and store it in RuntimeConfig.
+///
+/// Uses the same programmatic gather + LLM synthesis pattern as the bulletin,
+/// but with narrower scope and the `cortex_knowledge_synthesis` prompt template.
+/// Also keeps `memory_bulletin` in sync for backward compatibility.
+#[tracing::instrument(skip(deps, logger), fields(agent_id = %deps.agent_id))]
+pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogger) -> bool {
+    tracing::info!("cortex generating knowledge synthesis");
+    let started = Instant::now();
+
+    // Gather narrower sections (no identity, no events, no recent).
+    let raw_sections = gather_sections_from_list(deps, KNOWLEDGE_SYNTHESIS_SECTIONS).await;
+    let section_count = raw_sections.matches("### ").count();
+
+    if raw_sections.is_empty() {
+        tracing::info!("no memories found for knowledge synthesis");
+        deps.runtime_config
+            .knowledge_synthesis
+            .store(Arc::new(String::new()));
+        // Keep bulletin in sync during transition.
+        deps.runtime_config
+            .memory_bulletin
+            .store(Arc::new(String::new()));
+        return true;
+    }
+
+    // Append active tasks (same as bulletin).
+    let raw_sections = match gather_active_tasks(deps).await {
+        Ok(tasks) => format!("{raw_sections}{tasks}"),
+        Err(error) => {
+            tracing::warn!(%error, "failed to gather active tasks for knowledge synthesis");
+            raw_sections
+        }
+    };
+
+    let cortex_config = **deps.runtime_config.cortex.load();
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let synthesis_preamble = match prompt_engine.render_static("cortex_knowledge_synthesis") {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::error!(%error, "failed to render cortex_knowledge_synthesis prompt");
+            return false;
+        }
+    };
+
+    let routing = deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
+
+    let agent = AgentBuilder::new(model)
+        .preamble(&synthesis_preamble)
+        .hook(CortexHook::new())
+        .build();
+
+    let max_words = cortex_config.knowledge_synthesis_max_words;
+    let user_prompt = match prompt_engine.render_system_cortex_synthesis(max_words, &raw_sections) {
+        Ok(p) => p,
+        Err(error) => {
+            tracing::error!(%error, "failed to render cortex synthesis user prompt");
+            return false;
+        }
+    };
+
+    match agent.prompt(&user_prompt).await {
+        Ok(synthesis) => {
+            let word_count = synthesis.split_whitespace().count();
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tracing::info!(
+                words = word_count,
+                sections = section_count,
+                duration_ms,
+                "knowledge synthesis generated"
+            );
+            deps.runtime_config
+                .knowledge_synthesis
+                .store(Arc::new(synthesis.clone()));
+            // Keep bulletin in sync during transition so unconverted consumers work.
+            deps.runtime_config
+                .memory_bulletin
+                .store(Arc::new(synthesis));
+            // Mark this version as synthesized.
+            let current = deps
+                .runtime_config
+                .knowledge_synthesis_version
+                .load(std::sync::atomic::Ordering::Relaxed);
+            deps.runtime_config
+                .knowledge_synthesis_last_version
+                .store(current, std::sync::atomic::Ordering::Relaxed);
+            // Update warmup status.
+            let refresh_ms = chrono::Utc::now().timestamp_millis();
+            update_warmup_status(deps, |status| {
+                status.last_refresh_unix_ms = Some(refresh_ms);
+                status.bulletin_age_secs = Some(0);
+                if status.state != crate::config::WarmupState::Warming {
+                    status.state = crate::config::WarmupState::Warm;
+                    status.last_error = None;
+                }
+            });
+            logger.log(
+                "knowledge_synthesis_generated",
+                &format!("Knowledge synthesis: {word_count} words, {section_count} sections, {duration_ms}ms"),
+                Some(serde_json::json!({
+                    "word_count": word_count,
+                    "sections": section_count,
+                    "duration_ms": duration_ms,
+                    "model": model_name,
+                })),
+            );
+            true
+        }
+        Err(error) => {
+            let duration_ms = started.elapsed().as_millis() as u64;
+            tracing::error!(%error, duration_ms, "knowledge synthesis failed");
+            update_warmup_status(deps, |status| {
+                status.last_error = Some(format!("knowledge synthesis failed: {error}"));
+            });
+            logger.log(
+                "knowledge_synthesis_failed",
+                &format!("Knowledge synthesis failed after {duration_ms}ms: {error}"),
+                Some(serde_json::json!({
+                    "duration_ms": duration_ms,
+                    "error": error.to_string(),
+                    "model": model_name,
+                })),
+            );
+            false
+        }
+    }
+}
+
+/// Gather raw memory sections from a specific section list.
+///
+/// Uses the same pattern as `gather_bulletin_sections` (empty-query metadata
+/// search) but accepts an arbitrary section list for narrower scoping.
+async fn gather_sections_from_list(deps: &AgentDeps, sections: &[BulletinSection]) -> String {
+    let mut output = String::new();
+
+    for section in sections {
+        let config = SearchConfig {
+            mode: section.mode,
+            memory_type: section.memory_type,
+            max_results: section.max_results,
+            sort_by: section.sort_by,
+            ..Default::default()
+        };
+
+        let results = match deps.memory_search.search("", &config).await {
+            Ok(results) => results,
+            Err(error) => {
+                tracing::warn!(
+                    section = section.label,
+                    %error,
+                    "knowledge synthesis section query failed"
+                );
+                continue;
+            }
+        };
+
+        if results.is_empty() {
+            continue;
+        }
+
+        output.push_str(&format!("### {}\n\n", section.label));
+        for result in &results {
+            output.push_str(&format!(
+                "- [{}] (importance: {:.1}) {}\n",
+                result.memory.memory_type,
+                result.memory.importance,
+                result
+                    .memory
+                    .content
+                    .lines()
+                    .next()
+                    .unwrap_or(&result.memory.content),
+            ));
+        }
+        output.push('\n');
+    }
+
+    output
+}
+
+/// Check if knowledge synthesis needs regeneration based on dirty flag and debounce.
+pub fn should_regenerate_knowledge_synthesis(deps: &AgentDeps) -> bool {
+    let current_version = deps
+        .runtime_config
+        .knowledge_synthesis_version
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let last_version = deps
+        .runtime_config
+        .knowledge_synthesis_last_version
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    if current_version == last_version {
+        return false;
+    }
+
+    // Debounce: wait for activity to settle.
+    let cortex_config = **deps.runtime_config.cortex.load();
+    let last_change = deps
+        .runtime_config
+        .knowledge_synthesis_last_change
+        .load(std::sync::atomic::Ordering::Relaxed);
+    let now = chrono::Utc::now().timestamp();
+    let elapsed = now.saturating_sub(last_change) as u64;
+
+    elapsed >= cortex_config.knowledge_synthesis_debounce_secs
+}
+
+// -- Intra-Day Synthesis + Daily Summaries --
+
+/// Check and potentially synthesize a batch of recent working memory events.
+///
+/// Called on every cortex tick. The check is one cheap SQL query. LLM synthesis
+/// only happens when the event count threshold or time fallback is reached.
+pub async fn maybe_synthesize_intraday_batch(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+) -> anyhow::Result<bool> {
+    let wm = &deps.working_memory;
+    let wm_config = **deps.runtime_config.working_memory.load();
+    let today = wm.today();
+
+    let last_end = wm.get_last_intraday_synthesis_end(&today).await?;
+    let unsynthesized = wm.get_events_after(&today, last_end).await?;
+
+    if unsynthesized.is_empty() {
+        return Ok(false);
+    }
+
+    // Dual trigger: count-based OR time-based fallback.
+    let count_trigger = unsynthesized.len() >= wm_config.intraday_batch_threshold;
+    let time_trigger = if let Some(last) = last_end {
+        let elapsed = (chrono::Utc::now() - last).num_seconds() as u64;
+        elapsed >= wm_config.intraday_time_fallback_secs
+    } else {
+        // No previous synthesis — use time since first event.
+        let first_event = &unsynthesized[0];
+        let elapsed = (chrono::Utc::now() - first_event.timestamp).num_seconds() as u64;
+        elapsed >= wm_config.intraday_time_fallback_secs
+    };
+
+    if !count_trigger && !time_trigger {
+        return Ok(false);
+    }
+
+    // Build the event text for the LLM.
+    let time_start = unsynthesized
+        .first()
+        .map(|e| e.timestamp)
+        .unwrap_or_else(chrono::Utc::now);
+    let time_end = unsynthesized
+        .last()
+        .map(|e| e.timestamp)
+        .unwrap_or_else(chrono::Utc::now);
+    let timezone = wm.timezone();
+    let time_start_str = time_start
+        .with_timezone(&timezone)
+        .format("%H:%M")
+        .to_string();
+    let time_end_str = time_end
+        .with_timezone(&timezone)
+        .format("%H:%M")
+        .to_string();
+
+    let mut events_text = String::new();
+    for event in &unsynthesized {
+        let ts = event
+            .timestamp
+            .with_timezone(&timezone)
+            .format("%H:%M")
+            .to_string();
+        let channel_label = event
+            .channel_id
+            .as_deref()
+            .map(|c| format!(" [{c}]"))
+            .unwrap_or_default();
+        events_text.push_str(&format!(
+            "[{ts}]{channel_label} {}: {}\n",
+            event.event_type, event.summary
+        ));
+    }
+
+    // Render the synthesis prompt.
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let prompt = prompt_engine.render_intraday_synthesis(
+        unsynthesized.len(),
+        &time_start_str,
+        &time_end_str,
+        &events_text,
+    )?;
+
+    // Use a short one-shot LLM call — no tools, no hooks.
+    let routing = deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
+
+    let agent = AgentBuilder::new(model)
+        .preamble("You are a concise narrative summarizer. Output only the summary paragraph, nothing else.")
+        .hook(CortexHook::new())
+        .build();
+
+    let synthesis = agent.prompt(&prompt).await?;
+
+    // Store the synthesis.
+    wm.save_intraday_synthesis(
+        &today,
+        time_start,
+        time_end,
+        &synthesis,
+        unsynthesized.len(),
+    )
+    .await?;
+
+    tracing::info!(
+        event_count = unsynthesized.len(),
+        time_range = format!("{time_start_str}-{time_end_str}"),
+        words = synthesis.split_whitespace().count(),
+        trigger = if count_trigger {
+            "count"
+        } else {
+            "time_fallback"
+        },
+        "intra-day synthesis completed"
+    );
+
+    logger.log(
+        "intraday_synthesis",
+        &format!(
+            "Synthesized {} events ({time_start_str}-{time_end_str})",
+            unsynthesized.len()
+        ),
+        Some(serde_json::json!({
+            "event_count": unsynthesized.len(),
+            "trigger": if count_trigger { "count" } else { "time_fallback" },
+            "words": synthesis.split_whitespace().count(),
+        })),
+    );
+
+    Ok(true)
+}
+
+/// Check and potentially synthesize yesterday's daily summary.
+///
+/// Called on every cortex tick. Idempotent — once a daily summary exists for
+/// a given day, it is never regenerated. Uses intra-day synthesis paragraphs
+/// (not raw events) as input, so the LLM call is small and cheap.
+pub async fn maybe_synthesize_daily_summary(
+    deps: &AgentDeps,
+    logger: &CortexLogger,
+) -> anyhow::Result<bool> {
+    let wm = &deps.working_memory;
+    let yesterday = wm.yesterday();
+
+    // Idempotent check.
+    if wm.has_daily_summary(&yesterday).await? {
+        return Ok(false);
+    }
+
+    let intraday = wm.get_intraday_syntheses(&yesterday).await?;
+    let raw_events = wm.get_events_for_day(&yesterday).await?;
+
+    // No activity at all — save a minimal summary.
+    if intraday.is_empty() && raw_events.is_empty() {
+        wm.save_daily_summary(&yesterday, "No activity.", 0).await?;
+        return Ok(true);
+    }
+
+    // Build input from intra-day synthesis paragraphs + any unsynthesized tail.
+    let timezone = wm.timezone();
+    let mut blocks_text = String::new();
+    let mut total_events = 0i64;
+
+    // Last timestamp covered by intra-day syntheses (if any).
+    let mut last_synthesis_end = None;
+
+    for synthesis in &intraday {
+        let time_label = synthesis
+            .time_range_start
+            .with_timezone(&timezone)
+            .format("%H:%M")
+            .to_string();
+        blocks_text.push_str(&format!("[{time_label}] {}\n\n", synthesis.summary));
+        total_events += synthesis.event_count;
+        let end = synthesis.time_range_end;
+        last_synthesis_end = Some(
+            last_synthesis_end.map_or(end, |prev: chrono::DateTime<chrono::Utc>| prev.max(end)),
+        );
+    }
+
+    // Collect raw events not covered by any intra-day synthesis (the "tail").
+    // This happens when events didn't hit the count/time trigger before midnight.
+    let tail_events: Vec<_> = raw_events
+        .iter()
+        .filter(|event| match last_synthesis_end {
+            Some(end) => event.timestamp > end,
+            None => true, // No syntheses at all — all events are unsynthesized.
+        })
+        .collect();
+
+    if !tail_events.is_empty() {
+        if !blocks_text.is_empty() {
+            blocks_text.push_str("Unsynthesized events from the rest of the day:\n");
+        }
+        for event in &tail_events {
+            let ts = event
+                .timestamp
+                .with_timezone(&timezone)
+                .format("%H:%M")
+                .to_string();
+            let channel_label = event
+                .channel_id
+                .as_deref()
+                .map(|c| format!(" [{c}]"))
+                .unwrap_or_default();
+            blocks_text.push_str(&format!(
+                "[{ts}]{channel_label} {}: {}\n",
+                event.event_type, event.summary
+            ));
+        }
+        blocks_text.push('\n');
+        total_events += tail_events.len() as i64;
+    }
+
+    let wm_config = **deps.runtime_config.working_memory.load();
+    let prompt_engine = deps.runtime_config.prompts.load();
+    let prompt = prompt_engine.render_daily_summary(
+        &yesterday,
+        wm_config.daily_summary_max_words,
+        &blocks_text,
+    )?;
+
+    // One-shot LLM call.
+    let routing = deps.runtime_config.routing.load();
+    let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
+    let model = SpacebotModel::make(&deps.llm_manager, &model_name)
+        .with_context(&*deps.agent_id, "cortex")
+        .with_routing((**routing).clone());
+
+    let agent = AgentBuilder::new(model)
+        .preamble("You are a daily activity summarizer. Output only the summary, nothing else.")
+        .hook(CortexHook::new())
+        .build();
+
+    let summary = agent.prompt(&prompt).await?;
+
+    wm.save_daily_summary(&yesterday, &summary, total_events)
+        .await?;
+
+    let tail_count = tail_events.len();
+
+    tracing::info!(
+        day = yesterday,
+        intraday_blocks = intraday.len(),
+        tail_events = tail_count,
+        total_events,
+        words = summary.split_whitespace().count(),
+        "daily summary generated"
+    );
+
+    logger.log(
+        "daily_summary",
+        &format!(
+            "Daily summary for {yesterday}: {total_events} events, {} blocks, {tail_count} tail",
+            intraday.len()
+        ),
+        Some(serde_json::json!({
+            "day": yesterday,
+            "intraday_blocks": intraday.len(),
+            "tail_events": tail_count,
+            "total_events": total_events,
+            "words": summary.split_whitespace().count(),
+        })),
+    );
+
+    Ok(true)
 }
 
 // -- Agent Profile --

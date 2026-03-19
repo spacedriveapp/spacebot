@@ -1212,7 +1212,8 @@ maintenance_merge_similarity_threshold = 1.1
     }
 
     #[test]
-    fn test_work_readiness_rejects_stale_bulletin() {
+    fn test_work_readiness_allows_old_synthesis() {
+        // Knowledge synthesis is change-driven — staleness no longer blocks readiness.
         let readiness = evaluate_work_readiness(
             WarmupConfig {
                 refresh_secs: 60,
@@ -1228,10 +1229,9 @@ maintenance_merge_similarity_threshold = 1.1
             122_000,
         );
 
-        assert_eq!(readiness.stale_after_secs, 120);
         assert_eq!(readiness.bulletin_age_secs, Some(121));
-        assert!(!readiness.ready);
-        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinStale));
+        assert!(readiness.ready, "old synthesis should not block readiness");
+        assert_eq!(readiness.reason, None);
     }
 
     #[test]

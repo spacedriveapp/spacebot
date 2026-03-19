@@ -206,6 +206,12 @@ impl CortexConfig {
             association_max_per_pass: overrides
                 .association_max_per_pass
                 .unwrap_or(defaults.association_max_per_pass),
+            knowledge_synthesis_max_words: overrides
+                .knowledge_synthesis_max_words
+                .unwrap_or(defaults.knowledge_synthesis_max_words),
+            knowledge_synthesis_debounce_secs: overrides
+                .knowledge_synthesis_debounce_secs
+                .unwrap_or(defaults.knowledge_synthesis_debounce_secs),
         };
         config.validate_maintenance_bounds()?;
         Ok(config)

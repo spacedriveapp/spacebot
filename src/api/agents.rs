@@ -417,6 +417,15 @@ pub(super) async fn trigger_warmup(
             let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let project_store =
                 std::sync::Arc::new(crate::projects::ProjectStore::new(sqlite_pool.clone()));
+            let working_memory_tz = runtime_config
+                .user_timezone
+                .load()
+                .as_deref()
+                .or(runtime_config.cron_timezone.load().as_deref())
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC);
+            let working_memory =
+                crate::memory::WorkingMemoryStore::new(sqlite_pool.clone(), working_memory_tz);
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
@@ -439,6 +448,7 @@ pub(super) async fn trigger_warmup(
                     crate::agent::process_control::ProcessControlRegistry::new(),
                 ),
                 injection_tx,
+                working_memory,
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -812,6 +822,15 @@ pub async fn create_agent_internal(
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_humans.load()).clone(),
         )),
+        working_memory: {
+            let tz = agent_config
+                .user_timezone
+                .as_deref()
+                .or(agent_config.cron_timezone.as_deref())
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC);
+            crate::memory::WorkingMemoryStore::new(db.sqlite.clone(), tz)
+        },
     };
 
     let event_rx = event_tx.subscribe();
@@ -1472,6 +1491,16 @@ pub(super) async fn instance_overview(
         let agent_id = agent_config.id.clone();
 
         let Some(pool) = pools.get(&agent_id) else {
+            agents.push(AgentSummary {
+                id: agent_id,
+                channel_count: 0,
+                memory_total: 0,
+                cron_job_count: 0,
+                activity_sparkline: vec![0; 14],
+                last_activity_at: None,
+                last_bulletin_at: None,
+                profile: None,
+            });
             continue;
         };
 

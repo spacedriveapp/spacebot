@@ -58,11 +58,28 @@ impl MemoryPersistenceContractState {
 #[derive(Debug, Clone)]
 pub struct MemoryPersistenceCompleteTool {
     state: Arc<MemoryPersistenceContractState>,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
+    channel_id: Option<String>,
 }
 
 impl MemoryPersistenceCompleteTool {
     pub fn new(state: Arc<MemoryPersistenceContractState>) -> Self {
-        Self { state }
+        Self {
+            state,
+            working_memory: None,
+            channel_id: None,
+        }
+    }
+
+    /// Enable working memory event writing for extracted events.
+    pub fn with_working_memory(
+        mut self,
+        store: Arc<crate::memory::WorkingMemoryStore>,
+        channel_id: Option<String>,
+    ) -> Self {
+        self.working_memory = Some(store);
+        self.channel_id = channel_id;
+        self
     }
 }
 
@@ -83,6 +100,26 @@ pub struct MemoryPersistenceCompleteArgs {
     /// was worth saving.
     #[serde(default)]
     pub reason: Option<String>,
+    /// Optional events extracted from the conversation. Each event becomes a
+    /// working memory entry for temporal context.
+    #[serde(default)]
+    pub events: Vec<WorkingMemoryEventInput>,
+}
+
+/// A single event extracted by the persistence branch for the working memory log.
+#[derive(Debug, Clone, Deserialize, JsonSchema)]
+pub struct WorkingMemoryEventInput {
+    /// Event type: "decision", "error", or "system".
+    pub event_type: String,
+    /// One-line summary of the event.
+    pub summary: String,
+    /// Importance score (0.0-1.0). Defaults to 0.5.
+    #[serde(default = "default_importance")]
+    pub importance: f32,
+}
+
+fn default_importance() -> f32 {
+    0.5
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +157,29 @@ impl Tool for MemoryPersistenceCompleteTool {
                     "reason": {
                         "type": "string",
                         "description": "Required for outcome=no_memories. Brief reason why no memories were saved"
+                    },
+                    "events": {
+                        "type": "array",
+                        "description": "Optional events extracted from the conversation for working memory",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "event_type": {
+                                    "type": "string",
+                                    "enum": ["decision", "error", "system"],
+                                    "description": "Type of event"
+                                },
+                                "summary": {
+                                    "type": "string",
+                                    "description": "One-line summary of the event"
+                                },
+                                "importance": {
+                                    "type": "number",
+                                    "description": "Importance score 0.0-1.0, defaults to 0.5"
+                                }
+                            },
+                            "required": ["event_type", "summary"]
+                        }
                     }
                 },
                 "required": ["outcome"]
@@ -130,6 +190,31 @@ impl Tool for MemoryPersistenceCompleteTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let outcome = args.outcome.trim();
         let recorded_ids = self.state.saved_memory_ids();
+
+        // Write any extracted events to working memory (fire-and-forget).
+        if let Some(working_memory) = &self.working_memory {
+            for event_input in &args.events {
+                let event_type = match event_input.event_type.as_str() {
+                    "decision" => crate::memory::WorkingMemoryEventType::Decision,
+                    "error" => crate::memory::WorkingMemoryEventType::Error,
+                    _ => crate::memory::WorkingMemoryEventType::System,
+                };
+                let importance = event_input.importance.clamp(0.0, 1.0);
+                let mut builder = working_memory
+                    .emit(event_type, &event_input.summary)
+                    .importance(importance);
+                if let Some(channel_id) = &self.channel_id {
+                    builder = builder.channel(channel_id.clone());
+                }
+                builder.record();
+            }
+            if !args.events.is_empty() {
+                tracing::info!(
+                    event_count = args.events.len(),
+                    "persistence branch extracted events into working memory"
+                );
+            }
+        }
 
         match outcome {
             "saved" => {
@@ -217,6 +302,7 @@ mod tests {
                 outcome: "saved".to_string(),
                 saved_memory_ids: vec!["mem_fake".to_string()],
                 reason: None,
+                events: vec![],
             })
             .await
             .expect_err("fabricated ids should fail");
@@ -236,6 +322,7 @@ mod tests {
                 outcome: "saved".to_string(),
                 saved_memory_ids: vec!["mem_2".to_string(), "mem_1".to_string()],
                 reason: None,
+                events: vec![],
             })
             .await
             .expect("exact ids should pass");
@@ -254,6 +341,7 @@ mod tests {
                 outcome: "no_memories".to_string(),
                 saved_memory_ids: Vec::new(),
                 reason: Some("No durable facts in recent turns".to_string()),
+                events: vec![],
             })
             .await
             .expect("no_memories should pass with reason");

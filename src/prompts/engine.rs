@@ -57,6 +57,18 @@ impl PromptEngine {
             "cortex_bulletin",
             crate::prompts::text::get("cortex_bulletin"),
         )?;
+        env.add_template(
+            "cortex_knowledge_synthesis",
+            crate::prompts::text::get("cortex_knowledge_synthesis"),
+        )?;
+        env.add_template(
+            "cortex_intraday_synthesis",
+            crate::prompts::text::get("cortex_intraday_synthesis"),
+        )?;
+        env.add_template(
+            "cortex_daily_summary",
+            crate::prompts::text::get("cortex_daily_summary"),
+        )?;
         env.add_template("compactor", crate::prompts::text::get("compactor"))?;
         env.add_template(
             "memory_persistence",
@@ -398,6 +410,42 @@ impl PromptEngine {
         )
     }
 
+    /// Render the intra-day synthesis prompt.
+    pub fn render_intraday_synthesis(
+        &self,
+        event_count: usize,
+        time_start: &str,
+        time_end: &str,
+        events: &str,
+    ) -> Result<String> {
+        self.render(
+            "cortex_intraday_synthesis",
+            context! {
+                event_count => event_count,
+                time_start => time_start,
+                time_end => time_end,
+                events => events,
+            },
+        )
+    }
+
+    /// Render the daily summary prompt.
+    pub fn render_daily_summary(
+        &self,
+        date: &str,
+        max_words: usize,
+        intraday_blocks: &str,
+    ) -> Result<String> {
+        self.render(
+            "cortex_daily_summary",
+            context! {
+                date => date,
+                max_words => max_words,
+                intraday_blocks => intraday_blocks,
+            },
+        )
+    }
+
     /// Convenience method for rendering ingestion chunk prompt.
     pub fn render_system_ingestion_chunk(
         &self,
@@ -468,6 +516,8 @@ impl PromptEngine {
             coalesce_hint,
             available_channels,
             sandbox_enabled,
+            None,
+            None,
             None,
             None,
             None,
@@ -579,7 +629,13 @@ impl PromptEngine {
         adapter_prompt: Option<String>,
         project_context: Option<String>,
         backfill_transcript: Option<String>,
+        working_memory: Option<String>,
+        channel_activity_map: Option<String>,
     ) -> Result<String> {
+        // During the transition, the bulletin is also exposed as knowledge_synthesis
+        // so the template can render it under the new heading.
+        let knowledge_synthesis = memory_bulletin.clone();
+
         self.render(
             "channel",
             context! {
@@ -596,6 +652,9 @@ impl PromptEngine {
                 adapter_prompt => adapter_prompt,
                 project_context => project_context,
                 backfill_transcript => backfill_transcript,
+                working_memory => working_memory,
+                channel_activity_map => channel_activity_map,
+                knowledge_synthesis => knowledge_synthesis,
             },
         )
     }

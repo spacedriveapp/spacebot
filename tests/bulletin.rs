@@ -130,6 +130,10 @@ async fn bootstrap_deps() -> anyhow::Result<spacebot::AgentDeps> {
             spacebot::agent::process_control::ProcessControlRegistry::new(),
         ),
         injection_tx: tokio::sync::mpsc::channel(1).0,
+        working_memory: spacebot::memory::WorkingMemoryStore::new(
+            db.sqlite.clone(),
+            chrono_tz::Tz::UTC,
+        ),
     })
 }
 

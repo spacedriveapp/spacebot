@@ -187,6 +187,8 @@ pub enum BranchToolProfile {
     Default,
     MemoryPersistence {
         contract_state: Arc<MemoryPersistenceContractState>,
+        working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
+        channel_id: Option<String>,
     },
 }
 
@@ -501,8 +503,13 @@ fn memory_save_with_events(
     memory_search: Arc<MemorySearch>,
     agent_id: AgentId,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 ) -> MemorySaveTool {
-    MemorySaveTool::new(memory_search).with_event_bus(agent_id, memory_event_tx)
+    let tool = MemorySaveTool::new(memory_search).with_event_bus(agent_id, memory_event_tx);
+    match working_memory {
+        Some(store) => tool.with_working_memory(store),
+        None => tool,
+    }
 }
 
 /// Create a per-branch ToolServer with memory tools.
@@ -527,8 +534,9 @@ pub fn create_branch_tool_server(
         memory_search.clone(),
         agent_id.clone(),
         memory_event_tx.clone(),
+        None,
     );
-    if let BranchToolProfile::MemoryPersistence { contract_state } = &profile {
+    if let BranchToolProfile::MemoryPersistence { contract_state, .. } = &profile {
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
@@ -548,8 +556,17 @@ pub fn create_branch_tool_server(
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()));
 
-    if let BranchToolProfile::MemoryPersistence { contract_state } = profile {
-        server = server.tool(MemoryPersistenceCompleteTool::new(contract_state));
+    if let BranchToolProfile::MemoryPersistence {
+        contract_state,
+        working_memory,
+        channel_id,
+    } = profile
+    {
+        let mut tool = MemoryPersistenceCompleteTool::new(contract_state);
+        if let Some(store) = working_memory {
+            tool = tool.with_working_memory(store, channel_id);
+        }
+        server = server.tool(tool);
     }
 
     if let Some(state) = state {
@@ -621,8 +638,9 @@ pub fn create_worker_tool_server(
 
 /// Create a ToolServer for the cortex process.
 ///
-/// The cortex only needs memory_save for consolidation. Additional tools can be
-/// added later as cortex capabilities expand.
+/// Retained for potential future use. The compactor no longer uses this
+/// (Phase 5b removed compactor memory_save).
+#[allow(dead_code)]
 pub fn create_cortex_tool_server(
     agent_id: AgentId,
     memory_event_tx: broadcast::Sender<ProcessEvent>,
@@ -633,6 +651,7 @@ pub fn create_cortex_tool_server(
             memory_search,
             agent_id,
             memory_event_tx,
+            None,
         ))
         .run()
 }
@@ -678,6 +697,7 @@ pub fn create_cortex_chat_tool_server(
             memory_search.clone(),
             agent_id.clone(),
             memory_event_tx,
+            None,
         ))
         .tool(MemoryRecallTool::new(memory_search.clone()))
         .tool(MemoryDeleteTool::new(memory_search))

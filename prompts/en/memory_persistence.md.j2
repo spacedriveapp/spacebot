@@ -27,9 +27,16 @@ This is an automatic process triggered periodically during conversation. You are
    - Use `related_to` for topical connections
    - Use `part_of` when a detail belongs to a larger concept already in memory
 
-4. **Finish with the terminal tool.** You must call `memory_persistence_complete` before finishing:
+4. **Extract events.** While reviewing the conversation, identify key decisions, important events, and errors. Include them in the `events` field of `memory_persistence_complete`:
+   - `event_type`: "decision" for commitments or choices made, "error" for failures or problems, "system" for other notable events
+   - `summary`: one-line description of what happened
+   - `importance`: 0.0-1.0 score (decisions and errors typically 0.6-0.8)
+   - Events feed the agent's temporal working memory — they help the agent remember *what happened today*, not just facts.
+
+5. **Finish with the terminal tool.** You must call `memory_persistence_complete` before finishing:
    - Use `outcome: "saved"` with `saved_memory_ids` that exactly match IDs returned by successful `memory_save` calls in this run.
    - Use `outcome: "no_memories"` when nothing is worth saving, with a short `reason` and no saved IDs.
+   - Always include any extracted `events` regardless of outcome.
 
 ## Rules
 

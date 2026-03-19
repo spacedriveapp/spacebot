@@ -174,7 +174,11 @@ pub(crate) async fn spawn_memory_persistence_branch(
         "persisting memories...",
         "memory_persistence_branch",
         BranchSpawnOptions {
-            profile: BranchToolProfile::MemoryPersistence { contract_state },
+            profile: BranchToolProfile::MemoryPersistence {
+                contract_state,
+                working_memory: Some(state.deps.working_memory.clone()),
+                channel_id: Some(state.channel_id.to_string()),
+            },
         },
     )
     .await
@@ -233,7 +237,7 @@ async fn spawn_branch(
 ) -> std::result::Result<BranchId, AgentError> {
     let BranchSpawnOptions { profile } = branch_options;
     let memory_persistence_contract = match &profile {
-        BranchToolProfile::MemoryPersistence { contract_state } => Some(contract_state.clone()),
+        BranchToolProfile::MemoryPersistence { contract_state, .. } => Some(contract_state.clone()),
         BranchToolProfile::Default => None,
     };
 
@@ -580,6 +584,17 @@ async fn spawn_worker_inner(
         })
         .ok();
 
+    state
+        .deps
+        .working_memory
+        .emit(
+            crate::memory::WorkingMemoryEventType::WorkerSpawned,
+            format!("Worker spawned: {task}"),
+        )
+        .channel(state.channel_id.to_string())
+        .importance(0.6)
+        .record();
+
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "worker spawned");
 
     Ok(worker_id)
@@ -771,6 +786,17 @@ async fn spawn_opencode_worker_inner(
             directory: Some(persist_directory.to_string_lossy().to_string()),
         })
         .ok();
+
+    state
+        .deps
+        .working_memory
+        .emit(
+            crate::memory::WorkingMemoryEventType::WorkerSpawned,
+            format!("Worker spawned (opencode): {task}"),
+        )
+        .channel(state.channel_id.to_string())
+        .importance(0.6)
+        .record();
 
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "OpenCode worker spawned");
 

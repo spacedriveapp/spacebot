@@ -660,6 +660,63 @@ impl Default for MemoryPersistenceConfig {
     }
 }
 
+/// Working memory system configuration.
+///
+/// Controls the temporal event log, intra-day synthesis, channel activity map,
+/// and persistence trigger thresholds.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkingMemoryConfig {
+    /// Whether working memory context injection is enabled.
+    pub enabled: bool,
+    /// Events before an intra-day synthesis batch is triggered.
+    pub intraday_batch_threshold: usize,
+    /// Seconds before time-based fallback triggers intra-day synthesis.
+    pub intraday_time_fallback_secs: u64,
+    /// Maximum unsynthesized recent events to show in the raw tail.
+    pub today_max_unsynthesized_events: usize,
+    /// Token budget for the entire working memory section.
+    pub context_token_budget: usize,
+    /// Token budget for the channel activity map.
+    pub channel_map_token_budget: usize,
+    /// Maximum channels to show in the activity map.
+    pub channel_map_max_channels: usize,
+    /// Hide inactive channels after this many hours.
+    pub channel_map_inactive_hours: u64,
+    /// Minimum importance for events to be included under token pressure.
+    pub min_importance_under_pressure: f32,
+    /// Days to retain raw events before pruning.
+    pub event_retention_days: i64,
+    /// Daily summary max words.
+    pub daily_summary_max_words: usize,
+    /// Persistence branch trigger: message count threshold.
+    pub persistence_message_threshold: usize,
+    /// Persistence branch trigger: time threshold in seconds.
+    pub persistence_time_threshold_secs: u64,
+    /// Persistence branch trigger: event density threshold.
+    pub persistence_event_density_threshold: usize,
+}
+
+impl Default for WorkingMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intraday_batch_threshold: 15,
+            intraday_time_fallback_secs: 14400,
+            today_max_unsynthesized_events: 10,
+            context_token_budget: 1500,
+            channel_map_token_budget: 300,
+            channel_map_max_channels: 10,
+            channel_map_inactive_hours: 24,
+            min_importance_under_pressure: 0.5,
+            event_retention_days: 30,
+            daily_summary_max_words: 300,
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -870,6 +927,10 @@ pub struct CortexConfig {
     pub association_updates_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
+    /// Knowledge synthesis max words (replaces bulletin_max_words for Layer 5).
+    pub knowledge_synthesis_max_words: usize,
+    /// Debounce seconds after last memory change before regenerating knowledge synthesis.
+    pub knowledge_synthesis_debounce_secs: u64,
 }
 
 impl Default for CortexConfig {
@@ -893,6 +954,8 @@ impl Default for CortexConfig {
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
+            knowledge_synthesis_max_words: 500,
+            knowledge_synthesis_debounce_secs: 60,
         }
     }
 }
@@ -1075,14 +1138,14 @@ pub(super) fn evaluate_work_readiness(
         })
         .or(status.bulletin_age_secs);
 
+    // Knowledge synthesis is change-driven, not timer-driven. Staleness
+    // is no longer a readiness concern — only "never generated" matters.
     let reason = if status.state != WarmupState::Warm {
         Some(WorkReadinessReason::StateNotWarm)
     } else if warmup_config.eager_embedding_load && !status.embedding_ready {
         Some(WorkReadinessReason::EmbeddingNotReady)
     } else if bulletin_age_secs.is_none() {
         Some(WorkReadinessReason::BulletinMissing)
-    } else if bulletin_age_secs.is_some_and(|age| age > stale_after_secs) {
-        Some(WorkReadinessReason::BulletinStale)
     } else {
         None
     };

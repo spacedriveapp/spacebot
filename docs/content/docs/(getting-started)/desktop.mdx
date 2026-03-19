@@ -1,0 +1,141 @@
+---
+title: Desktop App
+description: Run Spacebot as a native desktop application with the Tauri-based desktop app.
+---
+
+# Desktop App
+
+The Spacebot desktop app is a native application that provides the full Spacebot dashboard experience. It connects to any running Spacebot instance over HTTP and can optionally start a bundled local server with one click.
+
+## How It Works
+
+The desktop app is a Tauri 2 shell wrapping the same React interface used by the web dashboard. Unlike the web version (which loads from the server's embedded static files), the desktop app bundles the frontend locally and connects to any Spacebot server via its HTTP API.
+
+```
+┌─────────────────────────────────────────────┐
+│ Desktop App (Tauri)                         │
+│  ┌───────────────────────────────────────┐  │
+│  │ Bundled React SPA                     │  │
+│  │  All API calls → configurable URL     │  │
+│  └───────────────────────────────────────┘  │
+│  Native: macOS titlebar, dark theme         │
+└─────────────────────────────────────────────┘
+           │ HTTP
+           ▼
+┌─────────────────────────────────────────────┐
+│ Spacebot Server                             │
+│  localhost:19898 (or any reachable URL)      │
+└─────────────────────────────────────────────┘
+```
+
+## Connection Screen
+
+On launch, the desktop app checks if a Spacebot server is reachable at the configured URL (default `http://localhost:19898`). If the server is not available, a connection screen is shown where you can:
+
+- **Edit the server URL** and click Connect to point at any running instance
+- **Start a local server** using the bundled Spacebot binary (one click)
+
+Once connected, the app transitions to the normal dashboard. The server URL is persisted between sessions.
+
+If the server goes down while you're using the app, the existing `ConnectionBanner` warns about stale data, and the SSE event stream will auto-reconnect when the server comes back.
+
+## Connecting to a Remote Server
+
+The desktop app can connect to any Spacebot instance, not just `localhost`. Enter the full URL in the connection screen:
+
+```
+http://192.168.1.50:19898
+https://my-spacebot.example.com
+```
+
+The server URL is saved and restored on next launch. You can change it at any time from the connection screen.
+
+If the Spacebot server requires authentication (`api.auth_token` in config), the app will need to include the token. Currently, auth tokens are passed automatically when using the hosted platform proxy.
+
+## Bundled Local Server (Sidecar)
+
+The desktop app bundles the Spacebot binary as a Tauri sidecar. Clicking **Start Local Server** on the connection screen spawns the binary in the background with `spacebot start --foreground`. The app automatically connects once the server is ready.
+
+The sidecar uses the default data directory for your platform:
+
+| Platform | Data directory |
+|----------|---------------|
+| macOS    | `~/.spacebot/` |
+| Linux    | `~/.spacebot/` |
+| Windows  | `%APPDATA%\spacebot\` |
+
+This is the same directory used by a standalone `spacebot` binary. If you've previously run Spacebot from the CLI or Docker with a mapped volume, your existing data, agents, and configuration are automatically available.
+
+The sidecar process runs independently of the desktop app window. If you close the app, the server continues running. To stop it, use `spacebot stop` from the CLI or quit from the connection screen.
+
+## Building from Source
+
+### Prerequisites
+
+- **Rust 1.85+** -- `rustup update stable`
+- **Bun** -- `curl -fsSL https://bun.sh/install | bash`
+- **Tauri CLI** -- included via `@tauri-apps/cli` in `desktop/package.json`
+- Platform-specific Tauri dependencies (see [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
+
+### Build
+
+```bash
+# Build everything (sidecar + frontend + Tauri bundle)
+just desktop-build
+```
+
+Tauri's `beforeBuildCommand` automatically handles building the spacebot sidecar binary (release mode) and the web interface -- no manual steps needed.
+
+Under the hood, `bundle-sidecar.sh` compiles the spacebot binary and copies it to `desktop/src-tauri/binaries/spacebot-<target-triple>` (e.g. `spacebot-aarch64-apple-darwin`). Tauri requires the target triple suffix for cross-platform sidecar support.
+
+### Development
+
+For development with hot-reload:
+
+```bash
+# Start spacebot server (from source or installed) -- needed for the API
+cargo run -- start -f -d
+
+# In another terminal: start the desktop app
+just desktop-dev
+# or: cd desktop && bun run tauri:dev
+```
+
+Tauri's `beforeDevCommand` automatically builds the sidecar binary (debug mode), installs frontend dependencies, and starts the Vite dev server. No manual `bundle-sidecar` or `bun install` steps are needed.
+
+In dev mode, the Tauri window loads from the Vite dev server (`http://localhost:19840`), which proxies `/api` requests to the running Spacebot instance on port `19898`. The connection screen is bypassed since the Vite proxy makes the API same-origin.
+
+## Architecture Details
+
+### Frontend Loading
+
+| Mode | Frontend source | API target |
+|------|----------------|------------|
+| **Desktop (production)** | Bundled local files (`interface/dist/`) | Configurable URL (default `localhost:19898`) |
+| **Desktop (dev)** | Vite dev server (`localhost:19840`) | Same-origin via Vite proxy |
+| **Web (production)** | Embedded in server binary via `rust_embed` | Same-origin (relative paths) |
+| **Hosted (platform)** | Served via reverse proxy | Same-origin with `__SPACEBOT_BASE_PATH` |
+
+### Server URL Resolution
+
+The `ServerProvider` context determines the API mode:
+
+- **Same-origin mode** (web, hosted, Vite dev): API calls use relative paths (`/api/...`). No connection screen.
+- **Tauri mode**: API calls use an absolute URL (`http://host:port/api/...`). Connection screen gates the app.
+
+The server URL is persisted in two locations for reliability:
+
+1. **Tauri IPC** -- `connection.json` in the app data directory (primary, survives webview cache clears)
+2. **localStorage** -- `spacebot_server_url` key (fallback)
+
+### CORS
+
+When the desktop app loads from `tauri://localhost` and makes requests to `http://localhost:19898`, CORS applies. The Spacebot server uses `mirror_request()` for the `Access-Control-Allow-Origin` header, which reflects the requesting origin back. Credentials are allowed. No additional server configuration is needed.
+
+### Native Features
+
+The desktop app includes platform-specific enhancements:
+
+- **macOS**: Transparent titlebar with traffic light integration, sidebar vibrancy effect, dark theme lock
+- **Window management**: 1200x800 default size, 900x600 minimum, overlay titlebar style
+- **Tauri plugins**: Shell (sidecar management, opening external links)

@@ -421,6 +421,8 @@ pub struct Channel {
     pub compactor: Compactor,
     /// Count of user messages since last memory persistence branch.
     message_count: usize,
+    /// When the last memory persistence branch was triggered.
+    last_persistence_at: std::time::Instant,
     /// Branch IDs for silent memory persistence branches (results not injected into history).
     memory_persistence_branches: HashSet<BranchId>,
     /// Optional Discord reply target captured when each branch was started.
@@ -575,6 +577,7 @@ impl Channel {
             conversation_context: None,
             compactor,
             message_count: 0,
+            last_persistence_at: std::time::Instant::now(),
             memory_persistence_branches: HashSet::new(),
             branch_reply_targets: HashMap::new(),
             coalesce_buffer: Vec::new(),
@@ -1534,6 +1537,47 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
+        // Render working memory layers (Layers 2 + 3).
+        let wm_config = **rc.working_memory.load();
+        let timezone = self.deps.working_memory.timezone();
+        let working_memory = match crate::memory::working::render_working_memory(
+            &self.deps.working_memory,
+            self.id.as_ref(),
+            &wm_config,
+            timezone,
+        )
+        .await
+        {
+            Ok(text) => {
+                if text.is_empty() {
+                    tracing::debug!(channel_id = %self.id, "working memory rendered empty (disabled?)");
+                } else {
+                    tracing::debug!(channel_id = %self.id, len = text.len(), "working memory rendered");
+                }
+                text
+            }
+            Err(error) => {
+                tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
+                String::new()
+            }
+        };
+
+        let channel_activity_map = match crate::memory::working::render_channel_activity_map(
+            &self.deps.sqlite_pool,
+            &self.deps.working_memory,
+            self.id.as_ref(),
+            &wm_config,
+            timezone,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
+                String::new()
+            }
+        };
+
         prompt_engine.render_channel_prompt_with_links(
             empty_to_none(identity_context),
             empty_to_none(memory_bulletin.to_string()),
@@ -1548,6 +1592,8 @@ impl Channel {
             adapter_prompt,
             project_context,
             self.backfill_transcript.clone(),
+            empty_to_none(working_memory),
+            empty_to_none(channel_activity_map),
         )
     }
 
@@ -2181,6 +2227,47 @@ impl Channel {
 
         let project_context = self.build_project_context(&prompt_engine).await;
 
+        // Render working memory layers (Layers 2 + 3).
+        let wm_config = **rc.working_memory.load();
+        let timezone = self.deps.working_memory.timezone();
+        let working_memory = match crate::memory::working::render_working_memory(
+            &self.deps.working_memory,
+            self.id.as_ref(),
+            &wm_config,
+            timezone,
+        )
+        .await
+        {
+            Ok(text) => {
+                if text.is_empty() {
+                    tracing::debug!(channel_id = %self.id, "working memory rendered empty (disabled?)");
+                } else {
+                    tracing::debug!(channel_id = %self.id, len = text.len(), "working memory rendered");
+                }
+                text
+            }
+            Err(error) => {
+                tracing::warn!(channel_id = %self.id, %error, "working memory render failed");
+                String::new()
+            }
+        };
+
+        let channel_activity_map = match crate::memory::working::render_channel_activity_map(
+            &self.deps.sqlite_pool,
+            &self.deps.working_memory,
+            self.id.as_ref(),
+            &wm_config,
+            timezone,
+        )
+        .await
+        {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(channel_id = %self.id, %error, "channel activity map render failed");
+                String::new()
+            }
+        };
+
         let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
 
         prompt_engine.render_channel_prompt_with_links(
@@ -2197,6 +2284,8 @@ impl Channel {
             adapter_prompt,
             project_context,
             self.backfill_transcript.clone(),
+            empty_to_none(working_memory),
+            empty_to_none(channel_activity_map),
         )
     }
 
@@ -2744,6 +2833,22 @@ impl Channel {
                         );
                     }
 
+                    // Truncate for working memory — full conclusion lives in branch_runs.
+                    let summary = if conclusion.len() > 200 {
+                        format!("{}...", &conclusion[..200])
+                    } else {
+                        conclusion.clone()
+                    };
+                    self.deps
+                        .working_memory
+                        .emit(
+                            crate::memory::WorkingMemoryEventType::BranchCompleted,
+                            format!("Branch concluded: {summary}"),
+                        )
+                        .channel(self.id.to_string())
+                        .importance(0.7)
+                        .record();
+
                     tracing::info!(branch_id = %branch_id, "branch result queued for retrigger");
                 }
                 self.branch_reply_targets.remove(branch_id);
@@ -2800,6 +2905,31 @@ impl Channel {
                 self.state.active_workers.write().await.remove(worker_id);
                 self.state.worker_inputs.write().await.remove(worker_id);
                 self.state.worker_injections.write().await.remove(worker_id);
+
+                // Record worker completion in working memory.
+                let worker_summary = if result.len() > 200 {
+                    format!("{}...", &result[..200])
+                } else {
+                    result.clone()
+                };
+                let event_type = if *success {
+                    crate::memory::WorkingMemoryEventType::WorkerCompleted
+                } else {
+                    crate::memory::WorkingMemoryEventType::Error
+                };
+                self.deps
+                    .working_memory
+                    .emit(
+                        event_type,
+                        if *success {
+                            format!("Worker completed: {worker_summary}")
+                        } else {
+                            format!("Worker failed: {worker_summary}")
+                        },
+                    )
+                    .channel(self.id.to_string())
+                    .importance(if *success { 0.6 } else { 0.8 })
+                    .record();
 
                 if *notify {
                     // Accumulate result for the next retrigger instead of
@@ -3068,19 +3198,63 @@ impl Channel {
         status.render_full(&current_time_line, &system_info)
     }
 
-    /// Check if a memory persistence branch should be spawned based on message count.
+    /// Check if a memory persistence branch should be spawned.
+    ///
+    /// Three triggers (any one fires):
+    /// 1. **Message count** — threshold reached (default 20, configurable)
+    /// 2. **Time-based** — elapsed since last persistence, if conversation is active
+    /// 3. **Event density** — working memory events from this channel since last persistence
     async fn check_memory_persistence(&mut self) {
         let config = **self.deps.runtime_config.memory_persistence.load();
         if !config.enabled || config.message_interval == 0 {
             return;
         }
 
-        if self.message_count < config.message_interval {
+        let wm_config = **self.deps.runtime_config.working_memory.load();
+        let elapsed = self.last_persistence_at.elapsed();
+
+        // Trigger 1: Message count threshold.
+        let message_trigger = self.message_count >= wm_config.persistence_message_threshold;
+
+        // Trigger 2: Time-based — only if conversation is active (message_count > 0).
+        let time_trigger = self.message_count > 0
+            && elapsed.as_secs() >= wm_config.persistence_time_threshold_secs;
+
+        // Trigger 3: Event density — working memory events from this channel.
+        let density_trigger = if !message_trigger && !time_trigger {
+            // Only check DB if the cheap triggers didn't fire.
+            let since = chrono::Utc::now() - chrono::Duration::seconds(elapsed.as_secs() as i64);
+            match self
+                .deps
+                .working_memory
+                .count_events_since(self.id.as_ref(), since)
+                .await
+            {
+                Ok(count) => count as usize >= wm_config.persistence_event_density_threshold,
+                Err(error) => {
+                    tracing::debug!(%error, "event density check failed, skipping");
+                    false
+                }
+            }
+        } else {
+            false
+        };
+
+        if !message_trigger && !time_trigger && !density_trigger {
             return;
         }
 
-        // Reset counter before spawning so subsequent messages don't pile up
+        let trigger = if message_trigger {
+            "message_count"
+        } else if time_trigger {
+            "time"
+        } else {
+            "event_density"
+        };
+
+        // Reset counters before spawning so subsequent messages don't pile up.
         self.message_count = 0;
+        self.last_persistence_at = std::time::Instant::now();
 
         match spawn_memory_persistence_branch(&self.state, &self.deps).await {
             Ok(branch_id) => {
@@ -3088,7 +3262,7 @@ impl Channel {
                 tracing::info!(
                     channel_id = %self.id,
                     branch_id = %branch_id,
-                    interval = config.message_interval,
+                    trigger,
                     "memory persistence branch spawned"
                 );
             }

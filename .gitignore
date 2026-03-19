@@ -9,6 +9,9 @@ interface/dist/
 interface/public/opencode-embed/
 .opencode-build-cache/
 
+# Desktop sidecar binaries (built by scripts/bundle-sidecar.sh)
+desktop/src-tauri/binaries/
+
 .idea
 list/
 agents/

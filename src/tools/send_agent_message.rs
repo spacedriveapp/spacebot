@@ -40,6 +40,7 @@ pub struct SendAgentMessageTool {
     /// The originating channel (conversation_id) where the user request came from.
     /// Set per-turn so task completion notifications route back to the right place.
     originating_channel: Option<String>,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 impl std::fmt::Debug for SendAgentMessageTool {
@@ -66,6 +67,7 @@ impl SendAgentMessageTool {
             conversation_logger,
             skip_flag: None,
             originating_channel: None,
+            working_memory: None,
         }
     }
 
@@ -79,6 +81,11 @@ impl SendAgentMessageTool {
     /// route back to the conversation where the user asked for the work.
     pub fn with_originating_channel(mut self, channel_id: String) -> Self {
         self.originating_channel = Some(channel_id);
+        self
+    }
+
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
         self
     }
 
@@ -281,6 +288,16 @@ impl Tool for SendAgentMessageTool {
             task_number,
             "task delegated to target agent"
         );
+
+        if let Some(working_memory) = &self.working_memory {
+            working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::AgentMessage,
+                    format!("Delegated task #{task_number} to {target_display}"),
+                )
+                .importance(0.7)
+                .record();
+        }
 
         Ok(SendAgentMessageOutput {
             success: true,

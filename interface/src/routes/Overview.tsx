@@ -119,6 +119,22 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 
 	return (
 		<div className="flex flex-col h-full">
+			{providersData && !providersData.has_any && agents.length > 0 && (
+				<div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
+					<p className="text-sm text-amber-200">
+						Agents are configured, but no provider credentials are available. Add or unlock
+						secrets to bring agents online.
+					</p>
+					<Link
+						to="/settings"
+						search={{tab: "secrets"}}
+						className="shrink-0 text-sm font-medium text-amber-100 underline-offset-4 hover:underline"
+					>
+						Open Secrets Settings
+					</Link>
+				</div>
+			)}
+
 			{/* Full-screen topology */}
 			<div className="flex-1 overflow-hidden">
 				{overviewLoading ? (
