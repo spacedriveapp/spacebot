@@ -3,6 +3,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use tauri::Emitter;
 use tauri::Manager;
 use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
@@ -49,6 +50,18 @@ fn set_server_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
 fn toggle_voice_overlay(app: tauri::AppHandle) -> Result<(), String> {
     toggle_overlay(&app);
     Ok(())
+}
+
+fn activate_voice_overlay(app: &tauri::AppHandle) {
+    if app.get_webview_window("voice-overlay").is_none() {
+        create_overlay_window(app);
+    } else if let Some(overlay) = app.get_webview_window("voice-overlay") {
+        if !overlay.is_visible().unwrap_or(false) {
+            apply_overlay_window_chrome(&overlay);
+            let _ = overlay.show();
+            let _ = overlay.set_focus();
+        }
+    }
 }
 
 fn toggle_overlay(app: &tauri::AppHandle) {
@@ -144,18 +157,37 @@ fn main() {
         )
         .init();
 
-    // Option+Space shortcut for voice overlay toggle
-    let shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    // Option+Space toggles the overlay. Option+Shift+Space is hold-to-talk.
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    let voice_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut(shortcut)
+                .with_shortcut(toggle_shortcut.clone())
+                .unwrap()
+                .with_shortcut(voice_shortcut.clone())
                 .unwrap()
                 .with_handler(move |app, _shortcut, event| {
-                    if event.state == tauri_plugin_global_shortcut::ShortcutState::Pressed {
-                        toggle_overlay(app);
+                    match (_shortcut, event.state) {
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Pressed)
+                            if shortcut == &toggle_shortcut =>
+                        {
+                            toggle_overlay(app);
+                        }
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Pressed)
+                            if shortcut == &voice_shortcut =>
+                        {
+                            activate_voice_overlay(app);
+                            let _ = app.emit("voice-overlay:start-recording", ());
+                        }
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Released)
+                            if shortcut == &voice_shortcut =>
+                        {
+                            let _ = app.emit("voice-overlay:stop-recording", ());
+                        }
+                        _ => {}
                     }
                 })
                 .build(),

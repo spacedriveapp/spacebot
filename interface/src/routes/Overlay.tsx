@@ -27,7 +27,7 @@ export function Overlay() {
 	const [voiceState, setVoiceState] = useState<VoiceState>("idle");
 	const [agentId] = useState("main"); // default agent
 	const [profileId, setProfileId] = useState<string>(() => localStorage.getItem("spacebot.voice.profileId") ?? "");
-	const [statusText, setStatusText] = useState("Press Option+Space to talk");
+	const [statusText, setStatusText] = useState("Press Option+Shift+Space to talk");
 	const [, setSpokenText] = useState<string | null>(null);
 	const [transcript, setTranscript] = useState<Array<{role: string; text: string}>>([]);
 
@@ -99,11 +99,11 @@ export function Overlay() {
 
 		// Play TTS
 		ttsStartedRef.current = true;
-		speak(event.spoken_text, agentId, profileId).then(() => {
-			ttsStartedRef.current = false;
-			setVoiceState("idle");
-			setStatusText("Press Option+Space to talk");
-		});
+			speak(event.spoken_text, agentId, profileId).then(() => {
+				ttsStartedRef.current = false;
+				setVoiceState("idle");
+				setStatusText("Press Option+Shift+Space to talk");
+			});
 	}, [sessionId, agentId, speak, profileId]);
 
 	const handleOutboundMessage = useCallback((data: unknown) => {
@@ -156,7 +156,7 @@ export function Overlay() {
 		const blob = await stopRecording();
 		if (!blob || blob.size === 0) {
 			setVoiceState("idle");
-			setStatusText("Press Option+Space to talk");
+			setStatusText("Press Option+Shift+Space to talk");
 			return;
 		}
 
@@ -171,20 +171,46 @@ export function Overlay() {
 			console.error("Failed to send audio:", error);
 			setVoiceState("idle");
 			setStatusText("Failed to send. Try again.");
-			setTimeout(() => setStatusText("Press Option+Space to talk"), 3000);
+			setTimeout(() => setStatusText("Press Option+Shift+Space to talk"), 3000);
 		}
 	}, [recorderState, stopRecording, agentId, sessionId]);
 
-	// -- Keyboard shortcut (for web mode, Tauri uses global shortcut) --
+	useEffect(() => {
+		if (!(window as any).__TAURI_INTERNALS__) return;
+
+		let disposed = false;
+		let unlistenStart: null | (() => void) = null;
+		let unlistenStop: null | (() => void) = null;
+
+		void (async () => {
+			const {listen} = await import("@tauri-apps/api/event");
+			if (disposed) return;
+
+			unlistenStart = await listen("voice-overlay:start-recording", () => {
+				void handleStartRecording();
+			});
+			unlistenStop = await listen("voice-overlay:stop-recording", () => {
+				void handleStopRecording();
+			});
+		})();
+
+		return () => {
+			disposed = true;
+			unlistenStart?.();
+			unlistenStop?.();
+		};
+	}, [handleStartRecording, handleStopRecording]);
+
+	// -- Keyboard shortcut (web mode mirrors the dedicated voice hotkey) --
 	useEffect(() => {
 		const handleKeyDown = (event: KeyboardEvent) => {
-			if (event.code === "Space" && event.altKey && voiceState === "idle") {
+			if (event.code === "Space" && event.altKey && event.shiftKey && voiceState === "idle") {
 				event.preventDefault();
 				handleStartRecording();
 			}
 		};
 		const handleKeyUp = (event: KeyboardEvent) => {
-			if (event.code === "Space" && voiceState === "recording") {
+			if (event.code === "Space" && event.altKey && event.shiftKey && voiceState === "recording") {
 				event.preventDefault();
 				handleStopRecording();
 			}

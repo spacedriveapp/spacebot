@@ -1,11 +1,16 @@
 ---
 title: Memory
-description: Structured memory system with graph associations and hybrid search.
+description: Graph memory, working memory, and knowledge synthesis for durable recall plus day-of awareness.
 ---
 
 # Memory
 
-Memories in SpaceBot are structured objects in a database. Not markdown files, not daily logs, not a manually curated MEMORY.md. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB for search.
+Spacebot has two complementary memory layers:
+
+- **Graph memory** for durable knowledge, semantic recall, and long-lived relationships
+- **Working memory** for recent operational awareness: what happened today, what other channels are doing, and what decisions were just made
+
+Both are rendered into channel prompts differently. Graph memory is recalled and synthesized. Working memory is rendered directly from the event log plus compact daily/intra-day summaries. Together they replace the old flat `MEMORY.md` / bulletin style of agent context.
 
 ## Why Not Files
 
@@ -15,10 +20,10 @@ OpenClaw stores memories as markdown files on disk and indexes them into SQLite 
 
 Memories live across two embedded databases, each doing what it's best at:
 
-- **SQLite** -- the memory graph. Rows with content, type, importance, timestamps, source. Association edges with weights and relation types. Relational queries for graph traversal, metadata filtering, and maintenance operations.
+- **SQLite** -- the memory graph **and** working-memory event log. Graph rows with content, type, importance, timestamps, source. Association edges with weights and relation types. Working-memory events, synthesis blocks, and channel activity rendering also live here.
 - **LanceDB** -- embeddings and search. Vector storage in Lance columnar format with HNSW indexing. Built-in full-text search via Tantivy. Hybrid search (vector + FTS) in one system.
 
-The two are joined on memory ID. A recall worker queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. No server processes -- both are embedded, everything is files in a data directory.
+Graph-memory recall joins the two on memory ID. A recall worker queries LanceDB for semantic/keyword matches, then hits SQLite for graph traversal and metadata. Working memory does not use embeddings at all — it is SQL-first, temporal, and renderable even before an embedding model is warm.
 
 ## Memory Structure
 
@@ -47,6 +52,42 @@ Memories are typed. The type determines how the memory is stored, searched, and 
 **Event** -- Something that happened. "James deployed SpaceDrive v0.4 on Feb 10." Events are temporal and naturally decay in importance.
 
 **Observation** -- Something the system noticed. "James tends to work late on Fridays." Observations are inferred, not stated.
+
+## Working Memory
+
+Working memory is not a second vector store. It is an append-only operational log plus synthesized summaries that answer questions like:
+
+- What happened earlier today?
+- What did we decide a few channels ago?
+- Which workers or branches just finished?
+- What is this channel focused on right now?
+
+Typical working-memory events include worker spawns and completions, branch completions, task updates, system events, cron executions, errors, and high-value decisions surfaced by the persistence path.
+
+### Why It Exists
+
+Graph memory is optimized for durable knowledge and semantic retrieval. It is great for "what do we know about auth?" It is not ideal for "what happened in the last two hours across active channels?" Working memory fills that gap.
+
+Channels render working memory directly into prompt context, so a freshly resumed conversation can still see today's narrative and channel activity without first spawning a branch.
+
+### What Channels See
+
+Channel prompts now include:
+
+1. Identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`)
+2. Knowledge synthesis from the cortex
+3. Rendered working-memory timeline for the current day
+4. A compact channel activity map showing what else is active
+
+This gives the agent both durable knowledge and temporal awareness.
+
+### Working Memory vs Graph Memory
+
+| Layer | Best for | Backing store | Retrieval style |
+|------|----------|---------------|-----------------|
+| Graph memory | facts, preferences, observations, long-term decisions | SQLite + LanceDB | branch recall + synthesis |
+| Working memory | recent decisions, completions, errors, current activity | SQLite | direct prompt rendering + synthesis |
+| Knowledge synthesis | high-level cross-cutting agent knowledge | runtime cache backed by cortex generation | direct prompt injection |
 
 ## The Graph
 
@@ -163,8 +204,9 @@ Not everything is a graph memory. Some context is stable, foundational, and user
 - **SOUL.md** -- core values, personality, tone
 - **IDENTITY.md** -- agent name, nature
 - **ROLE.md** -- responsibilities, scope, escalation rules
+- **SPEECH.md** -- spoken cadence, delivery style, warmth, and anti-repetition rules for voice output
 
-These are loaded into channel system prompts every time. They're files in the agent root directory (not the workspace), not database rows, because they change rarely and users should be able to edit them in a text editor.
+These are loaded into channel system prompts every time. `SPEECH.md` is also used during spoken-reply generation when Voicebox output is enabled. They are files in the agent root directory (not the workspace), not database rows, because they change rarely and users should be able to edit them in a text editor or through the config UI.
 
 What's gone:
 
@@ -174,26 +216,15 @@ What's gone:
 
 ## Context Injection
 
-When a channel starts or a cron job fires, memories are injected into the system prompt. This isn't a raw dump -- it's a curated selection:
+When a channel starts or a cron job fires, memory context is layered rather than dumped as one blob:
 
-1. Identity-tagged memories are always included
-2. High-importance memories above a threshold are included
-3. Recently accessed memories get a boost
-4. The rest depends on what the conversation is about (populated by recall workers during the session)
+1. **Identity files** -- stable agent persona and role
+2. **Knowledge synthesis** -- the cortex's compact high-level understanding of the agent's world
+3. **Working memory** -- recent event narrative plus raw tail for today's activity
+4. **Channel activity map** -- other active conversations and their current focus
+5. **On-demand recall** -- branches pull graph memories when the conversation needs deeper specific context
 
-The injected memories are grouped by type and formatted cleanly. The channel sees something like:
-
-```
-## Identity
-- My name is Spacebot
-- James is a software engineer who works on SpaceDrive
-
-## Recent Context
-- We decided to use SQLite for the prototype (2 days ago)
-- James prefers short, direct responses (preference)
-```
-
-Not a wall of raw search results. Not everything in the database. Just what matters right now.
+Not a wall of raw search results. Not everything in the database. Just the right mix of durable knowledge and recent situational awareness.
 
 ## Maintenance
 
