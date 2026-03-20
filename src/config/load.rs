@@ -14,11 +14,12 @@ use super::{
     AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
-    LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SignalConfig,
-    SignalInstanceConfig, SlackCommandConfig, SlackConfig, SlackInstanceConfig, TelegramConfig,
-    TelegramInstanceConfig, TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig,
-    WebhookConfig, normalize_adapter, validate_named_messaging_adapters,
+    LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
+    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
+    ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
+    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
+    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
+    validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -206,6 +207,12 @@ impl CortexConfig {
             association_max_per_pass: overrides
                 .association_max_per_pass
                 .unwrap_or(defaults.association_max_per_pass),
+            knowledge_synthesis_max_words: overrides
+                .knowledge_synthesis_max_words
+                .unwrap_or(defaults.knowledge_synthesis_max_words),
+            knowledge_synthesis_debounce_secs: overrides
+                .knowledge_synthesis_debounce_secs
+                .unwrap_or(defaults.knowledge_synthesis_debounce_secs),
         };
         config.validate_maintenance_bounds()?;
         Ok(config)
@@ -2238,6 +2245,54 @@ impl Config {
                     ignore_stories: s.ignore_stories,
                 })
             }),
+            mattermost: toml.messaging.mattermost.and_then(|mm| {
+                let instances = mm
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let token = instance.token.as_deref().and_then(resolve_env_value);
+                        let base_url = instance.base_url.as_deref().and_then(resolve_env_value);
+                        let has_credentials = token.is_some() && base_url.is_some();
+                        if instance.enabled && !has_credentials {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "mattermost instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+                        MattermostInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            base_url: base_url.unwrap_or_default(),
+                            token: token.unwrap_or_default(),
+                            team_id: instance.team_id,
+                            dm_allowed_users: instance.dm_allowed_users,
+                            max_attachment_bytes: instance.max_attachment_bytes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let token = std::env::var("MATTERMOST_TOKEN")
+                    .ok()
+                    .or_else(|| mm.token.as_deref().and_then(resolve_env_value));
+                let base_url = std::env::var("MATTERMOST_BASE_URL")
+                    .ok()
+                    .or_else(|| mm.base_url.as_deref().and_then(resolve_env_value));
+
+                if (token.is_none() || base_url.is_none()) && instances.is_empty() {
+                    tracing::warn!("mattermost config present but no credentials found");
+                    return None;
+                }
+
+                Some(MattermostConfig {
+                    enabled: mm.enabled,
+                    base_url: base_url.unwrap_or_default(),
+                    token: token.unwrap_or_default(),
+                    team_id: mm.team_id,
+                    instances,
+                    dm_allowed_users: mm.dm_allowed_users,
+                    max_attachment_bytes: mm.max_attachment_bytes,
+                })
+            }),
         };
 
         let bindings: Vec<Binding> = toml
@@ -2250,6 +2305,7 @@ impl Config {
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
+                team_id: b.team_id,
                 channel_ids: b.channel_ids,
                 require_mention: b.require_mention,
                 dm_allowed_users: b.dm_allowed_users,

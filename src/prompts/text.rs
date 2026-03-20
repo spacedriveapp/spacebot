@@ -59,6 +59,15 @@ fn lookup(lang: &str, key: &str) -> &'static str {
         ("en", "worker") => include_str!("../../prompts/en/worker.md.j2"),
         ("en", "cortex") => include_str!("../../prompts/en/cortex.md.j2"),
         ("en", "cortex_bulletin") => include_str!("../../prompts/en/cortex_bulletin.md.j2"),
+        ("en", "cortex_knowledge_synthesis") => {
+            include_str!("../../prompts/en/cortex_knowledge_synthesis.md.j2")
+        }
+        ("en", "cortex_intraday_synthesis") => {
+            include_str!("../../prompts/en/cortex_intraday_synthesis.md.j2")
+        }
+        ("en", "cortex_daily_summary") => {
+            include_str!("../../prompts/en/cortex_daily_summary.md.j2")
+        }
         ("en", "cortex_profile") => include_str!("../../prompts/en/cortex_profile.md.j2"),
         ("en", "compactor") => include_str!("../../prompts/en/compactor.md.j2"),
         ("en", "memory_persistence") => include_str!("../../prompts/en/memory_persistence.md.j2"),

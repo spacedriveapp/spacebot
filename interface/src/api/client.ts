@@ -1,6 +1,23 @@
 export const BASE_PATH: string = (window as any).__SPACEBOT_BASE_PATH || "";
 export const IS_TAURI: boolean = !!(window as any).__TAURI_INTERNALS__;
-const API_BASE = BASE_PATH + "/api";
+
+/**
+ * Dynamic server URL for the Tauri desktop app. When set, all API
+ * requests target this absolute URL (e.g. "http://localhost:19898/api/...").
+ * When empty the app uses relative paths (same-origin / proxy mode).
+ */
+let _serverUrl = "";
+export function setServerUrl(url: string) {
+	_serverUrl = url.replace(/\/+$/, "");
+}
+export function getServerUrl(): string {
+	return _serverUrl;
+}
+
+function getApiBase(): string {
+	if (_serverUrl) return `${_serverUrl}/api`;
+	return BASE_PATH + "/api";
+}
 
 export interface StatusResponse {
 	status: string;
@@ -180,7 +197,7 @@ export type ApiEvent =
 	| CortexChatMessageEvent;
 
 async function fetchJson<T>(path: string): Promise<T> {
-	const response = await fetch(`${API_BASE}${path}`);
+	const response = await fetch(`${getApiBase()}${path}`);
 	if (!response.ok) {
 		throw new Error(`API error: ${response.status}`);
 	}
@@ -318,7 +335,11 @@ export interface WorkerRunInfo {
 	live_status: string | null;
 	tool_calls: number;
 	opencode_port: number | null;
+	opencode_session_id: string | null;
+	directory: string | null;
 	interactive: boolean;
+	project_id: string | null;
+	project_name: string | null;
 }
 
 export interface WorkerDetailResponse {
@@ -1207,6 +1228,8 @@ export interface CreateMessagingInstanceRequest {
 		webhook_port?: number;
 		webhook_bind?: string;
 		webhook_auth_token?: string;
+		mattermost_base_url?: string;
+		mattermost_token?: string;
 	};
 }
 
@@ -1665,7 +1688,7 @@ export const api = {
 	channels: () => fetchJson<ChannelsResponse>("/channels"),
 	deleteChannel: async (agentId: string, channelId: string) => {
 		const params = new URLSearchParams({ agent_id: agentId, channel_id: channelId });
-		const response = await fetch(`${API_BASE}/channels?${params}`, { method: "DELETE" });
+		const response = await fetch(`${getApiBase()}/channels?${params}`, { method: "DELETE" });
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<{ success: boolean }>;
 	},
@@ -1678,7 +1701,7 @@ export const api = {
 	inspectPrompt: (channelId: string) =>
 		fetchJson<PromptInspectResponse>(`/channels/inspect?channel_id=${encodeURIComponent(channelId)}`),
 	setPromptCapture: async (channelId: string, enabled: boolean) => {
-		const response = await fetch(`${API_BASE}/channels/inspect/capture`, {
+		const response = await fetch(`${getApiBase()}/channels/inspect/capture`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ channel_id: channelId, enabled }),
@@ -1744,7 +1767,7 @@ export const api = {
 		return fetchJson<CortexChatMessagesResponse>(`/cortex-chat/messages?${search}`);
 	},
 	cortexChatSend: (agentId: string, threadId: string, message: string, channelId?: string) =>
-		fetch(`${API_BASE}/cortex-chat/send`, {
+		fetch(`${getApiBase()}/cortex-chat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -1759,7 +1782,7 @@ export const api = {
 			`/cortex-chat/threads?agent_id=${encodeURIComponent(agentId)}`,
 		),
 	cortexChatDeleteThread: async (agentId: string, threadId: string) => {
-		const response = await fetch(`${API_BASE}/cortex-chat/thread`, {
+		const response = await fetch(`${getApiBase()}/cortex-chat/thread`, {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, thread_id: threadId }),
@@ -1771,7 +1794,7 @@ export const api = {
 	agentIdentity: (agentId: string) =>
 		fetchJson<IdentityFiles>(`/agents/identity?agent_id=${encodeURIComponent(agentId)}`),
 	updateIdentity: async (request: IdentityUpdateRequest) => {
-		const response = await fetch(`${API_BASE}/agents/identity`, {
+		const response = await fetch(`${getApiBase()}/agents/identity`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -1782,7 +1805,7 @@ export const api = {
 		return response.json() as Promise<IdentityFiles>;
 	},
 	createAgent: async (agentId: string, displayName?: string, role?: string) => {
-		const response = await fetch(`${API_BASE}/agents`, {
+		const response = await fetch(`${getApiBase()}/agents`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, display_name: displayName || undefined, role: role || undefined }),
@@ -1794,7 +1817,7 @@ export const api = {
 	},
 
 	updateAgent: async (agentId: string, update: { display_name?: string; role?: string; gradient_start?: string; gradient_end?: string }) => {
-		const response = await fetch(`${API_BASE}/agents`, {
+		const response = await fetch(`${getApiBase()}/agents`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, ...update }),
@@ -1807,7 +1830,7 @@ export const api = {
 
 	deleteAgent: async (agentId: string) => {
 		const params = new URLSearchParams({ agent_id: agentId });
-		const response = await fetch(`${API_BASE}/agents?${params}`, {
+		const response = await fetch(`${getApiBase()}/agents?${params}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -1817,12 +1840,12 @@ export const api = {
 	},
 
 	/** Get the avatar URL for an agent (returns the raw URL, not fetched). */
-	agentAvatarUrl: (agentId: string) => `${API_BASE}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
+	agentAvatarUrl: (agentId: string) => `${getApiBase()}/agents/avatar?agent_id=${encodeURIComponent(agentId)}`,
 
 	/** Upload an avatar image for an agent. */
 	uploadAvatar: async (agentId: string, file: File) => {
 		const params = new URLSearchParams({ agent_id: agentId });
-		const response = await fetch(`${API_BASE}/agents/avatar?${params}`, {
+		const response = await fetch(`${getApiBase()}/agents/avatar?${params}`, {
 			method: "POST",
 			headers: { "Content-Type": file.type },
 			body: file,
@@ -1836,7 +1859,7 @@ export const api = {
 	/** Delete the avatar for an agent. */
 	deleteAvatar: async (agentId: string) => {
 		const params = new URLSearchParams({ agent_id: agentId });
-		const response = await fetch(`${API_BASE}/agents/avatar?${params}`, {
+		const response = await fetch(`${getApiBase()}/agents/avatar?${params}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -1848,7 +1871,7 @@ export const api = {
 	agentConfig: (agentId: string) =>
 		fetchJson<AgentConfigResponse>(`/agents/config?agent_id=${encodeURIComponent(agentId)}`),
 	updateAgentConfig: async (request: AgentConfigUpdateRequest) => {
-		const response = await fetch(`${API_BASE}/agents/config`, {
+		const response = await fetch(`${getApiBase()}/agents/config`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -1871,7 +1894,7 @@ export const api = {
 	},
 
 	createCronJob: async (agentId: string, request: CreateCronRequest) => {
-		const response = await fetch(`${API_BASE}/agents/cron`, {
+		const response = await fetch(`${getApiBase()}/agents/cron`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -1884,7 +1907,7 @@ export const api = {
 
 	deleteCronJob: async (agentId: string, cronId: string) => {
 		const search = new URLSearchParams({ agent_id: agentId, cron_id: cronId });
-		const response = await fetch(`${API_BASE}/agents/cron?${search}`, {
+		const response = await fetch(`${getApiBase()}/agents/cron?${search}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -1894,7 +1917,7 @@ export const api = {
 	},
 
 	toggleCronJob: async (agentId: string, cronId: string, enabled: boolean) => {
-		const response = await fetch(`${API_BASE}/agents/cron/toggle`, {
+		const response = await fetch(`${getApiBase()}/agents/cron/toggle`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, cron_id: cronId, enabled }),
@@ -1906,7 +1929,7 @@ export const api = {
 	},
 
 	triggerCronJob: async (agentId: string, cronId: string) => {
-		const response = await fetch(`${API_BASE}/agents/cron/trigger`, {
+		const response = await fetch(`${getApiBase()}/agents/cron/trigger`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, cron_id: cronId }),
@@ -1918,7 +1941,7 @@ export const api = {
 	},
 
 	cancelProcess: async (channelId: string, processType: "worker" | "branch", processId: string) => {
-		const response = await fetch(`${API_BASE}/channels/cancel`, {
+		const response = await fetch(`${getApiBase()}/channels/cancel`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ channel_id: channelId, process_type: processType, process_id: processId }),
@@ -1932,7 +1955,7 @@ export const api = {
 	// Provider management
 	providers: () => fetchJson<ProvidersResponse>("/providers"),
 	updateProvider: async (provider: string, apiKey: string, model: string) => {
-		const response = await fetch(`${API_BASE}/providers`, {
+		const response = await fetch(`${getApiBase()}/providers`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ provider, api_key: apiKey, model }),
@@ -1943,7 +1966,7 @@ export const api = {
 		return response.json() as Promise<ProviderActionResponse>;
 	},
 	testProviderModel: async (provider: string, apiKey: string, model: string) => {
-		const response = await fetch(`${API_BASE}/providers/test`, {
+		const response = await fetch(`${getApiBase()}/providers/test`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ provider, api_key: apiKey, model }),
@@ -1954,7 +1977,7 @@ export const api = {
 		return response.json() as Promise<ProviderModelTestResponse>;
 	},
 	startOpenAiOAuthBrowser: async (params: {model: string}) => {
-		const response = await fetch(`${API_BASE}/providers/openai/oauth/browser/start`, {
+		const response = await fetch(`${getApiBase()}/providers/openai/oauth/browser/start`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -1968,7 +1991,7 @@ export const api = {
 	},
 	openAiOAuthBrowserStatus: async (state: string) => {
 		const response = await fetch(
-			`${API_BASE}/providers/openai/oauth/browser/status?state=${encodeURIComponent(state)}`,
+			`${getApiBase()}/providers/openai/oauth/browser/status?state=${encodeURIComponent(state)}`,
 		);
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
@@ -1976,7 +1999,7 @@ export const api = {
 		return response.json() as Promise<OpenAiOAuthBrowserStatusResponse>;
 	},
 	removeProvider: async (provider: string) => {
-		const response = await fetch(`${API_BASE}/providers/${encodeURIComponent(provider)}`, {
+		const response = await fetch(`${getApiBase()}/providers/${encodeURIComponent(provider)}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -1994,7 +2017,7 @@ export const api = {
 		return fetchJson<ModelsResponse>(`/models${query}`);
 	},
 	refreshModels: async () => {
-		const response = await fetch(`${API_BASE}/models/refresh`, {
+		const response = await fetch(`${getApiBase()}/models/refresh`, {
 			method: "POST",
 		});
 		if (!response.ok) {
@@ -2013,7 +2036,7 @@ export const api = {
 			formData.append("files", file);
 		}
 		const response = await fetch(
-			`${API_BASE}/agents/ingest/upload?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/ingest/upload?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "POST", body: formData },
 		);
 		if (!response.ok) {
@@ -2024,7 +2047,7 @@ export const api = {
 
 	deleteIngestFile: async (agentId: string, contentHash: string) => {
 		const params = new URLSearchParams({ agent_id: agentId, content_hash: contentHash });
-		const response = await fetch(`${API_BASE}/agents/ingest/files?${params}`, {
+		const response = await fetch(`${getApiBase()}/agents/ingest/files?${params}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -2044,7 +2067,7 @@ export const api = {
 	},
 
 	createBinding: async (request: CreateBindingRequest) => {
-		const response = await fetch(`${API_BASE}/bindings`, {
+		const response = await fetch(`${getApiBase()}/bindings`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2056,7 +2079,7 @@ export const api = {
 	},
 
 	updateBinding: async (request: UpdateBindingRequest) => {
-		const response = await fetch(`${API_BASE}/bindings`, {
+		const response = await fetch(`${getApiBase()}/bindings`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2068,7 +2091,7 @@ export const api = {
 	},
 
 	deleteBinding: async (request: DeleteBindingRequest) => {
-		const response = await fetch(`${API_BASE}/bindings`, {
+		const response = await fetch(`${getApiBase()}/bindings`, {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2082,7 +2105,7 @@ export const api = {
 	togglePlatform: async (platform: string, enabled: boolean, adapter?: string) => {
 		const body: Record<string, unknown> = { platform, enabled };
 		if (adapter) body.adapter = adapter;
-		const response = await fetch(`${API_BASE}/messaging/toggle`, {
+		const response = await fetch(`${getApiBase()}/messaging/toggle`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
@@ -2096,7 +2119,7 @@ export const api = {
 	disconnectPlatform: async (platform: string, adapter?: string) => {
 		const body: Record<string, unknown> = { platform };
 		if (adapter) body.adapter = adapter;
-		const response = await fetch(`${API_BASE}/messaging/disconnect`, {
+		const response = await fetch(`${getApiBase()}/messaging/disconnect`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(body),
@@ -2108,7 +2131,7 @@ export const api = {
 	},
 
 	createMessagingInstance: async (request: CreateMessagingInstanceRequest) => {
-		const response = await fetch(`${API_BASE}/messaging/instances`, {
+		const response = await fetch(`${getApiBase()}/messaging/instances`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2120,7 +2143,7 @@ export const api = {
 	},
 
 	deleteMessagingInstance: async (request: DeleteMessagingInstanceRequest) => {
-		const response = await fetch(`${API_BASE}/messaging/instances`, {
+		const response = await fetch(`${getApiBase()}/messaging/instances`, {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2135,7 +2158,7 @@ export const api = {
 	globalSettings: () => fetchJson<GlobalSettingsResponse>("/settings"),
 	
 	updateGlobalSettings: async (settings: GlobalSettingsUpdate) => {
-		const response = await fetch(`${API_BASE}/settings`, {
+		const response = await fetch(`${getApiBase()}/settings`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(settings),
@@ -2149,7 +2172,7 @@ export const api = {
 	// Raw config API
 	rawConfig: () => fetchJson<RawConfigResponse>("/config/raw"),
 	updateRawConfig: async (content: string) => {
-		const response = await fetch(`${API_BASE}/config/raw`, {
+		const response = await fetch(`${getApiBase()}/config/raw`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ content }),
@@ -2169,14 +2192,14 @@ export const api = {
 	// Update API
 	updateCheck: () => fetchJson<UpdateStatus>("/update/check"),
 	updateCheckNow: async () => {
-		const response = await fetch(`${API_BASE}/update/check`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/update/check`, { method: "POST" });
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<UpdateStatus>;
 	},
 	updateApply: async () => {
-		const response = await fetch(`${API_BASE}/update/apply`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/update/apply`, { method: "POST" });
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);
 		}
@@ -2188,7 +2211,7 @@ export const api = {
 		fetchJson<SkillsListResponse>(`/agents/skills?agent_id=${encodeURIComponent(agentId)}`),
 	
 	installSkill: async (request: InstallSkillRequest) => {
-		const response = await fetch(`${API_BASE}/agents/skills/install`, {
+		const response = await fetch(`${getApiBase()}/agents/skills/install`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2200,7 +2223,7 @@ export const api = {
 	},
 	
 	removeSkill: async (request: RemoveSkillRequest) => {
-		const response = await fetch(`${API_BASE}/agents/skills/remove`, {
+		const response = await fetch(`${getApiBase()}/agents/skills/remove`, {
 			method: "DELETE",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2222,7 +2245,7 @@ export const api = {
 			form.append("file", file);
 		}
 		const response = await fetch(
-			`${API_BASE}/agents/skills/upload?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/skills/upload?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "POST", body: form },
 		);
 		if (!response.ok) {
@@ -2253,7 +2276,7 @@ export const api = {
 	agentLinks: (agentId: string) =>
 		fetchJson<LinksResponse>(`/agents/${encodeURIComponent(agentId)}/links`),
 	createLink: async (request: CreateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
-		const response = await fetch(`${API_BASE}/links`, {
+		const response = await fetch(`${getApiBase()}/links`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2265,7 +2288,7 @@ export const api = {
 	},
 	updateLink: async (from: string, to: string, request: UpdateLinkRequest): Promise<{ link: AgentLinkResponse }> => {
 		const response = await fetch(
-			`${API_BASE}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+			`${getApiBase()}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
 			{
 				method: "PUT",
 				headers: { "Content-Type": "application/json" },
@@ -2279,7 +2302,7 @@ export const api = {
 	},
 	deleteLink: async (from: string, to: string): Promise<void> => {
 		const response = await fetch(
-			`${API_BASE}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
+			`${getApiBase()}/links/${encodeURIComponent(from)}/${encodeURIComponent(to)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) {
@@ -2290,7 +2313,7 @@ export const api = {
 	// Agent Groups API
 	groups: () => fetchJson<{ groups: TopologyGroup[] }>("/groups"),
 	createGroup: async (request: CreateGroupRequest): Promise<{ group: TopologyGroup }> => {
-		const response = await fetch(`${API_BASE}/groups`, {
+		const response = await fetch(`${getApiBase()}/groups`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2302,7 +2325,7 @@ export const api = {
 	},
 	updateGroup: async (name: string, request: UpdateGroupRequest): Promise<{ group: TopologyGroup }> => {
 		const response = await fetch(
-			`${API_BASE}/groups/${encodeURIComponent(name)}`,
+			`${getApiBase()}/groups/${encodeURIComponent(name)}`,
 			{
 				method: "PUT",
 				headers: { "Content-Type": "application/json" },
@@ -2316,7 +2339,7 @@ export const api = {
 	},
 	deleteGroup: async (name: string): Promise<void> => {
 		const response = await fetch(
-			`${API_BASE}/groups/${encodeURIComponent(name)}`,
+			`${getApiBase()}/groups/${encodeURIComponent(name)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) {
@@ -2327,7 +2350,7 @@ export const api = {
 	// Humans API
 	humans: () => fetchJson<{ humans: TopologyHuman[] }>("/humans"),
 	createHuman: async (request: CreateHumanRequest): Promise<{ human: TopologyHuman }> => {
-		const response = await fetch(`${API_BASE}/humans`, {
+		const response = await fetch(`${getApiBase()}/humans`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify(request),
@@ -2339,7 +2362,7 @@ export const api = {
 	},
 	updateHuman: async (id: string, request: UpdateHumanRequest): Promise<{ human: TopologyHuman }> => {
 		const response = await fetch(
-			`${API_BASE}/humans/${encodeURIComponent(id)}`,
+			`${getApiBase()}/humans/${encodeURIComponent(id)}`,
 			{
 				method: "PUT",
 				headers: { "Content-Type": "application/json" },
@@ -2353,7 +2376,7 @@ export const api = {
 	},
 	deleteHuman: async (id: string): Promise<void> => {
 		const response = await fetch(
-			`${API_BASE}/humans/${encodeURIComponent(id)}`,
+			`${getApiBase()}/humans/${encodeURIComponent(id)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) {
@@ -2363,7 +2386,7 @@ export const api = {
 
 	// Web Chat API
 	webChatSend: (agentId: string, sessionId: string, message: string, senderName?: string) =>
-		fetch(`${API_BASE}/webchat/send`, {
+		fetch(`${getApiBase()}/webchat/send`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
@@ -2375,7 +2398,7 @@ export const api = {
 		}),
 
 	webChatHistory: (agentId: string, sessionId: string, limit = 100) =>
-		fetch(`${API_BASE}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
+		fetch(`${getApiBase()}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
 	// Tasks API
 	listTasks: (agentId: string, params?: { status?: TaskStatus; priority?: TaskPriority; limit?: number }) => {
@@ -2388,7 +2411,7 @@ export const api = {
 	getTask: (agentId: string, taskNumber: number) =>
 		fetchJson<TaskResponse>(`/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`),
 	createTask: async (agentId: string, request: CreateTaskRequest): Promise<TaskResponse> => {
-		const response = await fetch(`${API_BASE}/agents/tasks`, {
+		const response = await fetch(`${getApiBase()}/agents/tasks`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2397,7 +2420,7 @@ export const api = {
 		return response.json() as Promise<TaskResponse>;
 	},
 	updateTask: async (agentId: string, taskNumber: number, request: UpdateTaskRequest): Promise<TaskResponse> => {
-		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}`, {
+		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2406,14 +2429,14 @@ export const api = {
 		return response.json() as Promise<TaskResponse>;
 	},
 	deleteTask: async (agentId: string, taskNumber: number): Promise<TaskActionResponse> => {
-		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`, {
+		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskActionResponse>;
 	},
 	approveTask: async (agentId: string, taskNumber: number, approvedBy?: string): Promise<TaskResponse> => {
-		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/approve`, {
+		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}/approve`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId, approved_by: approvedBy }),
@@ -2422,7 +2445,7 @@ export const api = {
 		return response.json() as Promise<TaskResponse>;
 	},
 	executeTask: async (agentId: string, taskNumber: number): Promise<TaskResponse> => {
-		const response = await fetch(`${API_BASE}/agents/tasks/${taskNumber}/execute`, {
+		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}/execute`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ agent_id: agentId }),
@@ -2435,7 +2458,7 @@ export const api = {
 	secretsStatus: () => fetchJson<SecretStoreStatus>("/secrets/status"),
 	listSecrets: () => fetchJson<SecretListResponse>("/secrets"),
 	putSecret: async (name: string, value: string, category?: SecretCategory): Promise<PutSecretResponse> => {
-		const response = await fetch(`${API_BASE}/secrets/${encodeURIComponent(name)}`, {
+		const response = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ value, category }),
@@ -2447,7 +2470,7 @@ export const api = {
 		return response.json() as Promise<PutSecretResponse>;
 	},
 	deleteSecret: async (name: string): Promise<DeleteSecretResponse> => {
-		const response = await fetch(`${API_BASE}/secrets/${encodeURIComponent(name)}`, {
+		const response = await fetch(`${getApiBase()}/secrets/${encodeURIComponent(name)}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) {
@@ -2457,7 +2480,7 @@ export const api = {
 		return response.json() as Promise<DeleteSecretResponse>;
 	},
 	enableEncryption: async (): Promise<EncryptResponse> => {
-		const response = await fetch(`${API_BASE}/secrets/encrypt`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/secrets/encrypt`, { method: "POST" });
 		if (!response.ok) {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
@@ -2465,7 +2488,7 @@ export const api = {
 		return response.json() as Promise<EncryptResponse>;
 	},
 	unlockSecrets: async (masterKey: string): Promise<UnlockResponse> => {
-		const response = await fetch(`${API_BASE}/secrets/unlock`, {
+		const response = await fetch(`${getApiBase()}/secrets/unlock`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ master_key: masterKey }),
@@ -2477,7 +2500,7 @@ export const api = {
 		return response.json() as Promise<UnlockResponse>;
 	},
 	lockSecrets: async (): Promise<{ state: string; message: string }> => {
-		const response = await fetch(`${API_BASE}/secrets/lock`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/secrets/lock`, { method: "POST" });
 		if (!response.ok) {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
@@ -2485,7 +2508,7 @@ export const api = {
 		return response.json();
 	},
 	rotateKey: async (): Promise<{ master_key: string; message: string }> => {
-		const response = await fetch(`${API_BASE}/secrets/rotate`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/secrets/rotate`, { method: "POST" });
 		if (!response.ok) {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
@@ -2493,7 +2516,7 @@ export const api = {
 		return response.json();
 	},
 	migrateSecrets: async (): Promise<MigrateResponse> => {
-		const response = await fetch(`${API_BASE}/secrets/migrate`, { method: "POST" });
+		const response = await fetch(`${getApiBase()}/secrets/migrate`, { method: "POST" });
 		if (!response.ok) {
 			const body = await response.json().catch(() => ({}));
 			throw new Error(body.error || `API error: ${response.status}`);
@@ -2514,7 +2537,7 @@ export const api = {
 		),
 
 	createProject: async (agentId: string, request: CreateProjectRequest): Promise<ProjectWithRelations> => {
-		const response = await fetch(`${API_BASE}/agents/projects`, {
+		const response = await fetch(`${getApiBase()}/agents/projects`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2524,7 +2547,7 @@ export const api = {
 	},
 
 	updateProject: async (agentId: string, projectId: string, request: UpdateProjectRequest): Promise<ProjectWithRelations> => {
-		const response = await fetch(`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}`, {
+		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2535,7 +2558,7 @@ export const api = {
 
 	deleteProject: async (agentId: string, projectId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
@@ -2544,7 +2567,7 @@ export const api = {
 
 	scanProject: async (agentId: string, projectId: string): Promise<ProjectWithRelations> => {
 		const response = await fetch(
-			`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}/scan?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/scan?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "POST" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
@@ -2557,7 +2580,7 @@ export const api = {
 		),
 
 	createProjectRepo: async (agentId: string, projectId: string, request: CreateRepoRequest): Promise<{ repo: ProjectRepo }> => {
-		const response = await fetch(`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}/repos`, {
+		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2568,7 +2591,7 @@ export const api = {
 
 	deleteProjectRepo: async (agentId: string, projectId: string, repoId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/repos/${encodeURIComponent(repoId)}?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
@@ -2576,7 +2599,7 @@ export const api = {
 	},
 
 	createProjectWorktree: async (agentId: string, projectId: string, request: CreateWorktreeRequest): Promise<{ worktree: ProjectWorktree }> => {
-		const response = await fetch(`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}/worktrees`, {
+		const response = await fetch(`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({ ...request, agent_id: agentId }),
@@ -2587,12 +2610,12 @@ export const api = {
 
 	deleteProjectWorktree: async (agentId: string, projectId: string, worktreeId: string): Promise<ProjectActionResponse> => {
 		const response = await fetch(
-			`${API_BASE}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}?agent_id=${encodeURIComponent(agentId)}`,
+			`${getApiBase()}/agents/projects/${encodeURIComponent(projectId)}/worktrees/${encodeURIComponent(worktreeId)}?agent_id=${encodeURIComponent(agentId)}`,
 			{ method: "DELETE" },
 		);
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ProjectActionResponse>;
 	},
 
-	eventsUrl: `${API_BASE}/events`,
+	getEventsUrl: () => `${getApiBase()}/events`,
 };

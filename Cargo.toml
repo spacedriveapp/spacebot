@@ -153,6 +153,7 @@ prometheus = { version = "0.13", optional = true }
 pdf-extract = "0.10.0"
 open = "5.3.3"
 urlencoding = "2.1.3"
+url = "2"
 moka = "0.12.13"
 
 [features]

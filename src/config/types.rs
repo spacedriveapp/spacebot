@@ -660,6 +660,63 @@ impl Default for MemoryPersistenceConfig {
     }
 }
 
+/// Working memory system configuration.
+///
+/// Controls the temporal event log, intra-day synthesis, channel activity map,
+/// and persistence trigger thresholds.
+#[derive(Debug, Clone, Copy)]
+pub struct WorkingMemoryConfig {
+    /// Whether working memory context injection is enabled.
+    pub enabled: bool,
+    /// Events before an intra-day synthesis batch is triggered.
+    pub intraday_batch_threshold: usize,
+    /// Seconds before time-based fallback triggers intra-day synthesis.
+    pub intraday_time_fallback_secs: u64,
+    /// Maximum unsynthesized recent events to show in the raw tail.
+    pub today_max_unsynthesized_events: usize,
+    /// Token budget for the entire working memory section.
+    pub context_token_budget: usize,
+    /// Token budget for the channel activity map.
+    pub channel_map_token_budget: usize,
+    /// Maximum channels to show in the activity map.
+    pub channel_map_max_channels: usize,
+    /// Hide inactive channels after this many hours.
+    pub channel_map_inactive_hours: u64,
+    /// Minimum importance for events to be included under token pressure.
+    pub min_importance_under_pressure: f32,
+    /// Days to retain raw events before pruning.
+    pub event_retention_days: i64,
+    /// Daily summary max words.
+    pub daily_summary_max_words: usize,
+    /// Persistence branch trigger: message count threshold.
+    pub persistence_message_threshold: usize,
+    /// Persistence branch trigger: time threshold in seconds.
+    pub persistence_time_threshold_secs: u64,
+    /// Persistence branch trigger: event density threshold.
+    pub persistence_event_density_threshold: usize,
+}
+
+impl Default for WorkingMemoryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            intraday_batch_threshold: 15,
+            intraday_time_fallback_secs: 14400,
+            today_max_unsynthesized_events: 10,
+            context_token_budget: 1500,
+            channel_map_token_budget: 300,
+            channel_map_max_channels: 10,
+            channel_map_inactive_hours: 24,
+            min_importance_under_pressure: 0.5,
+            event_retention_days: 30,
+            daily_summary_max_words: 300,
+            persistence_message_threshold: 20,
+            persistence_time_threshold_secs: 900,
+            persistence_event_density_threshold: 5,
+        }
+    }
+}
+
 impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
@@ -870,6 +927,10 @@ pub struct CortexConfig {
     pub association_updates_threshold: f32,
     /// Max associations to create per pass (rate limit).
     pub association_max_per_pass: usize,
+    /// Knowledge synthesis max words (replaces bulletin_max_words for Layer 5).
+    pub knowledge_synthesis_max_words: usize,
+    /// Debounce seconds after last memory change before regenerating knowledge synthesis.
+    pub knowledge_synthesis_debounce_secs: u64,
 }
 
 impl Default for CortexConfig {
@@ -893,6 +954,8 @@ impl Default for CortexConfig {
             association_similarity_threshold: 0.85,
             association_updates_threshold: 0.95,
             association_max_per_pass: 100,
+            knowledge_synthesis_max_words: 500,
+            knowledge_synthesis_debounce_secs: 60,
         }
     }
 }
@@ -1075,14 +1138,14 @@ pub(super) fn evaluate_work_readiness(
         })
         .or(status.bulletin_age_secs);
 
+    // Knowledge synthesis is change-driven, not timer-driven. Staleness
+    // is no longer a readiness concern — only "never generated" matters.
     let reason = if status.state != WarmupState::Warm {
         Some(WorkReadinessReason::StateNotWarm)
     } else if warmup_config.eager_embedding_load && !status.embedding_ready {
         Some(WorkReadinessReason::EmbeddingNotReady)
     } else if bulletin_age_secs.is_none() {
         Some(WorkReadinessReason::BulletinMissing)
-    } else if bulletin_age_secs.is_some_and(|age| age > stale_after_secs) {
-        Some(WorkReadinessReason::BulletinStale)
     } else {
         None
     };
@@ -1473,6 +1536,7 @@ pub struct Binding {
     pub guild_id: Option<String>,
     pub workspace_id: Option<String>, // Slack workspace (team) ID
     pub chat_id: Option<String>,      // Telegram group ID
+    pub team_id: Option<String>,      // Mattermost team ID
     /// Channel IDs this binding applies to. If empty, all channels in the guild/workspace are allowed.
     pub channel_ids: Vec<String>,
     /// Require explicit @mention (or reply-to-bot) for inbound messages.
@@ -1561,11 +1625,18 @@ impl Binding {
                 .get("twitch_channel")
                 .and_then(|v| v.as_str());
 
+            // Also check Mattermost channel ID
+            let mattermost_channel = message
+                .metadata
+                .get("mattermost_channel_id")
+                .and_then(|v| v.as_str());
+
             let direct_match = message_channel
                 .as_ref()
                 .is_some_and(|id| self.channel_ids.contains(id))
                 || slack_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()))
-                || twitch_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()));
+                || twitch_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()))
+                || mattermost_channel.is_some_and(|id| self.channel_ids.contains(&id.to_string()));
             let parent_match = parent_channel
                 .as_ref()
                 .is_some_and(|id| self.channel_ids.contains(id));
@@ -1587,6 +1658,18 @@ impl Binding {
             }
         }
 
+        // Mattermost team filter
+        if let Some(team_id) = &self.team_id
+            && self.channel == "mattermost"
+        {
+            let message_team = message
+                .metadata
+                .get("mattermost_team_id")
+                .and_then(|v| v.as_str());
+            if message_team != Some(team_id.as_str()) {
+                return false;
+            }
+        }
         true
     }
 
@@ -1629,6 +1712,7 @@ impl Binding {
             "slack" => "slack_mentions_or_replies_to_bot",
             "twitch" => "twitch_mentions_or_replies_to_bot",
             "telegram" => "telegram_mentions_or_replies_to_bot",
+            "mattermost" => "mattermost_mentions_or_replies_to_bot",
             // Unknown platforms: if require_mention is set, default to
             // requiring a mention (safe default).
             _ => return false,
@@ -1670,7 +1754,7 @@ pub(super) struct AdapterValidationState {
 pub(super) fn is_named_adapter_platform(platform: &str) -> bool {
     matches!(
         platform,
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "signal"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "signal" | "mattermost"
     )
 }
 
@@ -1853,7 +1937,95 @@ pub(super) fn build_adapter_validation_states(
         );
     }
 
+    if let Some(mattermost) = &messaging.mattermost {
+        let named_instances = validate_instance_names(
+            "mattermost",
+            mattermost
+                .instances
+                .iter()
+                .map(|instance| instance.name.as_str()),
+        )?;
+        let default_present =
+            !mattermost.base_url.trim().is_empty() && !mattermost.token.trim().is_empty();
+        validate_runtime_keys("mattermost", default_present, &named_instances)?;
+        if default_present {
+            validate_mattermost_url(&mattermost.base_url)?;
+        }
+        for instance in &mattermost.instances {
+            if instance.enabled && !instance.base_url.is_empty() {
+                validate_mattermost_url(&instance.base_url)?;
+            }
+        }
+        states.insert(
+            "mattermost",
+            AdapterValidationState {
+                default_present,
+                named_instances,
+            },
+        );
+    }
+
     Ok(states)
+}
+
+fn validate_mattermost_url(url: &str) -> Result<()> {
+    let parsed = url::Url::parse(url)
+        .map_err(|e| ConfigError::Invalid(format!("invalid mattermost base_url '{url}': {e}")))?;
+
+    if !parsed.username().is_empty() || parsed.password().is_some() {
+        return Err(ConfigError::Invalid(
+            "mattermost base_url must not contain credentials".to_string(),
+        )
+        .into());
+    }
+    let path = parsed.path();
+    if !path.is_empty() && path != "/" {
+        return Err(ConfigError::Invalid(format!(
+            "mattermost base_url must be an origin URL (no path), got path: {path}"
+        ))
+        .into());
+    }
+    if parsed.query().is_some() {
+        return Err(ConfigError::Invalid(
+            "mattermost base_url must not contain a query string".to_string(),
+        )
+        .into());
+    }
+    if parsed.fragment().is_some() {
+        return Err(ConfigError::Invalid(
+            "mattermost base_url must not contain a fragment".to_string(),
+        )
+        .into());
+    }
+
+    match parsed.scheme() {
+        "https" => {}
+        "http" => {
+            let is_local = match parsed.host() {
+                Some(url::Host::Domain(h)) => h.eq_ignore_ascii_case("localhost"),
+                Some(url::Host::Ipv4(addr)) => addr == std::net::Ipv4Addr::LOCALHOST,
+                Some(url::Host::Ipv6(addr)) => addr == std::net::Ipv6Addr::LOCALHOST,
+                None => false,
+            };
+            if !is_local {
+                return Err(ConfigError::Invalid(
+                    "mattermost base_url must use https for non-localhost hosts".to_string(),
+                )
+                .into());
+            }
+            tracing::warn!(
+                host = parsed.host_str().unwrap_or("<unknown>"),
+                "mattermost base_url uses http for localhost"
+            );
+        }
+        scheme => {
+            return Err(ConfigError::Invalid(format!(
+                "mattermost base_url must use http or https, got: {scheme}"
+            ))
+            .into());
+        }
+    }
+    Ok(())
 }
 
 pub(super) fn validate_instance_names<'a>(
@@ -1974,6 +2146,7 @@ pub struct MessagingConfig {
     pub webhook: Option<WebhookConfig>,
     pub twitch: Option<TwitchConfig>,
     pub signal: Option<SignalConfig>,
+    pub mattermost: Option<MattermostConfig>,
 }
 
 #[derive(Clone)]
@@ -2564,5 +2737,151 @@ impl SystemSecrets for SignalConfig {
                 instance_pattern: None,
             },
         ]
+    }
+}
+
+#[derive(Clone)]
+pub struct MattermostConfig {
+    pub enabled: bool,
+    pub base_url: String,
+    pub token: String,
+    pub team_id: Option<String>,
+    pub instances: Vec<MattermostInstanceConfig>,
+    pub dm_allowed_users: Vec<String>,
+    pub max_attachment_bytes: usize,
+}
+
+impl std::fmt::Debug for MattermostConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostConfig")
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("team_id", &self.team_id)
+            .field("instances", &self.instances)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct MattermostInstanceConfig {
+    pub name: String,
+    pub enabled: bool,
+    pub base_url: String,
+    pub token: String,
+    pub team_id: Option<String>,
+    pub dm_allowed_users: Vec<String>,
+    pub max_attachment_bytes: usize,
+}
+
+impl SystemSecrets for MattermostConfig {
+    fn section() -> &'static str {
+        "mattermost"
+    }
+
+    fn is_messaging_adapter() -> bool {
+        true
+    }
+
+    fn secret_fields() -> &'static [SecretField] {
+        &[
+            SecretField {
+                toml_key: "token",
+                secret_name: "MATTERMOST_TOKEN",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "MATTERMOST",
+                    field_suffix: "TOKEN",
+                }),
+            },
+            SecretField {
+                toml_key: "base_url",
+                secret_name: "MATTERMOST_BASE_URL",
+                instance_pattern: Some(InstancePattern {
+                    platform_prefix: "MATTERMOST",
+                    field_suffix: "BASE_URL",
+                }),
+            },
+        ]
+    }
+}
+
+impl std::fmt::Debug for MattermostInstanceConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MattermostInstanceConfig")
+            .field("name", &self.name)
+            .field("enabled", &self.enabled)
+            .field("base_url", &self.base_url)
+            .field("token", &"[REDACTED]")
+            .field("team_id", &self.team_id)
+            .field("dm_allowed_users", &self.dm_allowed_users)
+            .field("max_attachment_bytes", &self.max_attachment_bytes)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod mattermost_url_tests {
+    use super::validate_mattermost_url;
+
+    #[test]
+    fn accepts_https_url() {
+        assert!(validate_mattermost_url("https://mattermost.example.com").is_ok());
+    }
+
+    #[test]
+    fn accepts_http_localhost_with_warning() {
+        // http is allowed only for localhost (with a warning)
+        assert!(validate_mattermost_url("http://localhost:8065").is_ok());
+        assert!(validate_mattermost_url("http://127.0.0.1:8065").is_ok());
+        assert!(validate_mattermost_url("http://[::1]:8065").is_ok());
+    }
+
+    #[test]
+    fn rejects_http_non_localhost() {
+        // http is rejected for non-local hosts
+        assert!(validate_mattermost_url("http://mattermost.example.com").is_err());
+        assert!(validate_mattermost_url("http://10.0.0.1").is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_scheme() {
+        assert!(validate_mattermost_url("ftp://mattermost.example.com").is_err());
+        assert!(validate_mattermost_url("ws://mattermost.example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_unparseable_url() {
+        assert!(validate_mattermost_url("not a url at all").is_err());
+        assert!(validate_mattermost_url("").is_err());
+    }
+
+    #[test]
+    fn rejects_credentials_in_url() {
+        assert!(validate_mattermost_url("https://user:pass@mattermost.example.com").is_err());
+        assert!(validate_mattermost_url("https://user@mattermost.example.com").is_err());
+    }
+
+    #[test]
+    fn rejects_non_root_path() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/some/path").is_err());
+        assert!(validate_mattermost_url("https://mattermost.example.com/mattermost").is_err());
+    }
+
+    #[test]
+    fn accepts_root_path() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/").is_ok());
+        assert!(validate_mattermost_url("https://mattermost.example.com").is_ok());
+    }
+
+    #[test]
+    fn rejects_query_string() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/?token=abc").is_err());
+    }
+
+    #[test]
+    fn rejects_fragment() {
+        assert!(validate_mattermost_url("https://mattermost.example.com/#section").is_err());
     }
 }

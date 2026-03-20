@@ -14,6 +14,7 @@ pub(super) struct BindingResponse {
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
+    team_id: Option<String>,
     channel_ids: Vec<String>,
     require_mention: bool,
     dm_allowed_users: Vec<String>,
@@ -42,6 +43,8 @@ pub(super) struct CreateBindingRequest {
     workspace_id: Option<String>,
     #[serde(default)]
     chat_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
     #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
@@ -115,6 +118,8 @@ pub(super) struct DeleteBindingRequest {
     workspace_id: Option<String>,
     #[serde(default)]
     chat_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -135,6 +140,8 @@ pub(super) struct UpdateBindingRequest {
     original_workspace_id: Option<String>,
     #[serde(default)]
     original_chat_id: Option<String>,
+    #[serde(default)]
+    original_team_id: Option<String>,
 
     agent_id: String,
     channel: String,
@@ -146,6 +153,8 @@ pub(super) struct UpdateBindingRequest {
     workspace_id: Option<String>,
     #[serde(default)]
     chat_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
     #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
@@ -185,6 +194,7 @@ pub(super) async fn list_bindings(
             guild_id: b.guild_id,
             workspace_id: b.workspace_id,
             chat_id: b.chat_id,
+            team_id: b.team_id,
             channel_ids: b.channel_ids,
             require_mention: b.require_mention,
             dm_allowed_users: b.dm_allowed_users,
@@ -432,6 +442,14 @@ pub(super) async fn create_binding(
     }
     if let Some(chat_id) = &request.chat_id {
         binding_table["chat_id"] = toml_edit::value(chat_id.as_str());
+    }
+    if let Some(team_id) = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding_table["team_id"] = toml_edit::value(team_id);
     }
     if !request.channel_ids.is_empty() {
         let mut arr = toml_edit::Array::new();
@@ -682,6 +700,12 @@ pub(super) async fn update_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request
+        .original_team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -700,32 +724,39 @@ pub(super) async fn update_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.original_guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.original_workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.original_chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
+        let toml_team_id = table
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
             && matches_guild
             && matches_workspace
             && matches_chat
+            && matches_team
         {
             match_idx = Some(i);
             break;
@@ -750,6 +781,7 @@ pub(super) async fn update_binding(
     binding.remove("guild_id");
     binding.remove("workspace_id");
     binding.remove("chat_id");
+    binding.remove("team_id");
 
     if let Some(adapter) = request
         .adapter
@@ -774,6 +806,14 @@ pub(super) async fn update_binding(
         && !chat_id.is_empty()
     {
         binding["chat_id"] = toml_edit::value(chat_id);
+    }
+    if let Some(team_id) = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding["team_id"] = toml_edit::value(team_id);
     }
 
     if !request.channel_ids.is_empty() {
@@ -876,6 +916,12 @@ pub(super) async fn delete_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -894,32 +940,39 @@ pub(super) async fn delete_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
+        let toml_team_id = table
+            .get("team_id")
+            .and_then(|v: &toml_edit::Item| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
             && matches_guild
             && matches_workspace
             && matches_chat
+            && matches_team
         {
             match_idx = Some(i);
             break;

@@ -46,6 +46,7 @@
         "graphology": "^0.26.0",
         "graphology-layout-forceatlas2": "^0.10.1",
         "graphology-types": "^0.24.8",
+        "ogl": "^1.0.11",
         "react": "^19.0.0",
         "react-dom": "^19.0.0",
         "react-hook-form": "^7.71.1",
@@ -69,6 +70,10 @@
         "tailwindcss-animate": "^1.0.7",
         "typescript": "^5.6.2",
         "vite": "^6.0.0",
+      },
+      "optionalDependencies": {
+        "@tauri-apps/api": "^2",
+        "@tauri-apps/plugin-shell": "^2",
       },
     },
   },
@@ -512,6 +517,10 @@
     "@tanstack/store": ["@tanstack/store@0.8.0", "", {}, ""],
 
     "@tanstack/virtual-core": ["@tanstack/virtual-core@3.13.18", "", {}, ""],
+
+    "@tauri-apps/api": ["@tauri-apps/api@2.10.1", "", {}, "sha512-hKL/jWf293UDSUN09rR69hrToyIXBb8CjGaWC7gfinvnQrBVvnLr08FeFi38gxtugAVyVcTa5/FD/Xnkb1siBw=="],
+
+    "@tauri-apps/plugin-shell": ["@tauri-apps/plugin-shell@2.3.5", "", { "dependencies": { "@tauri-apps/api": "^2.10.1" } }, "sha512-jewtULhiQ7lI7+owCKAjc8tYLJr92U16bPOeAa472LHJdgaibLP83NcfAF2e+wkEcA53FxKQAZ7byDzs2eeizg=="],
 
     "@types/babel__core": ["@types/babel__core@7.20.5", "", { "dependencies": { "@babel/parser": "^7.20.7", "@babel/types": "^7.20.7", "@types/babel__generator": "*", "@types/babel__template": "*", "@types/babel__traverse": "*" } }, ""],
 
@@ -1202,6 +1211,8 @@
     "object-assign": ["object-assign@4.1.1", "", {}, ""],
 
     "object-hash": ["object-hash@3.0.0", "", {}, ""],
+
+    "ogl": ["ogl@1.0.11", "", {}, "sha512-kUpC154AFfxi16pmZUK4jk3J+8zxwTWGPo03EoYA8QPbzikHoaC82n6pNTbd+oEaJonaE8aPWBlX7ad9zrqLsA=="],
 
     "on-change": ["on-change@4.0.2", "", {}, "sha512-cMtCyuJmTx/bg2HCpHo3ZLeF7FZnBOapLqZHr2AlLeJ5Ul0Zu2mUJJz051Fdwu/Et2YW04ZD+TtU+gVy0ACNCA=="],
 

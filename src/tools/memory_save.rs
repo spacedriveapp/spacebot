@@ -20,6 +20,7 @@ pub struct MemorySaveTool {
     memory_search: Arc<MemorySearch>,
     event_context: Option<MemorySaveEventContext>,
     contract_state: Option<Arc<super::memory_persistence_complete::MemoryPersistenceContractState>>,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +36,7 @@ impl MemorySaveTool {
             memory_search,
             event_context: None,
             contract_state: None,
+            working_memory: None,
         }
     }
 
@@ -56,6 +58,12 @@ impl MemorySaveTool {
         contract_state: Arc<super::memory_persistence_complete::MemoryPersistenceContractState>,
     ) -> Self {
         self.contract_state = Some(contract_state);
+        self
+    }
+
+    /// Enable working memory event emission for successful memory saves.
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
         self
     }
 }
@@ -400,6 +408,20 @@ impl Tool for MemorySaveTool {
                     "failed to emit memory-saved event"
                 );
             }
+        }
+
+        if let Some(working_memory) = &self.working_memory {
+            let content_preview = summarize_memory_content(&memory.content);
+            let mut builder = working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::MemorySaved,
+                    format!("Memory saved ({}): {content_preview}", memory.memory_type),
+                )
+                .importance(0.5);
+            if let Some(channel_id) = &memory.channel_id {
+                builder = builder.channel(channel_id.to_string());
+            }
+            builder.record();
         }
 
         #[cfg(feature = "metrics")]

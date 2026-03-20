@@ -19,6 +19,7 @@ pub struct TaskUpdateTool {
     task_store: Arc<TaskStore>,
     agent_id: AgentId,
     scope: TaskUpdateScope,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 impl TaskUpdateTool {
@@ -27,6 +28,7 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Branch,
+            working_memory: None,
         }
     }
 
@@ -35,7 +37,13 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Worker(worker_id),
+            working_memory: None,
         }
+    }
+
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
+        self
     }
 }
 
@@ -224,6 +232,19 @@ impl Tool for TaskUpdateTool {
             .await
             .map_err(|error| TaskUpdateError(format!("{error}")))?
             .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?;
+
+        if let Some(working_memory) = &self.working_memory {
+            working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::TaskUpdate,
+                    format!(
+                        "Task #{} updated to {}",
+                        updated.task_number, updated.status
+                    ),
+                )
+                .importance(0.4)
+                .record();
+        }
 
         Ok(TaskUpdateOutput {
             success: true,

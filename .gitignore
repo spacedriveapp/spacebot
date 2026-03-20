@@ -30,6 +30,9 @@ node_modules/
 dist/
 build/
 
+# Desktop sidecar binaries (built by scripts/bundle-sidecar.sh)
+desktop/src-tauri/binaries/
+
 .idea
 list/
 agents/

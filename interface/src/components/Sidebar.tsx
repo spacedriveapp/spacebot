@@ -112,6 +112,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	const matchRoute = useMatchRoute();
 	const isOverview = matchRoute({ to: "/" });
 	const isSettings = matchRoute({ to: "/settings" });
+	const isOrchestrate = matchRoute({ to: "/orchestrate" });
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -146,6 +147,19 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 					title="Dashboard"
 				>
 					<HugeiconsIcon icon={DashboardSquare01Icon} className="h-4 w-4" />
+				</Link>
+				<Link
+					to="/orchestrate"
+					className={`flex h-8 w-8 items-center justify-center rounded-md ${
+						isOrchestrate ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					title="Orchestrate"
+				>
+					<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+						<rect x="1" y="2" width="4" height="12" rx="1" />
+						<rect x="6" y="2" width="4" height="12" rx="1" />
+						<rect x="11" y="2" width="4" height="12" rx="1" />
+					</svg>
 				</Link>
 				<Link
 					to="/settings"

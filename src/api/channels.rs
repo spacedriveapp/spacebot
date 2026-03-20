@@ -464,11 +464,192 @@ pub(super) async fn inspect_prompt(
 
     let sandbox_enabled = channel_state.deps.sandbox.containment_active();
 
+    // ── Render working memory layers (Layers 2 + 3) ──
+    let wm_config = **rc.working_memory.load();
+    let wm_timezone = channel_state.deps.working_memory.timezone();
+    let working_memory = crate::memory::working::render_working_memory(
+        &channel_state.deps.working_memory,
+        &query.channel_id,
+        &wm_config,
+        wm_timezone,
+    )
+    .await
+    .unwrap_or_default();
+
+    let channel_activity_map = crate::memory::working::render_channel_activity_map(
+        &channel_state.deps.sqlite_pool,
+        &channel_state.deps.working_memory,
+        &query.channel_id,
+        &wm_config,
+        wm_timezone,
+    )
+    .await
+    .unwrap_or_default();
+
+    // ── Available channels ──
+    let available_channels = {
+        let channels = channel_state
+            .channel_store
+            .list_active()
+            .await
+            .unwrap_or_default();
+        let entries: Vec<crate::prompts::engine::ChannelEntry> = channels
+            .into_iter()
+            .filter(|channel| {
+                channel.id.as_str() != query.channel_id.as_str()
+                    && channel.platform != "cron"
+                    && channel.platform != "webhook"
+            })
+            .map(|channel| crate::prompts::engine::ChannelEntry {
+                name: channel.display_name.unwrap_or_else(|| channel.id.clone()),
+                platform: channel.platform,
+                id: channel.id,
+            })
+            .collect();
+        if entries.is_empty() {
+            None
+        } else {
+            prompt_engine.render_available_channels(entries).ok()
+        }
+    };
+
+    // ── Org context ──
+    let org_context = {
+        let agent_id = channel_state.deps.agent_id.as_ref();
+        let all_links = channel_state.deps.links.load();
+        let links = crate::links::links_for_agent(&all_links, agent_id);
+        if links.is_empty() {
+            None
+        } else {
+            let all_humans = channel_state.deps.humans.load();
+            let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+                all_humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
+            let mut superiors = Vec::new();
+            let mut subordinates = Vec::new();
+            let mut peers = Vec::new();
+
+            for link in &links {
+                let is_from = link.from_agent_id == agent_id;
+                let other_id = if is_from {
+                    &link.to_agent_id
+                } else {
+                    &link.from_agent_id
+                };
+                let is_human = humans_by_id.contains_key(other_id.as_str());
+                let (name, role, description) =
+                    if let Some(human) = humans_by_id.get(other_id.as_str()) {
+                        let name = human
+                            .display_name
+                            .clone()
+                            .unwrap_or_else(|| other_id.clone());
+                        (name, human.role.clone(), human.description.clone())
+                    } else {
+                        let name = channel_state
+                            .deps
+                            .agent_names
+                            .get(other_id.as_str())
+                            .cloned()
+                            .unwrap_or_else(|| other_id.clone());
+                        (name, None, None)
+                    };
+                let info = crate::prompts::engine::LinkedAgent {
+                    name,
+                    id: other_id.clone(),
+                    is_human,
+                    role,
+                    description,
+                };
+                match link.kind {
+                    crate::links::LinkKind::Hierarchical => {
+                        if is_from {
+                            subordinates.push(info);
+                        } else {
+                            superiors.push(info);
+                        }
+                    }
+                    crate::links::LinkKind::Peer => peers.push(info),
+                }
+            }
+
+            if superiors.is_empty() && subordinates.is_empty() && peers.is_empty() {
+                None
+            } else {
+                prompt_engine
+                    .render_org_context(crate::prompts::engine::OrgContext {
+                        superiors,
+                        subordinates,
+                        peers,
+                    })
+                    .ok()
+            }
+        }
+    };
+
+    // ── Adapter prompt ──
+    let adapter = query.channel_id.split(':').next().filter(|a| !a.is_empty());
+    let adapter_prompt =
+        adapter.and_then(|adapter| prompt_engine.render_channel_adapter_prompt(adapter));
+
+    // ── Project context ──
+    let project_context = {
+        use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
+        let store = &channel_state.deps.project_store;
+        let projects = store
+            .list_projects(
+                &channel_state.deps.agent_id,
+                Some(crate::projects::ProjectStatus::Active),
+            )
+            .await
+            .unwrap_or_default();
+        if projects.is_empty() {
+            None
+        } else {
+            let mut contexts = Vec::with_capacity(projects.len());
+            for project in &projects {
+                let repos = store.list_repos(&project.id).await.unwrap_or_default();
+                let worktrees = store
+                    .list_worktrees_with_repos(&project.id)
+                    .await
+                    .unwrap_or_default();
+                contexts.push(ProjectContext {
+                    name: project.name.clone(),
+                    root_path: project.root_path.clone(),
+                    description: if project.description.is_empty() {
+                        None
+                    } else {
+                        Some(project.description.clone())
+                    },
+                    tags: project.tags.clone(),
+                    repos: repos
+                        .into_iter()
+                        .map(|repo| ProjectRepoContext {
+                            name: repo.name.clone(),
+                            path: repo.path.clone(),
+                            default_branch: repo.default_branch.clone(),
+                            remote_url: if repo.remote_url.is_empty() {
+                                None
+                            } else {
+                                Some(repo.remote_url.clone())
+                            },
+                        })
+                        .collect(),
+                    worktrees: worktrees
+                        .into_iter()
+                        .map(|worktree_with_repo| ProjectWorktreeContext {
+                            name: worktree_with_repo.worktree.name.clone(),
+                            path: worktree_with_repo.worktree.path.clone(),
+                            branch: worktree_with_repo.worktree.branch.clone(),
+                            repo_name: worktree_with_repo.repo_name.clone(),
+                        })
+                        .collect(),
+                });
+            }
+            prompt_engine.render_projects_context(contexts).ok()
+        }
+    };
+
     // ── Render the full system prompt ──
-    // This is a best-effort reconstruction from the API layer. It lacks
-    // available_channels, org_context, adapter_prompt, and project_context
-    // (those require Channel methods not available from ChannelState).
-    // Captured snapshots store the exact prompt the model received.
     let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
     let system_prompt = prompt_engine
         .render_channel_prompt_with_links(
@@ -478,13 +659,15 @@ pub(super) async fn inspect_prompt(
             worker_capabilities,
             conversation_context,
             empty_to_none(status_text),
-            None, // coalesce_hint
-            None, // available_channels — not available from API layer
+            None, // coalesce_hint — only set during batched message handling
+            available_channels,
             sandbox_enabled,
-            None, // org_context — not available from API layer
-            None, // adapter_prompt — not available from API layer
-            None, // project_context — not available from API layer
-            None, // backfill_transcript — not available from API layer
+            org_context,
+            adapter_prompt,
+            project_context,
+            None, // backfill_transcript — only set during channel initialization
+            empty_to_none(working_memory),
+            empty_to_none(channel_activity_map),
         )
         .unwrap_or_default();
 

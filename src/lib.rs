@@ -409,6 +409,8 @@ pub struct AgentDeps {
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
+    /// Working memory event log for temporal situational awareness.
+    pub working_memory: Arc<memory::WorkingMemoryStore>,
 }
 
 impl AgentDeps {

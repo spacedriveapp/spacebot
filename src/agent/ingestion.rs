@@ -499,6 +499,8 @@ async fn process_chunk(
         crate::conversation::ProcessRunLogger::new(deps.sqlite_pool.clone()),
         crate::tools::BranchToolProfile::MemoryPersistence {
             contract_state: contract_state.clone(),
+            working_memory: Some(deps.working_memory.clone()),
+            channel_id: None,
         },
     );
 

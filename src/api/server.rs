@@ -37,6 +37,10 @@ pub async fn start_http_server(
     state: Arc<ApiState>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    // Note: credentials are intentionally disabled. The API uses Bearer
+    // token auth (Authorization header), not cookies. Enabling credentials
+    // with mirror_request origin would allow any site to make credentialed
+    // cross-origin requests if cookie-based auth were ever added.
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
         .allow_methods([

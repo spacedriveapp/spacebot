@@ -8483,6 +8483,7 @@ dependencies = [
  "tracing-opentelemetry",
  "tracing-subscriber",
  "twitch-irc",
+ "url",
  "urlencoding",
  "uuid",
  "zip 2.4.2",

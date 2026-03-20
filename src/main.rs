@@ -1344,31 +1344,91 @@ fn bootstrap_secrets_store(
     // Try to auto-unlock if encrypted.
     if store.is_encrypted() {
         let keystore = spacebot::secrets::keystore::platform_keystore();
+        let tmpfs_paths = [
+            std::path::Path::new("/run/spacebot/master_key"),
+            std::path::Path::new("/run/secrets/master_key"),
+        ];
 
         // Hosted: check tmpfs-injected key.
-        let tmpfs_key_path = std::path::Path::new("/run/spacebot/master_key");
-        let master_key = if tmpfs_key_path.exists() {
-            std::fs::read(tmpfs_key_path).ok().inspect(|key| {
-                if let Err(error) = std::fs::remove_file(tmpfs_key_path) {
-                    tracing::warn!(%error, "failed to remove tmpfs master key — key may remain accessible");
+        let tmpfs_master_key = tmpfs_paths.iter().find_map(|path| {
+            if !path.exists() {
+                return None;
+            }
+
+            let raw_key = match std::fs::read(path) {
+                Ok(key) => key,
+                Err(error) => {
+                    tracing::warn!(%error, path = %path.display(), "failed to read tmpfs master key");
+                    return None;
                 }
-                if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, key) {
-                    tracing::warn!(%error, "failed to persist master key to OS credential store");
+            };
+
+            // Platform currently stores keys as 64-char hex strings. Decode
+            // those to raw bytes before unlock; otherwise treat as raw bytes.
+            if let Ok(text) = std::str::from_utf8(&raw_key) {
+                let trimmed = text.trim();
+                if trimmed.len() == 64 && trimmed.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return match hex::decode(trimmed) {
+                        Ok(decoded) => Some(decoded),
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                path = %path.display(),
+                                "failed to decode hex tmpfs master key, falling back to raw bytes"
+                            );
+                            Some(raw_key)
+                        }
+                    };
                 }
-            })
-        } else {
+            }
+
+            Some(raw_key)
+        });
+
+        let mut unlocked = false;
+
+        if let Some(key) = tmpfs_master_key {
+            match store.unlock(&key) {
+                Ok(()) => {
+                    unlocked = true;
+                    if let Err(error) = keystore.store_key(KEYSTORE_INSTANCE_ID, &key) {
+                        tracing::warn!(%error, "failed to persist master key to OS credential store");
+                    }
+                    // Clean up tmpfs key files only after a successful unlock.
+                    for cleanup_path in tmpfs_paths {
+                        if cleanup_path.exists()
+                            && let Err(error) = std::fs::remove_file(cleanup_path)
+                        {
+                            tracing::warn!(
+                                %error,
+                                path = %cleanup_path.display(),
+                                "failed to remove tmpfs master key — key may remain accessible"
+                            );
+                        }
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "failed to unlock secret store with tmpfs key");
+                }
+            }
+        }
+
+        if !unlocked {
             // Try instance-level key first, then fall back to legacy agent keys.
-            keystore
+            let master_key = keystore
                 .load_key(KEYSTORE_INSTANCE_ID)
                 .ok()
                 .flatten()
-                .or_else(|| load_legacy_keystore_key(&instance_dir))
-        };
+                .or_else(|| load_legacy_keystore_key(&instance_dir));
 
-        if let Some(key) = master_key
-            && let Err(error) = store.unlock(&key)
-        {
-            tracing::warn!(%error, "failed to unlock secret store — secrets will be inaccessible");
+            if let Some(key) = master_key
+                && let Err(error) = store.unlock(&key)
+            {
+                tracing::warn!(
+                    %error,
+                    "failed to unlock secret store — secrets will be inaccessible"
+                );
+            }
         }
     }
 
@@ -1475,6 +1535,25 @@ fn has_provider_credentials(
         || spacebot::openai_auth::credentials_path(instance_dir).exists()
 }
 
+fn configured_agent_infos(config: &spacebot::config::Config) -> Vec<spacebot::api::AgentInfo> {
+    config
+        .resolve_agents()
+        .into_iter()
+        .map(|agent| spacebot::api::AgentInfo {
+            id: agent.id,
+            display_name: agent.display_name,
+            role: agent.role,
+            gradient_start: agent.gradient_start,
+            gradient_end: agent.gradient_end,
+            workspace: agent.workspace,
+            context_window: agent.context_window,
+            max_turns: agent.max_turns,
+            max_concurrent_branches: agent.max_concurrent_branches,
+            max_concurrent_workers: agent.max_concurrent_workers,
+        })
+        .collect()
+}
+
 async fn run(
     config: spacebot::config::Config,
     foreground: bool,
@@ -1518,6 +1597,12 @@ async fn run(
     );
     api_state.auth_token = config.api.auth_token.clone();
     let api_state = Arc::new(api_state);
+
+    // Keep the secrets API available in setup mode so encrypted stores can be
+    // unlocked before providers/agents are initialized.
+    if let Some(store) = &bootstrapped_store {
+        api_state.set_secrets_store(store.clone());
+    }
 
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
@@ -1637,6 +1722,7 @@ async fn run(
     api_state.set_agent_links((**agent_links.load()).clone());
     api_state.set_agent_groups(config.groups.clone());
     api_state.set_agent_humans(config.humans.clone());
+    api_state.set_agent_configs(configured_agent_infos(&config));
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;
@@ -1651,6 +1737,7 @@ async fn run(
         let mut slack_permissions = None;
         let mut telegram_permissions = None;
         let mut twitch_permissions = None;
+        let mut mattermost_permissions = None;
         let mut signal_permissions = None;
         initialize_agents(
             &config,
@@ -1669,6 +1756,7 @@ async fn run(
             &mut slack_permissions,
             &mut telegram_permissions,
             &mut twitch_permissions,
+            &mut mattermost_permissions,
             &mut signal_permissions,
             agent_links.clone(),
             agent_humans.clone(),
@@ -1688,6 +1776,7 @@ async fn run(
             slack_permissions,
             telegram_permissions,
             twitch_permissions,
+            mattermost_permissions,
             signal_permissions,
             bindings.clone(),
             Some(messaging_manager.clone()),
@@ -1701,11 +1790,12 @@ async fn run(
             config_path.clone(),
             config.instance_dir.clone(),
             Vec::new(),
-            None,
-            None,
-            None,
-            None,
-            None,
+            None, // discord_permissions
+            None, // slack_permissions
+            None, // telegram_permissions
+            None, // twitch_permissions
+            None, // mattermost_permissions
+            None, // signal_permissions
             bindings.clone(),
             None,
             llm_manager.clone(),
@@ -2217,9 +2307,10 @@ async fn run(
                 };
 
                 match new_config {
-                    Ok(new_config)
-                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) =>
-                    {
+                    Ok(new_config) => {
+                        api_state.set_agent_configs(configured_agent_infos(&new_config));
+
+                        if has_provider_credentials(&new_config.llm, &new_config.instance_dir) {
                         // Refresh in-memory defaults so newly created agents
                         // inherit the latest routing from the updated config.
                         api_state.set_defaults_config(new_config.defaults.clone()).await;
@@ -2242,6 +2333,7 @@ async fn run(
                                 let mut new_slack_permissions = None;
                                 let mut new_telegram_permissions = None;
                                 let mut new_twitch_permissions = None;
+                                let mut new_mattermost_permissions = None;
                                 let mut new_signal_permissions = None;
                                 match initialize_agents(
                                     &new_config,
@@ -2260,6 +2352,7 @@ async fn run(
                                     &mut new_slack_permissions,
                                     &mut new_telegram_permissions,
                                     &mut new_twitch_permissions,
+                                    &mut new_mattermost_permissions,
                                     &mut new_signal_permissions,
                                     agent_links.clone(),
                                     agent_humans.clone(),
@@ -2278,6 +2371,7 @@ async fn run(
                                             new_slack_permissions,
                                             new_telegram_permissions,
                                             new_twitch_permissions,
+                                            new_mattermost_permissions,
                                             new_signal_permissions,
                                             bindings.clone(),
                                             Some(messaging_manager.clone()),
@@ -2296,9 +2390,9 @@ async fn run(
                                 tracing::error!(%error, "failed to create LLM manager with new keys");
                             }
                         }
-                    }
-                    Ok(_) => {
-                        tracing::warn!("config reloaded but still no providers configured");
+                        } else {
+                            tracing::warn!("config reloaded but still no providers configured");
+                        }
                     }
                     Err(error) => {
                         tracing::error!(%error, "failed to reload config after provider setup");
@@ -2401,6 +2495,7 @@ async fn initialize_agents(
     slack_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SlackPermissions>>>,
     telegram_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TelegramPermissions>>>,
     twitch_permissions: &mut Option<Arc<ArcSwap<spacebot::config::TwitchPermissions>>>,
+    mattermost_permissions: &mut Option<Arc<ArcSwap<spacebot::config::MattermostPermissions>>>,
     signal_permissions: &mut Option<Arc<ArcSwap<spacebot::config::SignalPermissions>>>,
     agent_links: Arc<ArcSwap<Vec<spacebot::links::AgentLink>>>,
     agent_humans: Arc<ArcSwap<Vec<spacebot::config::HumanDef>>>,
@@ -2545,6 +2640,18 @@ async fn initialize_agents(
             embedding_model.clone(),
         ));
 
+        // Working memory event log (temporal situational awareness).
+        let working_memory_timezone = {
+            let user_tz = agent_config.user_timezone.as_deref();
+            let cron_tz = agent_config.cron_timezone.as_deref();
+            user_tz
+                .or(cron_tz)
+                .and_then(|tz_name| tz_name.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC)
+        };
+        let working_memory =
+            spacebot::memory::WorkingMemoryStore::new(db.sqlite.clone(), working_memory_timezone);
+
         // Per-agent control and memory event buses (broadcast fan-out).
         let (event_tx, memory_event_tx) = spacebot::create_process_event_buses();
 
@@ -2650,6 +2757,7 @@ async fn initialize_agents(
                 spacebot::agent::process_control::ProcessControlRegistry::new(),
             ),
             injection_tx: injection_tx.clone(),
+            working_memory,
         };
 
         let agent = spacebot::Agent {
@@ -2698,6 +2806,19 @@ async fn initialize_agents(
     }
 
     tracing::info!(agent_count = agents.len(), "all agents initialized");
+
+    // Record startup in each agent's working memory.
+    for agent in agents.values() {
+        agent
+            .deps
+            .working_memory
+            .emit(
+                spacebot::memory::WorkingMemoryEventType::System,
+                format!("Agent started ({})", agent.config.id),
+            )
+            .importance(0.3)
+            .record();
+    }
 
     // Wire agent event streams, DB pools, and config summaries into the API server
     {
@@ -3099,6 +3220,81 @@ async fn initialize_agents(
                 perms,
             );
             new_messaging_manager.register(adapter).await;
+        }
+    }
+
+    // Shared Mattermost permissions (hot-reloadable via file watcher)
+    *mattermost_permissions = config
+        .messaging
+        .mattermost
+        .as_ref()
+        .map(|mattermost_config| {
+            let perms = spacebot::config::MattermostPermissions::from_config(
+                mattermost_config,
+                &config.bindings,
+            );
+            Arc::new(ArcSwap::from_pointee(perms))
+        });
+
+    if let Some(mattermost_config) = &config.messaging.mattermost
+        && mattermost_config.enabled
+    {
+        if !mattermost_config.base_url.is_empty() && !mattermost_config.token.is_empty() {
+            match spacebot::messaging::mattermost::MattermostAdapter::new(
+                "mattermost",
+                &mattermost_config.base_url,
+                mattermost_config.token.as_str(),
+                mattermost_config.team_id.as_deref().map(Arc::from),
+                mattermost_config.max_attachment_bytes,
+                mattermost_permissions.clone().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "mattermost permissions not initialized when mattermost is enabled"
+                    )
+                })?,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, "failed to create mattermost adapter");
+                }
+            }
+        }
+
+        for instance in mattermost_config
+            .instances
+            .iter()
+            .filter(|instance| instance.enabled)
+        {
+            if instance.base_url.is_empty() || instance.token.is_empty() {
+                tracing::warn!(adapter = %instance.name, "skipping enabled mattermost instance with missing credentials");
+                continue;
+            }
+            let runtime_key = spacebot::config::binding_runtime_adapter_key(
+                "mattermost",
+                Some(instance.name.as_str()),
+            );
+            let perms = Arc::new(ArcSwap::from_pointee(
+                spacebot::config::MattermostPermissions::from_instance_config(
+                    instance,
+                    &config.bindings,
+                ),
+            ));
+            match spacebot::messaging::mattermost::MattermostAdapter::new(
+                runtime_key,
+                &instance.base_url,
+                instance.token.as_str(),
+                instance.team_id.as_deref().map(Arc::from),
+                instance.max_attachment_bytes,
+                perms,
+            ) {
+                Ok(adapter) => {
+                    new_messaging_manager.register(adapter).await;
+                }
+                Err(error) => {
+                    tracing::error!(%error, adapter = %instance.name, "failed to create named mattermost adapter");
+                }
+            }
         }
     }
 

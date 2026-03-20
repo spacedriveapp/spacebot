@@ -349,6 +349,16 @@ impl Scheduler {
                                 ])
                                 .inc();
 
+                            exec_context
+                                .deps
+                                .working_memory
+                                .emit(
+                                    crate::memory::WorkingMemoryEventType::CronExecuted,
+                                    format!("Cron completed: {exec_job_id}"),
+                                )
+                                .importance(0.4)
+                                .record();
+
                             let mut j = exec_jobs.write().await;
                             if let Some(j) = j.get_mut(&exec_job_id) {
                                 j.consecutive_failures = 0;
@@ -364,6 +374,16 @@ impl Scheduler {
                                     "failure",
                                 ])
                                 .inc();
+
+                            exec_context
+                                .deps
+                                .working_memory
+                                .emit(
+                                    crate::memory::WorkingMemoryEventType::Error,
+                                    format!("Cron failed: {exec_job_id}: {error}"),
+                                )
+                                .importance(0.8)
+                                .record();
 
                             tracing::error!(
                                 cron_id = %exec_job_id,
