@@ -742,9 +742,20 @@ impl OutboundResponse {
                 }
             }
             if let Some(footer) = &card.footer
-                && !footer.trim().is_empty()
+                && !footer.text.trim().is_empty()
             {
-                lines.push(footer.trim().to_string());
+                lines.push(footer.text.trim().to_string());
+            }
+            if let Some(author) = &card.author
+                && !author.name.trim().is_empty()
+            {
+                lines.push(author.name.trim().to_string());
+            }
+            if let Some(timestamp) = &card.timestamp
+                && !timestamp.trim().is_empty()
+                && chrono::DateTime::parse_from_rfc3339(timestamp.trim()).is_ok()
+            {
+                lines.push(timestamp.trim().to_string());
             }
             if !lines.is_empty() {
                 sections.push(lines.join("\n\n"));
@@ -763,7 +774,15 @@ pub struct Card {
     pub url: Option<String>,
     #[serde(default)]
     pub fields: Vec<CardField>,
-    pub footer: Option<String>,
+    pub footer: Option<CardFooter>,
+    /// Small image in the top-right corner of the embed.
+    pub thumbnail: Option<CardImage>,
+    /// Large image at the bottom of the embed.
+    pub image: Option<CardImage>,
+    /// Author bar at the top of the embed.
+    pub author: Option<CardAuthor>,
+    /// ISO 8601 timestamp displayed in the footer area.
+    pub timestamp: Option<String>,
 }
 
 /// A field within a generic Card.
@@ -773,6 +792,29 @@ pub struct CardField {
     pub value: String,
     #[serde(default)]
     pub inline: bool,
+}
+
+/// Footer for a Card.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CardFooter {
+    pub text: String,
+    pub icon_url: Option<String>,
+}
+
+/// Image (thumbnail or main image) for a Card.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CardImage {
+    pub url: String,
+    pub width: Option<u32>,
+    pub height: Option<u32>,
+}
+
+/// Author for a Card.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CardAuthor {
+    pub name: String,
+    pub url: Option<String>,
+    pub icon_url: Option<String>,
 }
 
 /// Container for interactive elements (maps to ActionRows in Discord).

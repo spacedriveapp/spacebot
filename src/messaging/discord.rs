@@ -10,10 +10,11 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow, CreateAttachment, CreateButton,
-    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreatePoll, CreatePollAnswer, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, GetMessages,
-    Http, Interaction, Message, MessageId, ReactionType, Ready, ShardManager, User, UserId,
+    CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
+    EventHandler, GatewayIntents, GetMessages, Http, Interaction, Message, MessageId, ReactionType,
+    Ready, ShardManager, Timestamp, User, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -1038,7 +1039,39 @@ fn build_embed(card: &crate::Card) -> CreateEmbed {
         embed = embed.url(url);
     }
     if let Some(footer) = &card.footer {
-        embed = embed.footer(CreateEmbedFooter::new(footer));
+        let footer_text = footer.text.trim();
+        if !footer_text.is_empty() {
+            let mut footer_builder = CreateEmbedFooter::new(footer_text);
+            if let Some(icon_url) = &footer.icon_url {
+                footer_builder = footer_builder.icon_url(icon_url);
+            }
+            embed = embed.footer(footer_builder);
+        }
+    }
+    if let Some(thumbnail) = &card.thumbnail {
+        embed = embed.thumbnail(&thumbnail.url);
+    }
+    if let Some(image) = &card.image {
+        embed = embed.image(&image.url);
+    }
+    if let Some(author) = &card.author {
+        let author_name = author.name.trim();
+        if !author_name.is_empty() {
+            let mut author_builder = CreateEmbedAuthor::new(author_name);
+            if let Some(url) = &author.url {
+                author_builder = author_builder.url(url);
+            }
+            if let Some(icon_url) = &author.icon_url {
+                author_builder = author_builder.icon_url(icon_url);
+            }
+            embed = embed.author(author_builder);
+        }
+    }
+    if let Some(timestamp) = &card.timestamp {
+        match timestamp.parse::<Timestamp>() {
+            Ok(ts) => embed = embed.timestamp(ts),
+            Err(e) => tracing::warn!(timestamp, %e, "invalid ISO 8601 timestamp in card, skipping"),
+        }
     }
 
     for (i, field) in card.fields.iter().enumerate() {
@@ -1315,10 +1348,7 @@ mod tests {
         let cards = vec![Card {
             title: Some("Status".into()),
             description: Some("All green".into()),
-            color: None,
-            url: None,
-            fields: Vec::new(),
-            footer: None,
+            ..Default::default()
         }];
 
         let parts = prepare_rich_message_parts(String::new(), &cards, &[], None);

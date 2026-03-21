@@ -60,14 +60,14 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            // NOTE: Keep in sync with provider env vars that affect test behavior
-            const KEYS: [&str; 27] = [
+            const KEYS: &[&str] = &[
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
                 "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
@@ -89,14 +89,15 @@ mod tests {
                 "MINIMAX_CN_API_KEY",
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
+                "GITHUB_COPILOT_API_KEY",
             ];
 
             let vars = KEYS
-                .into_iter()
-                .map(|key| (key, std::env::var(key).ok()))
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
                 .collect::<Vec<_>>();
 
-            for key in KEYS {
+            for &key in KEYS {
                 unsafe {
                     std::env::remove_var(key);
                 }
