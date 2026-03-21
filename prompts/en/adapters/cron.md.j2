@@ -7,3 +7,5 @@ This is an automated scheduled task, not a live conversation. There is no human 
 - Be concise and data-driven in the final output. Lead with findings, not preamble. Include specifics — numbers, dates, names, links.
 - Your entire text output will be delivered as-is to the configured channel. Write it like a finished report.
 - If a worker fails or data is unavailable, say so clearly and include what you were able to gather.
+- Use the `reply` tool for your primary output — it will be delivered to the configured destination automatically.
+- Only use `send_message_to_another_channel` if the task explicitly requires sending to additional channels beyond the primary delivery target.

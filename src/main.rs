@@ -3303,12 +3303,22 @@ async fn initialize_agents(
         let perms = spacebot::config::SignalPermissions::from_config(signal_config);
         Arc::new(ArcSwap::from_pointee(perms))
     });
+    if let Some(perms) = &*signal_permissions {
+        api_state.set_signal_permissions(perms.clone()).await;
+    }
 
-    if let Some(signal_config) = &config.messaging.signal
-        && signal_config.enabled
-    {
-        let tmp_dir = config.instance_dir.join("tmp");
-        if !signal_config.http_url.is_empty() && !signal_config.account.is_empty() {
+    // Signal: start default adapter (requires root enabled) and named instances (independent).
+    // Unlike Discord/Telegram where named instances inherit the root enabled gate,
+    // Signal named instances start independently when they have valid credentials
+    // and their own enabled flag is set. This allows running multiple Signal accounts
+    // without needing a "default" account enabled.
+    let tmp_dir = config.instance_dir.join("tmp");
+    if let Some(signal_config) = &config.messaging.signal {
+        // Start default adapter only if root is enabled AND has credentials
+        if signal_config.enabled
+            && !signal_config.http_url.is_empty()
+            && !signal_config.account.is_empty()
+        {
             let adapter = spacebot::messaging::signal::SignalAdapter::new(
                 "signal",
                 &signal_config.http_url,
@@ -3322,6 +3332,7 @@ async fn initialize_agents(
             new_messaging_manager.register(adapter).await;
         }
 
+        // Start named instances regardless of root enabled flag (as long as config exists)
         for instance in signal_config
             .instances
             .iter()

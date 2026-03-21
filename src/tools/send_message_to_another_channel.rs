@@ -88,12 +88,8 @@ impl Tool for SendMessageTool {
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         let email_adapter_available = self.messaging_manager.has_adapter("email").await;
-        // Check if current adapter is Signal (e.g., "signal:gvoice1" starts with "signal")
-        let signal_adapter_available = self
-            .current_adapter
-            .as_ref()
-            .map(|adapter| adapter.starts_with("signal"))
-            .unwrap_or(false);
+        // Check if any Signal adapter is registered (works in any context, including cron)
+        let signal_adapter_available = self.messaging_manager.has_platform_adapters("signal").await;
 
         let mut description =
             crate::prompts::text::get("tools/send_message_to_another_channel").to_string();
@@ -109,12 +105,62 @@ impl Tool for SendMessageTool {
         }
 
         if signal_adapter_available {
-            description.push_str(
-                " Signal messaging is enabled: you can target `signal:uuid:{uuid}`, `signal:group:{group_id}`, or `signal:+{phone}`.",
-            );
-            target_description.push_str(
-                " With Signal enabled, explicit targets are also allowed: `signal:uuid:{uuid}`, `signal:group:{group_id}`, `signal:+{phone}`",
-            );
+            // Get actual Signal adapter names to determine if default or named-only
+            let adapter_names = self.messaging_manager.adapter_names().await;
+            let signal_adapters: Vec<String> = adapter_names
+                .into_iter()
+                .filter(|name| name == "signal" || name.starts_with("signal:"))
+                .collect();
+            let has_default_signal = signal_adapters.iter().any(|name| name == "signal");
+            let named_adapters: Vec<String> = signal_adapters
+                .into_iter()
+                .filter(|name| name.starts_with("signal:"))
+                .collect();
+
+            if has_default_signal {
+                // Default adapter exists - show generic syntax
+                description.push_str(
+                    " Signal messaging is enabled: you can target `signal:uuid:{uuid}`, `signal:group:{group_id}`, or `signal:+{phone}`.",
+                );
+                target_description.push_str(
+                    " With Signal enabled, explicit targets are also allowed: `signal:uuid:{uuid}`, `signal:group:{group_id}`, `signal:+{phone}`",
+                );
+
+                // Also mention named instances if they exist
+                if !named_adapters.is_empty() {
+                    let named_examples: Vec<String> = named_adapters
+                        .iter()
+                        .take(2)
+                        .map(|adapter| format!("`{}:+{{phone}}`", adapter))
+                        .collect();
+                    description.push_str(&format!(
+                        " Named instances are also available: {}.",
+                        named_examples.join(", ")
+                    ));
+                    target_description
+                        .push_str(&format!(" Named instances: {}", named_examples.join(", ")));
+                }
+            } else {
+                // Only named adapters - show specific instance names
+                let instance_examples: Vec<String> = named_adapters
+                    .iter()
+                    .take(3)
+                    .map(|adapter| format!("`{}:+{{phone}}`", adapter))
+                    .collect();
+
+                if !instance_examples.is_empty() {
+                    description.push_str(&format!(
+                        " Signal messaging is enabled with named instances: target using `{}:{{instance_name}}:{{target}}` format (e.g., {}).",
+                        "signal",
+                        instance_examples.join(", ")
+                    ));
+                    target_description.push_str(&format!(
+                        " With Signal enabled, use named instance format: `{}:{{instance_name}}:{{target}}` (e.g., {})",
+                        "signal",
+                        instance_examples.join(", ")
+                    ));
+                }
+            }
         }
 
         ToolDefinition {
@@ -147,16 +193,48 @@ impl Tool for SendMessageTool {
         // Check for explicit signal: prefix first - always honored regardless of current adapter.
         // This allows users to explicitly target Signal even when in Discord/Telegram/etc.
         if let Some(mut target) = parse_explicit_signal_prefix(&args.target) {
-            // If explicit prefix returned default "signal" adapter but we're in a named
-            // Signal adapter conversation (e.g., signal:gvoice1), use the current adapter
-            // to ensure the message goes through the correct account.
-            if target.adapter == "signal"
-                && let Some(current_adapter) = self
-                    .current_adapter
-                    .as_ref()
-                    .filter(|adapter| adapter.starts_with("signal:"))
-            {
-                target.adapter = current_adapter.clone();
+            // If explicit prefix returned default "signal" adapter, try to resolve
+            // to a specific named instance for correct routing.
+            if target.adapter == "signal" {
+                // Look up registered Signal adapters to determine resolution strategy.
+                let all_signal_adapters: Vec<String> = self
+                    .messaging_manager
+                    .adapter_names()
+                    .await
+                    .into_iter()
+                    .filter(|name| name == "signal" || name.starts_with("signal:"))
+                    .collect();
+
+                let has_default_signal = all_signal_adapters.iter().any(|name| name == "signal");
+                let named_adapters: Vec<&str> = all_signal_adapters
+                    .iter()
+                    .filter(|name| name.starts_with("signal:"))
+                    .map(|s| s.as_str())
+                    .collect();
+
+                if let Some(current_adapter) = self.current_adapter.as_ref().filter(|adapter| {
+                    adapter.starts_with("signal:") && all_signal_adapters.contains(adapter)
+                }) {
+                    // In a named Signal conversation — only retarget if no default adapter.
+                    // When a default "signal" adapter exists, the explicit "signal:" prefix
+                    // should use it (not the current named adapter), preserving user intent.
+                    if !has_default_signal {
+                        target.adapter = current_adapter.clone();
+                    }
+                } else if has_default_signal {
+                    // Not in a Signal conversation (e.g., cron context) but default exists.
+                    // Leave target.adapter as "signal" so broadcast() uses the default.
+                } else if named_adapters.len() == 1 {
+                    // No default, but exactly one named adapter - use it
+                    target.adapter = named_adapters[0].to_string();
+                } else if named_adapters.len() > 1 {
+                    // Multiple named adapters and no default - ambiguity error
+                    return Err(SendMessageError(format!(
+                        "Multiple Signal adapters are configured ({}). Please specify which instance to use by targeting 'signal:<instance_name>:<target>' instead of 'signal:<target>'.",
+                        named_adapters.join(", ")
+                    )));
+                }
+                // If 0 adapters, leave as "signal" and let broadcast() fail with appropriate error
             }
 
             self.messaging_manager
@@ -187,38 +265,57 @@ impl Tool for SendMessageTool {
         if let Some(current_adapter) = self
             .current_adapter
             .as_ref()
-            .filter(|adapter| adapter.starts_with("signal"))
+            .filter(|adapter| *adapter == "signal" || adapter.starts_with("signal:"))
         {
-            match parse_implicit_signal_shorthand(&args.target, current_adapter) {
-                Ok(Some(target)) => {
-                    self.messaging_manager
-                        .broadcast(
-                            &target.adapter,
-                            &target.target,
-                            crate::OutboundResponse::Text(args.message),
-                        )
-                        .await
-                        .map_err(|error| {
-                            SendMessageError(format!("failed to send message: {error}"))
-                        })?;
+            // Verify the cached adapter is still registered before using it.
+            // The channel's current_adapter is stale if the named adapter was removed.
+            let live_signal_adapters: Vec<String> = self
+                .messaging_manager
+                .adapter_names()
+                .await
+                .into_iter()
+                .filter(|name| name == "signal" || name.starts_with("signal:"))
+                .collect();
 
-                    tracing::info!(
-                        adapter = %target.adapter,
-                        broadcast_target = %"[REDACTED]",
-                        "message sent via implicit Signal shorthand"
-                    );
+            if !live_signal_adapters.contains(current_adapter) {
+                // Adapter was removed — fall through to channel-name lookup instead
+                // of routing to a dead adapter.
+                tracing::warn!(
+                    adapter = %current_adapter,
+                    "current_adapter references a removed Signal adapter; skipping implicit shorthand"
+                );
+            } else {
+                match parse_implicit_signal_shorthand(&args.target, current_adapter) {
+                    Ok(Some(target)) => {
+                        self.messaging_manager
+                            .broadcast(
+                                &target.adapter,
+                                &target.target,
+                                crate::OutboundResponse::Text(args.message),
+                            )
+                            .await
+                            .map_err(|error| {
+                                SendMessageError(format!("failed to send message: {error}"))
+                            })?;
 
-                    return Ok(SendMessageOutput {
-                        success: true,
-                        target: target.target,
-                        platform: target.adapter,
-                    });
-                }
-                Err(validation_error) => {
-                    return Err(SendMessageError(validation_error));
-                }
-                Ok(None) => {
-                    // Not a Signal shorthand — fall through to channel-name lookup.
+                        tracing::info!(
+                            adapter = %target.adapter,
+                            broadcast_target = %"[REDACTED]",
+                            "message sent via implicit Signal shorthand"
+                        );
+
+                        return Ok(SendMessageOutput {
+                            success: true,
+                            target: target.target,
+                            platform: target.adapter,
+                        });
+                    }
+                    Err(validation_error) => {
+                        return Err(SendMessageError(validation_error));
+                    }
+                    Ok(None) => {
+                        // Not a Signal shorthand — fall through to channel-name lookup.
+                    }
                 }
             }
         }
@@ -369,28 +466,44 @@ fn parse_implicit_signal_shorthand(
         ));
     }
 
-    // Phone number format: starts with + followed by 7+ digits
-    if trimmed.starts_with('+')
-        && trimmed[1..].len() >= 7
-        && trimmed[1..].chars().all(|c| c.is_ascii_digit())
-    {
-        return Ok(Some(BroadcastTarget {
-            adapter: current_adapter.to_string(),
-            target: trimmed.to_string(),
-        }));
-    }
-
-    // Starts with + but doesn't meet phone number requirements.
-    if let Some(digits) = trimmed.strip_prefix('+') {
-        if digits.chars().all(|c| c.is_ascii_digit()) {
-            return Err(format!(
-                "'{trimmed}' looks like a phone number but is too short. Phone numbers need at least 7 digits after the + prefix."
-            ));
+    // Phone number format: use strict E.164 validation
+    if trimmed.starts_with('+') {
+        if crate::messaging::target::is_valid_e164(trimmed) {
+            return Ok(Some(BroadcastTarget {
+                adapter: current_adapter.to_string(),
+                target: trimmed.to_string(),
+            }));
         }
-        if !digits.is_empty() {
-            return Err(format!(
-                "'{trimmed}' looks like a phone number but contains non-digit characters. Use format: +1234567890"
-            ));
+        // Invalid phone number - provide specific error
+        if let Some(digits) = trimmed.strip_prefix('+') {
+            if digits.is_empty() {
+                return Err(
+                    "Phone number cannot be empty after + prefix. Use format: +1234567890"
+                        .to_string(),
+                );
+            }
+            if !digits.chars().all(|c| c.is_ascii_digit()) {
+                return Err(format!(
+                    "'{trimmed}' contains non-digit characters. Use format: +1234567890"
+                ));
+            }
+            if digits.len() < 6 {
+                return Err(format!(
+                    "'{trimmed}' is too short. Phone numbers need 6-15 digits after the + prefix (7-16 total)."
+                ));
+            }
+            if digits.len() > 15 {
+                return Err(format!(
+                    "'{trimmed}' is too long. Phone numbers need 6-15 digits after the + prefix (7-16 total)."
+                ));
+            }
+            if digits.starts_with('0') {
+                return Err(format!(
+                    "'{trimmed}' has invalid country code. Country codes cannot start with 0."
+                ));
+            }
+            // Catch-all for any other '+' prefixed input that failed validation
+            return Err(format!("'{trimmed}' is not a valid E.164 phone number"));
         }
     }
 

@@ -57,3 +57,58 @@ export function platformColor(platform: string): string {
 		default: return "bg-gray-500/20 text-gray-400";
 	}
 }
+
+// E.164 Phone Number Validation
+// Validates international phone numbers in format: + followed by country code and 6-15 digits
+export const E164_REGEX = /^\+[1-9]\d{5,14}$/;
+
+export const E164_ERROR_TEXT = 
+	"Phone number must be in E.164 format: + followed by a country code (first digit 1-9, not 0) and 6-15 digits total (e.g., +1234567890)";
+
+export function isValidE164(phoneNumber: string): boolean {
+	return E164_REGEX.test(phoneNumber.trim());
+}
+
+export function validateE164(phoneNumber: string): { valid: boolean; error?: string } {
+	const trimmed = phoneNumber.trim();
+	if (!trimmed) {
+		return { valid: false, error: "Phone number is required" };
+	}
+	if (!E164_REGEX.test(trimmed)) {
+		return { valid: false, error: E164_ERROR_TEXT };
+	}
+	return { valid: true };
+}
+
+/**
+ * Validate Signal DM allowed-users entries.
+ * Each entry must be E.164 phone, uuid:xxx, or group:xxx.
+ */
+export function validateSignalDmAllowedUsers(
+	raw: string
+): { valid: true; entries: string[] } | { valid: false; error: string } {
+	const entries = raw.split(',').map(s => s.trim()).filter(s => s.length > 0);
+	const invalid: string[] = [];
+	const valid: string[] = [];
+
+	for (const entry of entries) {
+		if (
+			isValidE164(entry) ||
+			(entry.startsWith('uuid:') && entry.length > 5) ||
+			(entry.startsWith('group:') && entry.length > 6)
+		) {
+			valid.push(entry);
+		} else {
+			invalid.push(entry);
+		}
+	}
+
+	if (invalid.length > 0) {
+		return {
+			valid: false,
+			error: `Invalid entries: ${invalid.join(', ')}. Must be E.164 phone numbers (+1234567890), uuid:xxx, or group:xxx`,
+		};
+	}
+
+	return { valid: true, entries: valid };
+}

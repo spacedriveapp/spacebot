@@ -1257,6 +1257,7 @@ impl Channel {
                 &first.source,
                 server_name,
                 channel_name,
+                self.conversation_id.as_deref(),
             )?);
         }
 
@@ -1736,6 +1737,7 @@ impl Channel {
                 &message.source,
                 server_name,
                 channel_name,
+                self.conversation_id.as_deref(),
             )?);
         }
 

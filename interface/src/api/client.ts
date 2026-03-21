@@ -1199,6 +1199,8 @@ export interface MessagingStatusResponse {
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
 	email: PlatformStatus;
+	mattermost: PlatformStatus;
+	signal: PlatformStatus;
 	instances: AdapterInstanceStatus[];
 }
 
@@ -1230,6 +1232,9 @@ export interface CreateMessagingInstanceRequest {
 		webhook_auth_token?: string;
 		mattermost_base_url?: string;
 		mattermost_token?: string;
+		signal_http_url?: string;
+		signal_account?: string;
+		signal_dm_allowed_users?: string;
 	};
 }
 

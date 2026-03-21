@@ -434,9 +434,12 @@ pub async fn add_channel_tools(
         .await?;
     handle.add_tool(ReactTool::new(response_tx.clone())).await?;
     if let Some(cron_tool) = cron_tool {
-        let cron_tool = cron_tool.with_default_delivery_target(
-            default_delivery_target_for_conversation(&conversation_id, slack_thread_ts),
-        );
+        let cron_tool = cron_tool
+            .with_default_delivery_target(default_delivery_target_for_conversation(
+                &conversation_id,
+                slack_thread_ts,
+            ))
+            .with_current_adapter(current_adapter.clone());
         handle.add_tool(cron_tool).await?;
     }
     if let Some(mut agent_msg) = send_agent_message_tool {

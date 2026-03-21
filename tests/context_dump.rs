@@ -190,7 +190,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
-        .render_conversation_context("discord", Some("Test Server"), Some("#general"))
+        .render_conversation_context("discord", Some("Test Server"), Some("#general"), None)
         .ok();
 
     let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };

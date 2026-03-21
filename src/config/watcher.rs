@@ -553,61 +553,72 @@ pub fn spawn_file_watcher(
                                 }
                             }
 
-                        // Signal: start default + named instances that are enabled and not already running.
-                        if let Some(signal_config) = &config.messaging.signal
-                            && signal_config.enabled {
-                                if !signal_config.http_url.is_empty()
-                                    && !signal_config.account.is_empty()
-                                    && !manager.has_adapter("signal").await
-                                {
-                                    let permissions = match signal_permissions {
-                                        Some(ref existing) => existing.clone(),
-                                        None => {
-                                            let permissions = SignalPermissions::from_config(signal_config);
-                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
-                                        }
-                                    };
-                                    let tmp_dir = instance_dir.join("tmp");
-                                    let adapter = crate::messaging::signal::SignalAdapter::new(
-                                        "signal",
-                                        &signal_config.http_url,
-                                        &signal_config.account,
-                                        signal_config.ignore_stories,
-                                        permissions,
-                                        tmp_dir,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, "failed to hot-start signal adapter from config change");
+                        // Signal: start default adapter (requires root enabled) and named instances (independent).
+                        // Unlike Discord/Telegram where named instances inherit the root enabled gate,
+                        // Signal named instances start independently when they have valid credentials
+                        // and their own enabled flag is set. This allows running multiple Signal accounts
+                        // without needing a "default" account enabled.
+                        if let Some(signal_config) = &config.messaging.signal {
+                            // Start default adapter only if root is enabled AND has credentials
+                            if signal_config.enabled
+                                && !signal_config.http_url.is_empty()
+                                && !signal_config.account.is_empty()
+                                && !manager.has_adapter("signal").await
+                            {
+                                let permissions = match signal_permissions {
+                                    Some(ref existing) => existing.clone(),
+                                    None => {
+                                        let permissions = SignalPermissions::from_config(signal_config);
+                                        Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
                                     }
-                                }
-
-                                for instance in signal_config.instances.iter().filter(|instance| instance.enabled) {
-                                    let runtime_key = binding_runtime_adapter_key(
-                                        "signal",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        // TODO: named instance permissions not hot-updated (see discord block comment)
-                                        continue;
-                                    }
-
-                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
-                                        SignalPermissions::from_instance_config(instance),
-                                    ));
-                                    let tmp_dir = instance_dir.join("tmp");
-                                    let adapter = crate::messaging::signal::SignalAdapter::new(
-                                        runtime_key,
-                                        &instance.http_url,
-                                        &instance.account,
-                                        instance.ignore_stories,
-                                        permissions,
-                                        tmp_dir,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, adapter = %instance.name, "failed to hot-start named signal adapter from config change");
-                                    }
+                                };
+                                let tmp_dir = instance_dir.join("tmp");
+                                let adapter = crate::messaging::signal::SignalAdapter::new(
+                                    "signal",
+                                    &signal_config.http_url,
+                                    &signal_config.account,
+                                    signal_config.ignore_stories,
+                                    permissions,
+                                    tmp_dir,
+                                );
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, "failed to hot-start signal adapter from config change");
                                 }
                             }
+
+                            // Start named instances regardless of root enabled flag (as long as config exists)
+                            for instance in signal_config.instances.iter().filter(|instance| instance.enabled) {
+                                let runtime_key = binding_runtime_adapter_key(
+                                    "signal",
+                                    Some(instance.name.as_str()),
+                                );
+                                if manager.has_adapter(runtime_key.as_str()).await {
+                                    // TODO: named instance permissions not hot-updated (see discord block comment)
+                                    continue;
+                                }
+                                // Skip instances with missing credentials (same gating as cold-start)
+                                if instance.http_url.is_empty() || instance.account.is_empty() {
+                                    tracing::warn!(adapter = %instance.name, "skipping enabled signal instance with missing credentials");
+                                    continue;
+                                }
+
+                                let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                    SignalPermissions::from_instance_config(instance),
+                                ));
+                                let tmp_dir = instance_dir.join("tmp");
+                                let adapter = crate::messaging::signal::SignalAdapter::new(
+                                    runtime_key,
+                                    &instance.http_url,
+                                    &instance.account,
+                                    instance.ignore_stories,
+                                    permissions,
+                                    tmp_dir,
+                                );
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, adapter = %instance.name, "failed to hot-start named signal adapter from config change");
+                                }
+                            }
+                        }
 
                         // Mattermost: start default + named instances that are enabled and not already running.
                         if let Some(mattermost_config) = &config.messaging.mattermost

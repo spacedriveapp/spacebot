@@ -3,6 +3,8 @@ Platform: {{ platform }}
 Server: {{ server_name }}
 {%- endif %}
 {%- if channel_name %}
-Channel: #{{ channel_name }}
+Channel: {{ channel_name }} ({{ platform }}{% if conversation_id %}, id: `{{ conversation_id }}`{% endif %})
+{%- elif conversation_id %}
+Channel ID: `{{ conversation_id }}`
 {%- endif %}
 Multiple users may be present. Each message is prefixed with [username].

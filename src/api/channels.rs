@@ -456,6 +456,7 @@ pub(super) async fn inspect_prompt(
                     &info.platform,
                     server_name,
                     info.display_name.as_deref(),
+                    Some(&info.id),
                 )
                 .ok()
         }

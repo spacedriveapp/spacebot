@@ -893,10 +893,19 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     });
 
     // Send the cron job prompt as a synthetic message
+    // Derive source from the delivery target's adapter so adapter_selector() can extract
+    // the platform prefix (e.g., "signal" from "signal:gvoice1"). This ensures the channel
+    // correctly identifies as being "from" that messaging platform and tools resolve properly.
+    let source_adapter = job
+        .delivery_target
+        .adapter
+        .split(':')
+        .next()
+        .unwrap_or("cron");
     let message = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        source: "cron".into(),
-        adapter: None,
+        source: source_adapter.into(),
+        adapter: Some(job.delivery_target.adapter.clone()),
         conversation_id: format!("cron:{}", job.id),
         sender_id: "system".into(),
         agent_id: Some(context.deps.agent_id.clone()),

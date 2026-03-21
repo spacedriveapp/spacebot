@@ -18,6 +18,7 @@ export function PlatformIcon({ platform, className = "text-ink-faint", size = "1
 		email: faEnvelope,
 		mattermost: faServer,
 		whatsapp: faWhatsapp,
+		signal: faComment,
 		matrix: faComments,
 		imessage: faComment,
 		irc: faComments,
