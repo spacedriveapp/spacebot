@@ -140,6 +140,32 @@ pub fn resolve_broadcast_target(channel: &ChannelInfo) -> Option<BroadcastTarget
                 .and_then(normalize_email_target)
                 .or_else(|| from.as_deref().and_then(normalize_email_target))?
         }
+        "mattermost" => {
+            let adapter = extract_mattermost_adapter_from_channel_id(&channel.id);
+            let raw_target = if let Some(channel_id) = channel
+                .platform_meta
+                .as_ref()
+                .and_then(|meta| meta.get("mattermost_channel_id"))
+                .and_then(json_value_to_string)
+            {
+                channel_id
+            } else {
+                // conversation id: mattermost:{team_id}:{channel_id}
+                // or mattermost:{team_id}:dm:{user_id}
+                // Named instance: mattermost:{instance}:{team_id}:{channel_id}
+                // Named DM:       mattermost:{instance}:{team_id}:dm:{user_id}
+                let parts: Vec<&str> = channel.id.split(':').collect();
+                match parts.as_slice() {
+                    [_, _team_id, "dm", user_id] => format!("dm:{user_id}"),
+                    [_, _team_id, channel_id] => (*channel_id).to_string(),
+                    [_, _instance, _team_id, "dm", user_id] => format!("dm:{user_id}"),
+                    [_, _instance, _team_id, channel_id] => (*channel_id).to_string(),
+                    _ => return None,
+                }
+            };
+            let target = normalize_mattermost_target(&raw_target)?;
+            return Some(BroadcastTarget { adapter, target });
+        }
         _ => return None,
     };
 
@@ -163,6 +189,7 @@ pub fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "telegram" => normalize_telegram_target(trimmed),
         "twitch" => normalize_twitch_target(trimmed),
         "email" => normalize_email_target(trimmed),
+        "mattermost" => normalize_mattermost_target(trimmed),
         // Webchat targets are full conversation IDs (e.g. "portal:chat:main")
         "webchat" => Some(trimmed.to_string()),
         "signal" => normalize_signal_target(trimmed),
@@ -235,6 +262,66 @@ fn normalize_twitch_target(raw_target: &str) -> Option<String> {
         None
     } else {
         Some(channel_login.to_string())
+    }
+}
+
+/// Extract the runtime adapter key from a Mattermost conversation ID.
+///
+/// Mattermost conversation IDs encode whether a named instance was used:
+/// - Default channel:  `mattermost:{team_id}:{channel_id}` (3 parts) → `"mattermost"`
+/// - Default DM:       `mattermost:{team_id}:dm:{user_id}` (4 parts, 3rd = `"dm"`) → `"mattermost"`
+/// - Named channel:    `mattermost:{instance}:{team_id}:{channel_id}` (4 parts, last ≠ `"dm"`) → `"mattermost:{instance}"`
+/// - Named DM:         `mattermost:{instance}:{team_id}:dm:{user_id}` (5 parts) → `"mattermost:{instance}"`
+fn extract_mattermost_adapter_from_channel_id(channel_id: &str) -> String {
+    // Named instance conv IDs: "mattermost:{instance}:{team_id}:{channel_id}" (4 parts)
+    //                      or: "mattermost:{instance}:{team_id}:dm:{user_id}" (5 parts)
+    // Default conv IDs:        "mattermost:{team_id}:{channel_id}" (3 parts)
+    //                      or: "mattermost:{team_id}:dm:{user_id}" (4 parts, 3rd part = "dm")
+    let parts: Vec<&str> = channel_id.split(':').collect();
+    match parts.as_slice() {
+        // Default DM: mattermost:{team_id}:dm:{user_id} — must come before the named-channel arm
+        ["mattermost", _, "dm", _] => "mattermost".to_string(),
+        // Named DM: mattermost:{instance}:{team_id}:dm:{user_id}
+        ["mattermost", instance, _, "dm", _] => format!("mattermost:{instance}"),
+        // Named channel: mattermost:{instance}:{team_id}:{channel_id}
+        ["mattermost", instance, _, _] => format!("mattermost:{instance}"),
+        _ => "mattermost".to_string(),
+    }
+}
+
+/// Normalize a raw Mattermost target string to a bare channel ID or `dm:{user_id}`.
+///
+/// Accepts any of the following forms (with or without a leading `mattermost:` prefix):
+/// - `channel_id` → `channel_id`
+/// - `dm:{user_id}` → `dm:{user_id}`
+/// - `{team_id}:{channel_id}` → `channel_id`
+/// - `{team_id}:dm:{user_id}` → `dm:{user_id}`
+/// - `{instance}:{team_id}:{channel_id}` → `channel_id`
+/// - `{instance}:{team_id}:dm:{user_id}` → `dm:{user_id}`
+///
+/// Returns `None` if the input is empty or does not match any recognised shape.
+fn normalize_mattermost_target(raw_target: &str) -> Option<String> {
+    let target = strip_repeated_prefix(raw_target, "mattermost");
+    // Parse out just the channel_id or dm:{user_id}, discarding any team/instance prefix.
+    match target.split(':').collect::<Vec<_>>().as_slice() {
+        // Already bare: "channel_id" (but not the bare word "dm" without a user_id)
+        [channel_id] if !channel_id.is_empty() && *channel_id != "dm" => {
+            Some((*channel_id).to_string())
+        }
+        ["dm", user_id] if !user_id.is_empty() => Some(format!("dm:{user_id}")),
+        // With team prefix: "team_id:channel_id" or "team_id:dm:user_id"
+        [_team_id, channel_id] if !channel_id.is_empty() && *channel_id != "dm" => {
+            Some((*channel_id).to_string())
+        }
+        [_team_id, "dm", user_id] if !user_id.is_empty() => Some(format!("dm:{user_id}")),
+        // With instance+team prefix: "instance:team_id:channel_id" or "instance:team_id:dm:user_id"
+        [_instance, _team_id, channel_id] if !channel_id.is_empty() && *channel_id != "dm" => {
+            Some((*channel_id).to_string())
+        }
+        [_instance, _team_id, "dm", user_id] if !user_id.is_empty() => {
+            Some(format!("dm:{user_id}"))
+        }
+        _ => None,
     }
 }
 

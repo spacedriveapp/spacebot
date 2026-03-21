@@ -834,10 +834,13 @@ impl ProcessRunLogger {
         let list_query = format!(
             "SELECT w.id, w.task, w.status, w.worker_type, w.channel_id, w.started_at, \
                     w.completed_at, w.transcript IS NOT NULL as has_transcript, \
-                    w.tool_calls, w.opencode_port, w.interactive, \
-                    c.display_name as channel_name \
+                    w.tool_calls, w.opencode_port, w.opencode_session_id, w.directory, \
+                    w.interactive, \
+                    c.display_name as channel_name, \
+                    w.project_id, p.name as project_name \
              FROM worker_runs w \
              LEFT JOIN channels c ON w.channel_id = c.id \
+             LEFT JOIN projects p ON w.project_id = p.id \
              {list_where_clause} \
              ORDER BY w.started_at DESC \
              LIMIT ?2 OFFSET ?3"
@@ -888,7 +891,11 @@ impl ProcessRunLogger {
                 has_transcript: row.try_get::<bool, _>("has_transcript").unwrap_or(false),
                 tool_calls: row.try_get::<i64, _>("tool_calls").unwrap_or(0),
                 opencode_port: row.try_get::<i32, _>("opencode_port").ok(),
+                opencode_session_id: row.try_get("opencode_session_id").ok().flatten(),
+                directory: row.try_get("directory").ok().flatten(),
                 interactive: row.try_get::<bool, _>("interactive").unwrap_or(false),
+                project_id: row.try_get("project_id").ok().flatten(),
+                project_name: row.try_get("project_name").ok().flatten(),
             })
             .collect();
 
@@ -960,7 +967,11 @@ pub struct WorkerRunRow {
     pub has_transcript: bool,
     pub tool_calls: i64,
     pub opencode_port: Option<i32>,
+    pub opencode_session_id: Option<String>,
+    pub directory: Option<String>,
     pub interactive: bool,
+    pub project_id: Option<String>,
+    pub project_name: Option<String>,
 }
 
 /// A worker that was idle at shutdown, loaded for reconnection at startup.

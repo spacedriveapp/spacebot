@@ -24,6 +24,7 @@ import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
+import {Orchestrate} from "@/routes/Orchestrate";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
 
@@ -121,6 +122,22 @@ const logsRoute = createRoute({
 				<p className="text-sm text-ink-faint">Logs coming soon</p>
 			</div>
 		);
+	},
+});
+
+const orchestrateRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/orchestrate",
+	component: function OrchestratePage() {
+		useSetTopBar(
+			<div className="flex h-full items-center gap-4 px-6">
+				<h1 className="font-plex text-sm font-medium text-ink">
+					Orchestrate
+				</h1>
+				<span className="text-xs text-ink-faint">Active workers across all agents</span>
+			</div>,
+		);
+		return <Orchestrate />;
 	},
 });
 
@@ -354,6 +371,7 @@ const routeTree = rootRoute.addChildren([
 	indexRoute,
 	settingsRoute,
 	logsRoute,
+	orchestrateRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,

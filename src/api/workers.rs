@@ -48,8 +48,16 @@ pub(super) struct WorkerListItem {
     tool_calls: i64,
     /// OpenCode server port (for workers with an embeddable web UI).
     opencode_port: Option<i32>,
+    /// OpenCode session ID (for workers with an embeddable web UI).
+    opencode_session_id: Option<String>,
+    /// Working directory for OpenCode workers.
+    directory: Option<String>,
     /// Whether this worker accepts follow-up input via route.
     interactive: bool,
+    /// Project ID this worker is linked to.
+    project_id: Option<String>,
+    /// Project name (resolved via join).
+    project_name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -144,7 +152,11 @@ pub(super) async fn list_workers(
                 live_status,
                 tool_calls,
                 opencode_port: row.opencode_port,
+                opencode_session_id: row.opencode_session_id,
+                directory: row.directory,
                 interactive: row.interactive,
+                project_id: row.project_id,
+                project_name: row.project_name,
             }
         })
         .collect();

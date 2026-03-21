@@ -335,7 +335,11 @@ export interface WorkerRunInfo {
 	live_status: string | null;
 	tool_calls: number;
 	opencode_port: number | null;
+	opencode_session_id: string | null;
+	directory: string | null;
 	interactive: boolean;
+	project_id: string | null;
+	project_name: string | null;
 }
 
 export interface WorkerDetailResponse {
@@ -1224,6 +1228,8 @@ export interface CreateMessagingInstanceRequest {
 		webhook_port?: number;
 		webhook_bind?: string;
 		webhook_auth_token?: string;
+		mattermost_base_url?: string;
+		mattermost_token?: string;
 	};
 }
 

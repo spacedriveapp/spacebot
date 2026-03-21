@@ -488,13 +488,35 @@ fn merge_json_object(current: Value, patch: Option<Value>) -> Value {
         return current;
     };
 
-    let mut merged = current.as_object().cloned().unwrap_or_default();
-    if let Some(patch_object) = patch.as_object() {
-        for (key, value) in patch_object {
-            merged.insert(key.clone(), value.clone());
-        }
+    // Only apply object patches — ignore scalars/nulls to preserve the
+    // invariant that task metadata is always an object.
+    let Value::Object(patch_object) = patch else {
+        return current;
+    };
+
+    let Value::Object(mut current_object) = current else {
+        return Value::Object(patch_object);
+    };
+
+    for (key, patch_value) in patch_object {
+        let merged_value = match current_object.remove(&key) {
+            Some(current_value) => merge_json_value(current_value, patch_value),
+            None => patch_value,
+        };
+        current_object.insert(key, merged_value);
     }
-    Value::Object(merged)
+
+    Value::Object(current_object)
+}
+
+fn merge_json_value(current: Value, patch: Value) -> Value {
+    match (current, patch) {
+        (Value::Object(current_object), Value::Object(patch_object)) => merge_json_object(
+            Value::Object(current_object),
+            Some(Value::Object(patch_object)),
+        ),
+        (_, patch_value) => patch_value,
+    }
 }
 
 fn parse_subtasks(value: &str) -> Vec<TaskSubtask> {
@@ -693,6 +715,71 @@ mod tests {
             requeued.worker_id.is_none(),
             "expected worker binding to clear, got {:?}",
             requeued.worker_id
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_updates_deep_merge_nested_objects() {
+        let store = setup_store().await;
+        let created = store
+            .create(CreateTaskInput {
+                agent_id: "agent-test".to_string(),
+                title: "github-linked task".to_string(),
+                description: None,
+                status: TaskStatus::Backlog,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({
+                    "github_issue": {
+                        "repo": "spacedriveapp/spacebot",
+                        "number": 123,
+                        "labels": ["bug"],
+                        "state": "open"
+                    },
+                    "source": "github"
+                }),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let updated = store
+            .update(
+                "agent-test",
+                created.task_number,
+                UpdateTaskInput {
+                    metadata: Some(serde_json::json!({
+                        "github_issue": {
+                            "url": "https://github.com/spacedriveapp/spacebot/issues/123",
+                            "labels": ["bug", "tasks"]
+                        },
+                        "github_pr": {
+                            "number": 456
+                        }
+                    })),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update should succeed")
+            .expect("task should exist");
+
+        assert_eq!(
+            updated.metadata,
+            serde_json::json!({
+                "github_issue": {
+                    "repo": "spacedriveapp/spacebot",
+                    "number": 123,
+                    "url": "https://github.com/spacedriveapp/spacebot/issues/123",
+                    "labels": ["bug", "tasks"],
+                    "state": "open"
+                },
+                "github_pr": {
+                    "number": 456
+                },
+                "source": "github"
+            })
         );
     }
 }

@@ -101,7 +101,7 @@ impl Tool for TaskUpdateTool {
                             "required": ["title", "completed"]
                         }
                     },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
+                    "metadata": { "type": "object", "description": "Metadata object deep-merged with current metadata" },
                     "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" }
                 },
                 "required": ["task_number"]
@@ -135,7 +135,7 @@ impl Tool for TaskUpdateTool {
                             "required": ["title", "completed"]
                         }
                     },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
+                    "metadata": { "type": "object", "description": "Metadata object deep-merged with current metadata" },
                     "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" },
                     "worker_id": { "type": "string", "description": "Optional worker ID to bind to this task" },
                     "approved_by": { "type": "string", "description": "Optional approver identifier" }

@@ -128,6 +128,7 @@ pub fn is_retriable_error(error_message: &str) -> bool {
         || lower.contains("overloaded")
         || lower.contains("timeout")
         || lower.contains("connection")
+        || lower.contains("error sending request")
         // Generic server errors (OpenRouter wraps upstream 500s in various
         // phrasings like "The server had an error while processing your request")
         || lower.contains("server error")
@@ -469,4 +470,81 @@ pub const RETRY_BASE_DELAY_MS: u64 = 500;
 pub fn is_rate_limit_error(error_message: &str) -> bool {
     let lower = error_message.to_lowercase();
     lower.contains("429") || lower.contains("rate limit")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_retriable_error_catches_network_failures() {
+        // DNS/connection failures from reqwest
+        assert!(is_retriable_error(
+            "error sending request for url (https://api.z.ai/api/anthropic/v1/messages)"
+        ));
+        assert!(is_retriable_error(
+            "error sending request: connection refused"
+        ));
+        assert!(is_retriable_error("ERROR SENDING REQUEST: timeout"));
+    }
+
+    #[test]
+    fn is_retriable_error_catches_http_errors() {
+        // 5xx server errors
+        assert!(is_retriable_error("502 Bad Gateway"));
+        assert!(is_retriable_error("503 Service Unavailable"));
+        assert!(is_retriable_error("504 Gateway Timeout"));
+        assert!(is_retriable_error("500 Internal Server Error"));
+        // Rate limiting
+        assert!(is_retriable_error("429 Too Many Requests"));
+        assert!(is_retriable_error("rate limit exceeded"));
+    }
+
+    #[test]
+    fn is_retriable_error_catches_timeout_and_connection_errors() {
+        assert!(is_retriable_error("connection timeout"));
+        assert!(is_retriable_error("connection reset by peer"));
+        assert!(is_retriable_error("timeout while waiting for response"));
+    }
+
+    #[test]
+    fn is_retriable_error_catches_server_error_phrases() {
+        assert!(is_retriable_error(
+            "The server had an error while processing your request"
+        ));
+        assert!(is_retriable_error("internal error"));
+        assert!(is_retriable_error("server error"));
+        assert!(is_retriable_error("overloaded"));
+    }
+
+    #[test]
+    fn is_retriable_error_catches_malformed_responses() {
+        assert!(is_retriable_error("empty response"));
+        assert!(is_retriable_error("failed to read response body"));
+        assert!(is_retriable_error("error decoding response body"));
+    }
+
+    #[test]
+    fn is_retriable_error_rejects_non_retriable_errors() {
+        // Auth errors should not be retriable
+        assert!(!is_retriable_error("Invalid API key"));
+        assert!(!is_retriable_error("401 Unauthorized"));
+        assert!(!is_retriable_error("403 Forbidden"));
+        // Client errors should not be retriable
+        assert!(!is_retriable_error("400 Bad Request"));
+        assert!(!is_retriable_error("404 Not Found"));
+        // Other errors should not be retriable
+        assert!(!is_retriable_error("unexpected EOF"));
+        assert!(!is_retriable_error("parse error"));
+    }
+
+    #[test]
+    fn is_rate_limit_error_detection() {
+        assert!(is_rate_limit_error("429 Too Many Requests"));
+        assert!(is_rate_limit_error("rate limit exceeded"));
+        assert!(is_rate_limit_error("RATE LIMIT: too many requests"));
+        // Other transient errors should not be rate limited
+        assert!(!is_rate_limit_error("503 Service Unavailable"));
+        assert!(!is_rate_limit_error("timeout"));
+    }
 }

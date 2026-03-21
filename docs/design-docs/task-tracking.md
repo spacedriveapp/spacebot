@@ -206,7 +206,7 @@ Arguments:
   status: String (optional)
   priority: String (optional)
   subtasks: JSON (optional, full replacement of subtasks array)
-  metadata: JSON (optional, merged with existing)
+  metadata: JSON (optional, deep-merged with existing; nested objects are merged recursively)
   complete_subtask: i32 (optional, index of subtask to mark complete)
 ```
 
@@ -259,6 +259,25 @@ Each task card shows:
 - Source indicator — cortex icon if promoted from a todo, human icon if manually created
 - Worker status — if in_progress, shows live worker status
 - Metadata badges — GitHub issue/PR links rendered as small icons
+
+Recommended metadata shape for GitHub linkage:
+
+```json
+{
+  "github_issue": {
+    "repo": "spacedriveapp/spacebot",
+    "number": 123,
+    "url": "https://github.com/spacedriveapp/spacebot/issues/123"
+  },
+  "github_pr": {
+    "repo": "spacedriveapp/spacebot",
+    "number": 456,
+    "url": "https://github.com/spacedriveapp/spacebot/pull/456"
+  }
+}
+```
+
+Task metadata updates should deep-merge nested objects so agents and workers can add fields like `url`, `labels`, or `state` later without replacing the rest of the stored GitHub reference.
 
 Clicking a card opens a detail panel (slide-out or modal) with:
 
