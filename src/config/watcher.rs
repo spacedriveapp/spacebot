@@ -553,7 +553,11 @@ pub fn spawn_file_watcher(
                                 }
                             }
 
-                        // Signal: start default adapter (requires root enabled) and named instances (independent)
+                        // Signal: start default adapter (requires root enabled) and named instances (independent).
+                        // Unlike Discord/Telegram where named instances inherit the root enabled gate,
+                        // Signal named instances start independently when they have valid credentials
+                        // and their own enabled flag is set. This allows running multiple Signal accounts
+                        // without needing a "default" account enabled.
                         if let Some(signal_config) = &config.messaging.signal {
                             // Start default adapter only if root is enabled AND has credentials
                             if signal_config.enabled
@@ -590,6 +594,11 @@ pub fn spawn_file_watcher(
                                 );
                                 if manager.has_adapter(runtime_key.as_str()).await {
                                     // TODO: named instance permissions not hot-updated (see discord block comment)
+                                    continue;
+                                }
+                                // Skip instances with missing credentials (same gating as cold-start)
+                                if instance.http_url.is_empty() || instance.account.is_empty() {
+                                    tracing::warn!(adapter = %instance.name, "skipping enabled signal instance with missing credentials");
                                     continue;
                                 }
 

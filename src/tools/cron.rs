@@ -201,12 +201,14 @@ impl CronTool {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
         let interval_secs = args.interval_secs.unwrap_or(3600);
-        let delivery_target = args
+        let explicit_delivery_target = args
             .delivery_target
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| value.to_string())
+            .map(|value| value.to_string());
+        let delivery_target = explicit_delivery_target
+            .clone()
             .or_else(|| self.default_delivery_target.clone())
             .ok_or_else(|| {
                 CronError(
@@ -215,8 +217,15 @@ impl CronTool {
                 )
             })?;
 
-        // Normalize delivery target for named instances
-        let delivery_target = normalize_delivery_target(&delivery_target, &self.current_adapter);
+        // Only normalize delivery target when it came from the conversation default,
+        // not when the user explicitly provided one. An explicit "signal:uuid:xxx"
+        // targets the default adapter by design; the default fallback from the
+        // conversation context should be rewritten for the named instance.
+        let delivery_target = if explicit_delivery_target.is_some() {
+            delivery_target
+        } else {
+            normalize_delivery_target(&delivery_target, &self.current_adapter)
+        };
 
         // Validate cron job ID: alphanumeric, hyphens, underscores only
         if id.is_empty()
@@ -546,5 +555,31 @@ mod tests {
         let result =
             normalize_delivery_target("email:alice@example.com", &Some("email".to_string()));
         assert_eq!(result, "email:alice@example.com");
+    }
+
+    // Regression tests: already-qualified non-Signal targets must not be double-prefixed
+    #[test]
+    fn test_normalize_slack_already_qualified_no_rewrite() {
+        let result =
+            normalize_delivery_target("slack:team1:userid:123", &Some("slack:team1".to_string()));
+        assert_eq!(result, "slack:team1:userid:123");
+    }
+
+    #[test]
+    fn test_normalize_discord_already_qualified_no_rewrite() {
+        let result = normalize_delivery_target(
+            "discord:guild1:userid:456",
+            &Some("discord:guild1".to_string()),
+        );
+        assert_eq!(result, "discord:guild1:userid:456");
+    }
+
+    #[test]
+    fn test_normalize_telegram_already_qualified_no_rewrite() {
+        let result = normalize_delivery_target(
+            "telegram:bot1:userid:789",
+            &Some("telegram:bot1".to_string()),
+        );
+        assert_eq!(result, "telegram:bot1:userid:789");
     }
 }

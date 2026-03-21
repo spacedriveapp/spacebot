@@ -3307,7 +3307,11 @@ async fn initialize_agents(
         api_state.set_signal_permissions(perms.clone()).await;
     }
 
-    // Signal: start default adapter (requires root enabled) and named instances (independent)
+    // Signal: start default adapter (requires root enabled) and named instances (independent).
+    // Unlike Discord/Telegram where named instances inherit the root enabled gate,
+    // Signal named instances start independently when they have valid credentials
+    // and their own enabled flag is set. This allows running multiple Signal accounts
+    // without needing a "default" account enabled.
     let tmp_dir = config.instance_dir.join("tmp");
     if let Some(signal_config) = &config.messaging.signal {
         // Start default adapter only if root is enabled AND has credentials

@@ -528,20 +528,26 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
             })
         }
         // Named adapter: signal:instance:uuid:xxx, signal:instance:group:xxx
-        [instance, "uuid", uuid] if !instance.is_empty() && !uuid.is_empty() => {
+        [instance, "uuid", uuid]
+            if !instance.is_empty() && !uuid.is_empty() && is_valid_instance_name(instance) =>
+        {
             Some(BroadcastTarget {
                 adapter: format!("signal:{instance}"),
                 target: format!("uuid:{uuid}"),
             })
         }
-        [instance, "group", group_id] if !instance.is_empty() && !group_id.is_empty() => {
+        [instance, "group", group_id]
+            if !instance.is_empty() && !group_id.is_empty() && is_valid_instance_name(instance) =>
+        {
             Some(BroadcastTarget {
                 adapter: format!("signal:{instance}"),
                 target: format!("group:{group_id}"),
             })
         }
         // Named adapter: signal:instance:e164:+xxx - use normalize_signal_target
-        [instance, "e164", phone] if !instance.is_empty() && !phone.is_empty() => {
+        [instance, "e164", phone]
+            if !instance.is_empty() && !phone.is_empty() && is_valid_instance_name(instance) =>
+        {
             normalize_signal_target(&format!("e164:{phone}")).map(|target| BroadcastTarget {
                 adapter: format!("signal:{instance}"),
                 target,
@@ -549,7 +555,10 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
         }
         // Named adapter: signal:instance:+xxx - use normalize_signal_target
         [instance, phone]
-            if !instance.is_empty() && phone.starts_with('+') && !phone.is_empty() =>
+            if !instance.is_empty()
+                && phone.starts_with('+')
+                && !phone.is_empty()
+                && is_valid_instance_name(instance) =>
         {
             normalize_signal_target(phone).map(|target| BroadcastTarget {
                 adapter: format!("signal:{instance}"),
@@ -561,7 +570,8 @@ pub fn parse_signal_target_parts(parts: &[&str]) -> Option<BroadcastTarget> {
         [instance, single]
             if !instance.is_empty()
                 && !single.is_empty()
-                && !single.chars().all(|c| c.is_ascii_digit()) =>
+                && !single.chars().all(|c| c.is_ascii_digit())
+                && is_valid_instance_name(instance) =>
         {
             normalize_signal_target(single).map(|target| BroadcastTarget {
                 adapter: format!("signal:{instance}"),
@@ -600,45 +610,54 @@ fn parse_named_instance_target(parts: &[&str]) -> Option<BroadcastTarget> {
     }
 
     match parts {
-        // "dm" reserved for Slack/Discord
-        ["discord", "dm", user_id] if !user_id.is_empty() => Some(BroadcastTarget {
-            adapter: "discord".to_string(),
-            target: format!("dm:{user_id}"),
-        }),
-        ["slack", "dm", user_id] if !user_id.is_empty() => Some(BroadcastTarget {
-            adapter: "slack".to_string(),
-            target: format!("dm:{user_id}"),
-        }),
+        // "dm" reserved for Slack/Discord (case-insensitive)
+        [platform @ ("discord" | "slack"), instance, user_id]
+            if instance.eq_ignore_ascii_case("dm") && !user_id.is_empty() =>
+        {
+            let normalized = normalize_target(platform, &format!("dm:{user_id}"))?;
+            Some(BroadcastTarget {
+                adapter: (*platform).to_string(),
+                target: normalized,
+            })
+        }
         // Named adapter: platform:instance:target
         // Heuristic: instance names are simple alphanumeric identifiers (not all digits like guild IDs)
-        // Reject "dm" as instance name for Discord/Slack (reserved for DM format)
+        // Reject "dm" as instance name for Discord/Slack (reserved for DM format, case-insensitive)
         [platform, instance, target, ..]
             if parts.len() >= 3
                 && !instance.is_empty()
                 && !target.is_empty()
                 && is_valid_instance_name(instance)
-                && !((*platform == "discord" || *platform == "slack") && *instance == "dm") =>
+                && !((*platform == "discord" || *platform == "slack")
+                    && instance.eq_ignore_ascii_case("dm")) =>
         {
             // Reconstruct target from remaining parts (in case target contains colons)
+            // Normalize to collapse guild-prefixed IDs and reject malformed inputs
             let full_target = parts[2..].join(":");
-            if full_target.is_empty() {
-                return None;
-            }
+            let normalized = normalize_target(platform, &full_target)?;
             Some(BroadcastTarget {
                 adapter: format!("{}:{}", platform, instance),
-                target: full_target,
+                target: normalized,
             })
         }
         // Legacy multi-part format: platform:workspace_id:target_id (use last part as target)
-        [platform, .., target] if parts.len() > 2 && !target.is_empty() => Some(BroadcastTarget {
-            adapter: (*platform).to_string(),
-            target: (*target).to_string(),
-        }),
+        // Restrict to known legacy adapters (slack, discord) to prevent malformed named-targets
+        // like "telegram:bad.instance:12345" from being interpreted as "telegram:12345"
+        [platform @ ("slack" | "discord"), .., target] if parts.len() > 2 && !target.is_empty() => {
+            let normalized = normalize_target(platform, target)?;
+            Some(BroadcastTarget {
+                adapter: (*platform).to_string(),
+                target: normalized,
+            })
+        }
         // Default adapter: platform:target
-        [platform, target] if !target.is_empty() => Some(BroadcastTarget {
-            adapter: (*platform).to_string(),
-            target: (*target).to_string(),
-        }),
+        [platform, target] if !target.is_empty() => {
+            let normalized = normalize_target(platform, target)?;
+            Some(BroadcastTarget {
+                adapter: (*platform).to_string(),
+                target: normalized,
+            })
+        }
         _ => None,
     }
 }

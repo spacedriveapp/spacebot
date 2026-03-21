@@ -683,6 +683,9 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				if (result.entries.length > 0) {
 					credentials.signal_dm_allowed_users = result.entries.join(',');
 				}
+			} else if (credentialInputs.signal_dm_allowed_users !== undefined) {
+				// Defined but empty → send "" so backend clears the allow-list
+				credentials.signal_dm_allowed_users = "";
 			}
 		}
 
@@ -1015,7 +1018,7 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 						</div>
 						<div>
 							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Account Phone Number</label>
-				            <Input
+							<Input
 								size="lg"
 								value={credentialInputs.signal_account ?? ""}
 								onChange={(e) => setCredentialInputs({...credentialInputs, signal_account: e.target.value})}
@@ -1036,7 +1039,7 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
 							/>
 							<p className="mt-1 text-xs text-ink-faint">
-								Comma-separated list of phone numbers allowed to DM this bot (if empty, only the bot's own account can DM)
+								Allowed DM senders: E.164 phone numbers (+1234567890) or uuid:xxx identifiers. Comma-separated. If empty, DMs are blocked.
 							</p>
 						</div>
 					</>

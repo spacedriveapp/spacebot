@@ -196,48 +196,45 @@ impl Tool for SendMessageTool {
             // If explicit prefix returned default "signal" adapter, try to resolve
             // to a specific named instance for correct routing.
             if target.adapter == "signal" {
-                if let Some(current_adapter) = self
-                    .current_adapter
-                    .as_ref()
-                    .filter(|adapter| adapter.starts_with("signal:"))
-                {
-                    // In a named Signal conversation — use that instance
-                    target.adapter = current_adapter.clone();
-                } else {
-                    // Not in a Signal conversation (e.g., cron context) — look up
-                    // registered Signal adapters and resolve appropriately.
-                    let all_signal_adapters: Vec<String> = self
-                        .messaging_manager
-                        .adapter_names()
-                        .await
-                        .into_iter()
-                        .filter(|name| name == "signal" || name.starts_with("signal:"))
-                        .collect();
+                // Look up registered Signal adapters to determine resolution strategy.
+                let all_signal_adapters: Vec<String> = self
+                    .messaging_manager
+                    .adapter_names()
+                    .await
+                    .into_iter()
+                    .filter(|name| name == "signal" || name.starts_with("signal:"))
+                    .collect();
 
-                    // Check if default "signal" adapter exists
-                    let has_default_signal =
-                        all_signal_adapters.iter().any(|name| name == "signal");
-                    // Get only named adapters (exclude default "signal")
-                    let named_adapters: Vec<String> = all_signal_adapters
-                        .into_iter()
-                        .filter(|name| name.starts_with("signal:"))
-                        .collect();
+                let has_default_signal = all_signal_adapters.iter().any(|name| name == "signal");
+                let named_adapters: Vec<&str> = all_signal_adapters
+                    .iter()
+                    .filter(|name| name.starts_with("signal:"))
+                    .map(|s| s.as_str())
+                    .collect();
 
-                    if has_default_signal {
-                        // Default "signal" exists - let broadcast() use it for exact lookup
-                        // Don't change target.adapter, leave as "signal"
-                    } else if named_adapters.len() == 1 {
-                        // No default, but exactly one named adapter - use it
-                        target.adapter = named_adapters.into_iter().next().unwrap();
-                    } else if named_adapters.len() > 1 {
-                        // Multiple named adapters and no default - ambiguity error
-                        return Err(SendMessageError(format!(
-                            "Multiple Signal adapters are configured ({}). Please specify which instance to use by targeting 'signal:<instance_name>:<target>' instead of 'signal:<target>'.",
-                            named_adapters.join(", ")
-                        )));
+                if let Some(current_adapter) = self.current_adapter.as_ref().filter(|adapter| {
+                    adapter.starts_with("signal:") && all_signal_adapters.contains(adapter)
+                }) {
+                    // In a named Signal conversation — only retarget if no default adapter.
+                    // When a default "signal" adapter exists, the explicit "signal:" prefix
+                    // should use it (not the current named adapter), preserving user intent.
+                    if !has_default_signal {
+                        target.adapter = current_adapter.clone();
                     }
-                    // If 0 adapters, leave as "signal" and let broadcast() fail with appropriate error
+                } else if has_default_signal {
+                    // Not in a Signal conversation (e.g., cron context) but default exists.
+                    // Leave target.adapter as "signal" so broadcast() uses the default.
+                } else if named_adapters.len() == 1 {
+                    // No default, but exactly one named adapter - use it
+                    target.adapter = named_adapters[0].to_string();
+                } else if named_adapters.len() > 1 {
+                    // Multiple named adapters and no default - ambiguity error
+                    return Err(SendMessageError(format!(
+                        "Multiple Signal adapters are configured ({}). Please specify which instance to use by targeting 'signal:<instance_name>:<target>' instead of 'signal:<target>'.",
+                        named_adapters.join(", ")
+                    )));
                 }
+                // If 0 adapters, leave as "signal" and let broadcast() fail with appropriate error
             }
 
             self.messaging_manager
@@ -270,36 +267,55 @@ impl Tool for SendMessageTool {
             .as_ref()
             .filter(|adapter| *adapter == "signal" || adapter.starts_with("signal:"))
         {
-            match parse_implicit_signal_shorthand(&args.target, current_adapter) {
-                Ok(Some(target)) => {
-                    self.messaging_manager
-                        .broadcast(
-                            &target.adapter,
-                            &target.target,
-                            crate::OutboundResponse::Text(args.message),
-                        )
-                        .await
-                        .map_err(|error| {
-                            SendMessageError(format!("failed to send message: {error}"))
-                        })?;
+            // Verify the cached adapter is still registered before using it.
+            // The channel's current_adapter is stale if the named adapter was removed.
+            let live_signal_adapters: Vec<String> = self
+                .messaging_manager
+                .adapter_names()
+                .await
+                .into_iter()
+                .filter(|name| name == "signal" || name.starts_with("signal:"))
+                .collect();
 
-                    tracing::info!(
-                        adapter = %target.adapter,
-                        broadcast_target = %"[REDACTED]",
-                        "message sent via implicit Signal shorthand"
-                    );
+            if !live_signal_adapters.contains(current_adapter) {
+                // Adapter was removed — fall through to channel-name lookup instead
+                // of routing to a dead adapter.
+                tracing::warn!(
+                    adapter = %current_adapter,
+                    "current_adapter references a removed Signal adapter; skipping implicit shorthand"
+                );
+            } else {
+                match parse_implicit_signal_shorthand(&args.target, current_adapter) {
+                    Ok(Some(target)) => {
+                        self.messaging_manager
+                            .broadcast(
+                                &target.adapter,
+                                &target.target,
+                                crate::OutboundResponse::Text(args.message),
+                            )
+                            .await
+                            .map_err(|error| {
+                                SendMessageError(format!("failed to send message: {error}"))
+                            })?;
 
-                    return Ok(SendMessageOutput {
-                        success: true,
-                        target: target.target,
-                        platform: target.adapter,
-                    });
-                }
-                Err(validation_error) => {
-                    return Err(SendMessageError(validation_error));
-                }
-                Ok(None) => {
-                    // Not a Signal shorthand — fall through to channel-name lookup.
+                        tracing::info!(
+                            adapter = %target.adapter,
+                            broadcast_target = %"[REDACTED]",
+                            "message sent via implicit Signal shorthand"
+                        );
+
+                        return Ok(SendMessageOutput {
+                            success: true,
+                            target: target.target,
+                            platform: target.adapter,
+                        });
+                    }
+                    Err(validation_error) => {
+                        return Err(SendMessageError(validation_error));
+                    }
+                    Ok(None) => {
+                        // Not a Signal shorthand — fall through to channel-name lookup.
+                    }
                 }
             }
         }

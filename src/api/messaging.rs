@@ -197,6 +197,41 @@ fn push_instance_status(
     });
 }
 
+/// Merge incoming Signal credentials with existing TOML values for patch-style updates.
+/// Fields omitted from the request are filled from the existing platform table,
+/// so callers can update individual fields without resubmitting every credential.
+///
+/// **Note on `signal_dm_allowed_users`:** This field intentionally does NOT fall back
+/// to existing TOML values. It uses tri-state semantics:
+/// - `None` → caller handles as "preserve existing" (do nothing)
+/// - `Some("")` → clear the allow-list
+/// - `Some(entries)` → set the allow-list
+///
+/// The caller (`create_messaging_instance`) must interpret the `None` case correctly.
+fn merge_signal_credentials_with_existing(
+    credentials: &InstanceCredentials,
+    existing: &toml_edit::Table,
+) -> InstanceCredentials {
+    InstanceCredentials {
+        signal_http_url: credentials.signal_http_url.clone().or_else(|| {
+            existing
+                .get("http_url")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        }),
+        signal_account: credentials.signal_account.clone().or_else(|| {
+            existing
+                .get("account")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        }),
+        signal_dm_allowed_users: credentials.signal_dm_allowed_users.clone(),
+        ..Default::default()
+    }
+}
+
 /// Parse and validate Signal credentials from the request.
 /// Returns (http_url, account, dm_allowed_users) on success, or an error response on failure.
 fn parse_signal_credentials(
@@ -222,6 +257,9 @@ fn parse_signal_credentials(
                         ),
                     });
                 }
+                // url.to_string() normalizes the URL (lowercase host, percent-encoding).
+                // The stored value may differ from user input (e.g. HTTP://LOCALHOST → http://localhost).
+                // SignalAdapter::new() additionally strips trailing slashes at runtime.
                 url.to_string()
             }
             Err(e) => {
@@ -1456,40 +1494,6 @@ pub(super) async fn toggle_platform(
                                         tracing::error!(%error, "failed to start signal adapter on toggle");
                                     }
                                 }
-
-                                // Also start all enabled named instances
-                                for instance in signal_config
-                                    .instances
-                                    .iter()
-                                    .filter(|instance| instance.enabled)
-                                {
-                                    let runtime_key = crate::config::binding_runtime_adapter_key(
-                                        "signal",
-                                        Some(instance.name.as_str()),
-                                    );
-                                    if manager.has_adapter(runtime_key.as_str()).await {
-                                        continue;
-                                    }
-                                    let permissions =
-                                        std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(
-                                            crate::config::SignalPermissions::from_instance_config(
-                                                instance,
-                                            ),
-                                        ));
-                                    let instance_dir = state.instance_dir.load();
-                                    let tmp_dir = instance_dir.join("tmp");
-                                    let adapter = crate::messaging::signal::SignalAdapter::new(
-                                        runtime_key,
-                                        &instance.http_url,
-                                        &instance.account,
-                                        instance.ignore_stories,
-                                        permissions,
-                                        tmp_dir,
-                                    );
-                                    if let Err(error) = manager.register_and_start(adapter).await {
-                                        tracing::error!(%error, adapter = %instance.name, "failed to start named signal adapter on toggle");
-                                    }
-                                }
                             }
                             Some(adapter_name) => {
                                 // Toggle specific named instance only
@@ -1537,6 +1541,12 @@ pub(super) async fn toggle_platform(
                 crate::config::binding_runtime_adapter_key(platform, Some(adapter_name.trim()));
             if let Err(error) = manager.remove_adapter(&runtime_key).await {
                 tracing::warn!(%error, adapter = %runtime_key, "failed to shut down named adapter on toggle");
+            }
+        } else if platform == "signal" {
+            // Root toggle disable: only remove the default adapter, not named instances
+            let runtime_key = crate::config::binding_runtime_adapter_key(platform, None);
+            if let Err(error) = manager.remove_adapter(&runtime_key).await {
+                tracing::warn!(%error, adapter = %runtime_key, "failed to shut down default adapter on toggle");
             }
         } else if let Err(error) = manager.remove_platform_adapters(platform).await {
             tracing::warn!(%error, platform = %platform, "failed to shut down adapters on toggle");
@@ -1750,15 +1760,18 @@ pub(super) async fn create_messaging_instance(
                     }
                 }
                 "signal" => {
-                    // Use helper function to parse and validate Signal credentials
-                    let (http_url, account, dm_users) = match parse_signal_credentials(credentials)
-                    {
+                    // Merge incoming credentials with existing TOML values for patch-style updates.
+                    // Fields omitted from the request are filled from the current table,
+                    // so callers can update individual fields without resubmitting every credential.
+                    let effective =
+                        merge_signal_credentials_with_existing(credentials, platform_table);
+                    let (http_url, account, dm_users) = match parse_signal_credentials(&effective) {
                         Ok(result) => result,
                         Err(response) => return Ok(Json(response)),
                     };
 
-                    // Store normalized URL (strip trailing slash)
-                    platform_table["http_url"] = toml_edit::value(http_url.trim_end_matches('/'));
+                    // Store URL as-is; SignalAdapter::new() normalizes trailing slashes.
+                    platform_table["http_url"] = toml_edit::value(http_url.as_str());
                     platform_table["account"] = toml_edit::value(account);
 
                     // Store dm_allowed_users: preserve existing when omitted (None),
@@ -1782,7 +1795,9 @@ pub(super) async fn create_messaging_instance(
                 }
                 _ => {}
             }
-            platform_table["enabled"] = toml_edit::value(enabled);
+            if let Some(value) = request.enabled {
+                platform_table["enabled"] = toml_edit::value(value);
+            }
         }
         Some(ref name) => {
             // Named instance — add to [[messaging.<platform>.instances]]
@@ -1910,15 +1925,15 @@ pub(super) async fn create_messaging_instance(
                     }
                 }
                 "signal" => {
-                    // Use helper function to parse and validate Signal credentials
+                    // New instance — no existing values to merge, validate directly.
                     let (http_url, account, dm_users) = match parse_signal_credentials(credentials)
                     {
                         Ok(result) => result,
                         Err(response) => return Ok(Json(response)),
                     };
 
-                    // Store normalized URL (strip trailing slash)
-                    instance_table["http_url"] = toml_edit::value(http_url.trim_end_matches('/'));
+                    // Store URL as-is; SignalAdapter::new() normalizes trailing slashes.
+                    instance_table["http_url"] = toml_edit::value(http_url.as_str());
                     instance_table["account"] = toml_edit::value(account);
 
                     // Store dm_allowed_users: preserve existing when omitted (None),
@@ -1936,7 +1951,9 @@ pub(super) async fn create_messaging_instance(
                             instance_table.remove("dm_allowed_users");
                         }
                         None => {
-                            // Omitted - don't set the field (for new instances, nothing to preserve
+                            // Omitted - don't set the field. When loaded, the absence
+                            // of dm_allowed_users results in an empty Vec which blocks
+                            // all DMs (the safe default).
                         }
                     }
                 }

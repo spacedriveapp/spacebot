@@ -63,7 +63,7 @@ export function platformColor(platform: string): string {
 export const E164_REGEX = /^\+[1-9]\d{5,14}$/;
 
 export const E164_ERROR_TEXT = 
-	"Phone number must be in E.164 format: + followed by country code and 6-15 digits (e.g., +1234567890)";
+	"Phone number must be in E.164 format: + followed by a country code (first digit 1-9, not 0) and 6-15 digits total (e.g., +1234567890)";
 
 export function isValidE164(phoneNumber: string): boolean {
 	return E164_REGEX.test(phoneNumber.trim());

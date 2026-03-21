@@ -194,6 +194,9 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 				if (result.entries.length > 0) {
 					dmUsers = result.entries.join(',');
 				}
+			} else if (credentialInputs.signal_dm_allowed_users !== undefined) {
+				// Defined but empty → send "" so backend clears the allow-list
+				dmUsers = "";
 			}
 			request.platform_credentials = {
 				signal_http_url: credentialInputs.signal_http_url.trim(),
@@ -426,7 +429,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 										onKeyDown={(e) => { if (e.key === "Enter") handleSaveCredentials(); }}
 									/>
 									<p className="mt-1 text-xs text-ink-faint">
-										Comma-separated list of phone numbers allowed to DM this bot (if empty, only the bot's own account can DM)
+										Allowed DM senders: E.164 phone numbers (+1234567890) or uuid:xxx identifiers. Comma-separated. If empty, DMs are blocked.
 									</p>
 								</div>
 							</div>
@@ -445,7 +448,7 @@ export function ChannelEditModal({platform, name, status, open, onOpenChange}: C
 						</p>
 					)}
 
-					{platform !== "webhook" && Object.values(credentialInputs).some((v) => v?.trim()) && (
+					{platform !== "webhook" && (Object.values(credentialInputs).some((v) => v?.trim()) || credentialInputs.signal_dm_allowed_users === "") && (
 						<Button onClick={handleSaveCredentials} loading={saveCreds.isPending} size="sm">
 							{configured ? "Update Credentials" : "Connect"}
 						</Button>

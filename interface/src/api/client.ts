@@ -1199,6 +1199,8 @@ export interface MessagingStatusResponse {
 	webhook: PlatformStatus;
 	twitch: PlatformStatus;
 	email: PlatformStatus;
+	mattermost: PlatformStatus;
+	signal: PlatformStatus;
 	instances: AdapterInstanceStatus[];
 }
 
