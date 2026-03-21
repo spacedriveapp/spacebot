@@ -285,7 +285,49 @@ impl Tool for ReplyTool {
                                     "required": ["name", "value"]
                                 }
                             },
-                            "footer": { "type": "string" }
+                            "footer": {
+                                "type": "object",
+                                "properties": {
+                                    "text": { "type": "string" },
+                                    "icon_url": { "type": "string", "format": "uri" }
+                                },
+                                "required": ["text"]
+                            },
+                            "thumbnail": {
+                                "type": "object",
+                                "description": "Small image in the top-right corner of the embed.",
+                                "properties": {
+                                    "url": { "type": "string", "format": "uri" },
+                                    "width": { "type": "integer", "description": "Optional width hint in pixels" },
+                                    "height": { "type": "integer", "description": "Optional height hint in pixels" }
+                                },
+                                "required": ["url"]
+                            },
+                            "image": {
+                                "type": "object",
+                                "description": "Large image at the bottom of the embed.",
+                                "properties": {
+                                    "url": { "type": "string", "format": "uri" },
+                                    "width": { "type": "integer", "description": "Optional width hint in pixels" },
+                                    "height": { "type": "integer", "description": "Optional height hint in pixels" }
+                                },
+                                "required": ["url"]
+                            },
+                            "author": {
+                                "type": "object",
+                                "description": "Author bar at the top of the embed.",
+                                "properties": {
+                                    "name": { "type": "string" },
+                                    "url": { "type": "string", "format": "uri" },
+                                    "icon_url": { "type": "string", "format": "uri" }
+                                },
+                                "required": ["name"]
+                            },
+                            "timestamp": {
+                                "type": "string",
+                                "format": "date-time",
+                                "description": "ISO 8601 timestamp (e.g. 2024-01-01T00:00:00Z) displayed in the footer area."
+                            }
                         }
                     }
                 },
