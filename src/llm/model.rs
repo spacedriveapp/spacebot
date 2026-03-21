@@ -2815,34 +2815,508 @@ fn parse_openai_responses_response(
     })
 }
 
+/// Returns `true` if the JSON value is semantically empty: null, empty string, empty array,
+/// or empty object. Booleans and numbers are never considered empty.
+fn json_value_is_empty(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::String(text) => text.is_empty(),
+        serde_json::Value::Array(items) => items.is_empty(),
+        serde_json::Value::Object(map) => map.is_empty(),
+        _ => false,
+    }
+}
+
+/// Recursively merges `source` into `target` using streaming-aware semantics.
+///
+/// - Null targets are replaced unconditionally.
+/// - Objects are merged key-by-key (recursive).
+/// - Arrays are merged index-by-index (recursive), with extra source items appended.
+/// - Strings are only replaced when the source extends the target (delta accumulation).
+/// - Empty targets of any type are replaced by the source value.
+fn merge_json_value(target: &mut serde_json::Value, source: &serde_json::Value) {
+    match (target, source) {
+        (target_value @ serde_json::Value::Null, source_value) => {
+            *target_value = source_value.clone();
+        }
+        (serde_json::Value::Object(target_map), serde_json::Value::Object(source_map)) => {
+            for (key, source_value) in source_map {
+                if let Some(target_value) = target_map.get_mut(key) {
+                    merge_json_value(target_value, source_value);
+                } else {
+                    target_map.insert(key.clone(), source_value.clone());
+                }
+            }
+        }
+        (serde_json::Value::Array(target_items), serde_json::Value::Array(source_items)) => {
+            for (index, source_value) in source_items.iter().enumerate() {
+                if let Some(target_value) = target_items.get_mut(index) {
+                    merge_json_value(target_value, source_value);
+                } else {
+                    target_items.push(source_value.clone());
+                }
+            }
+        }
+        // Streaming merge: only replace `target_text` when `source_text` is a strict extension
+        // (longer and starts with `target_text`), which is the normal pattern for incremental
+        // SSE delta accumulation where each chunk appends to the previous partial value.
+        // An empty `target_text` is also replaced unconditionally.
+        (serde_json::Value::String(target_text), serde_json::Value::String(source_text)) => {
+            if target_text.is_empty()
+                || (source_text.len() > target_text.len()
+                    && source_text.starts_with(target_text.as_str()))
+            {
+                *target_text = source_text.clone();
+            }
+        }
+        (target_value, source_value) if json_value_is_empty(target_value) => {
+            *target_value = source_value.clone();
+        }
+        _ => {}
+    }
+}
+
+/// Ensures the value is a JSON object, replacing it with an empty object if it is not.
+/// Returns a mutable reference to the inner object map.
+fn ensure_json_object(
+    value: &mut serde_json::Value,
+) -> &mut serde_json::Map<String, serde_json::Value> {
+    if !value.is_object() {
+        *value = serde_json::Value::Object(serde_json::Map::new());
+    }
+
+    value.as_object_mut().expect("value should be an object")
+}
+
+/// Ensures the named field on a JSON object is an array, initializing it if missing or
+/// if the existing value is not an array. Returns a mutable reference to the inner `Vec`.
+fn ensure_json_array_field<'a>(
+    value: &'a mut serde_json::Value,
+    field_name: &str,
+) -> &'a mut Vec<serde_json::Value> {
+    let object = ensure_json_object(value);
+    let field_value = object
+        .entry(field_name.to_string())
+        .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+
+    if !field_value.is_array() {
+        *field_value = serde_json::Value::Array(Vec::new());
+    }
+
+    field_value
+        .as_array_mut()
+        .expect("array field should be an array")
+}
+
+/// Ensures the vector has an element at the given index by padding with `Value::Null` if
+/// necessary. Returns a mutable reference to the element at that index.
+fn ensure_json_array_index(
+    values: &mut Vec<serde_json::Value>,
+    index: usize,
+) -> &mut serde_json::Value {
+    while values.len() <= index {
+        values.push(serde_json::Value::Null);
+    }
+
+    &mut values[index]
+}
+
+/// Extracts an unsigned integer index from a named field in an SSE event body.
+/// Returns `None` if the field is missing or not a valid `u64`.
+fn responses_event_index(event_body: &serde_json::Value, field_name: &str) -> Option<usize> {
+    event_body
+        .get(field_name)
+        .and_then(serde_json::Value::as_u64)
+        .map(|index| index as usize)
+}
+
+/// Gets or creates a Responses API output item at the given index in the accumulator.
+///
+/// When creating a new item, initializes type-specific fields: `role`/`content` for messages,
+/// `arguments` for function calls. If the item already exists, ensures these required fields
+/// are present without overwriting existing values.
+fn ensure_responses_output_item<'a>(
+    output_items: &'a mut BTreeMap<usize, serde_json::Value>,
+    output_index: usize,
+    item_type: &str,
+    item_id: Option<&str>,
+) -> &'a mut serde_json::Value {
+    let output_item = output_items.entry(output_index).or_insert_with(|| {
+        let mut item = serde_json::json!({
+            "type": item_type,
+        });
+
+        if item_type == "message" {
+            item["role"] = serde_json::Value::String("assistant".to_string());
+            item["content"] = serde_json::Value::Array(Vec::new());
+        }
+
+        if item_type == "function_call" {
+            item["arguments"] = serde_json::Value::String(String::new());
+        }
+
+        if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            item["id"] = serde_json::Value::String(item_id.to_string());
+        }
+
+        item
+    });
+
+    {
+        let object = ensure_json_object(output_item);
+        object
+            .entry("type".to_string())
+            .or_insert_with(|| serde_json::Value::String(item_type.to_string()));
+
+        if item_type == "message" {
+            object
+                .entry("role".to_string())
+                .or_insert_with(|| serde_json::Value::String("assistant".to_string()));
+            object
+                .entry("content".to_string())
+                .or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
+
+        if item_type == "function_call" {
+            object
+                .entry("arguments".to_string())
+                .or_insert_with(|| serde_json::Value::String(String::new()));
+        }
+
+        if let Some(item_id) = item_id.filter(|id| !id.is_empty()) {
+            object
+                .entry("id".to_string())
+                .or_insert_with(|| serde_json::Value::String(item_id.to_string()));
+        }
+    }
+
+    output_item
+}
+
+/// Gets or creates a content part within a message output item at the given output and
+/// content indices. The parent message item is created via [`ensure_responses_output_item`]
+/// if it does not already exist. Returns a mutable reference to the content part.
+fn ensure_responses_content_part<'a>(
+    output_items: &'a mut BTreeMap<usize, serde_json::Value>,
+    output_index: usize,
+    content_index: usize,
+    part_type: &str,
+    item_id: Option<&str>,
+) -> &'a mut serde_json::Value {
+    let output_item = ensure_responses_output_item(output_items, output_index, "message", item_id);
+    let content = ensure_json_array_field(output_item, "content");
+    let content_part = ensure_json_array_index(content, content_index);
+
+    {
+        let object = ensure_json_object(content_part);
+        object
+            .entry("type".to_string())
+            .or_insert_with(|| serde_json::Value::String(part_type.to_string()));
+    }
+
+    content_part
+}
+
+/// Appends `suffix` to an existing string field on a JSON object, or creates the field if
+/// it does not exist. Mutates the string in place to avoid re-allocation on every SSE delta.
+fn append_json_string_field(value: &mut serde_json::Value, field_name: &str, suffix: &str) {
+    let object = ensure_json_object(value);
+
+    match object.get_mut(field_name) {
+        Some(serde_json::Value::String(text)) => text.push_str(suffix),
+        _ => {
+            object.insert(
+                field_name.to_string(),
+                serde_json::Value::String(suffix.to_string()),
+            );
+        }
+    }
+}
+
+/// Sets a string field on a JSON object to the given value, replacing any previous content.
+/// Used for finalization events (e.g. `response.output_text.done`) that carry the complete text.
+fn set_json_string_field(value: &mut serde_json::Value, field_name: &str, text: &str) {
+    let object = ensure_json_object(value);
+    object.insert(
+        field_name.to_string(),
+        serde_json::Value::String(text.to_string()),
+    );
+}
+
+/// Merges output items from a `response.created` or `response.completed` payload into the
+/// accumulator. Existing items at the same index are deep-merged; new items are inserted.
+fn merge_responses_output_items(
+    output_items: &mut BTreeMap<usize, serde_json::Value>,
+    response: &serde_json::Value,
+) {
+    let Some(items) = response.get("output").and_then(serde_json::Value::as_array) else {
+        return;
+    };
+
+    for (index, item) in items.iter().enumerate() {
+        output_items
+            .entry(index)
+            .and_modify(|existing_item| merge_json_value(existing_item, item))
+            .or_insert_with(|| item.clone());
+    }
+}
+
+/// Collects accumulated output items from the sparse index map into a dense ordered vector.
+///
+/// Items are returned in index order. `BTreeMap` iteration is already sorted by key,
+/// so we collect values directly without filling gaps with null entries.
+fn collect_responses_output_items(
+    output_items: &BTreeMap<usize, serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    output_items.values().cloned().collect()
+}
+
+/// Parses an OpenAI Responses API SSE stream into a single consolidated JSON response.
+///
+/// Accumulates state across streamed events (`response.output_item`, `response.content_part`,
+/// `response.output_text.delta`, `response.function_call_arguments.delta`, etc.) and merges
+/// the reconstructed output into the `response.completed` payload. This handles the case where
+/// `response.completed` only includes a metadata shell without the content delivered earlier
+/// in the stream.
 fn parse_openai_responses_sse_response(
     response_text: &str,
     provider_label: &str,
 ) -> Result<serde_json::Value, CompletionError> {
-    for line in response_text.lines() {
-        let Some(data) = line.strip_prefix("data: ") else {
-            continue;
-        };
+    let mut saw_data_event = false;
+    let mut created_response = None;
+    let mut completed_response = None;
+    let mut output_items = BTreeMap::new();
 
-        if data.trim().is_empty() || data.trim() == "[DONE]" {
-            continue;
+    let mut process_payload = |payload: &str| -> Result<(), CompletionError> {
+        let data = payload.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return Ok(());
         }
+
+        saw_data_event = true;
 
         let Ok(event_body) = serde_json::from_str::<serde_json::Value>(data) else {
-            continue;
+            return Ok(());
         };
 
-        if event_body["type"].as_str() == Some("response.completed")
-            && let Some(response) = event_body.get("response")
-        {
-            return Ok(response.clone());
+        if let Some(error_body) = event_body.get("error") {
+            let message = error_body["message"].as_str().unwrap_or("unknown error");
+            return Err(CompletionError::ProviderError(format!(
+                "{provider_label} Responses streaming error: {message}"
+            )));
+        }
+
+        match event_body["type"].as_str() {
+            Some("response.created") => {
+                if let Some(response) = event_body.get("response") {
+                    merge_responses_output_items(&mut output_items, response);
+                    created_response = Some(response.clone());
+                }
+            }
+            Some("response.output_item.added") | Some("response.output_item.done") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(item) = event_body.get("item")
+                {
+                    output_items
+                        .entry(output_index)
+                        .and_modify(|existing_item| merge_json_value(existing_item, item))
+                        .or_insert_with(|| item.clone());
+                }
+            }
+            Some("response.content_part.added") | Some("response.content_part.done") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(content_index) = responses_event_index(&event_body, "content_index")
+                    && let Some(part) = event_body.get("part")
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let content_part = ensure_responses_content_part(
+                        &mut output_items,
+                        output_index,
+                        content_index,
+                        part["type"].as_str().unwrap_or("output_text"),
+                        item_id,
+                    );
+                    merge_json_value(content_part, part);
+                }
+            }
+            Some("response.output_text.delta") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(content_index) = responses_event_index(&event_body, "content_index")
+                    && let Some(delta) = event_body.get("delta").and_then(serde_json::Value::as_str)
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let content_part = ensure_responses_content_part(
+                        &mut output_items,
+                        output_index,
+                        content_index,
+                        "output_text",
+                        item_id,
+                    );
+                    append_json_string_field(content_part, "text", delta);
+                }
+            }
+            Some("response.output_text.done") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(content_index) = responses_event_index(&event_body, "content_index")
+                    && let Some(text) = event_body.get("text").and_then(serde_json::Value::as_str)
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let content_part = ensure_responses_content_part(
+                        &mut output_items,
+                        output_index,
+                        content_index,
+                        "output_text",
+                        item_id,
+                    );
+                    set_json_string_field(content_part, "text", text);
+                }
+            }
+            Some("response.refusal.delta") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(content_index) = responses_event_index(&event_body, "content_index")
+                    && let Some(delta) = event_body.get("delta").and_then(serde_json::Value::as_str)
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let content_part = ensure_responses_content_part(
+                        &mut output_items,
+                        output_index,
+                        content_index,
+                        "refusal",
+                        item_id,
+                    );
+                    append_json_string_field(content_part, "refusal", delta);
+                }
+            }
+            Some("response.refusal.done") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(content_index) = responses_event_index(&event_body, "content_index")
+                    && let Some(refusal) = event_body
+                        .get("refusal")
+                        .and_then(serde_json::Value::as_str)
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let content_part = ensure_responses_content_part(
+                        &mut output_items,
+                        output_index,
+                        content_index,
+                        "refusal",
+                        item_id,
+                    );
+                    set_json_string_field(content_part, "refusal", refusal);
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index")
+                    && let Some(delta) = event_body.get("delta").and_then(serde_json::Value::as_str)
+                {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let output_item = ensure_responses_output_item(
+                        &mut output_items,
+                        output_index,
+                        "function_call",
+                        item_id,
+                    );
+                    append_json_string_field(output_item, "arguments", delta);
+                }
+            }
+            Some("response.function_call_arguments.done") => {
+                if let Some(output_index) = responses_event_index(&event_body, "output_index") {
+                    let item_id = event_body
+                        .get("item_id")
+                        .and_then(serde_json::Value::as_str);
+                    let output_item = ensure_responses_output_item(
+                        &mut output_items,
+                        output_index,
+                        "function_call",
+                        item_id,
+                    );
+
+                    if let Some(name) = event_body.get("name").and_then(serde_json::Value::as_str) {
+                        set_json_string_field(output_item, "name", name);
+                    }
+                    if let Some(arguments) = event_body
+                        .get("arguments")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        set_json_string_field(output_item, "arguments", arguments);
+                    }
+                    if let Some(call_id) = event_body
+                        .get("call_id")
+                        .and_then(serde_json::Value::as_str)
+                    {
+                        set_json_string_field(output_item, "call_id", call_id);
+                    }
+                }
+            }
+            Some("response.completed") => {
+                if let Some(response) = event_body.get("response") {
+                    merge_responses_output_items(&mut output_items, response);
+                    completed_response = Some(response.clone());
+                }
+            }
+            _ => {}
+        }
+
+        Ok(())
+    };
+
+    let mut block_buffer = response_text.to_string();
+    while let Some(block) = extract_sse_block(&mut block_buffer) {
+        if let Some(payload) = extract_sse_data_payload(&block) {
+            process_payload(&payload)?;
         }
     }
+    if !block_buffer.trim().is_empty()
+        && let Some(payload) = extract_sse_data_payload(&block_buffer)
+    {
+        process_payload(&payload)?;
+    }
 
-    Err(CompletionError::ProviderError(format!(
-        "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
-        truncate_body(response_text)
-    )))
+    if !saw_data_event {
+        return Err(CompletionError::ProviderError(format!(
+            "{provider_label} Responses SSE stream missing SSE data events.\nBody: {}",
+            truncate_body(response_text)
+        )));
+    }
+
+    let mut response = if let Some(response) = completed_response.clone() {
+        response
+    } else if let Some(response) = created_response.clone() {
+        response
+    } else if output_items.is_empty() {
+        return Err(CompletionError::ProviderError(format!(
+            "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
+            truncate_body(response_text)
+        )));
+    } else {
+        serde_json::json!({})
+    };
+
+    if let Some(created_response) = created_response.as_ref() {
+        merge_json_value(&mut response, created_response);
+    }
+
+    merge_responses_output_items(&mut output_items, &response);
+    if !output_items.is_empty() {
+        ensure_json_object(&mut response).insert(
+            "output".to_string(),
+            serde_json::Value::Array(collect_responses_output_items(&output_items)),
+        );
+    }
+
+    Ok(response)
 }
 
 fn parse_openai_error_message(response_text: &str) -> Option<String> {
@@ -3435,6 +3909,39 @@ mod tests {
             "."
         );
         assert_eq!(parsed["usage"]["prompt_tokens"], 12);
+    }
+
+    #[test]
+    fn parse_openai_responses_sse_response_reconstructs_message_content_from_stream_events() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[]}}\n\n",
+            "data: {\"type\":\"response.content_part.added\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"part\":{\"type\":\"output_text\",\"text\":\"\"}}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"delta\":\"Hotovo\"}\n\n",
+            "data: {\"type\":\"response.output_text.delta\",\"output_index\":0,\"content_index\":0,\"item_id\":\"msg_1\",\"delta\":\", Machu\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+        );
+
+        let parsed = parse_openai_responses_sse_response(sse, "OpenAI ChatGPT").expect("valid SSE");
+
+        assert_eq!(parsed["output"][0]["type"], "message");
+        assert_eq!(parsed["output"][0]["content"][0]["type"], "output_text");
+        assert_eq!(parsed["output"][0]["content"][0]["text"], "Hotovo, Machu");
+    }
+
+    #[test]
+    fn parse_openai_responses_sse_response_reconstructs_function_calls_from_stream_events() {
+        let sse = concat!(
+            "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"id\":\"fc_1\",\"call_id\":\"call_1\",\"type\":\"function_call\",\"name\":\"memory_save\",\"arguments\":\"\"}}\n\n",
+            "data: {\"type\":\"response.function_call_arguments.delta\",\"output_index\":0,\"item_id\":\"fc_1\",\"delta\":\"{\\\"content\\\":\\\"Machu\\\"}\"}\n\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"output\":[{\"id\":\"fc_1\",\"type\":\"function_call\"}],\"usage\":{\"input_tokens\":3,\"output_tokens\":2,\"input_tokens_details\":{\"cached_tokens\":0}}}}\n\n"
+        );
+
+        let parsed = parse_openai_responses_sse_response(sse, "OpenAI ChatGPT").expect("valid SSE");
+
+        assert_eq!(parsed["output"][0]["type"], "function_call");
+        assert_eq!(parsed["output"][0]["name"], "memory_save");
+        assert_eq!(parsed["output"][0]["call_id"], "call_1");
+        assert_eq!(parsed["output"][0]["arguments"], "{\"content\":\"Machu\"}");
     }
 
     #[test]
