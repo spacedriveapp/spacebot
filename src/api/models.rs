@@ -78,26 +78,8 @@ static MODELS_CACHE: std::sync::LazyLock<
 
 const MODELS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
-/// Models known to work with Spacebot's current voice transcription path
-/// (OpenAI-compatible `/v1/chat/completions` with `input_audio`).
-const KNOWN_VOICE_TRANSCRIPTION_MODELS: &[&str] = &[
-    // Native Gemini API
-    "gemini/gemini-2.0-flash",
-    "gemini/gemini-2.5-flash",
-    "gemini/gemini-2.5-flash-lite",
-    "gemini/gemini-2.5-pro",
-    "gemini/gemini-3-flash-preview",
-    "gemini/gemini-3-pro-preview",
-    "gemini/gemini-3.1-pro-preview",
-    // Via OpenRouter
-    "openrouter/google/gemini-2.0-flash-001",
-    "openrouter/google/gemini-2.5-flash",
-    "openrouter/google/gemini-2.5-flash-lite",
-    "openrouter/google/gemini-2.5-pro",
-    "openrouter/google/gemini-3-flash-preview",
-    "openrouter/google/gemini-3-pro-preview",
-    "openrouter/google/gemini-3.1-pro-preview",
-];
+/// Providers that support Whisper-compatible `/v1/audio/transcriptions` endpoint.
+const WHISPER_CAPABLE_PROVIDERS: &[&str] = &["openai", "groq", "gemini"];
 
 /// Maps models.dev provider IDs to spacebot's internal provider IDs for
 /// providers with direct integrations.
@@ -123,8 +105,9 @@ fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
     }
 }
 
-fn is_known_voice_transcription_model(model_id: &str) -> bool {
-    KNOWN_VOICE_TRANSCRIPTION_MODELS.contains(&model_id)
+/// Returns true if the provider supports Whisper-compatible voice transcription.
+fn supports_voice_transcription(provider: &str) -> bool {
+    WHISPER_CAPABLE_PROVIDERS.contains(&provider)
 }
 
 fn as_openai_chatgpt_model(model: &ModelInfo) -> Option<ModelInfo> {
@@ -378,9 +361,7 @@ pub(super) async fn get_models(
         if let Some(capability) = requested_capability {
             match capability {
                 "input_audio" => model.input_audio,
-                "voice_transcription" => {
-                    model.input_audio && is_known_voice_transcription_model(&model.id)
-                }
+                "voice_transcription" => supports_voice_transcription(&model.provider),
                 _ => true,
             }
         } else {
@@ -423,8 +404,7 @@ pub(super) async fn get_models(
             if capability == "input_audio" && !model.input_audio {
                 continue;
             }
-            if capability == "voice_transcription"
-                && (!model.input_audio || !is_known_voice_transcription_model(&model.id))
+            if capability == "voice_transcription" && !supports_voice_transcription(&model.provider)
             {
                 continue;
             }

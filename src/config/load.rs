@@ -830,6 +830,17 @@ impl Config {
         if let Ok(voice_model) = std::env::var("SPACEBOT_VOICE_MODEL") {
             routing.voice = voice_model;
         }
+        if let Ok(voice_language) = std::env::var("SPACEBOT_VOICE_LANGUAGE") {
+            routing.voice_language = Some(voice_language);
+        }
+        if let Ok(voice_translate) = std::env::var("SPACEBOT_VOICE_TRANSLATE") {
+            if voice_translate.eq_ignore_ascii_case("true") {
+                routing.voice_translate = true;
+            }
+        }
+        if let Ok(stt_provider) = std::env::var("SPACEBOT_STT_PROVIDER") {
+            routing.stt_provider = Some(stt_provider);
+        }
 
         let agents = vec![AgentConfig {
             id: "main".into(),

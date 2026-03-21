@@ -32,6 +32,13 @@ pub struct RoutingConfig {
     pub worker_thinking_effort: String,
     pub compactor_thinking_effort: String,
     pub cortex_thinking_effort: String,
+
+    /// Language hint for voice transcription accuracy (e.g., "en", "es").
+    pub voice_language: Option<String>,
+    /// If true, use translations endpoint (translates to English).
+    pub voice_translate: bool,
+    /// Optional STT provider override (defaults to voice model provider).
+    pub stt_provider: Option<String>,
 }
 
 impl Default for RoutingConfig {
@@ -58,6 +65,9 @@ impl RoutingConfig {
             worker_thinking_effort: "auto".into(),
             compactor_thinking_effort: "auto".into(),
             cortex_thinking_effort: "auto".into(),
+            voice_language: None,
+            voice_translate: false,
+            stt_provider: None,
         }
     }
 }
@@ -206,7 +216,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 worker: worker.clone(),
                 compactor: worker.clone(),
                 cortex: worker.clone(),
-                voice: String::new(),
+                voice: "openai/whisper-1".into(),
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
@@ -254,7 +264,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 worker: worker.clone(),
                 compactor: worker.clone(),
                 cortex: worker.clone(),
-                voice: String::new(),
+                voice: "groq/whisper-large-v3-turbo".into(),
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker])]),
                 rate_limit_cooldown_secs: 60,
@@ -353,7 +363,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 worker: worker.clone(),
                 compactor: worker.clone(),
                 cortex: worker.clone(),
-                voice: String::new(),
+                voice: "gemini/gemini-2.5-flash".into(),
                 task_overrides: HashMap::from([("coding".into(), channel.clone())]),
                 fallbacks: HashMap::from([(channel, vec![worker.clone()]), (worker, vec![lite])]),
                 rate_limit_cooldown_secs: 60,
