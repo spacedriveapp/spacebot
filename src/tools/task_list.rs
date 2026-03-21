@@ -96,7 +96,13 @@ impl Tool for TaskListTool {
         let limit = i64::from(args.limit).clamp(1, 500);
         let tasks = self
             .task_store
-            .list(&self.agent_id, status, priority, limit)
+            .list(crate::tasks::TaskListFilter {
+                assigned_agent_id: Some(self.agent_id.clone()),
+                status,
+                priority,
+                limit: Some(limit),
+                ..Default::default()
+            })
             .await
             .map_err(|error| TaskListError(format!("{error}")))?;
 

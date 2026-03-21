@@ -127,7 +127,8 @@ impl Tool for TaskCreateTool {
         let task = self
             .task_store
             .create(CreateTaskInput {
-                agent_id: self.agent_id.clone(),
+                owner_agent_id: self.agent_id.clone(),
+                assigned_agent_id: self.agent_id.clone(),
                 title: args.title,
                 description: args.description,
                 status,

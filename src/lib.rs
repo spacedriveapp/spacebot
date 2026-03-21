@@ -399,12 +399,6 @@ pub struct AgentDeps {
     /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
     /// to surface human display names, roles, and descriptions in agent prompts.
     pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
-    /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
-    /// reachable via links. Used by `send_agent_message` to create tasks on
-    /// target agents and by the cortex to look up delegation metadata.
-    /// Populated after all agents are initialized.
-    pub task_store_registry:
-        Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
     pub process_control_registry: Arc<agent::process_control::ProcessControlRegistry>,
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).

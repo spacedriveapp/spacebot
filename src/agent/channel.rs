@@ -549,7 +549,7 @@ impl Channel {
                     deps.agent_id.clone(),
                     deps.links.clone(),
                     deps.agent_names.clone(),
-                    deps.task_store_registry.clone(),
+                    deps.task_store.clone(),
                     ConversationLogger::new(deps.sqlite_pool.clone()),
                 ))
             } else {
