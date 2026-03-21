@@ -157,6 +157,7 @@ pub enum ApiEvent {
     OutboundMessage {
         agent_id: String,
         channel_id: String,
+        message_id: Option<String>,
         text: String,
     },
     /// Typing indicator state change.
@@ -277,6 +278,15 @@ pub enum ApiEvent {
         thread_id: String,
         content: String,
         tool_calls: Option<Vec<crate::agent::cortex_chat::CortexChatToolCall>>,
+    },
+    /// A shortened spoken version of an outbound reply for voice output.
+    /// The frontend voice card uses this to trigger TTS playback.
+    SpokenResponse {
+        agent_id: String,
+        channel_id: String,
+        message_id: String,
+        spoken_text: String,
+        full_text: String,
     },
 }
 
@@ -668,6 +678,23 @@ impl ApiState {
                                         thread_id: thread_id.clone(),
                                         content: content.clone(),
                                         tool_calls,
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::SpokenResponse {
+                                channel_id,
+                                message_id,
+                                spoken_text,
+                                full_text,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::SpokenResponse {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        message_id: message_id.clone(),
+                                        spoken_text: spoken_text.clone(),
+                                        full_text: full_text.clone(),
                                     })
                                     .ok();
                             }

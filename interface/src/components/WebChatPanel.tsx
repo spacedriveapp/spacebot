@@ -1,9 +1,11 @@
-import {useEffect, useRef, useState} from "react";
+import {useEffect, useRef, useState, useCallback} from "react";
 import {Link} from "@tanstack/react-router";
 import {useWebChat} from "@/hooks/useWebChat";
 import {isOpenCodeWorker, type ActiveWorker} from "@/hooks/useChannelLiveState";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
+import {useEventSource} from "@/hooks/useEventSource";
+import {api, type SpokenResponseEvent} from "@/api/client";
 
 interface WebChatPanelProps {
 	agentId: string;
@@ -179,6 +181,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
 	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
+	const [spokenBlocks, setSpokenBlocks] = useState<Array<{id: string; messageId: string; fullText: string; spokenText: string}>>([]);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 
 	const liveState = liveStates[sessionId];
@@ -186,6 +189,30 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const isTyping = liveState?.isTyping ?? false;
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
+
+	const handleSpokenResponse = useCallback((data: unknown) => {
+		const event = data as SpokenResponseEvent;
+		if (event.channel_id !== sessionId) return;
+		setSpokenBlocks((current) => {
+			const duplicate = current.some((item) => item.messageId === event.message_id);
+			if (duplicate) return current;
+			return [
+				...current,
+				{
+					id: event.message_id,
+					messageId: event.message_id,
+					fullText: event.full_text,
+					spokenText: event.spoken_text,
+				},
+			];
+		});
+	}, [sessionId]);
+
+	useEventSource(api.getEventsUrl(), {
+		handlers: {
+			spoken_response: handleSpokenResponse,
+		},
+	});
 
 	// Auto-scroll on new messages or typing state changes
 	useEffect(() => {
@@ -220,6 +247,10 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 
 					{timeline.map((item) => {
 						if (item.type !== "message") return null;
+						const spokenMatch =
+							item.role === "assistant"
+								? spokenBlocks.find((block) => block.messageId === item.id)
+								: null;
 						return (
 							<div key={item.id}>
 								{item.role === "user" ? (
@@ -231,8 +262,20 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 										</div>
 									</div>
 								) : (
-									<div className="text-sm text-ink-dull">
-										<Markdown>{item.content}</Markdown>
+									<div className="flex flex-col gap-3">
+										<div className="text-sm text-ink-dull">
+											<Markdown>{item.content}</Markdown>
+										</div>
+										{spokenMatch && (
+											<div className="max-w-[85%] rounded-2xl rounded-bl-md border border-accent/20 bg-accent/8 px-4 py-3">
+												<div className="mb-1 text-tiny font-medium uppercase tracking-[0.14em] text-accent/80">
+													Spoken reply
+												</div>
+												<p className="text-sm leading-relaxed text-ink">
+													{spokenMatch.spokenText}
+												</p>
+											</div>
+										)}
 									</div>
 								)}
 							</div>

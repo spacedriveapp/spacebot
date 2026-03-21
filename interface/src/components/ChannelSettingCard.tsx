@@ -27,7 +27,7 @@ import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faChevronDown, faPlus} from "@fortawesome/free-solid-svg-icons";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost";
 
 const PLATFORM_LABELS: Record<Platform, string> = {
 	discord: "Discord",
@@ -36,6 +36,7 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 	twitch: "Twitch",
 	email: "Email",
 	webhook: "Webhook",
+	mattermost: "Mattermost",
 };
 
 const DOC_LINKS: Partial<Record<Platform, string>> = {
@@ -43,6 +44,7 @@ const DOC_LINKS: Partial<Record<Platform, string>> = {
 	slack: "https://docs.spacebot.sh/slack-setup",
 	telegram: "https://docs.spacebot.sh/telegram-setup",
 	twitch: "https://docs.spacebot.sh/twitch-setup",
+	mattermost: "https://docs.spacebot.sh/mattermost-setup",
 };
 
 // --- Platform Catalog (Left Column) ---
@@ -59,6 +61,7 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 		"twitch",
 		"email",
 		"webhook",
+		"mattermost",
 	];
 
 	const COMING_SOON = [
@@ -636,6 +639,17 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				credentials.webhook_bind = credentialInputs.webhook_bind.trim();
 			if (credentialInputs.webhook_auth_token?.trim())
 				credentials.webhook_auth_token = credentialInputs.webhook_auth_token.trim();
+		} else if (platform === "mattermost") {
+			if (!credentialInputs.mattermost_base_url?.trim()) {
+				setMessage({text: "Server URL is required", type: "error"});
+				return;
+			}
+			if (!credentialInputs.mattermost_token?.trim()) {
+				setMessage({text: "Access token is required", type: "error"});
+				return;
+			}
+			credentials.mattermost_base_url = credentialInputs.mattermost_base_url.trim();
+			credentials.mattermost_token = credentialInputs.mattermost_token.trim();
 		}
 
 		if (!isDefault && !instanceName.trim()) {
@@ -919,6 +933,31 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 								value={credentialInputs.webhook_auth_token ?? ""}
 								onChange={(e) => setCredentialInputs({...credentialInputs, webhook_auth_token: e.target.value})}
 								placeholder="Optional — leave empty for no auth"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+						</div>
+					</>
+				)}
+
+				{platform === "mattermost" && (
+					<>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Server URL</label>
+							<Input
+								size="lg"
+								value={credentialInputs.mattermost_base_url ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_base_url: e.target.value})}
+								placeholder="https://mattermost.example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Access Token</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.mattermost_token ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_token: e.target.value})}
+								placeholder="Personal access token from Mattermost account settings"
 								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
 							/>
 						</div>

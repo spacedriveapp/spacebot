@@ -13,7 +13,7 @@ Agents communicate through an explicit communication graph — directed links th
 
 An agent is a self-contained unit. It has:
 
-- **Identity files** — `SOUL.md`, `IDENTITY.md`, and `ROLE.md` in the agent root directory (`~/.spacebot/agents/{id}/`)
+- **Identity files** — `SOUL.md`, `IDENTITY.md`, `ROLE.md`, and `SPEECH.md` in the agent root directory (`~/.spacebot/agents/{id}/`)
 - **A workspace** — sandboxed directory (`~/.spacebot/agents/{id}/workspace/`) for working files, ingest, and prompt overrides; this is the boundary for worker file tools
 - **Its own databases** — SQLite, LanceDB, and redb, completely isolated from other agents
 - **Its own cortex** — monitoring its own processes and memory graph
@@ -228,6 +228,7 @@ Returns agents, humans, links, and groups for rendering.
 │   │   ├── SOUL.md                       # personality, values, boundaries
 │   │   ├── IDENTITY.md                   # name, nature, vibe
 │   │   ├── ROLE.md                       # responsibilities, scope, escalation rules
+│   │   ├── SPEECH.md                     # spoken cadence, warmth, anti-repetition guidance
 │   │   ├── workspace/                    # sandbox boundary for worker file tools
 │   │   ├── data/
 │   │   │   ├── spacebot.db              # SQLite (memories, conversations, cron jobs)
@@ -242,7 +243,7 @@ Returns agents, humans, links, and groups for rendering.
 │       └── ...
 ```
 
-Identity files are per-agent. `ROLE.md` defines what the agent does — responsibilities, scope, what to handle vs what to escalate. In single-agent setups it separates identity from operations. In multi-agent setups it's what differentiates agents operationally.
+Identity files are per-agent. `ROLE.md` defines what the agent does — responsibilities, scope, what to handle vs what to escalate. `SPEECH.md` defines how the agent sounds when it speaks — pacing, phrasing, warmth, and repetition constraints for voice output. In single-agent setups this keeps text identity and spoken delivery separate. In multi-agent setups it lets each agent have a distinct voice without changing its operational role.
 
 ## API
 

@@ -25,6 +25,7 @@ import {AgentTasks} from "@/routes/AgentTasks";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Orchestrate} from "@/routes/Orchestrate";
+import {Overlay} from "@/routes/Overlay";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
 
@@ -32,6 +33,12 @@ import {AgentTabs} from "@/components/AgentTabs";
 
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
+	const isOverlay = window.location.pathname.endsWith("/overlay");
+
+	// The overlay route renders without any chrome (no sidebar, top bar, etc.)
+	if (isOverlay) {
+		return <Outlet />;
+	}
 
 	return (
 		<TopBarProvider>
@@ -138,6 +145,14 @@ const orchestrateRoute = createRoute({
 			</div>,
 		);
 		return <Orchestrate />;
+	},
+});
+
+const overlayRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/overlay",
+	component: function OverlayPage() {
+		return <Overlay />;
 	},
 });
 
@@ -372,6 +387,7 @@ const routeTree = rootRoute.addChildren([
 	settingsRoute,
 	logsRoute,
 	orchestrateRoute,
+	overlayRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,

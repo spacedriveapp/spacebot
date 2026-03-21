@@ -3,7 +3,9 @@
 
 use std::fs;
 use std::path::PathBuf;
+use tauri::Emitter;
 use tauri::Manager;
+use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
 
 /// Resolve the path to the connection settings file in the app data directory.
 fn settings_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
@@ -43,6 +45,110 @@ fn set_server_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Toggle the voice overlay window visibility.
+#[tauri::command]
+fn toggle_voice_overlay(app: tauri::AppHandle) -> Result<(), String> {
+    toggle_overlay(&app);
+    Ok(())
+}
+
+fn activate_voice_overlay(app: &tauri::AppHandle) {
+    if app.get_webview_window("voice-overlay").is_none() {
+        create_overlay_window(app);
+    } else if let Some(overlay) = app.get_webview_window("voice-overlay") {
+        if !overlay.is_visible().unwrap_or(false) {
+            apply_overlay_window_chrome(&overlay);
+            let _ = overlay.show();
+            let _ = overlay.set_focus();
+        }
+    }
+}
+
+fn toggle_overlay(app: &tauri::AppHandle) {
+    if let Some(overlay) = app.get_webview_window("voice-overlay") {
+        // Toggle visibility
+        if overlay.is_visible().unwrap_or(false) {
+            let _ = overlay.hide();
+        } else {
+            apply_overlay_window_chrome(&overlay);
+            let _ = overlay.show();
+            let _ = overlay.set_focus();
+        }
+    } else {
+        // Create the overlay window on first toggle
+        create_overlay_window(app);
+    }
+}
+
+fn create_overlay_window(app: &tauri::AppHandle) {
+    use tauri::WebviewWindowBuilder;
+    use tauri::window::Color;
+
+    // Get the primary monitor to position at bottom center
+    let monitor = app.primary_monitor().ok().flatten();
+
+    let screen_width = monitor
+        .as_ref()
+        .map(|m| m.size().width as f64 / m.scale_factor())
+        .unwrap_or(1920.0);
+    let screen_height = monitor
+        .as_ref()
+        .map(|m| m.size().height as f64 / m.scale_factor())
+        .unwrap_or(1080.0);
+
+    let overlay_width = 520.0;
+    let overlay_height = 460.0;
+    let x = (screen_width - overlay_width) / 2.0;
+    let y = screen_height - overlay_height - 40.0; // 40px from bottom edge
+
+    match WebviewWindowBuilder::new(
+        app,
+        "voice-overlay",
+        tauri::WebviewUrl::App("/overlay".into()),
+    )
+    .title("Voice")
+    .inner_size(overlay_width, overlay_height)
+    .position(x, y)
+    .decorations(false)
+    .shadow(false)
+    .transparent(true)
+    .background_color(Color(0, 0, 0, 0))
+    .always_on_top(true)
+    .visible(true)
+    .resizable(false)
+    .skip_taskbar(true)
+    .focused(true)
+    .maximizable(false)
+    .minimizable(false)
+    .closable(false)
+    .build()
+    {
+        Ok(window) => {
+            apply_overlay_window_chrome(&window);
+            tracing::info!("voice overlay window created");
+            // Apply dark theme on macOS
+            #[cfg(target_os = "macos")]
+            {
+                if let Ok(ns_window) = window.ns_window() {
+                    unsafe {
+                        sb_desktop_macos::lock_app_theme(1);
+                    }
+                    let _ = ns_window;
+                }
+            }
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to create voice overlay window");
+        }
+    }
+}
+
+fn apply_overlay_window_chrome(window: &tauri::WebviewWindow) {
+    let _ = window.set_decorations(false);
+    let _ = window.set_shadow(false);
+    let _ = window.set_always_on_top(true);
+}
+
 fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -51,9 +157,46 @@ fn main() {
         )
         .init();
 
+    // Option+Space toggles the overlay. Option+Shift+Space is hold-to-talk.
+    let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
+    let voice_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![get_server_url, set_server_url])
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_shortcut(toggle_shortcut.clone())
+                .unwrap()
+                .with_shortcut(voice_shortcut.clone())
+                .unwrap()
+                .with_handler(move |app, _shortcut, event| {
+                    match (_shortcut, event.state) {
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Pressed)
+                            if shortcut == &toggle_shortcut =>
+                        {
+                            toggle_overlay(app);
+                        }
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Pressed)
+                            if shortcut == &voice_shortcut =>
+                        {
+                            activate_voice_overlay(app);
+                            let _ = app.emit("voice-overlay:start-recording", ());
+                        }
+                        (shortcut, tauri_plugin_global_shortcut::ShortcutState::Released)
+                            if shortcut == &voice_shortcut =>
+                        {
+                            let _ = app.emit("voice-overlay:stop-recording", ());
+                        }
+                        _ => {}
+                    }
+                })
+                .build(),
+        )
+        .invoke_handler(tauri::generate_handler![
+            get_server_url,
+            set_server_url,
+            toggle_voice_overlay,
+        ])
         .setup(|app| {
             // Apply macOS titlebar style (invisible toolbar for traffic light padding)
             #[cfg(target_os = "macos")]

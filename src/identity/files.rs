@@ -1,4 +1,4 @@
-//! Identity file loading: SOUL.md, IDENTITY.md, ROLE.md.
+//! Identity file loading: SOUL.md, IDENTITY.md, ROLE.md, SPEECH.md.
 //!
 //! Identity files live in the **agent root** directory (one level above the
 //! workspace), which places them outside the sandbox boundary. This means
@@ -18,6 +18,7 @@ pub struct Identity {
     pub soul: Option<String>,
     pub identity: Option<String>,
     pub role: Option<String>,
+    pub speech: Option<String>,
 }
 
 impl Identity {
@@ -31,6 +32,7 @@ impl Identity {
             soul: load_optional_file(&identity_dir.join("SOUL.md")).await,
             identity: load_optional_file(&identity_dir.join("IDENTITY.md")).await,
             role: load_optional_file(&identity_dir.join("ROLE.md")).await,
+            speech: load_optional_file(&identity_dir.join("SPEECH.md")).await,
         }
     }
 
@@ -56,6 +58,18 @@ impl Identity {
 
         output
     }
+
+    pub fn render_speech(&self) -> String {
+        self.speech
+            .as_ref()
+            .map(|speech| {
+                let mut output = String::from("## Speech Style\n\n");
+                output.push_str(speech);
+                output.push('\n');
+                output
+            })
+            .unwrap_or_default()
+    }
 }
 
 /// Default identity file templates for new agents.
@@ -69,6 +83,10 @@ const DEFAULT_IDENTITY_FILES: &[(&str, &str)] = &[
         include_str!("../../presets/main-agent/IDENTITY.md"),
     ),
     ("ROLE.md", include_str!("../../presets/main-agent/ROLE.md")),
+    (
+        "SPEECH.md",
+        include_str!("../../presets/main-agent/SPEECH.md"),
+    ),
 ];
 
 /// Write template identity files into the agent root if they don't already exist.

@@ -25,6 +25,50 @@ body {
 	@apply font-plex text-ink bg-app;
 }
 
+html.overlay-window,
+body.overlay-window,
+#root.overlay-window {
+	background: transparent !important;
+}
+
+body.overlay-window {
+	@apply bg-transparent;
+}
+
+#root.overlay-window {
+	min-height: 100vh;
+}
+
+.voice-overlay-pill {
+	position: relative;
+	isolation: isolate;
+}
+
+.voice-overlay-bar {
+	display: block;
+	flex: 0 0 auto;
+	will-change: height, opacity;
+}
+
+.voice-overlay-halo-recording {
+	animation: voice-overlay-breathe 1.1s ease-in-out infinite;
+}
+
+.voice-overlay-halo-speaking {
+	animation: voice-overlay-breathe 0.85s ease-in-out infinite;
+}
+
+@keyframes voice-overlay-breathe {
+	0%, 100% {
+		opacity: 0.7;
+		filter: blur(28px);
+	}
+	50% {
+		opacity: 1;
+		filter: blur(36px);
+	}
+}
+
 /* Markdown prose styling for message content */
 .markdown {
 	@apply leading-relaxed;
