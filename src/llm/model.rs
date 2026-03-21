@@ -2815,6 +2815,8 @@ fn parse_openai_responses_response(
     })
 }
 
+/// Returns `true` if the JSON value is semantically empty: null, empty string, empty array,
+/// or empty object. Booleans and numbers are never considered empty.
 fn json_value_is_empty(value: &serde_json::Value) -> bool {
     match value {
         serde_json::Value::Null => true,
@@ -2825,6 +2827,13 @@ fn json_value_is_empty(value: &serde_json::Value) -> bool {
     }
 }
 
+/// Recursively merges `source` into `target` using streaming-aware semantics.
+///
+/// - Null targets are replaced unconditionally.
+/// - Objects are merged key-by-key (recursive).
+/// - Arrays are merged index-by-index (recursive), with extra source items appended.
+/// - Strings are only replaced when the source extends the target (delta accumulation).
+/// - Empty targets of any type are replaced by the source value.
 fn merge_json_value(target: &mut serde_json::Value, source: &serde_json::Value) {
     match (target, source) {
         (target_value @ serde_json::Value::Null, source_value) => {
@@ -2848,6 +2857,10 @@ fn merge_json_value(target: &mut serde_json::Value, source: &serde_json::Value) 
                 }
             }
         }
+        // Streaming merge: only replace `target_text` when `source_text` is a strict extension
+        // (longer and starts with `target_text`), which is the normal pattern for incremental
+        // SSE delta accumulation where each chunk appends to the previous partial value.
+        // An empty `target_text` is also replaced unconditionally.
         (serde_json::Value::String(target_text), serde_json::Value::String(source_text)) => {
             if target_text.is_empty()
                 || (source_text.len() > target_text.len()
@@ -2863,6 +2876,8 @@ fn merge_json_value(target: &mut serde_json::Value, source: &serde_json::Value) 
     }
 }
 
+/// Ensures the value is a JSON object, replacing it with an empty object if it is not.
+/// Returns a mutable reference to the inner object map.
 fn ensure_json_object(
     value: &mut serde_json::Value,
 ) -> &mut serde_json::Map<String, serde_json::Value> {
@@ -2873,6 +2888,8 @@ fn ensure_json_object(
     value.as_object_mut().expect("value should be an object")
 }
 
+/// Ensures the named field on a JSON object is an array, initializing it if missing or
+/// if the existing value is not an array. Returns a mutable reference to the inner `Vec`.
 fn ensure_json_array_field<'a>(
     value: &'a mut serde_json::Value,
     field_name: &str,
@@ -2891,6 +2908,8 @@ fn ensure_json_array_field<'a>(
         .expect("array field should be an array")
 }
 
+/// Ensures the vector has an element at the given index by padding with `Value::Null` if
+/// necessary. Returns a mutable reference to the element at that index.
 fn ensure_json_array_index(
     values: &mut Vec<serde_json::Value>,
     index: usize,
@@ -2902,6 +2921,8 @@ fn ensure_json_array_index(
     &mut values[index]
 }
 
+/// Extracts an unsigned integer index from a named field in an SSE event body.
+/// Returns `None` if the field is missing or not a valid `u64`.
 fn responses_event_index(event_body: &serde_json::Value, field_name: &str) -> Option<usize> {
     event_body
         .get(field_name)
@@ -2909,6 +2930,11 @@ fn responses_event_index(event_body: &serde_json::Value, field_name: &str) -> Op
         .map(|index| index as usize)
 }
 
+/// Gets or creates a Responses API output item at the given index in the accumulator.
+///
+/// When creating a new item, initializes type-specific fields: `role`/`content` for messages,
+/// `arguments` for function calls. If the item already exists, ensures these required fields
+/// are present without overwriting existing values.
 fn ensure_responses_output_item<'a>(
     output_items: &'a mut BTreeMap<usize, serde_json::Value>,
     output_index: usize,
@@ -2967,6 +2993,9 @@ fn ensure_responses_output_item<'a>(
     output_item
 }
 
+/// Gets or creates a content part within a message output item at the given output and
+/// content indices. The parent message item is created via [`ensure_responses_output_item`]
+/// if it does not already exist. Returns a mutable reference to the content part.
 fn ensure_responses_content_part<'a>(
     output_items: &'a mut BTreeMap<usize, serde_json::Value>,
     output_index: usize,
@@ -2988,6 +3017,8 @@ fn ensure_responses_content_part<'a>(
     content_part
 }
 
+/// Appends `suffix` to an existing string field on a JSON object, or creates the field if
+/// it does not exist. Mutates the string in place to avoid re-allocation on every SSE delta.
 fn append_json_string_field(value: &mut serde_json::Value, field_name: &str, suffix: &str) {
     let object = ensure_json_object(value);
 
@@ -3002,6 +3033,8 @@ fn append_json_string_field(value: &mut serde_json::Value, field_name: &str, suf
     }
 }
 
+/// Sets a string field on a JSON object to the given value, replacing any previous content.
+/// Used for finalization events (e.g. `response.output_text.done`) that carry the complete text.
 fn set_json_string_field(value: &mut serde_json::Value, field_name: &str, text: &str) {
     let object = ensure_json_object(value);
     object.insert(
@@ -3010,6 +3043,8 @@ fn set_json_string_field(value: &mut serde_json::Value, field_name: &str, text: 
     );
 }
 
+/// Merges output items from a `response.created` or `response.completed` payload into the
+/// accumulator. Existing items at the same index are deep-merged; new items are inserted.
 fn merge_responses_output_items(
     output_items: &mut BTreeMap<usize, serde_json::Value>,
     response: &serde_json::Value,
@@ -3026,21 +3061,23 @@ fn merge_responses_output_items(
     }
 }
 
+/// Collects accumulated output items from the sparse index map into a dense ordered vector.
+///
+/// Items are returned in index order. `BTreeMap` iteration is already sorted by key,
+/// so we collect values directly without filling gaps with null entries.
 fn collect_responses_output_items(
     output_items: &BTreeMap<usize, serde_json::Value>,
 ) -> Vec<serde_json::Value> {
-    let Some(max_index) = output_items.keys().last().copied() else {
-        return Vec::new();
-    };
-
-    let mut ordered_items = vec![serde_json::Value::Null; max_index + 1];
-    for (index, item) in output_items {
-        ordered_items[*index] = item.clone();
-    }
-
-    ordered_items
+    output_items.values().cloned().collect()
 }
 
+/// Parses an OpenAI Responses API SSE stream into a single consolidated JSON response.
+///
+/// Accumulates state across streamed events (`response.output_item`, `response.content_part`,
+/// `response.output_text.delta`, `response.function_call_arguments.delta`, etc.) and merges
+/// the reconstructed output into the `response.completed` payload. This handles the case where
+/// `response.completed` only includes a metadata shell without the content delivered earlier
+/// in the stream.
 fn parse_openai_responses_sse_response(
     response_text: &str,
     provider_label: &str,
