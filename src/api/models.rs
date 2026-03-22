@@ -290,6 +290,15 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
         providers.push("anthropic");
     }
+    // Anthropic OAuth stores credentials as a separate JSON file
+    if !providers.contains(&"anthropic") {
+        if config_path
+            .parent()
+            .is_some_and(|instance_dir| crate::auth::credentials_path(instance_dir).exists())
+        {
+            providers.push("anthropic");
+        }
+    }
     if has_key("openai_key", "OPENAI_API_KEY") {
         providers.push("openai");
     }
@@ -329,11 +338,19 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("gemini_key", "GEMINI_API_KEY") {
         providers.push("gemini");
     }
+    if has_key("ollama_base_url", "OLLAMA_BASE_URL")
+        || has_key("ollama_key", "OLLAMA_API_KEY")
+    {
+        providers.push("ollama");
+    }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
     }
     if has_key("opencode_go_key", "OPENCODE_GO_API_KEY") {
         providers.push("opencode-go");
+    }
+    if has_key("nvidia_key", "NVIDIA_API_KEY") {
+        providers.push("nvidia");
     }
     if has_key("minimax_key", "MINIMAX_API_KEY") {
         providers.push("minimax");
@@ -346,6 +363,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
         providers.push("zai-coding-plan");
+    }
+    if has_key("github_copilot_key", "GITHUB_COPILOT_API_KEY") {
+        providers.push("github-copilot");
     }
 
     providers
