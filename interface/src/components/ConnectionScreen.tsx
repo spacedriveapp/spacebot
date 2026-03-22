@@ -89,7 +89,7 @@ export function ConnectionScreen() {
 	const isChecking = state === "checking";
 
 	return (
-		<div className="flex h-screen w-screen flex-col items-center justify-center bg-app">
+		<div className="flex h-screen w-full flex-col items-center justify-center bg-app overflow-hidden">
 			{/* Draggable titlebar region for Tauri */}
 			{IS_TAURI && (
 				<div
