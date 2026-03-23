@@ -1,0 +1,46 @@
+{
+  "$schema": "https://raw.githubusercontent.com/tauri-apps/tauri/dev/crates/tauri-config-schema/schema.json",
+  "build": {
+    "beforeDevCommand": "powershell -ExecutionPolicy Bypass -File ../scripts/bundle-sidecar.ps1 && cd ../interface && bun install --frozen-lockfile && bun run dev",
+    "beforeBuildCommand": "powershell -ExecutionPolicy Bypass -File ../scripts/bundle-sidecar.ps1 -Release && cd ../interface && bun install --frozen-lockfile && bun run build"
+  },
+  "app": {
+    "macOSPrivateApi": false,
+    "windows": [
+      {
+        "title": "Spacebot",
+        "hiddenTitle": true,
+        "width": 1200,
+        "height": 800,
+        "minWidth": 900,
+        "minHeight": 600,
+        "decorations": true,
+        "transparent": true,
+        "visible": false,
+        "titleBarStyle": "Overlay",
+        "backgroundColor": [0, 0, 0, 0],
+        "windowEffects": {
+          "effects": ["mica"],
+          "state": "followsWindowActiveState"
+        }
+      }
+    ]
+  },
+  "bundle": {
+    "externalBin": ["binaries/spacebot"],
+    "resources": {},
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "displayLanguageSelector": false
+      },
+      "wix": null
+    },
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico"
+    ]
+  }
+}
