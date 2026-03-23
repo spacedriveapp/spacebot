@@ -842,7 +842,7 @@ impl Default for BrowserConfig {
         Self {
             enabled: true,
             headless: true,
-            evaluate_enabled: false,
+            evaluate_enabled: true,
             executable_path: None,
             screenshot_dir: None,
             persist_session: false,
