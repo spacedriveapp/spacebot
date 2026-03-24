@@ -94,21 +94,21 @@ impl SpacebotModel {
                 .llm_manager
                 .get_anthropic_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?,
             "openai" => self
                 .llm_manager
                 .get_openai_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?,
             "openai-chatgpt" => self
                 .llm_manager
                 .get_openai_chatgpt_provider()
                 .await
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?,
             _ => self
                 .llm_manager
                 .get_provider(provider_id)
-                .map_err(|e| CompletionError::ProviderError(e.to_string()))?,
+                .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?,
         };
 
         if provider_id == "zai-coding-plan" || provider_id == "zhipu" {
@@ -458,13 +458,14 @@ impl SpacebotModel {
 
         let response = anthropic_request
             .builder
+            .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         let response_body: serde_json::Value =
@@ -573,11 +574,11 @@ impl SpacebotModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         let response_body: serde_json::Value =
@@ -690,11 +691,11 @@ impl SpacebotModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         if !status.is_success() {
@@ -792,11 +793,11 @@ impl SpacebotModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         let response_body: serde_json::Value =
@@ -882,11 +883,11 @@ impl SpacebotModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         let response_body: serde_json::Value =
