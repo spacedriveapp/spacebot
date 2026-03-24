@@ -96,6 +96,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxkbcommon0 \
     libxss1 \
     libxtst6 \
+    libxfixes3 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local/bin/spacebot /usr/local/bin/spacebot
