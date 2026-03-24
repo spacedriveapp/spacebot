@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
 	api,
@@ -7,6 +7,7 @@ import {
 	type ProjectRepo,
 	type CreateProjectRequest,
 	type CreateWorktreeRequest,
+	type DirEntry,
 } from "@/api/client";
 import { Badge, Button } from "@/ui";
 import {
@@ -21,6 +22,7 @@ import { Input, Label, TextArea } from "@/ui/Input";
 import { formatTimeAgo } from "@/lib/format";
 import { clsx } from "clsx";
 import { AnimatePresence, motion } from "framer-motion";
+import { useServer } from "@/hooks/useServer";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -111,6 +113,123 @@ function ProjectCard({
 // Create Project Dialog
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Directory Browser (web mode fallback)
+// ---------------------------------------------------------------------------
+
+function DirectoryBrowser({
+	onSelect,
+	onClose,
+}: {
+	onSelect: (path: string) => void;
+	onClose: () => void;
+}) {
+	const [currentPath, setCurrentPath] = useState<string>("");
+	const [entries, setEntries] = useState<DirEntry[]>([]);
+	const [parentPath, setParentPath] = useState<string | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+
+	const loadDir = useCallback(async (path?: string) => {
+		setLoading(true);
+		setError(null);
+		try {
+			const result = await api.listDir(path);
+			setCurrentPath(result.path);
+			setParentPath(result.parent);
+			setEntries(result.entries.filter((e) => e.is_dir));
+		} catch (e) {
+			setError(e instanceof Error ? e.message : "Failed to load directory");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		loadDir();
+	}, [loadDir]);
+
+	return (
+		<div className="rounded-lg border border-app-line bg-app-darkBox">
+			<div className="flex items-center gap-2 border-b border-app-line px-3 py-2">
+				<button
+					type="button"
+					onClick={() => parentPath && loadDir(parentPath)}
+					disabled={!parentPath}
+					className="rounded px-1.5 py-0.5 text-xs text-ink-dull hover:bg-app-hover/40 disabled:opacity-30"
+				>
+					..
+				</button>
+				<span className="min-w-0 flex-1 truncate font-mono text-xs text-ink-dull">
+					{currentPath}
+				</span>
+				<Button
+					type="button"
+					size="sm"
+					onClick={() => onSelect(currentPath)}
+				>
+					Select
+				</Button>
+				<button
+					type="button"
+					onClick={onClose}
+					className="rounded px-1.5 py-0.5 text-xs text-ink-faint hover:text-ink"
+				>
+					&times;
+				</button>
+			</div>
+			<div className="max-h-48 overflow-y-auto">
+				{loading && (
+					<div className="px-3 py-4 text-center text-xs text-ink-faint">
+						Loading...
+					</div>
+				)}
+				{error && (
+					<div className="px-3 py-4 text-center text-xs text-red-400">
+						{error}
+					</div>
+				)}
+				{!loading && !error && entries.length === 0 && (
+					<div className="px-3 py-4 text-center text-xs text-ink-faint">
+						No subdirectories
+					</div>
+				)}
+				{!loading &&
+					!error &&
+					entries.map((entry) => (
+						<button
+							key={entry.path}
+							type="button"
+							onClick={() => loadDir(entry.path)}
+							className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-sm text-ink hover:bg-app-hover/40"
+						>
+							<span className="text-xs text-accent">&#128193;</span>
+							<span className="truncate">{entry.name}</span>
+						</button>
+					))}
+			</div>
+		</div>
+	);
+}
+
+// ---------------------------------------------------------------------------
+// Browse Button (Tauri native dialog or web directory browser)
+// ---------------------------------------------------------------------------
+
+async function openNativeFolderDialog(): Promise<string | null> {
+	try {
+		const { open } = await import("@tauri-apps/plugin-dialog");
+		const selected = await open({
+			directory: true,
+			multiple: false,
+			title: "Select Project Directory",
+		});
+		return typeof selected === "string" ? selected : null;
+	} catch {
+		return null;
+	}
+}
+
 function CreateProjectDialog({
 	open,
 	onOpenChange,
@@ -121,11 +240,13 @@ function CreateProjectDialog({
 	agentId: string;
 }) {
 	const queryClient = useQueryClient();
+	const { isTauri } = useServer();
 	const [name, setName] = useState("");
 	const [rootPath, setRootPath] = useState("");
 	const [description, setDescription] = useState("");
 	const [icon, setIcon] = useState("");
 	const [tagsRaw, setTagsRaw] = useState("");
+	const [showBrowser, setShowBrowser] = useState(false);
 
 	const createMutation = useMutation({
 		mutationFn: (request: CreateProjectRequest) =>
@@ -138,8 +259,18 @@ function CreateProjectDialog({
 			setDescription("");
 			setIcon("");
 			setTagsRaw("");
+			setShowBrowser(false);
 		},
 	});
+
+	const handleBrowse = async () => {
+		if (isTauri) {
+			const selected = await openNativeFolderDialog();
+			if (selected) setRootPath(selected);
+		} else {
+			setShowBrowser((prev) => !prev);
+		}
+	};
 
 	const handleSubmit = (e: React.FormEvent) => {
 		e.preventDefault();
@@ -180,12 +311,34 @@ function CreateProjectDialog({
 					</div>
 					<div>
 						<Label>Root Path</Label>
-						<Input
-							value={rootPath}
-							onChange={(e) => setRootPath(e.target.value)}
-							placeholder="/home/user/projects/my-project"
-							className="font-mono"
-						/>
+						<div className="flex gap-2">
+							<Input
+								value={rootPath}
+								onChange={(e) => setRootPath(e.target.value)}
+								placeholder="/home/user/projects/my-project"
+								className="flex-1 font-mono"
+							/>
+							<Button
+								type="button"
+								variant="outline"
+								size="default"
+								onClick={handleBrowse}
+								title="Browse for directory"
+							>
+								Browse
+							</Button>
+						</div>
+						{showBrowser && !isTauri && (
+							<div className="mt-2">
+								<DirectoryBrowser
+									onSelect={(path) => {
+										setRootPath(path);
+										setShowBrowser(false);
+									}}
+									onClose={() => setShowBrowser(false)}
+								/>
+							</div>
+						)}
 					</div>
 					<div>
 						<Label>Description (optional)</Label>

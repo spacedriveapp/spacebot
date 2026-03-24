@@ -2,7 +2,7 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
+    agents, bindings, channels, config, cortex, cron, factory, fs, ingest, links, mcp, memories,
     messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
     tasks, tools, webchat, workers,
 };
@@ -57,6 +57,7 @@ pub async fn start_http_server(
         .route("/idle", get(system::idle))
         .route("/status", get(system::status))
         .route("/system/storage", get(system::storage_status))
+        .route("/fs/list-dir", get(fs::list_dir))
         .route("/system/backup/export", get(system::backup_export))
         .route("/system/backup/restore", post(system::backup_restore))
         .route("/overview", get(agents::instance_overview))

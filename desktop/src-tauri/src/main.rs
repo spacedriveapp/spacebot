@@ -53,6 +53,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![get_server_url, set_server_url])
         .setup(|app| {
             // Apply macOS titlebar style (invisible toolbar for traffic light padding)
