@@ -82,8 +82,8 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
-    /// Per-agent task stores for task CRUD operations.
-    pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
+    /// Instance-level global task store shared across all agents.
+    pub task_store: ArcSwap<Option<Arc<TaskStore>>>,
     /// Per-agent project stores for project/repo/worktree CRUD operations.
     pub project_stores: arc_swap::ArcSwap<HashMap<String, Arc<ProjectStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
@@ -124,9 +124,6 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
-    /// Cross-agent task store registry for delegation.
-    pub task_store_registry:
-        Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
     /// Sender for cross-agent message injection.
     pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
@@ -290,9 +287,6 @@ impl ApiState {
         agent_tx: mpsc::Sender<crate::Agent>,
         agent_remove_tx: mpsc::Sender<String>,
         injection_tx: mpsc::Sender<crate::ChannelInjection>,
-        task_store_registry: Arc<
-            ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
-        >,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -312,7 +306,7 @@ impl ApiState {
             config_write_mutex: tokio::sync::Mutex::new(()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
-            task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            task_store: ArcSwap::from_pointee(None),
             project_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
@@ -332,7 +326,6 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
-            task_store_registry,
             injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
@@ -751,9 +744,9 @@ impl ApiState {
         self.cron_schedulers.store(Arc::new(schedulers));
     }
 
-    /// Set the task stores for all agents.
-    pub fn set_task_stores(&self, stores: HashMap<String, Arc<TaskStore>>) {
-        self.task_stores.store(Arc::new(stores));
+    /// Set the global task store.
+    pub fn set_task_store(&self, store: Arc<TaskStore>) {
+        self.task_store.store(Arc::new(Some(store)));
     }
 
     /// Set the project stores for all agents.

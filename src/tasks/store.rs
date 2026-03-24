@@ -1,6 +1,10 @@
-//! Task CRUD storage (SQLite).
+//! Global task CRUD storage (SQLite).
+//!
+//! Operates against the instance-level `tasks.db` database with globally
+//! unique task numbers and explicit owner/assigned agent relationships.
 
 use crate::error::Result;
+
 use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -106,12 +110,13 @@ pub struct TaskSubtask {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
-    pub agent_id: String,
     pub task_number: i64,
     pub title: String,
     pub description: Option<String>,
     pub status: TaskStatus,
     pub priority: TaskPriority,
+    pub owner_agent_id: String,
+    pub assigned_agent_id: String,
     pub subtasks: Vec<TaskSubtask>,
     pub metadata: Value,
     pub source_memory_id: Option<String>,
@@ -126,7 +131,8 @@ pub struct Task {
 
 #[derive(Debug, Clone)]
 pub struct CreateTaskInput {
-    pub agent_id: String,
+    pub owner_agent_id: String,
+    pub assigned_agent_id: String,
     pub title: String,
     pub description: Option<String>,
     pub status: TaskStatus,
@@ -149,6 +155,22 @@ pub struct UpdateTaskInput {
     pub clear_worker_id: bool,
     pub approved_by: Option<String>,
     pub complete_subtask: Option<usize>,
+    /// Reassign the task to a different agent.
+    pub assigned_agent_id: Option<String>,
+}
+
+/// Filters for listing tasks from the global store.
+#[derive(Debug, Clone, Default)]
+pub struct TaskListFilter {
+    /// Convenience: matches tasks where `owner_agent_id` OR `assigned_agent_id`
+    /// equals this value. Mutually exclusive with the individual fields below.
+    pub agent_id: Option<String>,
+    pub owner_agent_id: Option<String>,
+    pub assigned_agent_id: Option<String>,
+    pub status: Option<TaskStatus>,
+    pub priority: Option<TaskPriority>,
+    pub created_by: Option<String>,
+    pub limit: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -161,8 +183,8 @@ impl TaskStore {
         Self { pool }
     }
 
-    /// Maximum number of retries when a concurrent create races on the same
-    /// `(agent_id, task_number)` UNIQUE constraint.
+    /// Maximum number of retries when a concurrent create races on the
+    /// `task_number` UNIQUE constraint.
     const MAX_CREATE_RETRIES: usize = 3;
 
     pub async fn create(&self, input: CreateTaskInput) -> Result<Task> {
@@ -177,10 +199,12 @@ impl TaskStore {
                 .await
                 .context("failed to open task create transaction")?;
 
+            // Atomically allocate the next task number from the high-water-mark
+            // sequence. This avoids number reuse after hard deletes.
             let task_number: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(MAX(task_number), 0) + 1 FROM tasks WHERE agent_id = ?",
+                "UPDATE task_number_seq SET next_number = next_number + 1 \
+                 WHERE id = 1 RETURNING next_number - 1",
             )
-            .bind(&input.agent_id)
             .fetch_one(&mut *tx)
             .await
             .context("failed to allocate next task number")?;
@@ -190,19 +214,21 @@ impl TaskStore {
             let insert_result = sqlx::query(
                 r#"
                 INSERT INTO tasks (
-                    id, agent_id, task_number, title, description, status, priority,
+                    id, task_number, title, description, status, priority,
+                    owner_agent_id, assigned_agent_id,
                     subtasks, metadata, source_memory_id, created_by
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(&task_id)
-            .bind(&input.agent_id)
             .bind(task_number)
             .bind(&input.title)
             .bind(&input.description)
             .bind(input.status.as_str())
             .bind(input.priority.as_str())
+            .bind(&input.owner_agent_id)
+            .bind(&input.assigned_agent_id)
             .bind(&subtasks_json)
             .bind(&metadata_json)
             .bind(&input.source_memory_id)
@@ -217,7 +243,7 @@ impl TaskStore {
                         .context("failed to commit task create transaction")?;
 
                     return self
-                        .get_by_number(&input.agent_id, task_number)
+                        .get_by_number(task_number)
                         .await?
                         .context("task inserted but not found")
                         .map_err(Into::into);
@@ -227,12 +253,7 @@ impl TaskStore {
                 {
                     // UNIQUE constraint violation — another concurrent create won the
                     // race for this task_number. Roll back and retry.
-                    tracing::debug!(
-                        attempt,
-                        task_number,
-                        agent_id = %input.agent_id,
-                        "task_number collision, retrying"
-                    );
+                    tracing::debug!(attempt, task_number, "task_number collision, retrying");
                     // tx is dropped here which rolls back automatically.
                     continue;
                 }
@@ -249,33 +270,52 @@ impl TaskStore {
         .into())
     }
 
-    pub async fn list(
-        &self,
-        agent_id: &str,
-        status: Option<TaskStatus>,
-        priority: Option<TaskPriority>,
-        limit: i64,
-    ) -> Result<Vec<Task>> {
-        let mut query = String::from(
-            "SELECT id, agent_id, task_number, title, description, status, priority, subtasks, metadata, source_memory_id, worker_id, created_by, approved_at, approved_by, created_at, updated_at, completed_at FROM tasks WHERE agent_id = ?",
-        );
+    /// List tasks with optional filters. Uses the global store — no agent_id
+    /// is required, but callers can filter by owner or assigned agent.
+    pub async fn list(&self, filter: TaskListFilter) -> Result<Vec<Task>> {
+        let mut query = String::from(SELECT_COLUMNS);
+        query.push_str(" FROM tasks WHERE 1=1");
 
-        if status.is_some() {
+        if filter.agent_id.is_some() {
+            query.push_str(" AND (owner_agent_id = ? OR assigned_agent_id = ?)");
+        }
+        if filter.owner_agent_id.is_some() {
+            query.push_str(" AND owner_agent_id = ?");
+        }
+        if filter.assigned_agent_id.is_some() {
+            query.push_str(" AND assigned_agent_id = ?");
+        }
+        if filter.status.is_some() {
             query.push_str(" AND status = ?");
         }
-        if priority.is_some() {
+        if filter.priority.is_some() {
             query.push_str(" AND priority = ?");
+        }
+        if filter.created_by.is_some() {
+            query.push_str(" AND created_by = ?");
         }
         query.push_str(" ORDER BY task_number DESC LIMIT ?");
 
-        let mut sql = sqlx::query(&query).bind(agent_id);
-        if let Some(status) = status {
+        let mut sql = sqlx::query(&query);
+        if let Some(ref agent) = filter.agent_id {
+            sql = sql.bind(agent).bind(agent);
+        }
+        if let Some(ref owner) = filter.owner_agent_id {
+            sql = sql.bind(owner);
+        }
+        if let Some(ref assigned) = filter.assigned_agent_id {
+            sql = sql.bind(assigned);
+        }
+        if let Some(status) = filter.status {
             sql = sql.bind(status.as_str());
         }
-        if let Some(priority) = priority {
+        if let Some(priority) = filter.priority {
             sql = sql.bind(priority.as_str());
         }
-        sql = sql.bind(limit.clamp(1, 500));
+        if let Some(ref created_by) = filter.created_by {
+            sql = sql.bind(created_by);
+        }
+        sql = sql.bind(filter.limit.unwrap_or(100).clamp(1, 500));
 
         let rows = sql
             .fetch_all(&self.pool)
@@ -285,16 +325,22 @@ impl TaskStore {
         rows.into_iter().map(task_from_row).collect()
     }
 
-    pub async fn list_ready(&self, agent_id: &str, limit: i64) -> Result<Vec<Task>> {
-        self.list(agent_id, Some(TaskStatus::Ready), None, limit)
-            .await
+    /// List ready tasks assigned to the given agent.
+    pub async fn list_ready(&self, assigned_agent_id: &str, limit: i64) -> Result<Vec<Task>> {
+        self.list(TaskListFilter {
+            assigned_agent_id: Some(assigned_agent_id.to_string()),
+            status: Some(TaskStatus::Ready),
+            limit: Some(limit),
+            ..Default::default()
+        })
+        .await
     }
 
-    pub async fn get_by_number(&self, agent_id: &str, task_number: i64) -> Result<Option<Task>> {
-        let row = sqlx::query(
-            "SELECT id, agent_id, task_number, title, description, status, priority, subtasks, metadata, source_memory_id, worker_id, created_by, approved_at, approved_by, created_at, updated_at, completed_at FROM tasks WHERE agent_id = ? AND task_number = ?",
-        )
-        .bind(agent_id)
+    /// Fetch a single task by its globally unique number.
+    pub async fn get_by_number(&self, task_number: i64) -> Result<Option<Task>> {
+        let row = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE task_number = ?"
+        ))
         .bind(task_number)
         .fetch_optional(&self.pool)
         .await
@@ -303,13 +349,8 @@ impl TaskStore {
         row.map(task_from_row).transpose()
     }
 
-    pub async fn update(
-        &self,
-        agent_id: &str,
-        task_number: i64,
-        input: UpdateTaskInput,
-    ) -> Result<Option<Task>> {
-        let Some(current) = self.get_by_number(agent_id, task_number).await? else {
+    pub async fn update(&self, task_number: i64, input: UpdateTaskInput) -> Result<Option<Task>> {
+        let Some(current) = self.get_by_number(task_number).await? else {
             return Ok(None);
         };
 
@@ -333,20 +374,30 @@ impl TaskStore {
         let next_status = input.status.unwrap_or(current.status);
         let next_priority = input.priority.unwrap_or(current.priority);
         let next_metadata = merge_json_object(current.metadata, input.metadata);
-        let next_worker_id = if let Some(worker_id) = input.worker_id {
+        let next_assigned = input
+            .assigned_agent_id
+            .unwrap_or(current.assigned_agent_id.clone());
+        let reassigned = next_assigned != current.assigned_agent_id;
+
+        // If the task is being reassigned to a different agent, clear the worker
+        // binding so the old worker cannot keep updating it.
+        let clear_worker = input.clear_worker_id || (reassigned && current.worker_id.is_some());
+        let next_worker_id = if clear_worker {
+            None
+        } else if let Some(worker_id) = input.worker_id {
             Some(worker_id)
         } else {
             current.worker_id
         };
 
         let approved_at = if current.approved_at.is_none() && next_status == TaskStatus::Ready {
-            Some("datetime('now')")
+            Some("SET")
         } else {
             None
         };
 
         let completed_at = if next_status == TaskStatus::Done {
-            Some("datetime('now')")
+            Some("SET")
         } else if current.completed_at.is_some() && next_status != TaskStatus::Done {
             Some("NULL")
         } else {
@@ -354,55 +405,58 @@ impl TaskStore {
         };
 
         let mut query = String::from(
-            "UPDATE tasks SET title = ?, description = ?, status = ?, priority = ?, subtasks = ?, metadata = ?, ",
+            "UPDATE tasks SET title = ?, description = ?, status = ?, priority = ?, \
+             assigned_agent_id = ?, subtasks = ?, metadata = ?, ",
         );
 
-        if input.clear_worker_id {
+        if clear_worker {
             query.push_str("worker_id = NULL, ");
         } else {
             query.push_str("worker_id = ?, ");
         }
 
-        query.push_str("approved_by = COALESCE(?, approved_by), updated_at = datetime('now')");
+        query.push_str(
+            "approved_by = COALESCE(?, approved_by), \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')",
+        );
 
         if approved_at.is_some() {
-            query.push_str(", approved_at = datetime('now')");
+            query.push_str(", approved_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')");
         }
         if let Some(value) = completed_at {
-            if value == "datetime('now')" {
-                query.push_str(", completed_at = datetime('now')");
+            if value == "SET" {
+                query.push_str(", completed_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')");
             } else {
                 query.push_str(", completed_at = NULL");
             }
         }
 
-        query.push_str(" WHERE agent_id = ? AND task_number = ?");
+        query.push_str(" WHERE task_number = ?");
 
         let mut sql = sqlx::query(&query)
             .bind(input.title.unwrap_or(current.title))
             .bind(input.description.or(current.description))
             .bind(next_status.as_str())
             .bind(next_priority.as_str())
+            .bind(&next_assigned)
             .bind(serde_json::to_string(&subtasks).context("failed to serialize subtasks")?)
             .bind(next_metadata.to_string());
 
-        if !input.clear_worker_id {
+        if !clear_worker {
             sql = sql.bind(next_worker_id);
         }
 
         sql.bind(input.approved_by)
-            .bind(agent_id)
             .bind(task_number)
             .execute(&self.pool)
             .await
             .context("failed to update task")?;
 
-        self.get_by_number(agent_id, task_number).await
+        self.get_by_number(task_number).await
     }
 
-    pub async fn delete(&self, agent_id: &str, task_number: i64) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM tasks WHERE agent_id = ? AND task_number = ?")
-            .bind(agent_id)
+    pub async fn delete(&self, task_number: i64) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM tasks WHERE task_number = ?")
             .bind(task_number)
             .execute(&self.pool)
             .await
@@ -411,9 +465,11 @@ impl TaskStore {
         Ok(result.rows_affected() > 0)
     }
 
-    pub async fn claim_next_ready(&self, agent_id: &str) -> Result<Option<Task>> {
+    /// Atomically claim the highest-priority ready task assigned to the given
+    /// agent. Moves it to `in_progress` and returns it.
+    pub async fn claim_next_ready(&self, assigned_agent_id: &str) -> Result<Option<Task>> {
         let row = sqlx::query(
-            "SELECT task_number FROM tasks WHERE agent_id = ? AND status = 'ready' \
+            "SELECT task_number FROM tasks WHERE assigned_agent_id = ? AND status = 'ready' \
              ORDER BY CASE priority \
                WHEN 'critical' THEN 0 \
                WHEN 'high' THEN 1 \
@@ -423,7 +479,7 @@ impl TaskStore {
              task_number ASC \
              LIMIT 1",
         )
-        .bind(agent_id)
+        .bind(assigned_agent_id)
         .fetch_optional(&self.pool)
         .await
         .context("failed to find ready task")?;
@@ -436,9 +492,10 @@ impl TaskStore {
             .try_get("task_number")
             .context("failed to read task_number from ready task row")?;
         let result = sqlx::query(
-            "UPDATE tasks SET status = 'in_progress', updated_at = datetime('now') WHERE agent_id = ? AND task_number = ? AND status = 'ready'",
+            "UPDATE tasks SET status = 'in_progress', \
+             updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now') \
+             WHERE task_number = ? AND status = 'ready'",
         )
-        .bind(agent_id)
         .bind(task_number)
         .execute(&self.pool)
         .await
@@ -448,13 +505,13 @@ impl TaskStore {
             return Ok(None);
         }
 
-        self.get_by_number(agent_id, task_number).await
+        self.get_by_number(task_number).await
     }
 
     pub async fn get_by_worker_id(&self, worker_id: &str) -> Result<Option<Task>> {
-        let row = sqlx::query(
-            "SELECT id, agent_id, task_number, title, description, status, priority, subtasks, metadata, source_memory_id, worker_id, created_by, approved_at, approved_by, created_at, updated_at, completed_at FROM tasks WHERE worker_id = ? ORDER BY updated_at DESC LIMIT 1",
-        )
+        let row = sqlx::query(&format!(
+            "{SELECT_COLUMNS} FROM tasks WHERE worker_id = ? ORDER BY updated_at DESC LIMIT 1"
+        ))
         .bind(worker_id)
         .fetch_optional(&self.pool)
         .await
@@ -464,7 +521,12 @@ impl TaskStore {
     }
 }
 
-fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
+/// Column list used by all SELECT queries. Kept in sync with `task_from_row`.
+const SELECT_COLUMNS: &str = "SELECT id, task_number, title, description, status, priority, \
+     owner_agent_id, assigned_agent_id, subtasks, metadata, source_memory_id, worker_id, \
+     created_by, approved_at, approved_by, created_at, updated_at, completed_at";
+
+pub fn can_transition(current: TaskStatus, next: TaskStatus) -> bool {
     if current == next {
         return true;
     }
@@ -542,11 +604,14 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
     let priority = TaskPriority::parse(&priority_value)
         .with_context(|| format!("invalid task priority in database: {priority_value}"))?;
 
+    // The global schema uses TEXT columns with ISO 8601 defaults. Read as
+    // strings directly; fall back to NaiveDateTime parsing for compatibility
+    // with rows that may still use SQLite TIMESTAMP format.
+    let created_at = read_timestamp(&row, "created_at")?;
+    let updated_at = read_timestamp(&row, "updated_at")?;
+
     Ok(Task {
         id: row.try_get("id").context("failed to read task id")?,
-        agent_id: row
-            .try_get("agent_id")
-            .context("failed to read task agent_id")?,
         task_number: row
             .try_get("task_number")
             .context("failed to read task_number")?,
@@ -554,6 +619,12 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         description: row.try_get("description").ok(),
         status,
         priority,
+        owner_agent_id: row
+            .try_get("owner_agent_id")
+            .context("failed to read owner_agent_id")?,
+        assigned_agent_id: row
+            .try_get("assigned_agent_id")
+            .context("failed to read assigned_agent_id")?,
         subtasks: parse_subtasks(&subtasks_value),
         metadata: parse_metadata(&metadata_value),
         source_memory_id: row.try_get("source_memory_id").ok(),
@@ -565,25 +636,37 @@ fn task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<Task> {
         created_by: row
             .try_get("created_by")
             .context("failed to read task created_by")?,
-        approved_at: row
-            .try_get::<Option<chrono::NaiveDateTime>, _>("approved_at")
-            .ok()
-            .flatten()
-            .map(|v| v.and_utc().to_rfc3339()),
+        approved_at: read_optional_timestamp(&row, "approved_at"),
         approved_by: row.try_get("approved_by").ok(),
-        created_at: row
-            .try_get::<chrono::NaiveDateTime, _>("created_at")
-            .map(|v| v.and_utc().to_rfc3339())
-            .context("failed to read task created_at")?,
-        updated_at: row
-            .try_get::<chrono::NaiveDateTime, _>("updated_at")
-            .map(|v| v.and_utc().to_rfc3339())
-            .context("failed to read task updated_at")?,
-        completed_at: row
-            .try_get::<chrono::NaiveDateTime, _>("completed_at")
-            .ok()
-            .map(|v| v.and_utc().to_rfc3339()),
+        created_at,
+        updated_at,
+        completed_at: read_optional_timestamp(&row, "completed_at"),
     })
+}
+
+/// Read a required timestamp column, trying TEXT first (ISO 8601) then falling
+/// back to NaiveDateTime for legacy TIMESTAMP columns.
+fn read_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Result<String> {
+    if let Ok(value) = row.try_get::<String, _>(column) {
+        return Ok(value);
+    }
+    row.try_get::<chrono::NaiveDateTime, _>(column)
+        .map(|v| v.and_utc().to_rfc3339())
+        .with_context(|| format!("failed to read task {column}"))
+        .map_err(Into::into)
+}
+
+/// Read an optional timestamp column, trying TEXT first then NaiveDateTime.
+fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Option<String> {
+    if let Ok(Some(value)) = row.try_get::<Option<String>, _>(column)
+        && !value.is_empty()
+    {
+        return Some(value);
+    }
+    row.try_get::<Option<chrono::NaiveDateTime>, _>(column)
+        .ok()
+        .flatten()
+        .map(|v| v.and_utc().to_rfc3339())
 }
 
 #[cfg(test)]
@@ -602,23 +685,23 @@ mod tests {
             r#"
             CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                task_number INTEGER NOT NULL,
+                task_number INTEGER NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 description TEXT,
                 status TEXT NOT NULL DEFAULT 'backlog',
                 priority TEXT NOT NULL DEFAULT 'medium',
+                owner_agent_id TEXT NOT NULL,
+                assigned_agent_id TEXT NOT NULL,
                 subtasks TEXT,
                 metadata TEXT,
                 source_memory_id TEXT,
                 worker_id TEXT,
                 created_by TEXT NOT NULL,
-                approved_at TIMESTAMP,
+                approved_at TEXT,
                 approved_by TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP,
-                UNIQUE(agent_id, task_number)
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                completed_at TEXT
             )
             "#,
         )
@@ -626,7 +709,37 @@ mod tests {
         .await
         .expect("tasks schema should be created");
 
+        sqlx::query(
+            "CREATE TABLE task_number_seq (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                next_number INTEGER NOT NULL DEFAULT 1
+            )",
+        )
+        .execute(&pool)
+        .await
+        .expect("task_number_seq should be created");
+
+        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
+            .execute(&pool)
+            .await
+            .expect("sequence seed should be inserted");
+
         TaskStore::new(pool)
+    }
+
+    fn self_assigned_input(title: &str, status: TaskStatus) -> CreateTaskInput {
+        CreateTaskInput {
+            owner_agent_id: "agent-test".to_string(),
+            assigned_agent_id: "agent-test".to_string(),
+            title: title.to_string(),
+            description: None,
+            status,
+            priority: TaskPriority::Medium,
+            subtasks: Vec::new(),
+            metadata: serde_json::json!({}),
+            source_memory_id: None,
+            created_by: "branch".to_string(),
+        }
     }
 
     #[tokio::test]
@@ -634,22 +747,14 @@ mod tests {
         let store = setup_store().await;
         let created = store
             .create(CreateTaskInput {
-                agent_id: "agent-test".to_string(),
-                title: "pending task".to_string(),
-                description: None,
-                status: TaskStatus::PendingApproval,
-                priority: TaskPriority::Medium,
-                subtasks: Vec::new(),
-                metadata: serde_json::json!({}),
-                source_memory_id: None,
                 created_by: "cortex".to_string(),
+                ..self_assigned_input("pending task", TaskStatus::PendingApproval)
             })
             .await
             .expect("task should be created");
 
         let error = store
             .update(
-                "agent-test",
                 created.task_number,
                 UpdateTaskInput {
                     status: Some(TaskStatus::InProgress),
@@ -666,23 +771,12 @@ mod tests {
     async fn can_requeue_in_progress_and_clear_worker_binding() {
         let store = setup_store().await;
         let created = store
-            .create(CreateTaskInput {
-                agent_id: "agent-test".to_string(),
-                title: "ready task".to_string(),
-                description: None,
-                status: TaskStatus::Ready,
-                priority: TaskPriority::Medium,
-                subtasks: Vec::new(),
-                metadata: serde_json::json!({}),
-                source_memory_id: None,
-                created_by: "branch".to_string(),
-            })
+            .create(self_assigned_input("ready task", TaskStatus::Ready))
             .await
             .expect("task should be created");
 
         let in_progress = store
             .update(
-                "agent-test",
                 created.task_number,
                 UpdateTaskInput {
                     status: Some(TaskStatus::InProgress),
@@ -698,7 +792,6 @@ mod tests {
 
         let requeued = store
             .update(
-                "agent-test",
                 created.task_number,
                 UpdateTaskInput {
                     status: Some(TaskStatus::Ready),
@@ -723,12 +816,6 @@ mod tests {
         let store = setup_store().await;
         let created = store
             .create(CreateTaskInput {
-                agent_id: "agent-test".to_string(),
-                title: "github-linked task".to_string(),
-                description: None,
-                status: TaskStatus::Backlog,
-                priority: TaskPriority::Medium,
-                subtasks: Vec::new(),
                 metadata: serde_json::json!({
                     "github_issue": {
                         "repo": "spacedriveapp/spacebot",
@@ -738,15 +825,13 @@ mod tests {
                     },
                     "source": "github"
                 }),
-                source_memory_id: None,
-                created_by: "branch".to_string(),
+                ..self_assigned_input("github-linked task", TaskStatus::Backlog)
             })
             .await
             .expect("task should be created");
 
         let updated = store
             .update(
-                "agent-test",
                 created.task_number,
                 UpdateTaskInput {
                     metadata: Some(serde_json::json!({
@@ -781,5 +866,154 @@ mod tests {
                 "source": "github"
             })
         );
+    }
+
+    #[tokio::test]
+    async fn global_task_numbers_are_unique_across_agents() {
+        let store = setup_store().await;
+
+        let task_a = store
+            .create(self_assigned_input("task for agent A", TaskStatus::Backlog))
+            .await
+            .expect("task A should be created");
+
+        let task_b = store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-other".to_string(),
+                assigned_agent_id: "agent-other".to_string(),
+                ..self_assigned_input("task for agent B", TaskStatus::Backlog)
+            })
+            .await
+            .expect("task B should be created");
+
+        assert_eq!(task_a.task_number, 1);
+        assert_eq!(task_b.task_number, 2);
+
+        // Both accessible by global number without agent scoping
+        let fetched_a = store
+            .get_by_number(1)
+            .await
+            .expect("fetch should succeed")
+            .expect("task 1 should exist");
+        assert_eq!(fetched_a.owner_agent_id, "agent-test");
+
+        let fetched_b = store
+            .get_by_number(2)
+            .await
+            .expect("fetch should succeed")
+            .expect("task 2 should exist");
+        assert_eq!(fetched_b.owner_agent_id, "agent-other");
+    }
+
+    #[tokio::test]
+    async fn list_filters_by_assigned_agent() {
+        let store = setup_store().await;
+
+        store
+            .create(self_assigned_input("my task", TaskStatus::Backlog))
+            .await
+            .expect("should create");
+
+        store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-other".to_string(),
+                ..self_assigned_input("delegated task", TaskStatus::Ready)
+            })
+            .await
+            .expect("should create");
+
+        let mine = store
+            .list(TaskListFilter {
+                assigned_agent_id: Some("agent-test".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list should succeed");
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].title, "my task");
+
+        let theirs = store
+            .list(TaskListFilter {
+                assigned_agent_id: Some("agent-other".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("list should succeed");
+        assert_eq!(theirs.len(), 1);
+        assert_eq!(theirs[0].title, "delegated task");
+
+        // Unfiltered returns both
+        let all = store
+            .list(TaskListFilter::default())
+            .await
+            .expect("list should succeed");
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn claim_next_ready_scopes_by_assigned_agent() {
+        let store = setup_store().await;
+
+        // Create a ready task assigned to agent-other
+        store
+            .create(CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-other".to_string(),
+                title: "not mine".to_string(),
+                description: None,
+                status: TaskStatus::Ready,
+                priority: TaskPriority::High,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("should create");
+
+        // agent-test should not be able to claim it
+        let claimed = store
+            .claim_next_ready("agent-test")
+            .await
+            .expect("claim should succeed");
+        assert!(
+            claimed.is_none(),
+            "should not claim task assigned to other agent"
+        );
+
+        // agent-other should be able to claim it
+        let claimed = store
+            .claim_next_ready("agent-other")
+            .await
+            .expect("claim should succeed");
+        assert!(claimed.is_some());
+        assert_eq!(claimed.unwrap().status, TaskStatus::InProgress);
+    }
+
+    #[tokio::test]
+    async fn reassign_task_via_update() {
+        let store = setup_store().await;
+        let created = store
+            .create(self_assigned_input("reassignable", TaskStatus::Backlog))
+            .await
+            .expect("should create");
+
+        assert_eq!(created.assigned_agent_id, "agent-test");
+
+        let updated = store
+            .update(
+                created.task_number,
+                UpdateTaskInput {
+                    assigned_agent_id: Some("agent-other".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("update should succeed")
+            .expect("task should exist");
+
+        assert_eq!(updated.assigned_agent_id, "agent-other");
+        assert_eq!(updated.owner_agent_id, "agent-test");
     }
 }

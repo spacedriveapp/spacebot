@@ -622,7 +622,6 @@ pub async fn register_detached_worker_for_pickup(
 
     if let Err(error) = task_store
         .update(
-            agent_id,
             task_number,
             UpdateTaskInput {
                 worker_id: Some(worker_id.to_string()),
@@ -2327,7 +2326,12 @@ async fn gather_active_tasks(deps: &AgentDeps) -> anyhow::Result<String> {
     ] {
         let tasks = deps
             .task_store
-            .list(&deps.agent_id, Some(*status), None, 20)
+            .list(crate::tasks::TaskListFilter {
+                assigned_agent_id: Some(deps.agent_id.to_string()),
+                status: Some(*status),
+                limit: Some(20),
+                ..Default::default()
+            })
             .await?;
         all_tasks.extend(tasks);
     }
@@ -3417,7 +3421,6 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                             let result_text = scrub(raw_result_text);
                             let db_updated = task_store
                                 .update(
-                                    &agent_id,
                                     task.task_number,
                                     UpdateTaskInput {
                                         status: Some(TaskStatus::Done),
@@ -3501,7 +3504,6 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                             run_logger.log_worker_completed(worker_id, &error_message, false);
                             let requeue_result = task_store
                                 .update(
-                                    &agent_id,
                                     task.task_number,
                                     UpdateTaskInput {
                                         status: Some(TaskStatus::Ready),
@@ -3582,7 +3584,6 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                             run_logger.log_worker_completed(worker_id, &error_message, false);
                             let requeue_result = task_store
                                 .update(
-                                    &agent_id,
                                     task.task_number,
                                     UpdateTaskInput {
                                         status: Some(TaskStatus::Ready),
@@ -3673,7 +3674,6 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                 ));
                 let update_result = task_store
                     .update(
-                        &agent_id,
                         task.task_number,
                         UpdateTaskInput {
                             status: Some(next_status),
@@ -4794,23 +4794,23 @@ mod tests {
         sqlx::query(
             "CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                task_number INTEGER NOT NULL,
+                task_number INTEGER NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 description TEXT,
                 status TEXT NOT NULL DEFAULT 'backlog',
                 priority TEXT NOT NULL DEFAULT 'medium',
+                owner_agent_id TEXT NOT NULL,
+                assigned_agent_id TEXT NOT NULL,
                 subtasks TEXT,
                 metadata TEXT,
                 source_memory_id TEXT,
                 worker_id TEXT,
                 created_by TEXT NOT NULL,
-                approved_at TIMESTAMP,
+                approved_at TEXT,
                 approved_by TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP,
-                UNIQUE(agent_id, task_number)
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                completed_at TEXT
             )",
         )
         .execute(&pool)
@@ -4825,17 +4825,19 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO tasks (
-                id, agent_id, task_number, title, description, status, priority,
+                id, task_number, title, description, status, priority,
+                owner_agent_id, assigned_agent_id,
                 subtasks, metadata, source_memory_id, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&*agent_id)
         .bind(task_number)
         .bind("test task")
         .bind(Some("description".to_string()))
         .bind("ready")
         .bind("medium")
+        .bind(&*agent_id)
+        .bind(&*agent_id)
         .bind("[]")
         .bind("{}")
         .bind(Option::<String>::None)
@@ -4876,23 +4878,23 @@ mod tests {
         sqlx::query(
             "CREATE TABLE tasks (
                 id TEXT PRIMARY KEY,
-                agent_id TEXT NOT NULL,
-                task_number INTEGER NOT NULL,
+                task_number INTEGER NOT NULL UNIQUE,
                 title TEXT NOT NULL,
                 description TEXT,
                 status TEXT NOT NULL DEFAULT 'backlog',
                 priority TEXT NOT NULL DEFAULT 'medium',
+                owner_agent_id TEXT NOT NULL,
+                assigned_agent_id TEXT NOT NULL,
                 subtasks TEXT,
                 metadata TEXT,
                 source_memory_id TEXT,
                 worker_id TEXT,
                 created_by TEXT NOT NULL,
-                approved_at TIMESTAMP,
+                approved_at TEXT,
                 approved_by TEXT,
-                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-                completed_at TIMESTAMP,
-                UNIQUE(agent_id, task_number)
+                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+                completed_at TEXT
             )",
         )
         .execute(&pool)
@@ -4907,17 +4909,19 @@ mod tests {
 
         sqlx::query(
             "INSERT INTO tasks (
-                id, agent_id, task_number, title, description, status, priority,
+                id, task_number, title, description, status, priority,
+                owner_agent_id, assigned_agent_id,
                 subtasks, metadata, source_memory_id, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(&*agent_id)
         .bind(task_number)
         .bind("test task")
         .bind(Some("description".to_string()))
         .bind("ready")
         .bind("medium")
+        .bind(&*agent_id)
+        .bind(&*agent_id)
         .bind("[]")
         .bind("{}")
         .bind(Option::<String>::None)

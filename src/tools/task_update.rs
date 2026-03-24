@@ -17,6 +17,8 @@ pub enum TaskUpdateScope {
 #[derive(Debug, Clone)]
 pub struct TaskUpdateTool {
     task_store: Arc<TaskStore>,
+    // Retained for future authorization checks on global task updates.
+    #[allow(dead_code)]
     agent_id: AgentId,
     scope: TaskUpdateScope,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
@@ -214,7 +216,6 @@ impl Tool for TaskUpdateTool {
         let updated = self
             .task_store
             .update(
-                &self.agent_id,
                 task_number,
                 UpdateTaskInput {
                     title: args.title,
@@ -227,6 +228,7 @@ impl Tool for TaskUpdateTool {
                     clear_worker_id: false,
                     approved_by: args.approved_by,
                     complete_subtask,
+                    ..Default::default()
                 },
             )
             .await

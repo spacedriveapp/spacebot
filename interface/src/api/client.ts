@@ -1122,12 +1122,13 @@ export interface TaskSubtask {
 
 export interface TaskItem {
 	id: string;
-	agent_id: string;
 	task_number: number;
 	title: string;
 	description?: string;
 	status: TaskStatus;
 	priority: TaskPriority;
+	owner_agent_id: string;
+	assigned_agent_id: string;
 	subtasks: TaskSubtask[];
 	metadata: Record<string, unknown>;
 	source_memory_id?: string;
@@ -1154,6 +1155,8 @@ export interface TaskActionResponse {
 }
 
 export interface CreateTaskRequest {
+	owner_agent_id: string;
+	assigned_agent_id?: string;
 	title: string;
 	description?: string;
 	status?: TaskStatus;
@@ -1169,6 +1172,7 @@ export interface UpdateTaskRequest {
 	description?: string;
 	status?: TaskStatus;
 	priority?: TaskPriority;
+	assigned_agent_id?: string;
 	subtasks?: TaskSubtask[];
 	metadata?: Record<string, unknown>;
 	complete_subtask?: number;
@@ -2406,54 +2410,68 @@ export const api = {
 		fetch(`${getApiBase()}/webchat/history?agent_id=${encodeURIComponent(agentId)}&session_id=${encodeURIComponent(sessionId)}&limit=${limit}`),
 
 	// Tasks API
-	listTasks: (agentId: string, params?: { status?: TaskStatus; priority?: TaskPriority; limit?: number }) => {
-		const search = new URLSearchParams({ agent_id: agentId });
+	listTasks: (params?: { agent_id?: string; owner_agent_id?: string; assigned_agent_id?: string; status?: TaskStatus; priority?: TaskPriority; created_by?: string; limit?: number }) => {
+		const search = new URLSearchParams();
+		if (params?.agent_id) search.set("agent_id", params.agent_id);
+		if (params?.owner_agent_id) search.set("owner_agent_id", params.owner_agent_id);
+		if (params?.assigned_agent_id) search.set("assigned_agent_id", params.assigned_agent_id);
 		if (params?.status) search.set("status", params.status);
 		if (params?.priority) search.set("priority", params.priority);
+		if (params?.created_by) search.set("created_by", params.created_by);
 		if (params?.limit) search.set("limit", String(params.limit));
-		return fetchJson<TaskListResponse>(`/agents/tasks?${search}`);
+		const query = search.toString();
+		return fetchJson<TaskListResponse>(query ? `/tasks?${query}` : "/tasks");
 	},
-	getTask: (agentId: string, taskNumber: number) =>
-		fetchJson<TaskResponse>(`/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`),
-	createTask: async (agentId: string, request: CreateTaskRequest): Promise<TaskResponse> => {
-		const response = await fetch(`${getApiBase()}/agents/tasks`, {
+	getTask: (taskNumber: number) =>
+		fetchJson<TaskResponse>(`/tasks/${taskNumber}`),
+	createTask: async (request: CreateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
-	updateTask: async (agentId: string, taskNumber: number, request: UpdateTaskRequest): Promise<TaskResponse> => {
-		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}`, {
+	updateTask: async (taskNumber: number, request: UpdateTaskRequest): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}`, {
 			method: "PUT",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ ...request, agent_id: agentId }),
+			body: JSON.stringify(request),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
-	deleteTask: async (agentId: string, taskNumber: number): Promise<TaskActionResponse> => {
-		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}?agent_id=${encodeURIComponent(agentId)}`, {
+	deleteTask: async (taskNumber: number): Promise<TaskActionResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}`, {
 			method: "DELETE",
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskActionResponse>;
 	},
-	approveTask: async (agentId: string, taskNumber: number, approvedBy?: string): Promise<TaskResponse> => {
-		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}/approve`, {
+	approveTask: async (taskNumber: number, approvedBy?: string): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/approve`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent_id: agentId, approved_by: approvedBy }),
+			body: JSON.stringify({ approved_by: approvedBy }),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;
 	},
-	executeTask: async (agentId: string, taskNumber: number): Promise<TaskResponse> => {
-		const response = await fetch(`${getApiBase()}/agents/tasks/${taskNumber}/execute`, {
+	executeTask: async (taskNumber: number): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/execute`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({ agent_id: agentId }),
+			body: JSON.stringify({}),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<TaskResponse>;
+	},
+	assignTask: async (taskNumber: number, assignedAgentId: string): Promise<TaskResponse> => {
+		const response = await fetch(`${getApiBase()}/tasks/${taskNumber}/assign`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ assigned_agent_id: assignedAgentId }),
 		});
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<TaskResponse>;

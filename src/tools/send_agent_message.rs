@@ -31,8 +31,8 @@ pub struct SendAgentMessageTool {
     links: Arc<ArcSwap<Vec<AgentLink>>>,
     /// Map of known agent IDs to display names, for resolving targets.
     agent_names: Arc<HashMap<String, String>>,
-    /// Cross-agent task store registry for creating tasks on target agents.
-    task_store_registry: Arc<ArcSwap<HashMap<String, Arc<TaskStore>>>>,
+    /// Global task store shared across all agents.
+    task_store: Arc<TaskStore>,
     /// Per-agent conversation logger for writing link channel audit records.
     conversation_logger: ConversationLogger,
     /// Per-turn skip flag. When set after delegation, the channel turn ends immediately.
@@ -56,14 +56,14 @@ impl SendAgentMessageTool {
         agent_id: crate::AgentId,
         links: Arc<ArcSwap<Vec<AgentLink>>>,
         agent_names: Arc<HashMap<String, String>>,
-        task_store_registry: Arc<ArcSwap<HashMap<String, Arc<TaskStore>>>>,
+        task_store: Arc<TaskStore>,
         conversation_logger: ConversationLogger,
     ) -> Self {
         Self {
             agent_id,
             links,
             agent_names,
-            task_store_registry,
+            task_store,
             conversation_logger,
             skip_flag: None,
             originating_channel: None,
@@ -210,15 +210,6 @@ impl Tool for SendAgentMessageTool {
             .cloned()
             .unwrap_or_else(|| receiving_agent_id.to_string());
 
-        // Look up the target agent's task store from the cross-agent registry.
-        let registry = self.task_store_registry.load();
-        let target_task_store = registry.get(receiving_agent_id).ok_or_else(|| {
-            SendAgentMessageError(format!(
-                "target agent '{}' has no task store available. It may not be initialized.",
-                target_display
-            ))
-        })?;
-
         // Extract title from the message: first sentence or first 120 chars.
         let title = extract_task_title(&args.message);
 
@@ -229,11 +220,13 @@ impl Tool for SendAgentMessageTool {
             "originating_channel": self.originating_channel,
         });
 
-        // Create the task on the target agent's store.
+        // Create the task in the global store with cross-agent assignment.
         // Agent-delegated tasks skip pending_approval and go straight to ready.
-        let task = target_task_store
+        let task = self
+            .task_store
             .create(crate::tasks::CreateTaskInput {
-                agent_id: receiving_agent_id.to_string(),
+                owner_agent_id: sending_agent_id.to_string(),
+                assigned_agent_id: receiving_agent_id.to_string(),
                 title: title.clone(),
                 description: Some(args.message.clone()),
                 status: crate::tasks::TaskStatus::Ready,

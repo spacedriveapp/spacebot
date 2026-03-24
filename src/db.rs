@@ -1,9 +1,12 @@
 //! Database connection management and migrations.
 
 use crate::error::{DbError, Result};
+
 use anyhow::Context as _;
 use sqlx::SqlitePool;
+
 use std::path::Path;
+use std::sync::Arc;
 
 /// Database connections bundle for per-agent databases.
 pub struct Db {
@@ -16,8 +19,6 @@ pub struct Db {
     /// Redb database for key-value config.
     pub redb: Arc<redb::Database>,
 }
-
-use std::sync::Arc;
 
 impl Db {
     /// Connect to all databases and run migrations.
@@ -65,4 +66,31 @@ impl Db {
         self.sqlite.close().await;
         // LanceDB and redb close automatically when dropped
     }
+}
+
+/// Connect to the instance-level global task database and run its migrations.
+///
+/// The global task database lives at `{instance_dir}/data/tasks.db` and holds
+/// a single `tasks` table shared across all agents with globally unique task
+/// numbers. This replaces per-agent task tables.
+pub async fn connect_global_tasks(data_dir: &Path) -> Result<SqlitePool> {
+    std::fs::create_dir_all(data_dir)
+        .with_context(|| format!("failed to create data directory: {}", data_dir.display()))?;
+
+    let db_path = data_dir.join("tasks.db");
+    let url = format!("sqlite:{}?mode=rwc", db_path.display());
+
+    let pool = SqlitePool::connect(&url).await.with_context(|| {
+        format!(
+            "failed to connect to global task database: {}",
+            db_path.display()
+        )
+    })?;
+
+    sqlx::migrate!("./migrations/global")
+        .run(&pool)
+        .await
+        .with_context(|| "failed to run global task database migrations")?;
+
+    Ok(pool)
 }
