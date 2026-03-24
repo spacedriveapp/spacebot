@@ -21,7 +21,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { api } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { DashboardSquare01Icon, Settings01Icon, LayoutThreeColumnIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
@@ -155,11 +155,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 					}`}
 					title="Orchestrate"
 				>
-					<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-						<rect x="1" y="2" width="4" height="12" rx="1" />
-						<rect x="6" y="2" width="4" height="12" rx="1" />
-						<rect x="11" y="2" width="4" height="12" rx="1" />
-					</svg>
+					<HugeiconsIcon icon={LayoutThreeColumnIcon} className="h-4 w-4" />
 				</Link>
 				<Link
 					to="/settings"

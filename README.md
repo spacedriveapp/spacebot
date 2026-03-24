@@ -102,6 +102,19 @@ Native adapters for Discord, Slack, Telegram, Twitch, and Webchat with full plat
 - **Per-channel permissions** — guild, channel, and DM-level access control, hot-reloadable
 - **Webchat** — embeddable portal chat with SSE streaming, per-agent session isolation
 
+### Voice Interaction
+
+Spacebot now has a full voice interface on top of WebChat and the desktop app:
+
+- **Push-to-talk voice overlay** — a transparent desktop/web overlay with the official Spacebot ball + WebGL orb treatment
+- **Siri-style waveform** — layered SVG waves driven by live FFT data from both microphone capture and TTS playback
+- **Blue / purple voice states** — blue while the user is speaking, Spacebot purple while the agent is speaking, with branded glow and motion treatment
+- **Voicebox integration** — spoken replies are generated through a configurable Voicebox server and streamed back through the same API surface as chat
+- **Speech personality** — `SPEECH.md` gives spoken replies their own cadence, phrasing, warmth, and anti-repetition guidance, separate from text identity
+- **Persistent spoken history** — the last 15 spoken rewrites are stored per channel and injected into the speech-generation prompt so spoken replies stay varied across sessions
+- **Stable spoken-response events** — spoken playback is correlated to outbound assistant messages by message ID, not fragile text matching
+- **Playback reliability** — TTS invalidation prevents stale or overlapping playback after `stop()`, and recorder teardown cleans up media resources on unmount
+
 ### Memory
 
 Not markdown files. Not _unstructured_ blocks in a vector database. Spacebot's memory is a typed, graph-connected knowledge system — and this opinionated structure is why agents are productive out of the box.
@@ -113,8 +126,10 @@ Every memory has a type, an importance score, and graph edges connecting it to r
 - **Hybrid recall** — vector similarity + full-text search merged via Reciprocal Rank Fusion
 - **Memory import** — dump files into the `ingest/` folder and Spacebot extracts structured memories automatically. Supports text, markdown, and PDF files. Migrating from OpenClaw? Drop your markdown memory files in and walk away.
 - **Cross-channel recall** — branches can read transcripts from other conversations
-- **Memory bulletin** — the cortex generates a periodic briefing of the agent's knowledge, injected into every conversation
-- **Warmup readiness contract** — branch/worker/cron dispatch checks `ready_for_work` (warm state + embedding ready + fresh bulletin), records cold-dispatch metrics, and triggers background forced warmup without blocking channels
+- **Working memory log** — an append-only event stream for decisions, branch completions, worker completions, task updates, cron executions, errors, and other day-of activity
+- **Layered context injection** — channels get identity files, graph-memory synthesis, rendered working memory, and a channel activity map instead of a single undifferentiated bulletin blob
+- **Knowledge synthesis** — the cortex maintains a change-driven high-level synthesis of what the agent knows, kept in sync with legacy `memory_bulletin` compatibility paths
+- **Warmup readiness contract** — branch/worker/cron dispatch checks `ready_for_work` against warm state, embedding readiness, and knowledge synthesis freshness, records cold-dispatch metrics, and triggers background forced warmup without blocking channels
 
 ### Scheduling
 
@@ -263,7 +278,7 @@ Secrets are split into two categories: **system** (LLM API keys, messaging token
 - **Leak detection** — secret-pattern checks are enforced at channel egress (`reply` and plaintext fallback output) across plaintext, URL-encoded, base64, and hex encodings. Outbound text matching a secret pattern is blocked; worker tool outputs no longer hard-fail the worker
 - **Library injection blocking** — the exec tool blocks dangerous environment variables (`LD_PRELOAD`, `DYLD_INSERT_LIBRARIES`, `NODE_OPTIONS`, etc.) that could hijack child process loading
 - **SSRF protection** — the browser tool blocks requests to cloud metadata endpoints, private IPs, loopback, and link-local addresses
-- **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, and `USER.md` are blocked at the application level
+- **Identity file protection** — writes to `SOUL.md`, `IDENTITY.md`, `ROLE.md`, and `SPEECH.md` are blocked at the application level
 - **Durable binary storage** — `tools/bin` directory on PATH survives hosted rollouts. Workers are instructed to install binaries there instead of ephemeral package manager locations
 
 ```toml
@@ -343,7 +358,7 @@ Compaction workers run alongside the channel without blocking it. Summaries stac
 
 ### The Cortex
 
-The agent's inner monologue. The only process that sees across all channels, workers, and branches simultaneously. Generates a **memory bulletin** — a periodically refreshed, LLM-curated briefing of the agent's knowledge injected into every conversation. Supervises running processes (kills hanging workers, cleans up stale branches). Maintains the memory graph (decay, pruning, merging near-duplicates, cross-channel consolidation). Detects patterns across conversations and creates observations. Also provides a direct interactive admin chat with full tool access for system inspection and manual intervention.
+The agent's inner monologue. The only process that sees across all channels, workers, and branches simultaneously. Maintains **knowledge synthesis** and the **working memory system** that feed every conversation with recent decisions, channel activity, and long-lived memory context. Supervises running processes (kills hanging workers, cleans up stale branches). Maintains the memory graph (decay, pruning, merging near-duplicates, cross-channel consolidation). Detects patterns across conversations and creates observations. Also provides a direct interactive admin chat with full tool access for system inspection and manual intervention.
 
 ---
 
@@ -379,13 +394,26 @@ Channel context hits 80%
 
 ### Memory System
 
-Memories are structured objects, not files. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB.
+Spacebot now uses two complementary memory layers:
+
+- **Graph memory** — typed long-lived memories in SQLite + LanceDB for semantic recall
+- **Working memory** — a temporal SQL event log rendered directly into channel prompts for "what happened today?" awareness
+
+Graph memories are structured objects, not files. Every memory is a row in SQLite with typed metadata and graph connections, paired with a vector embedding in LanceDB.
 
 - **Eight types** — Fact, Preference, Decision, Identity, Event, Observation, Goal, Todo
 - **Graph edges** — RelatedTo, Updates, Contradicts, CausedBy, PartOf
 - **Hybrid search** — Vector similarity + full-text search, merged via Reciprocal Rank Fusion
 - **Three creation paths** — Branch-initiated, compactor-initiated, cortex-initiated
 - **Importance scoring** — Access frequency, recency, graph centrality. Identity memories exempt from decay.
+
+Working memory is the "recent and operational" side of memory:
+
+- **Event types** — worker spawned/completed, branch completed, task updates, decisions, system events, cron executions, errors, and memory-save related events
+- **Prompt layers** — rendered working-memory timeline + channel activity map are injected directly into channel prompts
+- **Daily / intra-day synthesis** — the cortex compresses raw event streams into compact narrative context while preserving a recent raw tail
+- **Cross-session continuity** — because working memory lives in the database, a restarted channel still knows what happened earlier today
+- **Separate lifecycle** — graph memories capture durable knowledge; working memory captures temporal operational awareness
 
 ### Cron Jobs
 
@@ -519,10 +547,11 @@ No server dependencies. Single binary. All data lives in embedded databases in a
 | [Quick Start](docs/content/docs/(getting-started)/quickstart.mdx) | Setup, config, first run                                 |
 | [Config Reference](docs/content/docs/(configuration)/config.mdx) | Full `config.toml` reference                             |
 | [Agents](docs/content/docs/(core)/agents.mdx)                    | Multi-agent setup and isolation                          |
-| [Memory](docs/content/docs/(core)/memory.mdx)                    | Memory system design                                     |
+| [Memory](docs/content/docs/(core)/memory.mdx)                    | Graph memory, working memory, and knowledge synthesis    |
 | [Tools](docs/content/docs/(features)/tools.mdx)                  | All available LLM tools                                  |
 | [Compaction](docs/content/docs/(core)/compaction.mdx)            | Context window management                                |
-| [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Memory bulletin and system observation                   |
+| [Cortex](docs/content/docs/(core)/cortex.mdx)                    | Knowledge synthesis, working memory, and system observation |
+| [Desktop App](docs/content/docs/(getting-started)/desktop.mdx)   | Native app, connection screen, and voice overlay         |
 | [Cron Jobs](docs/content/docs/(features)/cron.mdx)               | Scheduled recurring tasks                                |
 | [Routing](docs/content/docs/(core)/routing.mdx)                  | Model routing and fallback chains                        |
 | [Secrets](docs/content/docs/(configuration)/secrets.mdx)         | Credential storage, encryption, and output scrubbing     |

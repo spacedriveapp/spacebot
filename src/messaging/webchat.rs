@@ -95,6 +95,7 @@ impl Messaging for WebChatAdapter {
         tx.send(ApiEvent::OutboundMessage {
             agent_id: agent_id.to_string(),
             channel_id: target.to_string(),
+            message_id: None,
             text,
         })
         .ok();

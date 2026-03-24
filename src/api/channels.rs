@@ -410,7 +410,12 @@ pub(super) async fn inspect_prompt(
     let prompt_engine = rc.prompts.load();
 
     // ── Gather all dynamic sections ──
-    let identity_context = rc.identity.load().render();
+    let identity_snapshot = rc.identity.load().clone();
+    let identity_context = crate::agent::channel::render_identity_context(
+        &identity_snapshot,
+        &channel_state.deps.memory_search,
+    )
+    .await;
     let memory_bulletin = rc.memory_bulletin.load();
     let skills = rc.skills.load();
     let skills_prompt = skills

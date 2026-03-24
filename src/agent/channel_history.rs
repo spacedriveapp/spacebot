@@ -434,7 +434,8 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         | ProcessEvent::StatusUpdate { .. }
         | ProcessEvent::TaskUpdated { .. }
         | ProcessEvent::WorkerText { .. }
-        | ProcessEvent::CortexChatUpdate { .. } => false,
+        | ProcessEvent::CortexChatUpdate { .. }
+        | ProcessEvent::SpokenResponse { .. } => false,
     }
 }
 

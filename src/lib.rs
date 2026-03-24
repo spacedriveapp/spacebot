@@ -308,6 +308,17 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         text: String,
     },
+    /// A shortened spoken version of an outbound reply, generated for voice
+    /// output. The frontend voice card uses this to trigger TTS playback.
+    SpokenResponse {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        message_id: String,
+        /// The short, conversational spoken text (1-3 sentences).
+        spoken_text: String,
+        /// The full response text this was derived from.
+        full_text: String,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.
@@ -602,6 +613,7 @@ pub struct Attachment {
 pub struct RoutedResponse {
     pub response: OutboundResponse,
     pub target: InboundMessage,
+    pub message_id: Option<String>,
 }
 
 /// A sender that automatically pairs outbound responses with a captured
@@ -622,10 +634,19 @@ impl RoutedSender {
         &self,
         response: OutboundResponse,
     ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
+        self.send_with_message_id(response, None).await
+    }
+
+    pub async fn send_with_message_id(
+        &self,
+        response: OutboundResponse,
+        message_id: Option<String>,
+    ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
         self.inner
             .send(RoutedResponse {
                 response,
                 target: self.target.clone(),
+                message_id,
             })
             .await
     }

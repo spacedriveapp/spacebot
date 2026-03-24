@@ -503,6 +503,8 @@ pub(super) struct TomlMessagingConfig {
     pub(super) webhook: Option<TomlWebhookConfig>,
     pub(super) twitch: Option<TomlTwitchConfig>,
     pub(super) signal: Option<TomlSignalConfig>,
+    #[serde(default)]
+    pub(super) mattermost: Option<TomlMattermostConfig>,
 }
 
 #[derive(Deserialize)]
@@ -782,9 +784,44 @@ pub(super) struct TomlBinding {
     pub(super) workspace_id: Option<String>,
     pub(super) chat_id: Option<String>,
     #[serde(default)]
+    pub(super) team_id: Option<String>,
+    #[serde(default)]
     pub(super) channel_ids: Vec<String>,
     #[serde(default)]
     pub(super) require_mention: bool,
     #[serde(default)]
     pub(super) dm_allowed_users: Vec<String>,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlMattermostConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) base_url: Option<String>,
+    pub(super) token: Option<String>,
+    pub(super) team_id: Option<String>,
+    #[serde(default)]
+    pub(super) instances: Vec<TomlMattermostInstanceConfig>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default = "default_mattermost_max_attachment_bytes")]
+    pub(super) max_attachment_bytes: usize,
+}
+
+#[derive(Deserialize)]
+pub(super) struct TomlMattermostInstanceConfig {
+    pub(super) name: String,
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) base_url: Option<String>,
+    pub(super) token: Option<String>,
+    pub(super) team_id: Option<String>,
+    #[serde(default)]
+    pub(super) dm_allowed_users: Vec<String>,
+    #[serde(default = "default_mattermost_max_attachment_bytes")]
+    pub(super) max_attachment_bytes: usize,
+}
+
+pub(super) fn default_mattermost_max_attachment_bytes() -> usize {
+    10 * 1024 * 1024
 }

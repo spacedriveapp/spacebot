@@ -30,16 +30,10 @@ function formatInstalls(n: number): string {
 /**
  * Derive the install spec from a registry skill.
  *
- * For multi-skill repos (e.g. anthropics/skills with skill "frontend-design"),
- * the spec is "owner/repo/skill-name". For single-skill repos where the repo
- * name matches the skillId (e.g. vercel-labs/agent-browser), use "owner/repo"
- * so the installer scans the whole repo for SKILL.md files.
+ * The spec is always "owner/repo/skill-name" (3-part format required by backend).
+ * Even for single-skill repos, the skillId is included.
  */
 function installSpec(skill: RegistrySkill): string {
-	const repoName = skill.source.split("/").pop();
-	if (repoName === skill.skillId) {
-		return skill.source;
-	}
 	return `${skill.source}/${skill.skillId}`;
 }
 

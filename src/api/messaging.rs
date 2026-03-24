@@ -95,6 +95,11 @@ pub(super) struct InstanceCredentials {
     webhook_bind: Option<String>,
     #[serde(default)]
     webhook_auth_token: Option<String>,
+    // Mattermost credentials
+    #[serde(default)]
+    mattermost_base_url: Option<String>,
+    #[serde(default)]
+    mattermost_token: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -509,6 +514,60 @@ pub(super) async fn messaging_status(
                 configured: false,
                 enabled: false,
             });
+
+        // Populate instances for Mattermost (not in the legacy per-platform status fields)
+        if let Some(mm) = doc.get("messaging").and_then(|m| m.get("mattermost")) {
+            let has_url = mm
+                .get("base_url")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            let has_token = mm
+                .get("token")
+                .and_then(|v| v.as_str())
+                .is_some_and(|s| !s.is_empty());
+            let enabled = mm.get("enabled").and_then(|v| v.as_bool()).unwrap_or(false);
+
+            if has_url && has_token {
+                push_instance_status(&mut instances, bindings, "mattermost", None, true, enabled);
+            }
+
+            if let Some(named_instances) = mm
+                .get("instances")
+                .and_then(|value| value.as_array_of_tables())
+            {
+                for instance in named_instances {
+                    let instance_name = normalize_adapter_selector(
+                        instance.get("name").and_then(|value| value.as_str()),
+                    );
+                    let instance_enabled = instance
+                        .get("enabled")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(true)
+                        && enabled;
+                    let instance_configured = instance
+                        .get("base_url")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| !value.is_empty())
+                        && instance
+                            .get("token")
+                            .and_then(|value| value.as_str())
+                            .is_some_and(|value| !value.is_empty());
+
+                    if let Some(instance_name) = instance_name
+                        && instance_configured
+                    {
+                        push_instance_status(
+                            &mut instances,
+                            bindings,
+                            "mattermost",
+                            Some(instance_name),
+                            true,
+                            instance_enabled,
+                        );
+                    }
+                }
+            }
+        }
 
         (
             discord_status,
@@ -1128,7 +1187,7 @@ pub(super) async fn create_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1269,6 +1328,26 @@ pub(super) async fn create_messaging_instance(
                         platform_table["auth_token"] = toml_edit::value(token.as_str());
                     }
                 }
+                "mattermost" => {
+                    if let Some(url) = &credentials.mattermost_base_url {
+                        if url::Url::parse(url)
+                            .map(|u| {
+                                u.path() != "/" || u.query().is_some() || u.fragment().is_some()
+                            })
+                            .unwrap_or(true)
+                        {
+                            return Ok(Json(MessagingInstanceActionResponse {
+                                success: false,
+                                message: "invalid mattermost base_url: must be an origin URL (e.g. https://mm.example.com)"
+                                    .to_string(),
+                            }));
+                        }
+                        platform_table["base_url"] = toml_edit::value(url.as_str());
+                    }
+                    if let Some(token) = &credentials.mattermost_token {
+                        platform_table["token"] = toml_edit::value(token.as_str());
+                    }
+                }
                 _ => {}
             }
             platform_table["enabled"] = toml_edit::value(enabled);
@@ -1378,6 +1457,26 @@ pub(super) async fn create_messaging_instance(
                         instance_table["auth_token"] = toml_edit::value(token.as_str());
                     }
                 }
+                "mattermost" => {
+                    if let Some(url) = &credentials.mattermost_base_url {
+                        if url::Url::parse(url)
+                            .map(|u| {
+                                u.path() != "/" || u.query().is_some() || u.fragment().is_some()
+                            })
+                            .unwrap_or(true)
+                        {
+                            return Ok(Json(MessagingInstanceActionResponse {
+                                success: false,
+                                message: "invalid mattermost base_url: must be an origin URL (e.g. https://mm.example.com)"
+                                    .to_string(),
+                            }));
+                        }
+                        instance_table["base_url"] = toml_edit::value(url.as_str());
+                    }
+                    if let Some(token) = &credentials.mattermost_token {
+                        instance_table["token"] = toml_edit::value(token.as_str());
+                    }
+                }
                 _ => {}
             }
 
@@ -1443,7 +1542,7 @@ pub(super) async fn delete_messaging_instance(
 
     if !matches!(
         platform.as_str(),
-        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook"
+        "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost"
     ) {
         return Ok(Json(MessagingInstanceActionResponse {
             success: false,
@@ -1539,6 +1638,13 @@ pub(super) async fn delete_messaging_instance(
                     table.remove("port");
                     table.remove("bind");
                     table.remove("auth_token");
+                }
+                "mattermost" => {
+                    table.remove("base_url");
+                    table.remove("token");
+                    table.remove("team_id");
+                    table.remove("dm_allowed_users");
+                    table.remove("max_attachment_bytes");
                 }
                 _ => {}
             }

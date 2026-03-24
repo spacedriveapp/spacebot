@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{
-    Binding, Config, DiscordPermissions, RuntimeConfig, SignalPermissions, SlackPermissions,
-    TelegramPermissions, TwitchPermissions, binding_runtime_adapter_key,
+    Binding, Config, DiscordPermissions, MattermostPermissions, RuntimeConfig, SignalPermissions,
+    SlackPermissions, TelegramPermissions, TwitchPermissions, binding_runtime_adapter_key,
 };
 
 /// Per-agent context needed by the file watcher: (id, prompt_dir, identity_dir,
@@ -31,6 +31,7 @@ pub fn spawn_file_watcher(
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
     twitch_permissions: Option<Arc<arc_swap::ArcSwap<TwitchPermissions>>>,
+    mattermost_permissions: Option<Arc<arc_swap::ArcSwap<MattermostPermissions>>>,
     signal_permissions: Option<Arc<arc_swap::ArcSwap<SignalPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
@@ -95,7 +96,7 @@ pub fn spawn_file_watcher(
                     tracing::warn!(%error, path = %path.display(), "failed to watch agent skills dir");
                 }
             }
-            // Watch the agent root (identity_dir) for SOUL.md/IDENTITY.md/ROLE.md changes.
+            // Watch the agent root (identity_dir) for SOUL.md/IDENTITY.md/ROLE.md/SPEECH.md changes.
             // Identity files live outside the workspace, in the agent root directory.
             if let Err(error) = watcher.watch(identity_dir, RecursiveMode::NonRecursive) {
                 tracing::warn!(%error, path = %identity_dir.display(), "failed to watch identity dir");
@@ -128,7 +129,7 @@ pub fn spawn_file_watcher(
             let mut config_changed = changed_paths.iter().any(|p| p.ends_with("config.toml"));
             let identity_changed = changed_paths.iter().any(|p| {
                 let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md")
+                matches!(name, "SOUL.md" | "IDENTITY.md" | "ROLE.md" | "SPEECH.md")
             });
             let skills_changed = changed_paths
                 .iter()
@@ -241,6 +242,15 @@ pub fn spawn_file_watcher(
                     tracing::info!("twitch permissions reloaded");
                 }
 
+                if let Some(ref perms) = mattermost_permissions
+                    && let Some(mattermost_config) = &config.messaging.mattermost
+                {
+                    let new_perms =
+                        MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("mattermost permissions reloaded");
+                }
+
                 if let Some(ref perms) = signal_permissions
                     && let Some(signal_config) = &config.messaging.signal
                 {
@@ -258,6 +268,7 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let mattermost_permissions = mattermost_permissions.clone();
                     let signal_permissions = signal_permissions.clone();
                     let instance_dir = instance_dir.clone();
 
@@ -594,6 +605,71 @@ pub fn spawn_file_watcher(
                                     );
                                     if let Err(error) = manager.register_and_start(adapter).await {
                                         tracing::error!(%error, adapter = %instance.name, "failed to hot-start named signal adapter from config change");
+                                    }
+                                }
+                            }
+
+                        // Mattermost: start default + named instances that are enabled and not already running.
+                        if let Some(mattermost_config) = &config.messaging.mattermost
+                            && mattermost_config.enabled {
+                                if !mattermost_config.base_url.is_empty()
+                                    && !mattermost_config.token.is_empty()
+                                    && !manager.has_adapter("mattermost").await
+                                {
+                                    let permissions = match mattermost_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        "mattermost",
+                                        &mattermost_config.base_url,
+                                        mattermost_config.token.as_str(),
+                                        mattermost_config.team_id.as_deref().map(Arc::from),
+                                        mattermost_config.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to build mattermost adapter from config change");
+                                        }
+                                    }
+                                }
+
+                                for instance in mattermost_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "mattermost",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        MattermostPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        runtime_key,
+                                        &instance.base_url,
+                                        instance.token.as_str(),
+                                        instance.team_id.as_deref().map(Arc::from),
+                                        instance.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to build named mattermost adapter from config change");
+                                        }
                                     }
                                 }
                             }

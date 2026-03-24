@@ -108,8 +108,23 @@ impl ConversationLogger {
         content: &str,
         sender_name: Option<&str>,
     ) {
+        self.log_bot_message_with_name_and_id(
+            channel_id,
+            uuid::Uuid::new_v4().to_string(),
+            content,
+            sender_name,
+        );
+    }
+
+    /// Log a bot (assistant) message with a caller-provided message id.
+    pub fn log_bot_message_with_name_and_id(
+        &self,
+        channel_id: &ChannelId,
+        id: String,
+        content: &str,
+        sender_name: Option<&str>,
+    ) {
         let pool = self.pool.clone();
-        let id = uuid::Uuid::new_v4().to_string();
         let channel_id = channel_id.to_string();
         let content = content.to_string();
         let sender_name = sender_name.map(String::from);

@@ -31,6 +31,22 @@ pub fn new_replied_flag() -> RepliedFlag {
     Arc::new(AtomicBool::new(false))
 }
 
+#[derive(Debug, Clone)]
+pub struct RepliedMessage {
+    pub text: String,
+    pub message_id: String,
+}
+
+/// Shared slot for capturing the text and persisted message id sent by the
+/// reply tool. The channel reads this after a successful turn to trigger
+/// spoken response generation for voice-enabled channels.
+pub type RepliedText = Arc<std::sync::Mutex<Option<RepliedMessage>>>;
+
+/// Create a new replied message slot (defaults to None).
+pub fn new_replied_text() -> RepliedText {
+    Arc::new(std::sync::Mutex::new(None))
+}
+
 /// Tool for replying to users.
 ///
 /// Holds a sender channel rather than a specific InboundMessage. The channel
@@ -44,6 +60,7 @@ pub struct ReplyTool {
     conversation_logger: ConversationLogger,
     channel_id: ChannelId,
     replied_flag: RepliedFlag,
+    replied_text: RepliedText,
     agent_display_name: String,
 }
 
@@ -55,6 +72,7 @@ impl ReplyTool {
         conversation_logger: ConversationLogger,
         channel_id: ChannelId,
         replied_flag: RepliedFlag,
+        replied_text: RepliedText,
         agent_display_name: impl Into<String>,
     ) -> Self {
         Self {
@@ -63,6 +81,7 @@ impl ReplyTool {
             conversation_logger,
             channel_id,
             replied_flag,
+            replied_text,
             agent_display_name: agent_display_name.into(),
         }
     }
@@ -437,19 +456,32 @@ impl Tool for ReplyTool {
             OutboundResponse::Text(converted_content.clone())
         };
 
+        let message_id = uuid::Uuid::new_v4().to_string();
+
         self.response_tx
-            .send(response)
+            .send_with_message_id(response, Some(message_id.clone()))
             .await
             .map_err(|e| ReplyError(format!("failed to send reply: {e}")))?;
 
-        self.conversation_logger.log_bot_message_with_name(
+        self.conversation_logger.log_bot_message_with_name_and_id(
             &self.channel_id,
+            message_id.clone(),
             &converted_content,
             Some(&self.agent_display_name),
         );
 
         // Mark the turn as handled so handle_agent_result skips the fallback send.
         self.replied_flag.store(true, Ordering::Relaxed);
+
+        // Capture the sent text so the channel can generate a spoken response.
+        let mut slot = self
+            .replied_text
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        *slot = Some(RepliedMessage {
+            text: converted_content.clone(),
+            message_id,
+        });
 
         tracing::debug!(conversation_id = %self.conversation_id, "reply sent to outbound channel");
 

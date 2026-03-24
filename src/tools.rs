@@ -354,6 +354,7 @@ pub async fn add_channel_tools(
     conversation_id: impl Into<String>,
     skip_flag: SkipFlag,
     replied_flag: RepliedFlag,
+    replied_text: reply::RepliedText,
     cron_tool: Option<CronTool>,
     send_agent_message_tool: Option<SendAgentMessageTool>,
     allow_direct_reply: bool,
@@ -376,6 +377,7 @@ pub async fn add_channel_tools(
                 state.conversation_logger.clone(),
                 state.channel_id.clone(),
                 replied_flag.clone(),
+                replied_text.clone(),
                 agent_display_name,
             ))
             .await?;

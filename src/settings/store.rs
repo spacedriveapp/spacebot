@@ -15,6 +15,7 @@ pub const WORKER_LOG_MODE_KEY: &str = "worker_log_mode";
 pub const CHANNEL_LISTEN_ONLY_MODE_KEY: &str = "channel_listen_only_mode";
 const CHANNEL_LISTEN_ONLY_MODE_PREFIX: &str = "channel_listen_only_mode:";
 const PROMPT_CAPTURE_PREFIX: &str = "prompt_capture:";
+const CHANNEL_SPOKEN_HISTORY_PREFIX: &str = "channel_spoken_history:";
 
 /// How worker execution logs are stored.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -61,6 +62,11 @@ impl SettingsStore {
     fn channel_listen_only_mode_key(channel_id: &str) -> String {
         format!("{CHANNEL_LISTEN_ONLY_MODE_PREFIX}{channel_id}")
     }
+
+    fn channel_spoken_history_key(channel_id: &str) -> String {
+        format!("{CHANNEL_SPOKEN_HISTORY_PREFIX}{channel_id}")
+    }
+
     /// Create a new settings store at the given path.
     /// The database will be created if it doesn't exist.
     pub fn new(path: &Path) -> Result<Self> {
@@ -230,10 +236,76 @@ impl SettingsStore {
         let key = format!("{PROMPT_CAPTURE_PREFIX}{channel_id}");
         self.set_raw(&key, if enabled { "true" } else { "false" })
     }
+
+    /// Load the persisted spoken response history for a channel.
+    pub fn channel_spoken_history_for(&self, channel_id: &str) -> Result<Vec<String>> {
+        let key = Self::channel_spoken_history_key(channel_id);
+        match self.get_raw(&key) {
+            Ok(raw) => serde_json::from_str::<Vec<String>>(&raw).map_err(|error| {
+                SettingsError::ReadFailed {
+                    key,
+                    details: format!("invalid spoken history JSON: {error}"),
+                }
+                .into()
+            }),
+            Err(crate::error::Error::Settings(settings_error)) => match *settings_error {
+                SettingsError::NotFound { .. } => Ok(Vec::new()),
+                other => Err(other.into()),
+            },
+            Err(other) => Err(other),
+        }
+    }
+
+    /// Persist the spoken response history for a channel.
+    pub fn set_channel_spoken_history_for(
+        &self,
+        channel_id: &str,
+        history: &[String],
+    ) -> Result<()> {
+        let key = Self::channel_spoken_history_key(channel_id);
+        let serialized =
+            serde_json::to_string(history).map_err(|error| SettingsError::WriteFailed {
+                key: key.clone(),
+                details: format!("failed to serialize spoken history: {error}"),
+            })?;
+        self.set_raw(&key, &serialized)
+    }
 }
 
 impl std::fmt::Debug for SettingsStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SettingsStore").finish_non_exhaustive()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SettingsStore;
+
+    #[test]
+    fn spoken_history_round_trips_per_channel() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let store = SettingsStore::new(&temp_dir.path().join("settings.redb"))
+            .expect("failed to create settings store");
+        let history = vec![
+            "First spoken reply".to_string(),
+            "Second spoken reply".to_string(),
+        ];
+
+        store
+            .set_channel_spoken_history_for("portal:chat:main", &history)
+            .expect("failed to persist spoken history");
+
+        let loaded = store
+            .channel_spoken_history_for("portal:chat:main")
+            .expect("failed to load spoken history");
+
+        assert_eq!(loaded, history);
+        assert!(
+            store
+                .channel_spoken_history_for("portal:chat:other")
+                .expect("failed to load empty spoken history")
+                .is_empty()
+        );
     }
 }

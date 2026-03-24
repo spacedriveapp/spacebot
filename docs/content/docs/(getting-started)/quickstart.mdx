@@ -132,7 +132,7 @@ On first launch, Spacebot automatically creates:
 
 - `~/.spacebot/` — instance directory
 - `~/.spacebot/agents/main/data/` — SQLite, LanceDB, and redb databases
-- `~/.spacebot/agents/main/` — identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`)
+- `~/.spacebot/agents/main/` — identity files (`SOUL.md`, `IDENTITY.md`, `ROLE.md`, `SPEECH.md`)
 - `~/.spacebot/agents/main/workspace/` — working files and ingest directory (sandbox boundary for worker file tools)
 
 ## Daemon management
@@ -155,8 +155,9 @@ Each agent has optional identity files in its root directory (`~/.spacebot/agent
 | `SOUL.md`     | Personality, values, communication style |
 | `IDENTITY.md` | Name, nature, purpose                    |
 | `ROLE.md`     | Responsibilities, scope, escalation rules |
+| `SPEECH.md`   | Spoken cadence, delivery style, anti-repetition rules |
 
-Template files are created on first run. Edit them to shape the agent's personality. Changes are hot-reloaded (no restart needed). These files live outside the workspace so they are not accessible to worker file tools.
+Template files are created on first run. Edit them to shape the agent's personality and speaking style. Changes are hot-reloaded (no restart needed). These files live outside the workspace so they are not accessible to worker file tools.
 
 ## Development setup
 

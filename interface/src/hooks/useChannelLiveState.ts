@@ -260,12 +260,12 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 						timeline[streamIndex] = { ...streamItem, content: event.text };
 					}
 				} else {
-					timeline.push(
-						assistantMessageItem(
-							`out-${generateId()}`,
-							event.agent_id,
-							event.text,
-						),
+						timeline.push(
+							assistantMessageItem(
+								event.message_id ?? `out-${generateId()}`,
+								event.agent_id,
+								event.text,
+							),
 					);
 				}
 
@@ -287,7 +287,7 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 					timeline: [
 						...existing.timeline,
 						assistantMessageItem(
-							`out-${generateId()}`,
+							event.message_id ?? `out-${generateId()}`,
 							event.agent_id,
 							event.text,
 						),

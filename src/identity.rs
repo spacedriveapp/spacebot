@@ -1,4 +1,4 @@
-//! Identity file loading (SOUL.md, IDENTITY.md, ROLE.md).
+//! Identity file loading (SOUL.md, IDENTITY.md, ROLE.md, SPEECH.md).
 
 pub mod files;
 

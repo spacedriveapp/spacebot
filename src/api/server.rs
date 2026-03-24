@@ -4,7 +4,7 @@ use super::state::ApiState;
 use super::{
     agents, bindings, channels, config, cortex, cron, factory, ingest, links, mcp, memories,
     messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
-    tasks, tools, webchat, workers,
+    tasks, tools, tts, webchat, workers,
 };
 
 use axum::Json;
@@ -277,6 +277,9 @@ pub async fn start_http_server(
         .route("/ssh/authorized-key", put(ssh::set_authorized_key))
         .route("/ssh/status", get(ssh::ssh_status))
         .route("/webchat/send", post(webchat::webchat_send))
+        .route("/webchat/send-audio", post(webchat::webchat_send_audio))
+        .route("/tts/generate", post(tts::tts_generate))
+        .route("/tts/profiles", get(tts::tts_profiles))
         .route("/webchat/history", get(webchat::webchat_history))
         .route("/links", get(links::list_links).post(links::create_link))
         .route(

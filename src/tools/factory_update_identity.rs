@@ -1,6 +1,6 @@
 //! Factory tool: update identity files for an existing agent.
 //!
-//! Allows refinement of an agent's soul, identity, and role content after
+//! Allows refinement of an agent's soul, identity, role, and speech content after
 //! creation. Only files provided in the arguments are overwritten; omitted
 //! files are left unchanged.
 
@@ -51,6 +51,9 @@ pub struct FactoryUpdateIdentityArgs {
     /// New content for ROLE.md (omit to leave unchanged).
     #[serde(default)]
     pub role_content: Option<String>,
+    /// New content for SPEECH.md (omit to leave unchanged).
+    #[serde(default)]
+    pub speech_content: Option<String>,
 }
 
 /// Output from factory update identity tool.
@@ -91,6 +94,10 @@ impl Tool for FactoryUpdateIdentityTool {
                     "role_content": {
                         "type": "string",
                         "description": "New markdown content for ROLE.md. Omit to leave unchanged."
+                    },
+                    "speech_content": {
+                        "type": "string",
+                        "description": "New markdown content for SPEECH.md. Omit to leave unchanged."
                     }
                 }
             }),
@@ -114,9 +121,10 @@ impl Tool for FactoryUpdateIdentityTool {
         if args.soul_content.is_none()
             && args.identity_content.is_none()
             && args.role_content.is_none()
+            && args.speech_content.is_none()
         {
             return Err(FactoryUpdateIdentityError(
-                "at least one of soul_content, identity_content, or role_content must be provided"
+                "at least one of soul_content, identity_content, role_content, or speech_content must be provided"
                     .into(),
             ));
         }
@@ -126,6 +134,7 @@ impl Tool for FactoryUpdateIdentityTool {
             ("soul_content", &args.soul_content),
             ("identity_content", &args.identity_content),
             ("role_content", &args.role_content),
+            ("speech_content", &args.speech_content),
         ] {
             if let Some(content) = content
                 && content.trim().is_empty()
@@ -138,10 +147,11 @@ impl Tool for FactoryUpdateIdentityTool {
 
         let mut files_updated = Vec::new();
 
-        let updates: [(&str, &Option<String>); 3] = [
+        let updates: [(&str, &Option<String>); 4] = [
             ("SOUL.md", &args.soul_content),
             ("IDENTITY.md", &args.identity_content),
             ("ROLE.md", &args.role_content),
+            ("SPEECH.md", &args.speech_content),
         ];
 
         for (filename, content) in &updates {

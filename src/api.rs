@@ -29,6 +29,7 @@ mod state;
 mod system;
 mod tasks;
 mod tools;
+mod tts;
 mod webchat;
 mod workers;
 

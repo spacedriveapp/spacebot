@@ -1350,7 +1350,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::WorkerInitialResult { .. }
         | ProcessEvent::WorkerText { .. }
-        | ProcessEvent::CortexChatUpdate { .. } => return None,
+        | ProcessEvent::CortexChatUpdate { .. }
+        | ProcessEvent::SpokenResponse { .. } => return None,
     })
 }
 

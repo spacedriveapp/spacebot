@@ -1,25 +1,28 @@
 ---
 title: Cortex
-description: System-level observer that maintains memory bulletins, runs maintenance, and monitors agent health.
+description: System-level observer that maintains knowledge synthesis, working memory, and agent health.
 ---
 
 # The Cortex
 
 The cortex is the system's awareness of itself. Every other process in Spacebot is focused on a specific job — channels talk to users, branches think, workers execute, compactors manage context. None of them see the whole picture. The cortex does.
 
-## The Memory Bulletin
+## Knowledge Synthesis And Working Memory
 
-The cortex's primary responsibility is generating the **memory bulletin** — a periodically refreshed, LLM-curated summary of what the agent currently knows. This bulletin is injected into every channel's system prompt, giving all conversations ambient awareness without needing to explicitly recall memories.
+The cortex's primary responsibility is maintaining two layers of ambient context:
 
-This is what makes Spacebot feel like it actually *knows* you. Without the bulletin, a fresh conversation would start cold — the agent would need a branch to recall memories before it could reference anything about the user, their projects, or recent decisions. With the bulletin, every conversation inherits a baseline context from the moment it starts.
+- **Knowledge synthesis** — a change-driven high-level summary of what the agent knows
+- **Working memory compression** — intra-day and daily summaries built from the append-only working-memory event log
+
+This is what makes Spacebot feel like it actually *knows* you and what it has been doing. Without these layers, a fresh conversation would start cold — the agent would need a branch to recall memories before it could reference anything about the user, their projects, or recent decisions. With them, every conversation inherits durable knowledge plus current-day situational awareness from the moment it starts.
 
 ### How It Works
 
-Bulletin generation is a two-phase process: programmatic retrieval, then LLM synthesis.
+Knowledge synthesis is a two-phase process: programmatic retrieval, then LLM synthesis.
 
-When warmup is enabled (default), warmup is the primary bulletin refresher on `warmup.refresh_secs` (default: 15 minutes). The bulletin loop still runs on `bulletin_interval_secs` (default: 60 minutes) as a fallback when warmup is disabled or when the cached bulletin is stale (`bulletin_age_secs >= max(1, warmup.refresh_secs)`).
+When warmup is enabled (default), warmup primes the synthesis cache and embedding readiness. After that, synthesis regeneration is change-driven and debounced through `knowledge_synthesis_debounce_secs` instead of being purely timer-driven.
 
-Each bulletin generation pass does:
+Each synthesis pass does:
 
 1. **Retrieves** memory data across eight predefined sections by querying the memory store directly (no LLM needed for retrieval):
    - Identity & Core Facts — typed search for Identity memories, sorted by importance
@@ -31,16 +34,16 @@ Each bulletin generation pass does:
    - Recent Events — typed search for Event memories, sorted by recency
    - Observations — typed search for Observation memories
 2. **Synthesizes** the raw sections into a cohesive briefing via a single LLM call. The LLM receives the pre-gathered data and produces a concise summary (~500 words, configurable). No tool calls, no multi-turn — just one synthesis pass.
-3. The bulletin is cached in `RuntimeConfig::memory_bulletin` via `ArcSwap`
+3. The result is cached in `RuntimeConfig::knowledge_synthesis` (and mirrored into `memory_bulletin` for backward compatibility)
 4. Every channel reads it on every turn — lock-free, zero-copy via `Arc`
 
 This design avoids the problem of an LLM formulating search queries without conversation context. The retrieval phase uses `SearchMode::Typed`, `SearchMode::Recent`, and `SearchMode::Important` — metadata-based modes that query SQLite directly without needing vector embeddings or search terms. The LLM only gets involved for the part it's good at: turning structured data into readable prose.
 
-On startup, Spacebot runs a best-effort warmup pass before adapters accept traffic (bounded wait), so the first bulletin is usually already present when the first user message arrives. If generation fails, the previous bulletin is preserved. If the memory graph is empty, an empty bulletin is stored without invoking the LLM.
+On startup, Spacebot runs a best-effort warmup pass before adapters accept traffic (bounded wait), so the first synthesis is usually already present when the first user message arrives. If generation fails, the previous synthesis is preserved. If the memory graph is empty, an empty synthesis is stored without invoking the LLM.
 
 ### What Channels See
 
-The bulletin is injected into the system prompt between identity context and the channel prompt:
+The cortex now feeds channels through layered context:
 
 ```
 ## Soul
@@ -52,15 +55,22 @@ The bulletin is injected into the system prompt between identity context and the
 ## Role
 [from ROLE.md]
 
-## Memory Context                    ← this is the bulletin
-[A concise briefing synthesized from eight memory dimensions:
-identity, recent, decisions, high-importance, preferences, goals,
-events, and observations. Organized by relevance and actionability.]
+## Speech Style
+[from SPEECH.md when spoken replies are generated]
+
+## Knowledge Synthesis
+[High-level summary of durable knowledge from the memory graph]
+
+## Working Memory
+[Today's event narrative + recent raw tail for this agent]
+
+## Channel Activity Map
+[What other channels are active and what they are focused on]
 
 ## [Channel prompt follows...]
 ```
 
-Not a wall of raw search results. Not every memory in the database. A curated, contextualized briefing that reads like a colleague's handoff notes.
+Not a wall of raw search results. Not every memory in the database. A curated, contextualized mix of long-lived knowledge and recent operational awareness.
 
 ### Why This Replaces MEMORY.md
 
@@ -72,21 +82,21 @@ OpenClaw (and systems like it) use a `MEMORY.md` file that the LLM manually main
 - Different conversations fight over the same file
 - It's a single flat document trying to capture a graph of relationships
 
-Spacebot's approach separates storage from presentation. Memories are structured objects in a graph database with typed metadata, associations, and importance scores. The bulletin is a *view* of that graph — a periodically refreshed snapshot curated by an LLM that can search, rank, and contextualize. The underlying graph is rich and queryable; the bulletin is the digestible summary.
+Spacebot's approach separates storage from presentation. Memories are structured objects in a graph database with typed metadata, associations, and importance scores. Working memory captures today's operational events. Knowledge synthesis is the high-level digestible summary. The underlying stores are rich and queryable; the rendered prompt context is optimized for conversation.
 
-### Bulletin vs Branch Recall
+### Ambient Context vs Branch Recall
 
 These serve different purposes:
 
-**The bulletin** provides ambient awareness. It's the same for every channel on every turn. It contains the most important, most recent, most relevant context — what any conversation would benefit from knowing. It's refreshed hourly, not per-message.
+**Knowledge synthesis + working memory** provide ambient awareness. They contain the most important, most recent, most relevant context — what any conversation would benefit from knowing before explicit recall happens.
 
 **Branch recall** provides targeted memory retrieval. When a conversation needs specific information ("what did we decide about the auth system?"), a branch is spawned to search the memory graph with a focused query. Branch recall is on-demand, per-conversation, and returns detailed results.
 
-The bulletin doesn't replace recall — it reduces how often recall is needed. A channel that already knows the user's name, their current project, and recent decisions from the bulletin doesn't need to spawn a branch for basic context.
+These layers don't replace recall — they reduce how often recall is needed. A channel that already knows the user's name, their current project, today's recent decisions, and other active workstreams doesn't need to spawn a branch for basic context.
 
 ## Current Responsibilities
 
-The bulletin is still the cortex's most visible responsibility, but it is no longer the only one.
+Knowledge synthesis is still the cortex's most visible responsibility, but it is no longer the only one.
 
 ### System Health Monitoring
 
@@ -94,7 +104,7 @@ The cortex already supervises long-running process state:
 
 - **Worker supervision** — detect hanging workers, apply timeout policies, and clean up detached worker state
 - **Branch supervision** — detect stale branches and enforce timeout/cancellation policy
-- **Circuit breakers** — recurring bulletin refresh and maintenance failures back off automatically instead of retrying forever
+- **Circuit breakers** — recurring synthesis refresh and maintenance failures back off automatically instead of retrying forever
 
 ### Memory Maintenance
 
@@ -143,13 +153,13 @@ The cortex is the only singleton in the system (per agent). There's one cortex p
 
 **Cron jobs** are user-defined scheduled tasks. "Check my inbox every 30 minutes." They run on schedules, get fresh channels with full capabilities, and produce user-facing output.
 
-**The cortex** is the system's internal loop. It maintains system health, memory coherence, and the memory bulletin. It runs continuously, doesn't produce user-facing output, and isn't user-configured beyond tuning intervals.
+**The cortex** is the system's internal loop. It maintains system health, memory coherence, knowledge synthesis, and working-memory compression. It runs continuously, doesn't produce user-facing output, and isn't user-configured beyond tuning intervals.
 
 ## Cortex vs Compactor
 
 **Compactors** are per-channel, programmatic monitors. They watch one channel's context size and trigger compaction workers. They're not LLM processes.
 
-**The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages the memory bulletin, supervises background health state, and runs periodic memory maintenance. Deeper memory coherence work still grows from here.
+**The cortex** is an LLM-assisted process that sees across all channels. It doesn't manage context size (that's the compactor's job). It manages knowledge synthesis, supervises background health state, compresses working memory over time, and runs periodic memory maintenance. Deeper memory coherence work still grows from here.
 
 ## Interactive Cortex Chat
 
@@ -169,11 +179,11 @@ This makes cortex chat a practical control-room interface for troubleshooting, v
 # Base tick interval for health monitoring and maintenance scheduling.
 tick_interval_secs = 30
 
-# How often to regenerate the memory bulletin.
-bulletin_interval_secs = 3600
+# Target word count for knowledge synthesis.
+knowledge_synthesis_max_words = 500
 
-# Target word count for the memory bulletin.
-bulletin_max_words = 500
+# Debounce after memory changes before regenerating synthesis.
+knowledge_synthesis_debounce_secs = 60
 
 # Worker is considered hanging if no activity for this long.
 worker_timeout_secs = 600
@@ -262,7 +272,7 @@ Branch, worker, and cron dispatch paths consult a derived `ready_for_work` signa
 
 - warmup state is `warm`
 - embedding model is ready
-- bulletin age is fresh (`<= max(60s, refresh_secs * 2)`)
+- knowledge synthesis is available and fresh enough for degraded-safe dispatch
 
 If dispatch arrives while not ready, Spacebot does **not** block the channel or scheduler:
 
@@ -277,11 +287,11 @@ Metrics:
 
 ## Failure Modes
 
-**What if the cortex bulletin fails?**
-The previous bulletin is preserved. Channels keep operating with the last successfully generated bulletin. If the cortex has never generated a bulletin (fresh install, empty memory graph), channels run without a memory context section — the system works fine, just without ambient awareness.
+**What if cortex synthesis fails?**
+The previous synthesis is preserved. Channels keep operating with the last successfully generated context. If the cortex has never generated synthesis (fresh install, empty memory graph), channels still run — they just rely more heavily on direct recall and raw working-memory rendering.
 
 **What if the cortex crashes?**
-The system keeps running. Channels still talk to users, branches still think, workers still execute. The bulletin goes stale but remains in `RuntimeConfig`. On restart, a new bulletin is generated immediately.
+The system keeps running. Channels still talk to users, branches still think, workers still execute. The last synthesis goes stale but remains in `RuntimeConfig`. On restart, a new synthesis is generated immediately.
 
 **What if the memory graph is empty?**
-The cortex generates a bulletin that says so (or an empty one). This is the normal state for a new agent. As memories accumulate through conversation, ingestion, or compaction, subsequent bulletin runs will have material to work with.
+The cortex generates an empty or minimal synthesis. This is the normal state for a new agent. As memories accumulate through conversation, ingestion, persistence, and working-memory events, subsequent synthesis runs will have material to work with.
