@@ -458,7 +458,7 @@ impl SpacebotModel {
 
         let response = anthropic_request
             .builder
-            .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
+            .timeout(std::time::Duration::from_secs(30 * 60))
             .send()
             .await
             .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
