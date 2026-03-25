@@ -1,8 +1,8 @@
-import {useCallback, useEffect, useRef, useState} from "react";
+import {memo, useCallback, useEffect, useRef, useState} from "react";
 import {useCortexChat, type ToolActivity} from "@/hooks/useCortexChat";
 import {Markdown} from "@/components/Markdown";
 import {ToolCall, type ToolCallPair} from "@/components/ToolCall";
-import {api, type CortexChatToolCall, type CortexChatThread} from "@/api/client";
+import {api, type CortexChatMessage, type CortexChatToolCall, type CortexChatThread} from "@/api/client";
 import {Button} from "@/ui";
 import {Popover, PopoverContent, PopoverTrigger} from "@/ui/Popover";
 import {PlusSignIcon, Cancel01Icon, Clock01Icon, Delete02Icon} from "@hugeicons/core-free-icons";
@@ -164,44 +164,51 @@ function ThinkingIndicator() {
 	);
 }
 
-function CortexChatInput({
-	value,
-	onChange,
+const CortexChatInput = memo(function CortexChatInput({
 	onSubmit,
 	isStreaming,
 }: {
-	value: string;
-	onChange: (value: string) => void;
-	onSubmit: () => void;
+	onSubmit: (text: string) => void;
 	isStreaming: boolean;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const [hasText, setHasText] = useState(false);
 
 	useEffect(() => {
 		textareaRef.current?.focus();
 	}, []);
 
-	useEffect(() => {
+	const adjustHeight = () => {
 		const textarea = textareaRef.current;
 		if (!textarea) return;
+		textarea.style.height = "auto";
+		const scrollHeight = textarea.scrollHeight;
+		const maxHeight = 160;
+		textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+		textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
+	};
 
-		const adjustHeight = () => {
-			textarea.style.height = "auto";
-			const scrollHeight = textarea.scrollHeight;
-			const maxHeight = 160;
-			textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
-			textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
-		};
-
+	const doSubmit = () => {
+		const textarea = textareaRef.current;
+		if (!textarea) return;
+		const trimmed = textarea.value.trim();
+		if (!trimmed) return;
+		textarea.value = "";
+		setHasText(false);
 		adjustHeight();
-		textarea.addEventListener("input", adjustHeight);
-		return () => textarea.removeEventListener("input", adjustHeight);
-	}, [value]);
+		onSubmit(trimmed);
+	};
+
+	const handleInput = () => {
+		const value = textareaRef.current?.value ?? "";
+		setHasText(value.trim().length > 0);
+		adjustHeight();
+	};
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
-			onSubmit();
+			doSubmit();
 		}
 	};
 
@@ -210,8 +217,7 @@ function CortexChatInput({
 			<div className="flex items-end gap-2 p-2.5">
 				<textarea
 					ref={textareaRef}
-					value={value}
-					onChange={(event) => onChange(event.target.value)}
+					onInput={handleInput}
 					onKeyDown={handleKeyDown}
 					placeholder={
 						isStreaming ? "Waiting for response..." : "Message the cortex..."
@@ -223,8 +229,8 @@ function CortexChatInput({
 				/>
 				<button
 					type="button"
-					onClick={onSubmit}
-					disabled={isStreaming || !value.trim()}
+					onClick={doSubmit}
+					disabled={isStreaming || !hasText}
 					className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
 				>
 					<svg
@@ -243,7 +249,7 @@ function CortexChatInput({
 			</div>
 		</div>
 	);
-}
+});
 
 function formatRelativeTime(dateStr: string): string {
 	const date = new Date(dateStr);
@@ -354,6 +360,43 @@ function ThreadList({
 	);
 }
 
+const CortexMessageList = memo(function CortexMessageList({
+	messages,
+}: {
+	messages: CortexChatMessage[];
+}) {
+	return (
+		<>
+			{messages.map((message) => (
+				<div key={message.id}>
+					{message.role === "user" ? (
+						<div className="flex justify-end">
+							<div className="max-w-[85%] rounded-2xl rounded-br-md bg-app-hover/30 px-3 py-2">
+								<p className="text-sm text-ink">{message.content}</p>
+							</div>
+						</div>
+					) : (
+						<div className="flex flex-col gap-2">
+							{message.tool_calls && message.tool_calls.length > 0 && (
+								<div className="flex flex-col gap-1.5">
+									{message.tool_calls.map((call) => (
+										<ToolCall key={call.id} pair={toToolCallPair(call)} />
+									))}
+								</div>
+							)}
+							{message.content && (
+								<div className="text-sm text-ink-dull">
+									<Markdown>{message.content}</Markdown>
+								</div>
+							)}
+						</div>
+					)}
+				</div>
+			))}
+		</>
+	);
+});
+
 export function CortexChatPanel({
 	agentId,
 	channelId,
@@ -371,7 +414,6 @@ export function CortexChatPanel({
 		newThread,
 		loadThread,
 	} = useCortexChat(agentId, channelId, {freshThread: !!initialPrompt});
-	const [input, setInput] = useState("");
 	const [threadListOpen, setThreadListOpen] = useState(false);
 	const messagesEndRef = useRef<HTMLDivElement>(null);
 	const initialPromptSentRef = useRef(false);
@@ -394,12 +436,13 @@ export function CortexChatPanel({
 		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
 	}, [messages.length, isStreaming, toolActivity.length]);
 
-	const handleSubmit = () => {
-		const trimmed = input.trim();
-		if (!trimmed || isStreaming) return;
-		setInput("");
-		sendMessage(trimmed);
-	};
+	const handleSubmit = useCallback(
+		(text: string) => {
+			if (isStreaming) return;
+			sendMessage(text);
+		},
+		[isStreaming, sendMessage],
+	);
 
 	const handleStarterPrompt = (prompt: string) => {
 		if (isStreaming || !threadId) return;
@@ -478,32 +521,7 @@ export function CortexChatPanel({
 			{/* Messages */}
 			<div className="min-h-0 flex-1 overflow-y-auto">
 				<div className="flex flex-col gap-5 p-3 pb-4">
-				{messages.map((message) => (
-					<div key={message.id}>
-						{message.role === "user" ? (
-							<div className="flex justify-end">
-								<div className="max-w-[85%] rounded-2xl rounded-br-md bg-app-hover/30 px-3 py-2">
-									<p className="text-sm text-ink">{message.content}</p>
-								</div>
-							</div>
-						) : (
-							<div className="flex flex-col gap-2">
-								{message.tool_calls && message.tool_calls.length > 0 && (
-									<div className="flex flex-col gap-1.5">
-										{message.tool_calls.map((call) => (
-											<ToolCall key={call.id} pair={toToolCallPair(call)} />
-										))}
-									</div>
-								)}
-								{message.content && (
-									<div className="text-sm text-ink-dull">
-										<Markdown>{message.content}</Markdown>
-									</div>
-								)}
-							</div>
-						)}
-					</div>
-				))}
+					<CortexMessageList messages={messages} />
 
 					{/* Streaming state */}
 					{isStreaming && (
@@ -537,8 +555,6 @@ export function CortexChatPanel({
 			{/* Input */}
 			<div className="border-t border-app-line/50 p-3">
 				<CortexChatInput
-					value={input}
-					onChange={setInput}
 					onSubmit={handleSubmit}
 					isStreaming={isStreaming}
 				/>
