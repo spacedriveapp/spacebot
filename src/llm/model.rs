@@ -16,6 +16,7 @@ use rig::one_or_many::OneOrMany;
 use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 const STREAM_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
@@ -644,7 +645,10 @@ impl SpacebotModel {
 
         while let Some(chunk_result) = byte_stream.next().await {
             let chunk = chunk_result.map_err(|e| {
-                CompletionError::ProviderError(format!("Anthropic stream read failed: {e:#}"))
+                CompletionError::ProviderError(format!(
+                    "Anthropic stream read failed: {e:#} (source: {:?})",
+                    StdError::source(&e).map(|s| format!("{s:#}"))
+                ))
             })?;
 
             if !first_chunk_logged {
