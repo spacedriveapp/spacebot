@@ -269,13 +269,12 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
         providers.push("anthropic");
     }
     // Anthropic OAuth stores credentials as a separate JSON file
-    if !providers.contains(&"anthropic") {
-        if config_path
+    if !providers.contains(&"anthropic")
+        && config_path
             .parent()
             .is_some_and(|instance_dir| crate::auth::credentials_path(instance_dir).exists())
-        {
-            providers.push("anthropic");
-        }
+    {
+        providers.push("anthropic");
     }
     if has_key("openai_key", "OPENAI_API_KEY") {
         providers.push("openai");
