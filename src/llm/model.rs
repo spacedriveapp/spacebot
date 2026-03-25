@@ -604,9 +604,35 @@ impl SpacebotModel {
             )));
         }
 
+        // Log response headers for proxy debugging
+        {
+            let headers = response.headers();
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            let ce = headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            let te = headers
+                .get("transfer-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            tracing::warn!(
+                content_type = ct,
+                content_encoding = ce,
+                transfer_encoding = te,
+                "Anthropic SSE response headers"
+            );
+        }
+
         // Collect SSE chunks into a single response
         use futures::StreamExt;
         let mut byte_stream = response.bytes_stream();
+
+        // Log first chunk raw bytes for proxy debugging
+        let mut first_chunk_logged = false;
         let mut block_buffer = String::new();
         let mut input_tokens: u64 = 0;
         let mut output_tokens: u64 = 0;
@@ -620,6 +646,18 @@ impl SpacebotModel {
             let chunk = chunk_result.map_err(|e| {
                 CompletionError::ProviderError(format!("Anthropic stream read failed: {e:#}"))
             })?;
+
+            if !first_chunk_logged {
+                first_chunk_logged = true;
+                let raw_hex: String = chunk
+                    .iter()
+                    .take(128)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let raw_text = String::from_utf8_lossy(&chunk[..chunk.len().min(200)]);
+                tracing::warn!(hex = %raw_hex, text = %raw_text, len = chunk.len(), "Anthropic SSE first chunk");
+            }
 
             let chunk_text = String::from_utf8_lossy(&chunk).to_string();
             block_buffer.push_str(&chunk_text);
