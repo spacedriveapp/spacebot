@@ -645,7 +645,10 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(
+                    &request.chat_history,
+                    provider_config.api_type == ApiType::Gemini,
+                ));
 
         let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
@@ -897,7 +900,10 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(
+                    &request.chat_history,
+                    provider_config.api_type == ApiType::Gemini,
+                ));
 
         let mut body = serde_json::json!({
             "model": self.model_name,
@@ -989,7 +995,10 @@ impl SpacebotModel {
             }));
         }
 
-        messages.extend(convert_messages_to_openai(&request.chat_history));
+        messages.extend(convert_messages_to_openai(
+                    &request.chat_history,
+                    provider_config.api_type == ApiType::Gemini,
+                ));
 
         let api_model_name = self.remap_model_name_for_api();
         let mut body = serde_json::json!({
@@ -1314,8 +1323,14 @@ pub fn convert_messages_to_anthropic(messages: &OneOrMany<Message>) -> Vec<serde
         .collect()
 }
 
-fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::Value> {
+fn convert_messages_to_openai(
+    messages: &OneOrMany<Message>,
+    is_gemini: bool,
+) -> Vec<serde_json::Value> {
     let mut result = Vec::new();
+    // Gemini requires the tool name to be present in the tool result message,
+    // even though OpenAI only uses tool_call_id. We track the mapping from history.
+    let mut call_id_to_name = std::collections::HashMap::new();
 
     for message in messages.iter() {
         match message {
@@ -1343,11 +1358,19 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                                 .as_deref()
                                 .filter(|call_id| !call_id.is_empty())
                                 .unwrap_or(&tr.id);
-                            tool_results.push(serde_json::json!({
+
+                            let mut tool_msg = serde_json::json!({
                                 "role": "tool",
                                 "tool_call_id": tool_call_id,
                                 "content": tool_result_content_to_string(&tr.content),
-                            }));
+                            });
+
+                            // Gemini compatibility: sometimes requires the function name
+                            if let Some(name) = call_id_to_name.get(tool_call_id) {
+                                tool_msg["name"] = serde_json::json!(name);
+                            }
+
+                            tool_results.push(tool_msg);
                         }
                         _ => {}
                     }
@@ -1401,16 +1424,29 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                                 .as_deref()
                                 .filter(|c| !c.is_empty())
                                 .unwrap_or(&tc.id);
+
+                            // Store name for tool result mapping
+                            call_id_to_name
+                                .insert(preferred_id.to_string(), tc.function.name.clone());
+
                             let args_string = serde_json::to_string(&tc.function.arguments)
                                 .unwrap_or_else(|_| "{}".to_string());
-                            tool_calls.push(serde_json::json!({
+
+                            let mut tool_call_json = serde_json::json!({
                                 "id": preferred_id,
                                 "type": "function",
                                 "function": {
                                     "name": tc.function.name,
                                     "arguments": args_string,
                                 }
-                            }));
+                            });
+
+                            // Gemini compatibility: requires an index field in tool calls
+                            if is_gemini {
+                                tool_call_json["index"] = serde_json::json!(tool_calls.len());
+                            }
+
+                            tool_calls.push(tool_call_json);
                         }
                         _ => {}
                     }
@@ -1420,7 +1456,13 @@ fn convert_messages_to_openai(messages: &OneOrMany<Message>) -> Vec<serde_json::
                 if !text_parts.is_empty() {
                     msg["content"] = serde_json::json!(text_parts.join("\n"));
                 } else if !tool_calls.is_empty() || saw_reasoning {
-                    msg["content"] = serde_json::Value::Null;
+                    // Gemini compatibility: requires an empty string instead of null
+                    // when tool_calls or reasoning are present.
+                    if is_gemini {
+                        msg["content"] = serde_json::json!("");
+                    } else {
+                        msg["content"] = serde_json::Value::Null;
+                    }
                 }
                 if saw_reasoning {
                     msg["reasoning_content"] = serde_json::json!(reasoning_parts.join("\n"));
@@ -3227,7 +3269,7 @@ mod tests {
             .expect("non-empty assistant content"),
         });
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "assistant");
         assert!(converted[0]["content"].is_null());
@@ -3273,7 +3315,7 @@ mod tests {
             .expect("non-empty assistant content"),
         });
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         assert_eq!(converted.len(), 1);
         assert!(converted[0]["content"].is_null());
         assert_eq!(converted[0]["reasoning_content"], "");
@@ -3318,6 +3360,122 @@ mod tests {
     }
 
     #[test]
+    fn convert_messages_to_openai_gemini_compatibility() {
+        // Gemini's OpenAI-compatible shim has several strict requirements that differ from
+        // the standard OpenAI API:
+        //
+        // 1. Assistant message content must be an empty string "" instead of null when
+        //    tool_calls are present. (Ref: https://github.com/openai/openai-python/issues/1344)
+        // 2. Each tool call in the assistant message must have an 'index' field starting at 0.
+        //    (Ref: https://github.com/google-gemini/generative-ai-python/issues/450)
+        // 3. Tool results (role: "tool") must include the function 'name'. Standard OpenAI
+        //    only requires 'tool_call_id', but Gemini's shim rejects messages where the name
+        //    is missing or does not match the preceding assistant message.
+        //    (Ref: https://ai.google.dev/gemini-api/docs/openai#chat-completions)
+
+        let messages = OneOrMany::many(vec![
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::many(vec![
+                    AssistantContent::tool_call(
+                        "call_1",
+                        "get_weather",
+                        serde_json::json!({"location": "London"}),
+                    ),
+                    AssistantContent::tool_call(
+                        "call_2",
+                        "get_time",
+                        serde_json::json!({"location": "London"}),
+                    ),
+                ])
+                .unwrap(),
+            },
+            Message::User {
+                content: OneOrMany::many(vec![
+                    UserContent::ToolResult(rig::message::ToolResult {
+                        id: "call_1".to_string(),
+                        call_id: Some("call_1".to_string()),
+                        content: OneOrMany::one(rig::message::ToolResultContent::text("rainy")),
+                    }),
+                    UserContent::ToolResult(rig::message::ToolResult {
+                        id: "call_2".to_string(),
+                        call_id: Some("call_2".to_string()),
+                        content: OneOrMany::one(rig::message::ToolResultContent::text("12:00")),
+                    }),
+                ])
+                .unwrap(),
+            },
+        ])
+        .unwrap();
+
+        let converted = convert_messages_to_openai(&messages, true);
+        assert_eq!(converted.len(), 3);
+
+        // Verify Assistant message quirks
+        assert_eq!(converted[0]["role"], "assistant");
+        assert_eq!(converted[0]["content"], ""); // Required by Gemini
+        assert_eq!(converted[0]["tool_calls"].as_array().unwrap().len(), 2);
+        assert_eq!(converted[0]["tool_calls"][0]["index"], 0); // Required by Gemini
+        assert_eq!(converted[0]["tool_calls"][1]["index"], 1); // Required by Gemini
+
+        // Verify Tool result message quirks
+        // Tool results are split into multiple messages (role: "tool")
+        // convert_messages_to_openai returns a flat list of messages.
+        // For the User message above, it should have produced two "tool" messages.
+        // So the total messages in `converted` should be:
+        // 1 (assistant) + 2 (tool results) = 3 messages.
+        assert_eq!(converted.len(), 3);
+
+        assert_eq!(converted[1]["role"], "tool");
+        assert_eq!(converted[1]["tool_call_id"], "call_1");
+        assert_eq!(converted[1]["name"], "get_weather"); // Required by Gemini
+
+        assert_eq!(converted[2]["role"], "tool");
+        assert_eq!(converted[2]["tool_call_id"], "call_2");
+        assert_eq!(converted[2]["name"], "get_time"); // Required by Gemini
+    }
+
+    #[test]
+    fn convert_messages_to_openai_standard_behavior() {
+        // Standard OpenAI behavior:
+        // 1. Assistant message content is null when tool_calls are present.
+        // 2. No index field in tool calls.
+        // 3. Tool results do not include 'name'.
+
+        let messages = OneOrMany::many(vec![
+            Message::Assistant {
+                id: None,
+                content: OneOrMany::one(AssistantContent::tool_call(
+                    "call_1",
+                    "get_weather",
+                    serde_json::json!({"location": "London"}),
+                )),
+            },
+            Message::User {
+                content: OneOrMany::one(UserContent::ToolResult(rig::message::ToolResult {
+                    id: "call_1".to_string(),
+                    call_id: Some("call_1".to_string()),
+                    content: OneOrMany::one(rig::message::ToolResultContent::text("rainy")),
+                })),
+            },
+        ])
+        .unwrap();
+
+        let converted = convert_messages_to_openai(&messages, false);
+        assert_eq!(converted.len(), 2);
+
+        // Verify Standard Assistant message behavior
+        assert_eq!(converted[0]["role"], "assistant");
+        assert!(converted[0]["content"].is_null()); // Standard OpenAI behavior
+        assert_eq!(converted[0]["tool_calls"][0].get("index"), None); // No index in standard OpenAI
+
+        // Verify Standard Tool result message behavior
+        assert_eq!(converted[1]["role"], "tool");
+        assert_eq!(converted[1]["tool_call_id"], "call_1");
+        assert_eq!(converted[1].get("name"), None); // Standard OpenAI doesn't need name in response
+    }
+
+    #[test]
     fn convert_messages_to_openai_tool_result_prefers_call_id_over_id() {
         let messages = OneOrMany::one(Message::User {
             content: OneOrMany::one(UserContent::ToolResult(rig::message::ToolResult {
@@ -3327,7 +3485,7 @@ mod tests {
             })),
         });
 
-        let converted = convert_messages_to_openai(&messages);
+        let converted = convert_messages_to_openai(&messages, false);
         assert_eq!(converted.len(), 1);
         assert_eq!(converted[0]["role"], "tool");
         assert_eq!(converted[0]["tool_call_id"], "stable-call-id");
