@@ -92,7 +92,7 @@ pub(super) struct WorkerDetailResponse {
 /// List worker runs for an agent, with live status merged from StatusBlocks.
 #[utoipa::path(
     get,
-    path = "/workers",
+    path = "/agents/workers",
     params(
         ("agent_id" = String, Query, description = "Agent ID"),
         ("limit" = i64, Query, description = "Maximum number of results to return"),
@@ -183,7 +183,7 @@ pub(super) async fn list_workers(
 /// Get full detail for a single worker run, including decompressed transcript.
 #[utoipa::path(
     get,
-    path = "/workers/detail",
+    path = "/agents/workers/detail",
     params(
         ("agent_id" = String, Query, description = "Agent ID"),
         ("worker_id" = String, Query, description = "Worker ID"),
