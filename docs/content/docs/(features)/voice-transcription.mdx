@@ -1,0 +1,194 @@
+---
+title: Voice Transcription
+description: Speech-to-text transcription for audio attachments using Whisper-compatible APIs.
+---
+
+# Voice Transcription
+
+Spacebot converts audio attachments (Telegram voice messages, Discord audio clips, etc.) to text using Whisper-compatible speech-to-text APIs. The transcript is injected into the conversation before the channel LLM processes it.
+
+## How It Works
+
+When a user sends an audio attachment, Spacebot:
+
+1. Downloads the audio bytes from the messaging platform
+2. Resolves the STT provider and model from routing config
+3. Sends a multipart `POST` to the provider's `/v1/audio/transcriptions` endpoint
+4. Injects the transcript into the conversation as a structured XML tag
+
+The channel LLM sees the transcript, not raw audio:
+
+```xml
+<voice_transcript name="voice_message.ogg" mime="audio/ogg">
+Hello, this is what the user said in their voice message.
+</voice_transcript>
+```
+
+When translation mode is enabled, the tag changes:
+
+```xml
+<voice_translation name="voice_message.ogg" mime="audio/ogg">
+Hello, this is the English translation of what the user said.
+</voice_translation>
+```
+
+## Configuration
+
+All voice settings live under `[defaults.routing]` or per-agent `[agents.routing]`.
+
+```toml
+[defaults.routing]
+voice = "groq/whisper-large-v3-turbo"
+voice_language = "en"      # optional
+voice_translate = false    # optional
+stt_provider = "groq"      # optional
+```
+
+### Parameters
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `voice` | string | Provider-dependent | STT model in `provider/model` format. Empty string disables voice transcription. |
+| `voice_language` | string | None | ISO 639-1 language hint for accuracy (e.g. `en`, `es`, `fr`, `ja`). Ignored in translation mode. |
+| `voice_translate` | bool | `false` | When `true`, uses the translations endpoint to translate audio to English. |
+| `stt_provider` | string | None | Override which provider handles STT. When absent, provider is extracted from the `voice` model prefix. |
+
+### Provider Defaults
+
+When no explicit `voice` is set, Spacebot applies a default based on the primary provider:
+
+| Primary Provider | Default `voice` | Notes |
+|------------------|----------------|-------|
+| OpenAI | `openai/whisper-1` | Native Whisper API |
+| Groq | `groq/whisper-large-v3-turbo` | Fast and cheap |
+| Gemini | `gemini/gemini-2.5-flash` | OpenAI-compatible endpoint |
+| OpenRouter | *(empty)* | No native STT — configure `stt_provider` separately |
+| Anthropic | *(empty)* | No STT — configure `stt_provider` separately |
+| All others | *(empty)* | Must configure `voice` explicitly |
+
+### Environment Variables
+
+| Variable | Description | Example |
+|----------|-------------|---------|
+| `SPACEBOT_VOICE_MODEL` | STT model | `groq/whisper-large-v3-turbo` |
+| `SPACEBOT_VOICE_LANGUAGE` | Language hint | `en` |
+| `SPACEBOT_VOICE_TRANSLATE` | Translation mode | `true` |
+| `SPACEBOT_STT_PROVIDER` | Provider override | `groq` |
+
+Resolution order: **environment variable > config file > provider default**.
+
+## Supported Providers
+
+Voice transcription requires a provider that supports the OpenAI-compatible Whisper API (`/v1/audio/transcriptions` with multipart form data).
+
+| Provider | Models | Transcription Endpoint | Translation Endpoint |
+|----------|--------|----------------------|---------------------|
+| **OpenAI** | `whisper-1`, `gpt-4o-transcribe`, `gpt-4o-mini-transcribe` | `/v1/audio/transcriptions` | `/v1/audio/translations` |
+| **Groq** | `whisper-large-v3`, `whisper-large-v3-turbo` | `/openai/v1/audio/transcriptions` | `/openai/v1/audio/translations` |
+| **Gemini** | `gemini-2.5-flash` (and other Gemini models) | `/v1/audio/transcriptions` | Not supported |
+
+Providers that do **not** have a transcription endpoint (Anthropic, OpenRouter, DeepSeek, Together, xAI, Mistral, etc.) cannot be used directly for voice. Configure a separate STT provider instead.
+
+### Supported Audio Formats
+
+The Whisper API accepts: `flac`, `m4a`, `mp3`, `mp4`, `mpeg`, `mpga`, `oga`, `ogg`, `wav`, `webm`.
+
+Telegram voice messages (OGG/Opus) are natively supported with no conversion needed.
+
+## Examples
+
+### Groq for chat and transcription
+
+```toml
+[llm]
+groq_key = "gsk_xxx"
+
+[defaults.routing]
+channel = "groq/llama-3.3-70b-versatile"
+voice = "groq/whisper-large-v3-turbo"
+```
+
+### OpenRouter for chat, Groq for transcription
+
+```toml
+[llm]
+openrouter_key = "sk-or-xxx"
+groq_key = "gsk_xxx"
+
+[defaults.routing]
+channel = "openrouter/anthropic/claude-sonnet-4"
+voice = "groq/whisper-large-v3-turbo"
+voice_language = "en"
+```
+
+### Anthropic for chat, OpenAI for transcription with translation
+
+```toml
+[llm]
+anthropic_key = "sk-ant-xxx"
+openai_key = "sk-xxx"
+
+[defaults.routing]
+channel = "anthropic/claude-sonnet-4"
+voice = "openai/whisper-1"
+voice_translate = true
+stt_provider = "openai"
+```
+
+### Multilingual transcription with language hint
+
+```toml
+[llm]
+openai_key = "sk-xxx"
+
+[defaults.routing]
+channel = "openai/gpt-4.1"
+voice = "openai/whisper-1"
+voice_language = "ja"
+```
+
+### Gemini for everything
+
+```toml
+[llm]
+gemini_key = "xxx"
+
+[defaults.routing]
+channel = "gemini/gemini-2.5-pro"
+voice = "gemini/gemini-2.5-flash"
+```
+
+## Error Handling
+
+Errors are returned as inline text in the conversation so the channel LLM can inform the user:
+
+| Condition | Message |
+|-----------|---------|
+| No voice model configured | `[Audio attachment received but no voice model is configured...]` |
+| STT provider not found | `[Audio transcription failed: provider 'xxx' is not configured]` |
+| Provider doesn't support Whisper | `[Audio transcription not supported by provider 'xxx'...]` |
+| API error | `[Audio transcription failed for filename.ogg: Whisper API error (400): ...]` |
+| Download failure | `[Failed to download audio: filename.ogg]` |
+
+There is no fallback to alternative transcription methods. If transcription fails, the error is returned directly.
+
+## API
+
+### Runtime Configuration
+
+Voice settings are included in the agent config API:
+
+```
+GET  /api/config?agent_id=main
+PATCH /api/config  { "agent_id": "main", "routing": { "voice": "...", ... } }
+```
+
+### Model Discovery
+
+Filter models to transcription-capable providers:
+
+```
+GET /api/models?capability=voice_transcription
+```
+
+Returns models from providers that support the Whisper-compatible transcription endpoint (currently: OpenAI, Groq, Gemini).
