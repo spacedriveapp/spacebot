@@ -17,6 +17,8 @@ pub struct AnthropicRequest {
     pub auth_path: AnthropicAuthPath,
     /// Original tool (name, description) pairs for reverse-mapping response tool calls.
     pub original_tools: Vec<(String, String)>,
+    /// The JSON body sent to the API, exposed for streaming variants to add `"stream": true`.
+    pub body: serde_json::Value,
 }
 
 /// Adaptive thinking is only available on 4.6-generation models.
@@ -42,6 +44,11 @@ fn messages_url(base_url: &str) -> String {
     } else {
         format!("{trimmed}/v1/messages")
     }
+}
+
+/// The Anthropic messages endpoint URL, exposed for streaming request construction.
+pub fn anthropic_messages_url(base_url: &str) -> String {
+    messages_url(base_url)
 }
 
 /// Build a fully configured Anthropic API request from a CompletionRequest.
@@ -109,6 +116,7 @@ pub fn build_anthropic_request(
         builder,
         auth_path,
         original_tools,
+        body,
     }
 }
 
