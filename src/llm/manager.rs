@@ -50,7 +50,10 @@ impl LlmManager {
     /// Create a new LLM manager with the given configuration.
     pub async fn new(config: LlmConfig) -> Result<Self> {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .with_context(|| "failed to build HTTP client")?;
 
@@ -94,7 +97,10 @@ impl LlmManager {
     /// Initialize with an instance directory (for use at construction time).
     pub async fn with_instance_dir(config: LlmConfig, instance_dir: PathBuf) -> Result<Self> {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(std::time::Duration::from_secs(300))
+            .connect_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
             .build()
             .with_context(|| "failed to build HTTP client")?;
 
