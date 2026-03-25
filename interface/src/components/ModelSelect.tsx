@@ -173,6 +173,9 @@ export function ModelSelect({
     [onChange],
   );
 
+  // Track whether blur should skip committing (e.g. after Escape)
+  const suppressBlurCommitRef = useRef(false);
+
   const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
     setFilter(val);
@@ -186,8 +189,21 @@ export function ModelSelect({
     setHighlightIndex(-1);
   };
 
+  const handleBlur = () => {
+    if (suppressBlurCommitRef.current) {
+      suppressBlurCommitRef.current = false;
+      return;
+    }
+    // Commit typed custom model ID when input loses focus (e.g. clicking Save/Test)
+    const trimmed = filter.trim();
+    if (trimmed && trimmed !== value) {
+      onChange(trimmed);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === "Escape") {
+      suppressBlurCommitRef.current = true;
       setOpen(false);
       setFilter("");
       setHighlightIndex(-1);
@@ -235,6 +251,7 @@ export function ModelSelect({
           value={open ? filter : value}
           onChange={handleInputChange}
           onFocus={handleFocus}
+          onBlur={handleBlur}
           onKeyDown={handleKeyDown}
           placeholder="Search models..."
           className="border-app-line/50 bg-app-darkBox/30"
