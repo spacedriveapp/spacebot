@@ -148,7 +148,6 @@ fn as_openai_chatgpt_model(model: &ModelInfo) -> Option<ModelInfo> {
     })
 }
 
-
 /// Fetch the full model catalog from models.dev and transform into ModelInfo entries.
 async fn fetch_models_dev() -> anyhow::Result<Vec<ModelInfo>> {
     let client = reqwest::Client::new();
@@ -317,9 +316,7 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("gemini_key", "GEMINI_API_KEY") {
         providers.push("gemini");
     }
-    if has_key("ollama_base_url", "OLLAMA_BASE_URL")
-        || has_key("ollama_key", "OLLAMA_API_KEY")
-    {
+    if has_key("ollama_base_url", "OLLAMA_BASE_URL") || has_key("ollama_key", "OLLAMA_API_KEY") {
         providers.push("ollama");
     }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
