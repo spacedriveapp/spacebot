@@ -392,6 +392,7 @@ pub fn defaults_for_provider(provider: &str) -> RoutingConfig {
                 ..RoutingConfig::default()
             }
         }
+        "ollama" => RoutingConfig::for_model("ollama/llama3".into()),
         "nvidia" => RoutingConfig::for_model("nvidia/meta/llama-3.1-405b-instruct".into()),
         "minimax" => RoutingConfig::for_model("minimax/MiniMax-M2.5".into()),
         "minimax-cn" => RoutingConfig::for_model("minimax-cn/MiniMax-M2.5".into()),
@@ -434,6 +435,7 @@ pub fn provider_to_prefix(provider: &str) -> &str {
         "xai" => "xai/",
         "mistral" => "mistral/",
         "gemini" => "gemini/",
+        "ollama" => "ollama/",
         "nvidia" => "nvidia/",
         "opencode-zen" => "opencode-zen/",
         "opencode-go" => "opencode-go/",
