@@ -1,7 +1,8 @@
-import {useEffect, useRef, useState} from "react";
+import {memo, useCallback, useEffect, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
 import {useWebChat} from "@/hooks/useWebChat";
 import {isOpenCodeWorker, type ActiveWorker} from "@/hooks/useChannelLiveState";
+import type {TimelineItem} from "@/api/client";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
 
@@ -88,46 +89,53 @@ function ThinkingIndicator() {
 	);
 }
 
-function FloatingChatInput({
-	value,
-	onChange,
+const FloatingChatInput = memo(function FloatingChatInput({
 	onSubmit,
 	disabled,
 	agentId,
 }: {
-	value: string;
-	onChange: (value: string) => void;
-	onSubmit: () => void;
+	onSubmit: (text: string) => void;
 	disabled: boolean;
 	agentId: string;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const [hasText, setHasText] = useState(false);
 
 	useEffect(() => {
 		textareaRef.current?.focus({preventScroll: true});
 	}, []);
 
-	useEffect(() => {
+	const adjustHeight = () => {
 		const textarea = textareaRef.current;
 		if (!textarea) return;
+		textarea.style.height = "auto";
+		const scrollHeight = textarea.scrollHeight;
+		const maxHeight = 200;
+		textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
+		textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
+	};
 
-		const adjustHeight = () => {
-			textarea.style.height = "auto";
-			const scrollHeight = textarea.scrollHeight;
-			const maxHeight = 200;
-			textarea.style.height = `${Math.min(scrollHeight, maxHeight)}px`;
-			textarea.style.overflowY = scrollHeight > maxHeight ? "auto" : "hidden";
-		};
-
+	const doSubmit = () => {
+		const textarea = textareaRef.current;
+		if (!textarea) return;
+		const trimmed = textarea.value.trim();
+		if (!trimmed) return;
+		textarea.value = "";
+		setHasText(false);
 		adjustHeight();
-		textarea.addEventListener("input", adjustHeight);
-		return () => textarea.removeEventListener("input", adjustHeight);
-	}, [value]);
+		onSubmit(trimmed);
+	};
+
+	const handleInput = () => {
+		const value = textareaRef.current?.value ?? "";
+		setHasText(value.trim().length > 0);
+		adjustHeight();
+	};
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (event.key === "Enter" && !event.shiftKey) {
 			event.preventDefault();
-			onSubmit();
+			doSubmit();
 		}
 	};
 
@@ -138,8 +146,7 @@ function FloatingChatInput({
 					<div className="flex items-end gap-2 p-3">
 						<textarea
 							ref={textareaRef}
-							value={value}
-							onChange={(event) => onChange(event.target.value)}
+							onInput={handleInput}
 							onKeyDown={handleKeyDown}
 							placeholder={
 								disabled ? "Waiting for response..." : `Message ${agentId}...`
@@ -151,8 +158,8 @@ function FloatingChatInput({
 						/>
 						<button
 							type="button"
-							onClick={onSubmit}
-							disabled={disabled || !value.trim()}
+							onClick={doSubmit}
+							disabled={disabled || !hasText}
 							className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
 						>
 							<svg
@@ -173,12 +180,55 @@ function FloatingChatInput({
 			</div>
 		</div>
 	);
-}
+});
+
+const MessageList = memo(function MessageList({
+	timeline,
+	isTyping,
+	error,
+}: {
+	timeline: TimelineItem[];
+	isTyping: boolean;
+	error: string | null;
+}) {
+	return (
+		<>
+			{timeline.map((item) => {
+				if (item.type !== "message") return null;
+				return (
+					<div key={item.id}>
+						{item.role === "user" ? (
+							<div className="flex justify-end">
+								<div className="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-br-md bg-app-hover/30 px-4 py-2.5">
+									<p className="text-sm text-ink break-all whitespace-pre-wrap">
+										{item.content}
+									</p>
+								</div>
+							</div>
+						) : (
+							<div className="text-sm text-ink-dull">
+								<Markdown>{item.content}</Markdown>
+							</div>
+						)}
+					</div>
+				);
+			})}
+
+			{/* Typing indicator */}
+			{isTyping && <ThinkingIndicator />}
+
+			{error && (
+				<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+					{error}
+				</div>
+			)}
+		</>
+	);
+});
 
 export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
 	const {liveStates} = useLiveContext();
-	const [input, setInput] = useState("");
 	const scrollRef = useRef<HTMLDivElement>(null);
 
 	const liveState = liveStates[sessionId];
@@ -198,12 +248,12 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 		}
 	}, [timeline.length, isTyping, activeWorkers.length]);
 
-	const handleSubmit = () => {
-		const trimmed = input.trim();
-		if (!trimmed || isSending) return;
-		setInput("");
-		sendMessage(trimmed);
-	};
+	const handleSubmit = useCallback(
+		(text: string) => {
+			sendMessage(text);
+		},
+		[sendMessage],
+	);
 
 	return (
 		<div className="relative flex h-full w-full flex-col">
@@ -224,42 +274,16 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 						</div>
 					)}
 
-					{timeline.map((item) => {
-						if (item.type !== "message") return null;
-						return (
-							<div key={item.id}>
-								{item.role === "user" ? (
-									<div className="flex justify-end">
-										<div className="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-br-md bg-app-hover/30 px-4 py-2.5">
-											<p className="text-sm text-ink break-all whitespace-pre-wrap">
-												{item.content}
-											</p>
-										</div>
-									</div>
-								) : (
-									<div className="text-sm text-ink-dull">
-										<Markdown>{item.content}</Markdown>
-									</div>
-								)}
-							</div>
-						);
-					})}
-
-					{/* Typing indicator */}
-					{isTyping && <ThinkingIndicator />}
-
-					{error && (
-						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
-							{error}
-						</div>
-					)}
+					<MessageList
+						timeline={timeline}
+						isTyping={isTyping}
+						error={error}
+					/>
 				</div>
 			</div>
 
 			{/* Floating input */}
 			<FloatingChatInput
-				value={input}
-				onChange={setInput}
 				onSubmit={handleSubmit}
 				disabled={isSending || isTyping}
 				agentId={agentId}
