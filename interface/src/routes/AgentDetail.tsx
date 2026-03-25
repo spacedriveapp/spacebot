@@ -366,7 +366,7 @@ function MemoryGrowthChart({ data }: { data: { date: string; count: number }[] }
 
 	return (
 		<div className="h-48 min-h-[192px]">
-			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
+			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={1}>
 				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
 					<defs>
 						<linearGradient id="memoryGradient" x1="0" y1="0" x2="0" y2="1">
@@ -427,7 +427,7 @@ function ProcessActivityChart({ data }: { data: { date: string; branches: number
 
 	return (
 		<div className="h-48 min-h-[192px]">
-			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
+			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={1}>
 				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
 					<defs>
 						<linearGradient id="branchGradient" x1="0" y1="0" x2="0" y2="1">
@@ -553,7 +553,7 @@ function MemoryDonut({ counts }: { counts: Record<string, number> }) {
 	return (
 			<div>
 			<div className="relative h-40 min-h-[160px]">
-				<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
+				<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100} debounce={1}>
 					<PieChart>
 						<Pie
 							data={data}
