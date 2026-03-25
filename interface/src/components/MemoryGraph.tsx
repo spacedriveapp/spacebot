@@ -64,6 +64,7 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 	const [edgeCount, setEdgeCount] = useState(0);
 	const [selectedNode, setSelectedNode] = useState<NodeDetail | null>(null);
 	const [hoveredNode, setHoveredNode] = useState<string | null>(null);
+	const hoveredNodeRef = useRef<string | null>(null);
 	const [expandingNode, setExpandingNode] = useState<string | null>(null);
 	// Track loaded node IDs so we can exclude them when fetching neighbors
 	const loadedNodeIds = useRef<Set<string>>(new Set());
@@ -156,11 +157,17 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 					},
 					nodeReducer: (node, data) => {
 						const res = { ...data };
-						if (hoveredNode && hoveredNode !== node) {
-							const graph = graphRef.current;
-							if (graph && !graph.hasEdge(hoveredNode, node) && !graph.hasEdge(node, hoveredNode)) {
-								res.color = FADED_NODE_COLOR;
-								res.label = "";
+						const hovered = hoveredNodeRef.current;
+						if (hovered) {
+							if (hovered === node) {
+								res.highlighted = true;
+								res.zIndex = 1;
+							} else {
+								const g = graphRef.current;
+								if (g && !g.hasEdge(hovered, node) && !g.hasEdge(node, hovered)) {
+									res.color = FADED_NODE_COLOR;
+									res.label = "";
+								}
 							}
 						}
 						return res;
@@ -271,8 +278,9 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 		};
 	}, [isLoading]);
 
-	// Re-render sigma when hoveredNode changes (for fade effect)
+	// Sync ref and re-render sigma when hoveredNode changes (for fade effect)
 	useEffect(() => {
+		hoveredNodeRef.current = hoveredNode;
 		sigmaRef.current?.refresh();
 	}, [hoveredNode]);
 
@@ -495,7 +503,7 @@ export function MemoryGraph({ agentId, sort, typeFilter }: MemoryGraphProps) {
 			{/* Sigma container */}
 			<div
 				ref={containerRef}
-				className="h-full w-full"
+				className="absolute inset-0 z-0"
 				style={{ background: "transparent" }}
 			/>
 
