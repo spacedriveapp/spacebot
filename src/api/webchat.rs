@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct WebChatSendRequest {
     agent_id: String,
     session_id: String,
@@ -21,13 +21,24 @@ fn default_sender_name() -> String {
     "user".into()
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WebChatSendResponse {
     ok: bool,
 }
 
 /// Fire-and-forget message injection. The response arrives via the global SSE
 /// event bus (`/api/events`), same as every other channel.
+#[utoipa::path(
+    post,
+    path = "/webchat/send",
+    request_body = WebChatSendRequest,
+    responses(
+        (status = 200, body = WebChatSendResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 503, description = "Messaging manager not available"),
+    ),
+    tag = "webchat",
+)]
 pub(super) async fn webchat_send(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<WebChatSendRequest>,
@@ -68,7 +79,7 @@ pub(super) async fn webchat_send(
     Ok(Json(WebChatSendResponse { ok: true }))
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct WebChatHistoryQuery {
     agent_id: String,
     session_id: String,
@@ -80,13 +91,28 @@ fn default_limit() -> i64 {
     100
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WebChatHistoryMessage {
     id: String,
     role: String,
     content: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/webchat/history",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("session_id" = String, Query, description = "Session ID"),
+        ("limit" = i64, Query, description = "Maximum number of messages to return (default: 100, max: 200)"),
+    ),
+    responses(
+        (status = 200, body = Vec<WebChatHistoryMessage>),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "webchat",
+)]
 pub(super) async fn webchat_history(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<WebChatHistoryQuery>,

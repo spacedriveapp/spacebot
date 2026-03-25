@@ -37,7 +37,7 @@ enum DeviceOAuthSessionStatus {
     Failed(String),
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProviderStatus {
     anthropic: bool,
     openai: bool,
@@ -60,35 +60,36 @@ pub(super) struct ProviderStatus {
     minimax_cn: bool,
     moonshot: bool,
     zai_coding_plan: bool,
+    github_copilot: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProvidersResponse {
     providers: ProviderStatus,
     has_any: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct ProviderUpdateRequest {
     provider: String,
     api_key: String,
     model: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProviderUpdateResponse {
     success: bool,
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct ProviderModelTestRequest {
     provider: String,
     api_key: String,
     model: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProviderModelTestResponse {
     success: bool,
     message: String,
@@ -97,12 +98,12 @@ pub(super) struct ProviderModelTestResponse {
     sample: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct OpenAiOAuthBrowserStartRequest {
     model: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OpenAiOAuthBrowserStartResponse {
     success: bool,
     message: String,
@@ -111,12 +112,12 @@ pub(super) struct OpenAiOAuthBrowserStartResponse {
     state: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct OpenAiOAuthBrowserStatusRequest {
     state: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OpenAiOAuthBrowserStatusResponse {
     found: bool,
     done: bool,
@@ -146,6 +147,7 @@ fn provider_toml_key(provider: &str) -> Option<&'static str> {
         "minimax-cn" => Some("minimax_cn_key"),
         "moonshot" => Some("moonshot_key"),
         "zai-coding-plan" => Some("zai_coding_plan_key"),
+        "github-copilot" => Some("github_copilot_key"),
         _ => None,
     }
 }
@@ -214,6 +216,7 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
         minimax_cn_key: (provider == "minimax-cn").then(|| credential.to_string()),
         moonshot_key: (provider == "moonshot").then(|| credential.to_string()),
         zai_coding_plan_key: (provider == "zai-coding-plan").then(|| credential.to_string()),
+        github_copilot_key: (provider == "github-copilot").then(|| credential.to_string()),
         providers,
     }
 }
@@ -340,12 +343,27 @@ async fn finalize_openai_oauth(
     Ok(())
 }
 
+#[utoipa::path(
+    get,
+    path = "/providers",
+    responses(
+        (status = 200, body = ProvidersResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn get_providers(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ProvidersResponse>, StatusCode> {
     let config_path = state.config_path.read().await.clone();
     let instance_dir = (**state.instance_dir.load()).clone();
+    let secrets_store = state.secrets_store.load();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
+    let env_set = |name: &str| {
+        std::env::var(name)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+    };
 
     let (
         anthropic,
@@ -369,6 +387,7 @@ pub(super) async fn get_providers(
         minimax_cn,
         moonshot,
         zai_coding_plan,
+        github_copilot,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -377,17 +396,39 @@ pub(super) async fn get_providers(
             .parse()
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+        let resolve_value = |value: &str| -> Option<String> {
+            if let Some(alias) = value.strip_prefix("secret:") {
+                let store = secrets_store.as_ref().as_ref()?;
+                return match store.get(alias) {
+                    Ok(secret) => Some(secret.expose().to_string()),
+                    Err(error) => {
+                        tracing::warn!(%error, alias, "failed to resolve secret reference");
+                        None
+                    }
+                };
+            }
+
+            if let Some(var_name) = value.strip_prefix("env:") {
+                return std::env::var(var_name)
+                    .ok()
+                    .filter(|resolved| !resolved.trim().is_empty());
+            }
+
+            if value.trim().is_empty() {
+                None
+            } else {
+                Some(value.to_string())
+            }
+        };
+
         let has_value = |key: &str, env_var: &str| -> bool {
             if let Some(llm) = doc.get("llm")
                 && let Some(val) = llm.get(key)
                 && let Some(s) = val.as_str()
             {
-                if let Some(var_name) = s.strip_prefix("env:") {
-                    return std::env::var(var_name).is_ok();
-                }
-                return !s.is_empty();
+                return resolve_value(s).is_some();
             }
-            std::env::var(env_var).is_ok()
+            env_set(env_var)
         };
 
         (
@@ -413,30 +454,32 @@ pub(super) async fn get_providers(
             has_value("minimax_cn_key", "MINIMAX_CN_API_KEY"),
             has_value("moonshot_key", "MOONSHOT_API_KEY"),
             has_value("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY"),
+            has_value("github_copilot_key", "GITHUB_COPILOT_API_KEY"),
         )
     } else {
         (
-            std::env::var("ANTHROPIC_API_KEY").is_ok(),
-            std::env::var("OPENAI_API_KEY").is_ok(),
+            env_set("ANTHROPIC_API_KEY"),
+            env_set("OPENAI_API_KEY"),
             openai_oauth_configured,
-            std::env::var("OPENROUTER_API_KEY").is_ok(),
-            std::env::var("KILO_API_KEY").is_ok(),
-            std::env::var("ZHIPU_API_KEY").is_ok(),
-            std::env::var("GROQ_API_KEY").is_ok(),
-            std::env::var("TOGETHER_API_KEY").is_ok(),
-            std::env::var("FIREWORKS_API_KEY").is_ok(),
-            std::env::var("DEEPSEEK_API_KEY").is_ok(),
-            std::env::var("XAI_API_KEY").is_ok(),
-            std::env::var("MISTRAL_API_KEY").is_ok(),
-            std::env::var("GEMINI_API_KEY").is_ok(),
-            std::env::var("OLLAMA_BASE_URL").is_ok() || std::env::var("OLLAMA_API_KEY").is_ok(),
-            std::env::var("OPENCODE_ZEN_API_KEY").is_ok(),
-            std::env::var("OPENCODE_GO_API_KEY").is_ok(),
-            std::env::var("NVIDIA_API_KEY").is_ok(),
-            std::env::var("MINIMAX_API_KEY").is_ok(),
-            std::env::var("MINIMAX_CN_API_KEY").is_ok(),
-            std::env::var("MOONSHOT_API_KEY").is_ok(),
-            std::env::var("ZAI_CODING_PLAN_API_KEY").is_ok(),
+            env_set("OPENROUTER_API_KEY"),
+            env_set("KILO_API_KEY"),
+            env_set("ZHIPU_API_KEY"),
+            env_set("GROQ_API_KEY"),
+            env_set("TOGETHER_API_KEY"),
+            env_set("FIREWORKS_API_KEY"),
+            env_set("DEEPSEEK_API_KEY"),
+            env_set("XAI_API_KEY"),
+            env_set("MISTRAL_API_KEY"),
+            env_set("GEMINI_API_KEY"),
+            env_set("OLLAMA_BASE_URL") || env_set("OLLAMA_API_KEY"),
+            env_set("OPENCODE_ZEN_API_KEY"),
+            env_set("OPENCODE_GO_API_KEY"),
+            env_set("NVIDIA_API_KEY"),
+            env_set("MINIMAX_API_KEY"),
+            env_set("MINIMAX_CN_API_KEY"),
+            env_set("MOONSHOT_API_KEY"),
+            env_set("ZAI_CODING_PLAN_API_KEY"),
+            env_set("GITHUB_COPILOT_API_KEY"),
         )
     };
 
@@ -462,6 +505,7 @@ pub(super) async fn get_providers(
         minimax_cn,
         moonshot,
         zai_coding_plan,
+        github_copilot,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -483,11 +527,22 @@ pub(super) async fn get_providers(
         || providers.minimax
         || providers.minimax_cn
         || providers.moonshot
-        || providers.zai_coding_plan;
+        || providers.zai_coding_plan
+        || providers.github_copilot;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/providers/openai/browser-oauth/start",
+    request_body = OpenAiOAuthBrowserStartRequest,
+    responses(
+        (status = 200, body = OpenAiOAuthBrowserStartResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn start_openai_browser_oauth(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<OpenAiOAuthBrowserStartRequest>,
@@ -673,6 +728,18 @@ async fn run_device_oauth_background(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/providers/openai/browser-oauth/status",
+    params(
+        ("state" = String, Query, description = "OAuth state parameter"),
+    ),
+    responses(
+        (status = 200, body = OpenAiOAuthBrowserStatusResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn openai_browser_oauth_status(
     Query(request): Query<OpenAiOAuthBrowserStatusRequest>,
 ) -> Result<Json<OpenAiOAuthBrowserStatusResponse>, StatusCode> {
@@ -726,6 +793,16 @@ pub(super) async fn openai_browser_oauth_status(
     Ok(Json(response))
 }
 
+#[utoipa::path(
+    post,
+    path = "/providers",
+    request_body = ProviderUpdateRequest,
+    responses(
+        (status = 200, body = ProviderUpdateResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn update_provider(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<ProviderUpdateRequest>,
@@ -805,6 +882,16 @@ pub(super) async fn update_provider(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/providers/test-model",
+    request_body = ProviderModelTestRequest,
+    responses(
+        (status = 200, body = ProviderModelTestResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn test_provider_model(
     Json(request): Json<ProviderModelTestRequest>,
 ) -> Result<Json<ProviderModelTestResponse>, StatusCode> {
@@ -890,6 +977,19 @@ pub(super) async fn test_provider_model(
     }
 }
 
+#[utoipa::path(
+    delete,
+    path = "/providers/{provider}",
+    params(
+        ("provider" = String, Path, description = "Provider name to delete"),
+    ),
+    responses(
+        (status = 200, body = ProviderUpdateResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Provider not found"),
+    ),
+    tag = "providers",
+)]
 pub(super) async fn delete_provider(
     State(state): State<Arc<ApiState>>,
     axum::extract::Path(provider): axum::extract::Path<String>,
@@ -912,6 +1012,21 @@ pub(super) async fn delete_provider(
             success: true,
             message: "ChatGPT Plus OAuth credentials removed".into(),
         }));
+    }
+
+    // GitHub Copilot has a cached token file alongside the TOML key.
+    // Remove both the TOML key and the cached token.
+    if provider == "github-copilot" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let token_path = crate::github_copilot_auth::credentials_path(&instance_dir);
+        if token_path.exists() {
+            tokio::fs::remove_file(&token_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(manager) = state.llm_manager.read().await.as_ref() {
+            manager.clear_copilot_token().await;
+        }
     }
 
     let Some(key_name) = provider_toml_key(&provider) else {

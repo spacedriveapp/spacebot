@@ -26,6 +26,7 @@ pub(super) const NVIDIA_PROVIDER_BASE_URL: &str = "https://integrate.api.nvidia.
 pub(super) const FIREWORKS_PROVIDER_BASE_URL: &str = "https://api.fireworks.ai/inference";
 pub(crate) const GEMINI_PROVIDER_BASE_URL: &str =
     "https://generativelanguage.googleapis.com/v1beta/openai";
+pub(super) const GITHUB_COPILOT_DEFAULT_BASE_URL: &str = "https://api.individual.githubcopilot.com";
 
 /// App attribution headers sent with every OpenRouter API request.
 /// See <https://openrouter.ai/docs/app-attribution>.
@@ -213,6 +214,9 @@ pub(crate) fn default_provider_config(
             use_bearer_auth: false,
             extra_headers: vec![],
         },
+        // GitHub Copilot requires token exchange and dynamic base URL derivation.
+        // The test path should use LlmManager::get_github_copilot_provider() instead.
+        "github-copilot" => return None,
         _ => return None,
     })
 }
@@ -274,6 +278,7 @@ pub(super) fn infer_routing_from_providers(
         "minimax-cn",
         "moonshot",
         "zai-coding-plan",
+        "github-copilot",
     ];
 
     for &name in PRIORITY {

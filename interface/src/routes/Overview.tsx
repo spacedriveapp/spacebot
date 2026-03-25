@@ -7,6 +7,7 @@ import {api} from "@/api/client";
 import {CreateAgentDialog} from "@/components/CreateAgentDialog";
 import {TopologyGraph} from "@/components/TopologyGraph";
 import {UpdatePill} from "@/components/UpdatePill";
+import {useSetTopBar} from "@/components/TopBar";
 import type {ChannelLiveState} from "@/hooks/useChannelLiveState";
 import {formatUptime} from "@/lib/format";
 
@@ -58,64 +59,81 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 
 	const uptime = statusData?.uptime_seconds ?? 0;
 
-	return (
-		<div className="flex flex-col h-full">
-			{/* Compact status bar */}
-			<div className="flex items-center justify-between border-b border-app-line bg-app-darkBox/50 px-6 py-3.5">
-				<div className="flex items-center gap-4">
+	useSetTopBar(
+		<div className="flex h-full flex-1 items-center justify-between px-6">
+			<div className="flex items-center gap-4">
+				<div className="flex items-center gap-2">
+					<h1 className="font-plex text-sm font-medium text-ink">Spacebot</h1>
+					{statusData ? (
+						<div className="h-2 w-2 rounded-full bg-green-500" />
+					) : (
+						<div className="h-2 w-2 rounded-full bg-red-500" />
+					)}
+				</div>
+
+				<div className="flex items-center gap-4 text-tiny text-ink-faint">
+					<span>
+						{agents.length} agent{agents.length !== 1 ? "s" : ""}
+					</span>
+					<span>
+						{channels.length} channel{channels.length !== 1 ? "s" : ""}
+					</span>
+					<span>{formatUptime(uptime)}</span>
+				</div>
+
+				{(activity.workers > 0 || activity.branches > 0) && (
 					<div className="flex items-center gap-2">
-						<h1 className="font-plex text-sm font-medium text-ink">Spacebot</h1>
-						{statusData ? (
-							<div className="h-2 w-2 rounded-full bg-green-500" />
-						) : (
-							<div className="h-2 w-2 rounded-full bg-red-500" />
+						{activity.workers > 0 && (
+							<span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-tiny">
+								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+								<span className="font-medium text-amber-400">
+									{activity.workers}w
+								</span>
+							</span>
+						)}
+						{activity.branches > 0 && (
+							<span className="flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-1 text-tiny">
+								<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
+								<span className="font-medium text-violet-400">
+									{activity.branches}b
+								</span>
+							</span>
 						)}
 					</div>
-
-					<div className="flex items-center gap-4 text-tiny text-ink-faint">
-						<span>
-							{agents.length} agent{agents.length !== 1 ? "s" : ""}
-						</span>
-						<span>
-							{channels.length} channel{channels.length !== 1 ? "s" : ""}
-						</span>
-						<span>{formatUptime(uptime)}</span>
-					</div>
-
-					{(activity.workers > 0 || activity.branches > 0) && (
-						<div className="flex items-center gap-2">
-							{activity.workers > 0 && (
-								<span className="flex items-center gap-1.5 rounded-full bg-amber-500/10 px-2.5 py-1 text-tiny">
-									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-									<span className="font-medium text-amber-400">
-										{activity.workers}w
-									</span>
-								</span>
-							)}
-							{activity.branches > 0 && (
-								<span className="flex items-center gap-1.5 rounded-full bg-violet-500/10 px-2.5 py-1 text-tiny">
-									<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-									<span className="font-medium text-violet-400">
-										{activity.branches}b
-									</span>
-								</span>
-							)}
-						</div>
-					)}
-				</div>
-
-				<div className="flex items-center gap-3">
-					<UpdatePill />
-					{providersData?.has_any && (
-						<button
-							onClick={() => setCreateOpen(true)}
-							className="text-tiny text-ink-faint hover:text-ink transition-colors"
-						>
-							+ New Agent
-						</button>
-					)}
-				</div>
+				)}
 			</div>
+
+			<div className="flex items-center gap-3">
+				<UpdatePill />
+				{providersData?.has_any && (
+					<button
+						onClick={() => setCreateOpen(true)}
+						className="text-tiny text-ink-faint hover:text-ink transition-colors"
+					>
+						+ New Agent
+					</button>
+				)}
+			</div>
+		</div>,
+	);
+
+	return (
+		<div className="flex flex-col h-full">
+			{providersData && !providersData.has_any && agents.length > 0 && (
+				<div className="mx-6 mt-4 flex items-center justify-between gap-3 rounded-lg border border-amber-500/25 bg-amber-500/10 px-4 py-3">
+					<p className="text-sm text-amber-200">
+						Agents are configured, but no provider credentials are available. Add or unlock
+						secrets to bring agents online.
+					</p>
+					<Link
+						to="/settings"
+						search={{tab: "secrets"}}
+						className="shrink-0 text-sm font-medium text-amber-100 underline-offset-4 hover:underline"
+					>
+						Open Secrets Settings
+					</Link>
+				</div>
+			)}
 
 			{/* Full-screen topology */}
 			<div className="flex-1 overflow-hidden">

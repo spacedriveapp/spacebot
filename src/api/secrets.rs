@@ -38,14 +38,25 @@ fn get_secrets_store(
 }
 
 /// `GET /api/secrets/status` — Store state, counts, encryption status.
+#[utoipa::path(
+    get,
+    path = "/secrets/status",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn secrets_status(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
         Err(e) => return e.into_response(),
     };
 
-    // TODO: detect platform_managed from deployment mode.
-    match store.status(false) {
+    let platform_managed = std::env::var("SPACEBOT_DEPLOYMENT")
+        .is_ok_and(|deployment| deployment.eq_ignore_ascii_case("hosted"));
+
+    match store.status(platform_managed) {
         Ok(status) => Json(status).into_response(),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -55,7 +66,7 @@ pub async fn secrets_status(State(state): State<Arc<ApiState>>) -> impl IntoResp
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct SecretListItem {
     name: String,
     category: SecretCategory,
@@ -63,12 +74,21 @@ struct SecretListItem {
     updated_at: chrono::DateTime<chrono::Utc>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct SecretListResponse {
     secrets: Vec<SecretListItem>,
 }
 
 /// `GET /api/secrets` — List all secrets (name + category, no values).
+#[utoipa::path(
+    get,
+    path = "/secrets",
+    responses(
+        (status = 200, body = SecretListResponse),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn list_secrets(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -97,14 +117,14 @@ pub async fn list_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRespon
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct PutSecretBody {
     pub value: String,
     /// If not provided, auto-categorized based on the secret name.
     pub category: Option<SecretCategory>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct PutSecretResponse {
     name: String,
     category: SecretCategory,
@@ -113,6 +133,20 @@ struct PutSecretResponse {
 }
 
 /// `PUT /api/secrets/:name` — Add or update a secret.
+#[utoipa::path(
+    put,
+    path = "/secrets/{name}",
+    params(
+        ("name" = String, Path, description = "Secret name"),
+    ),
+    request_body = PutSecretBody,
+    responses(
+        (status = 200, body = PutSecretResponse),
+        (status = 423, description = "Secret store is locked"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn put_secret(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -158,7 +192,7 @@ pub async fn put_secret(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct DeleteSecretResponse {
     deleted: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -166,6 +200,19 @@ struct DeleteSecretResponse {
 }
 
 /// `DELETE /api/secrets/:name` — Delete a secret.
+#[utoipa::path(
+    delete,
+    path = "/secrets/{name}",
+    params(
+        ("name" = String, Path, description = "Secret name"),
+    ),
+    responses(
+        (status = 200, body = DeleteSecretResponse),
+        (status = 423, description = "Secret store is locked"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn delete_secret(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -197,7 +244,7 @@ pub async fn delete_secret(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct SecretInfoResponse {
     name: String,
     category: SecretCategory,
@@ -206,6 +253,19 @@ struct SecretInfoResponse {
 }
 
 /// `GET /api/secrets/:name/info` — Secret metadata (no value).
+#[utoipa::path(
+    get,
+    path = "/secrets/{name}/info",
+    params(
+        ("name" = String, Path, description = "Secret name"),
+    ),
+    responses(
+        (status = 200, body = SecretInfoResponse),
+        (status = 404, description = "Secret not found"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn secret_info(
     State(state): State<Arc<ApiState>>,
     Path(name): Path<String>,
@@ -231,13 +291,23 @@ pub async fn secret_info(
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct EncryptResponse {
     master_key: String,
     message: String,
 }
 
 /// `POST /api/secrets/encrypt` — Enable encryption. Returns the master key (hex).
+#[utoipa::path(
+    post,
+    path = "/secrets/encrypt",
+    responses(
+        (status = 200, body = EncryptResponse),
+        (status = 400, description = "Encryption already enabled"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn enable_encryption(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -269,12 +339,24 @@ pub async fn enable_encryption(State(state): State<Arc<ApiState>>) -> impl IntoR
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UnlockBody {
     pub master_key: String,
 }
 
 /// `POST /api/secrets/unlock` — Unlock encrypted store with master key (hex).
+#[utoipa::path(
+    post,
+    path = "/secrets/unlock",
+    request_body = UnlockBody,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Invalid master key format"),
+        (status = 401, description = "Invalid master key"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn unlock_secrets(
     State(state): State<Arc<ApiState>>,
     Json(body): Json<UnlockBody>,
@@ -329,6 +411,16 @@ pub async fn unlock_secrets(
 }
 
 /// `POST /api/secrets/lock` — Lock encrypted store (clear key from memory).
+#[utoipa::path(
+    post,
+    path = "/secrets/lock",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Lock failed"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn lock_secrets(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -356,6 +448,16 @@ pub async fn lock_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRespon
 }
 
 /// `POST /api/secrets/rotate` — Rotate master key.
+#[utoipa::path(
+    post,
+    path = "/secrets/rotate",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Key rotation failed"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn rotate_key(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -384,14 +486,14 @@ pub async fn rotate_key(State(state): State<Arc<ApiState>>) -> impl IntoResponse
     }
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct MigrationItem {
     config_key: String,
     secret_name: String,
     category: SecretCategory,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct MigrateResponse {
     migrated: Vec<MigrationItem>,
     skipped: Vec<String>,
@@ -404,6 +506,16 @@ struct MigrateResponse {
 /// Scans the resolved config for plaintext credential values (not `env:` or
 /// `secret:` prefixed) and moves them to the secret store, replacing the
 /// config.toml entries with `secret:NAME` references.
+#[utoipa::path(
+    post,
+    path = "/secrets/migrate",
+    responses(
+        (status = 200, body = MigrateResponse),
+        (status = 423, description = "Secret store is locked"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn migrate_secrets(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -487,6 +599,16 @@ pub async fn migrate_secrets(State(state): State<Arc<ApiState>>) -> impl IntoRes
 }
 
 /// `POST /api/secrets/export` — Export all secrets as a JSON backup.
+#[utoipa::path(
+    post,
+    path = "/secrets/export",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 423, description = "Secret store is locked"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn export_secrets(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let store = match get_secrets_store(&state) {
         Ok(s) => s,
@@ -524,7 +646,7 @@ pub async fn export_secrets(State(state): State<Arc<ApiState>>) -> impl IntoResp
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ImportBody {
     /// The export data to import (JSON object matching ExportData format).
     #[serde(flatten)]
@@ -535,6 +657,17 @@ pub struct ImportBody {
 }
 
 /// `POST /api/secrets/import` — Import secrets from a backup.
+#[utoipa::path(
+    post,
+    path = "/secrets/import",
+    request_body = ImportBody,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 423, description = "Secret store is locked"),
+        (status = 503, description = "Secrets store not initialized"),
+    ),
+    tag = "secrets",
+)]
 pub async fn import_secrets(
     State(state): State<Arc<ApiState>>,
     Json(body): Json<ImportBody>,

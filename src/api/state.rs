@@ -3,7 +3,9 @@
 use crate::agent::channel::ChannelState;
 use crate::agent::cortex_chat::CortexChatSession;
 use crate::agent::status::StatusBlock;
-use crate::config::{Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SlackPermissions};
+use crate::config::{
+    Binding, DefaultsConfig, DiscordPermissions, RuntimeConfig, SignalPermissions, SlackPermissions,
+};
 use crate::conversation::worker_transcript::{ActionContent, TranscriptStep};
 use crate::cron::{CronStore, Scheduler};
 use crate::llm::LlmManager;
@@ -27,7 +29,7 @@ use std::time::Instant;
 use tokio::sync::{RwLock, broadcast, mpsc};
 
 /// Summary of an agent's configuration, exposed via the API.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct AgentInfo {
     pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -38,7 +40,7 @@ pub struct AgentInfo {
     pub gradient_start: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub gradient_end: Option<String>,
-    pub workspace: PathBuf,
+    pub workspace: String,
     pub context_window: usize,
     pub max_turns: usize,
     pub max_concurrent_branches: usize,
@@ -80,8 +82,8 @@ pub struct ApiState {
     pub cron_stores: arc_swap::ArcSwap<HashMap<String, Arc<CronStore>>>,
     /// Per-agent cron schedulers for job timer management.
     pub cron_schedulers: arc_swap::ArcSwap<HashMap<String, Arc<Scheduler>>>,
-    /// Per-agent task stores for task CRUD operations.
-    pub task_stores: arc_swap::ArcSwap<HashMap<String, Arc<TaskStore>>>,
+    /// Instance-level global task store shared across all agents.
+    pub task_store: ArcSwap<Option<Arc<TaskStore>>>,
     /// Per-agent project stores for project/repo/worktree CRUD operations.
     pub project_stores: arc_swap::ArcSwap<HashMap<String, Arc<ProjectStore>>>,
     /// Per-agent RuntimeConfig for reading live hot-reloaded configuration.
@@ -96,6 +98,8 @@ pub struct ApiState {
     pub discord_permissions: RwLock<Option<Arc<ArcSwap<DiscordPermissions>>>>,
     /// Shared reference to the Slack permissions ArcSwap (same instance used by the adapter and file watcher).
     pub slack_permissions: RwLock<Option<Arc<ArcSwap<SlackPermissions>>>>,
+    /// Shared reference to the Signal permissions ArcSwap (same instance used by the adapter and file watcher).
+    pub signal_permissions: RwLock<Option<Arc<ArcSwap<SignalPermissions>>>>,
     /// Shared reference to the bindings ArcSwap (same instance used by the main loop and file watcher).
     pub bindings: RwLock<Option<Arc<ArcSwap<Vec<Binding>>>>>,
     /// Shared messaging manager for runtime adapter addition.
@@ -120,9 +124,6 @@ pub struct ApiState {
     pub agent_remove_tx: mpsc::Sender<String>,
     /// Shared webchat adapter for session management from API handlers.
     pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
-    /// Cross-agent task store registry for delegation.
-    pub task_store_registry:
-        Arc<ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>>,
     /// Sender for cross-agent message injection.
     pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
@@ -142,7 +143,7 @@ pub struct ApiState {
 }
 
 /// Events sent to SSE clients. Wraps ProcessEvents with agent context.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ApiEvent {
     /// An inbound message from a user.
@@ -286,9 +287,6 @@ impl ApiState {
         agent_tx: mpsc::Sender<crate::Agent>,
         agent_remove_tx: mpsc::Sender<String>,
         injection_tx: mpsc::Sender<crate::ChannelInjection>,
-        task_store_registry: Arc<
-            ArcSwap<std::collections::HashMap<String, Arc<crate::tasks::TaskStore>>>,
-        >,
     ) -> Self {
         let (event_tx, _) = broadcast::channel(512);
         Self {
@@ -308,7 +306,7 @@ impl ApiState {
             config_write_mutex: tokio::sync::Mutex::new(()),
             cron_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             cron_schedulers: arc_swap::ArcSwap::from_pointee(HashMap::new()),
-            task_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
+            task_store: ArcSwap::from_pointee(None),
             project_stores: arc_swap::ArcSwap::from_pointee(HashMap::new()),
             runtime_configs: ArcSwap::from_pointee(HashMap::new()),
             mcp_managers: ArcSwap::from_pointee(HashMap::new()),
@@ -316,6 +314,7 @@ impl ApiState {
             secrets_store: ArcSwap::from_pointee(None),
             discord_permissions: RwLock::new(None),
             slack_permissions: RwLock::new(None),
+            signal_permissions: RwLock::new(None),
             bindings: RwLock::new(None),
             messaging_manager: RwLock::new(None),
             provider_setup_tx,
@@ -327,7 +326,6 @@ impl ApiState {
             defaults_config: RwLock::new(None),
             agent_tx,
             agent_remove_tx,
-            task_store_registry,
             injection_tx,
             webchat_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
@@ -746,9 +744,9 @@ impl ApiState {
         self.cron_schedulers.store(Arc::new(schedulers));
     }
 
-    /// Set the task stores for all agents.
-    pub fn set_task_stores(&self, stores: HashMap<String, Arc<TaskStore>>) {
-        self.task_stores.store(Arc::new(stores));
+    /// Set the global task store.
+    pub fn set_task_store(&self, store: Arc<TaskStore>) {
+        self.task_store.store(Arc::new(Some(store)));
     }
 
     /// Set the project stores for all agents.
@@ -784,6 +782,11 @@ impl ApiState {
     /// Share the Slack permissions ArcSwap with the API so reads get hot-reloaded values.
     pub async fn set_slack_permissions(&self, permissions: Arc<ArcSwap<SlackPermissions>>) {
         *self.slack_permissions.write().await = Some(permissions);
+    }
+
+    /// Share the Signal permissions ArcSwap with the API so reads get hot-reloaded values.
+    pub async fn set_signal_permissions(&self, permissions: Arc<ArcSwap<SignalPermissions>>) {
+        *self.signal_permissions.write().await = Some(permissions);
     }
 
     /// Share the bindings ArcSwap with the API so reads get hot-reloaded values.

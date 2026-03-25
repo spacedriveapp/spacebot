@@ -317,7 +317,17 @@ pub(crate) fn format_user_message(
         raw_text
     };
 
-    format!("{display_name}{bot_tag}{reply_context} [{timestamp_text}]: {text_content}")
+    let sender_context = message
+        .metadata
+        .get("sender_context")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| format!(" {s}"))
+        .unwrap_or_default();
+
+    format!(
+        "{display_name}{bot_tag}{reply_context}{sender_context} [{timestamp_text}]: {text_content}"
+    )
 }
 
 pub(crate) fn format_batched_user_message(
@@ -996,38 +1006,22 @@ mod tests {
     }
 
     #[test]
-    fn worker_task_temporal_context_preamble_includes_absolute_dates() {
-        let prompt_engine =
-            crate::prompts::PromptEngine::new("en").expect("prompt engine should initialize");
-        let temporal_context = crate::agent::channel_prompt::TemporalContext {
-            now_utc: chrono::DateTime::parse_from_rfc3339("2026-02-26T20:30:00Z")
-                .expect("valid RFC3339 timestamp")
-                .with_timezone(&chrono::Utc),
-            timezone: crate::agent::channel_prompt::TemporalTimezone::Named {
-                timezone_name: "America/New_York".to_string(),
-                timezone: "America/New_York"
-                    .parse()
-                    .expect("valid timezone identifier"),
-            },
+    fn worker_system_info_render_includes_time_and_model() {
+        let info = crate::agent::status::SystemInfo {
+            worker_model: "anthropic/claude-sonnet-4".into(),
+            ..Default::default()
         };
 
-        let worker_task = crate::agent::channel_prompt::build_worker_task_with_temporal_context(
-            "Run the migration checks",
-            &temporal_context,
-            &prompt_engine,
-        )
-        .expect("worker task preamble should render");
-        assert!(
-            worker_task.contains("Current local date/time:"),
-            "worker task should include local time context"
+        let rendered = info.render_for_worker(
+            "2026-02-26 15:30:00 EST (America/New_York, UTC-05:00); UTC 2026-02-26 20:30:00 UTC",
         );
         assert!(
-            worker_task.contains("Current UTC date/time:"),
-            "worker task should include UTC time context"
+            rendered.contains("Time: 2026-02-26 15:30:00 EST"),
+            "worker status should include time context"
         );
         assert!(
-            worker_task.contains("Run the migration checks"),
-            "worker task should preserve the original task body"
+            rendered.contains("Model: anthropic/claude-sonnet-4"),
+            "worker status should include model name"
         );
     }
 

@@ -104,7 +104,7 @@ function FloatingChatInput({
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
 
 	useEffect(() => {
-		textareaRef.current?.focus();
+		textareaRef.current?.focus({preventScroll: true});
 	}, []);
 
 	useEffect(() => {
@@ -179,7 +179,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
 	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
-	const messagesEndRef = useRef<HTMLDivElement>(null);
+	const scrollRef = useRef<HTMLDivElement>(null);
 
 	const liveState = liveStates[sessionId];
 	const timeline = liveState?.timeline ?? [];
@@ -187,9 +187,15 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
 
-	// Auto-scroll on new messages or typing state changes
+	// Auto-scroll on new messages or typing state changes.
+	// Use direct scrollTo on the container instead of scrollIntoView,
+	// which can propagate scroll to ancestor overflow-hidden containers
+	// and shift the entire layout (hiding the top navbar).
 	useEffect(() => {
-		messagesEndRef.current?.scrollIntoView({behavior: "smooth"});
+		const el = scrollRef.current;
+		if (el) {
+			el.scrollTo({top: el.scrollHeight, behavior: "smooth"});
+		}
 	}, [timeline.length, isTyping, activeWorkers.length]);
 
 	const handleSubmit = () => {
@@ -202,7 +208,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	return (
 		<div className="relative flex h-full w-full flex-col">
 			{/* Messages */}
-			<div className="flex-1 overflow-x-hidden overflow-y-auto">
+			<div ref={scrollRef} className="flex-1 overflow-x-hidden overflow-y-auto">
 				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
 					{hasActiveWorkers && (
 						<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
@@ -247,7 +253,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 							{error}
 						</div>
 					)}
-					<div ref={messagesEndRef} />
 				</div>
 			</div>
 

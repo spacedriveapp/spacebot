@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{
-    Binding, Config, DiscordPermissions, RuntimeConfig, SlackPermissions, TelegramPermissions,
-    TwitchPermissions, binding_runtime_adapter_key,
+    Binding, Config, DiscordPermissions, MattermostPermissions, RuntimeConfig, SignalPermissions,
+    SlackPermissions, TelegramPermissions, TwitchPermissions, binding_runtime_adapter_key,
 };
 
 /// Per-agent context needed by the file watcher: (id, prompt_dir, identity_dir,
@@ -31,6 +31,8 @@ pub fn spawn_file_watcher(
     slack_permissions: Option<Arc<arc_swap::ArcSwap<SlackPermissions>>>,
     telegram_permissions: Option<Arc<arc_swap::ArcSwap<TelegramPermissions>>>,
     twitch_permissions: Option<Arc<arc_swap::ArcSwap<TwitchPermissions>>>,
+    mattermost_permissions: Option<Arc<arc_swap::ArcSwap<MattermostPermissions>>>,
+    signal_permissions: Option<Arc<arc_swap::ArcSwap<SignalPermissions>>>,
     bindings: Arc<arc_swap::ArcSwap<Vec<Binding>>>,
     messaging_manager: Option<Arc<crate::messaging::MessagingManager>>,
     llm_manager: Arc<crate::llm::LlmManager>,
@@ -240,6 +242,23 @@ pub fn spawn_file_watcher(
                     tracing::info!("twitch permissions reloaded");
                 }
 
+                if let Some(ref perms) = mattermost_permissions
+                    && let Some(mattermost_config) = &config.messaging.mattermost
+                {
+                    let new_perms =
+                        MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("mattermost permissions reloaded");
+                }
+
+                if let Some(ref perms) = signal_permissions
+                    && let Some(signal_config) = &config.messaging.signal
+                {
+                    let new_perms = SignalPermissions::from_config(signal_config);
+                    perms.store(Arc::new(new_perms));
+                    tracing::info!("signal permissions reloaded");
+                }
+
                 // Hot-start adapters that are newly enabled in the config
                 if let Some(ref manager) = messaging_manager {
                     let rt = tokio::runtime::Handle::current();
@@ -249,6 +268,8 @@ pub fn spawn_file_watcher(
                     let slack_permissions = slack_permissions.clone();
                     let telegram_permissions = telegram_permissions.clone();
                     let twitch_permissions = twitch_permissions.clone();
+                    let mattermost_permissions = mattermost_permissions.clone();
+                    let signal_permissions = signal_permissions.clone();
                     let instance_dir = instance_dir.clone();
 
                     rt.spawn(async move {
@@ -528,6 +549,138 @@ pub fn spawn_file_watcher(
                                     );
                                     if let Err(error) = manager.register_and_start(adapter).await {
                                         tracing::error!(%error, adapter = %instance.name, "failed to hot-start named twitch adapter from config change");
+                                    }
+                                }
+                            }
+
+                        // Signal: start default adapter (requires root enabled) and named instances (independent).
+                        // Unlike Discord/Telegram where named instances inherit the root enabled gate,
+                        // Signal named instances start independently when they have valid credentials
+                        // and their own enabled flag is set. This allows running multiple Signal accounts
+                        // without needing a "default" account enabled.
+                        if let Some(signal_config) = &config.messaging.signal {
+                            // Start default adapter only if root is enabled AND has credentials
+                            if signal_config.enabled
+                                && !signal_config.http_url.is_empty()
+                                && !signal_config.account.is_empty()
+                                && !manager.has_adapter("signal").await
+                            {
+                                let permissions = match signal_permissions {
+                                    Some(ref existing) => existing.clone(),
+                                    None => {
+                                        let permissions = SignalPermissions::from_config(signal_config);
+                                        Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                    }
+                                };
+                                let tmp_dir = instance_dir.join("tmp");
+                                let adapter = crate::messaging::signal::SignalAdapter::new(
+                                    "signal",
+                                    &signal_config.http_url,
+                                    &signal_config.account,
+                                    signal_config.ignore_stories,
+                                    permissions,
+                                    tmp_dir,
+                                );
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, "failed to hot-start signal adapter from config change");
+                                }
+                            }
+
+                            // Start named instances regardless of root enabled flag (as long as config exists)
+                            for instance in signal_config.instances.iter().filter(|instance| instance.enabled) {
+                                let runtime_key = binding_runtime_adapter_key(
+                                    "signal",
+                                    Some(instance.name.as_str()),
+                                );
+                                if manager.has_adapter(runtime_key.as_str()).await {
+                                    // TODO: named instance permissions not hot-updated (see discord block comment)
+                                    continue;
+                                }
+                                // Skip instances with missing credentials (same gating as cold-start)
+                                if instance.http_url.is_empty() || instance.account.is_empty() {
+                                    tracing::warn!(adapter = %instance.name, "skipping enabled signal instance with missing credentials");
+                                    continue;
+                                }
+
+                                let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                    SignalPermissions::from_instance_config(instance),
+                                ));
+                                let tmp_dir = instance_dir.join("tmp");
+                                let adapter = crate::messaging::signal::SignalAdapter::new(
+                                    runtime_key,
+                                    &instance.http_url,
+                                    &instance.account,
+                                    instance.ignore_stories,
+                                    permissions,
+                                    tmp_dir,
+                                );
+                                if let Err(error) = manager.register_and_start(adapter).await {
+                                    tracing::error!(%error, adapter = %instance.name, "failed to hot-start named signal adapter from config change");
+                                }
+                            }
+                        }
+
+                        // Mattermost: start default + named instances that are enabled and not already running.
+                        if let Some(mattermost_config) = &config.messaging.mattermost
+                            && mattermost_config.enabled {
+                                if !mattermost_config.base_url.is_empty()
+                                    && !mattermost_config.token.is_empty()
+                                    && !manager.has_adapter("mattermost").await
+                                {
+                                    let permissions = match mattermost_permissions {
+                                        Some(ref existing) => existing.clone(),
+                                        None => {
+                                            let permissions = MattermostPermissions::from_config(mattermost_config, &config.bindings);
+                                            Arc::new(arc_swap::ArcSwap::from_pointee(permissions))
+                                        }
+                                    };
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        "mattermost",
+                                        &mattermost_config.base_url,
+                                        mattermost_config.token.as_str(),
+                                        mattermost_config.team_id.as_deref().map(Arc::from),
+                                        mattermost_config.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, "failed to hot-start mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, "failed to build mattermost adapter from config change");
+                                        }
+                                    }
+                                }
+
+                                for instance in mattermost_config.instances.iter().filter(|instance| instance.enabled) {
+                                    let runtime_key = binding_runtime_adapter_key(
+                                        "mattermost",
+                                        Some(instance.name.as_str()),
+                                    );
+                                    if manager.has_adapter(runtime_key.as_str()).await {
+                                        continue;
+                                    }
+
+                                    let permissions = Arc::new(arc_swap::ArcSwap::from_pointee(
+                                        MattermostPermissions::from_instance_config(instance, &config.bindings),
+                                    ));
+                                    match crate::messaging::mattermost::MattermostAdapter::new(
+                                        runtime_key,
+                                        &instance.base_url,
+                                        instance.token.as_str(),
+                                        instance.team_id.as_deref().map(Arc::from),
+                                        instance.max_attachment_bytes,
+                                        permissions,
+                                    ) {
+                                        Ok(adapter) => {
+                                            if let Err(error) = manager.register_and_start(adapter).await {
+                                                tracing::error!(%error, adapter = %instance.name, "failed to hot-start named mattermost adapter from config change");
+                                            }
+                                        }
+                                        Err(error) => {
+                                            tracing::error!(%error, adapter = %instance.name, "failed to build named mattermost adapter from config change");
+                                        }
                                     }
                                 }
                             }

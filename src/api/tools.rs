@@ -9,13 +9,13 @@ use serde::Serialize;
 use std::io::ErrorKind;
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ToolsResponse {
     tools_bin: String,
     binaries: Vec<BinaryEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct BinaryEntry {
     name: String,
     size: u64,
@@ -23,6 +23,15 @@ pub(super) struct BinaryEntry {
 }
 
 /// List the contents of the durable `tools/bin` directory.
+#[utoipa::path(
+    get,
+    path = "/tools",
+    responses(
+        (status = 200, body = ToolsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "tools",
+)]
 pub(super) async fn list_tools(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ToolsResponse>, StatusCode> {

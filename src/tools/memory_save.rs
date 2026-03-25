@@ -19,6 +19,8 @@ const MAX_MEMORY_CONTENT_BYTES: usize = 50_000;
 pub struct MemorySaveTool {
     memory_search: Arc<MemorySearch>,
     event_context: Option<MemorySaveEventContext>,
+    contract_state: Option<Arc<super::memory_persistence_complete::MemoryPersistenceContractState>>,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -33,6 +35,8 @@ impl MemorySaveTool {
         Self {
             memory_search,
             event_context: None,
+            contract_state: None,
+            working_memory: None,
         }
     }
 
@@ -46,6 +50,20 @@ impl MemorySaveTool {
             agent_id,
             memory_event_tx,
         });
+        self
+    }
+
+    pub fn with_contract_state(
+        mut self,
+        contract_state: Arc<super::memory_persistence_complete::MemoryPersistenceContractState>,
+    ) -> Self {
+        self.contract_state = Some(contract_state);
+        self
+    }
+
+    /// Enable working memory event emission for successful memory saves.
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
         self
     }
 }
@@ -289,19 +307,77 @@ impl Tool for MemorySaveTool {
             }
         }
 
-        // Generate and store embedding (async to avoid blocking the tokio runtime)
-        let embedding = self
+        // Generate and store embedding. On failure, compensate by deleting the
+        // SQLite row (and any associations already written) so there is no orphan.
+        let embedding = match self
             .memory_search
             .embedding_model_arc()
             .embed_one(&args.content)
             .await
-            .map_err(|e| MemorySaveError(format!("Failed to generate embedding: {e}")))?;
+        {
+            Ok(emb) => emb,
+            Err(embed_err) => {
+                if let Err(assoc_err) = self
+                    .memory_search
+                    .store()
+                    .delete_associations_for_memory(&memory.id)
+                    .await
+                {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        error = %assoc_err,
+                        "compensating association delete failed after embedding generation error"
+                    );
+                }
+                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        %del_err,
+                        "compensating delete failed after embedding generation error"
+                    );
+                }
+                return Err(MemorySaveError(format!(
+                    "Failed to generate embedding: {embed_err}"
+                )));
+            }
+        };
 
-        self.memory_search
+        match self
+            .memory_search
             .embedding_table()
             .store(&memory.id, &args.content, &embedding)
             .await
-            .map_err(|e| MemorySaveError(format!("Failed to store embedding: {e}")))?;
+        {
+            Ok(()) => {
+                if let Some(contract_state) = &self.contract_state {
+                    contract_state.record_saved_memory_id(memory.id.clone());
+                }
+            }
+            Err(embed_err) => {
+                if let Err(assoc_err) = self
+                    .memory_search
+                    .store()
+                    .delete_associations_for_memory(&memory.id)
+                    .await
+                {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        error = %assoc_err,
+                        "compensating association delete failed after embedding store error"
+                    );
+                }
+                if let Err(del_err) = self.memory_search.store().delete(&memory.id).await {
+                    tracing::error!(
+                        memory_id = %memory.id,
+                        %del_err,
+                        "compensating delete failed after embedding store error"
+                    );
+                }
+                return Err(MemorySaveError(format!(
+                    "Failed to store embedding: {embed_err}"
+                )));
+            }
+        }
 
         // Ensure the FTS index exists so full_text_search queries work.
         // Safe to call repeatedly — no-ops if the index already exists.
@@ -320,7 +396,10 @@ impl Tool for MemorySaveTool {
             let event = ProcessEvent::MemorySaved {
                 agent_id: event_context.agent_id.clone(),
                 memory_id: memory.id.clone(),
-                channel_id: memory.channel_id.clone(),
+                channel_id: memory
+                    .channel_id
+                    .as_ref()
+                    .map(|s| std::sync::Arc::from(s.as_str())),
                 memory_type: memory.memory_type,
                 importance: memory.importance,
                 content_summary: summarize_memory_content(&memory.content),
@@ -332,6 +411,20 @@ impl Tool for MemorySaveTool {
                     "failed to emit memory-saved event"
                 );
             }
+        }
+
+        if let Some(working_memory) = &self.working_memory {
+            let content_preview = summarize_memory_content(&memory.content);
+            let mut builder = working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::MemorySaved,
+                    format!("Memory saved ({}): {content_preview}", memory.memory_type),
+                )
+                .importance(0.5);
+            if let Some(channel_id) = &memory.channel_id {
+                builder = builder.channel(channel_id.to_string());
+            }
+            builder.record();
         }
 
         #[cfg(feature = "metrics")]

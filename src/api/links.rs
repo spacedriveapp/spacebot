@@ -11,12 +11,31 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// List all links in the instance.
+#[utoipa::path(
+    get,
+    path = "/links",
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+    tag = "links",
+)]
 pub async fn list_links(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let links = state.agent_links.load();
     Json(serde_json::json!({ "links": &**links }))
 }
 
 /// Get links for a specific agent.
+#[utoipa::path(
+    get,
+    path = "/links/agent/{agent_id}",
+    params(
+        ("agent_id" = String, Path, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+    tag = "links",
+)]
 pub async fn agent_links(
     State(state): State<Arc<ApiState>>,
     Path(agent_id): Path<String>,
@@ -27,7 +46,7 @@ pub async fn agent_links(
 }
 
 /// Topology response for graph rendering.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct TopologyResponse {
     agents: Vec<TopologyAgent>,
     humans: Vec<TopologyHuman>,
@@ -35,7 +54,7 @@ struct TopologyResponse {
     groups: Vec<TopologyGroup>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct TopologyHuman {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,9 +65,17 @@ struct TopologyHuman {
     bio: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    discord_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    telegram_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slack_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    email: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct TopologyAgent {
     id: String,
     name: String,
@@ -58,7 +85,7 @@ struct TopologyAgent {
     role: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct TopologyLink {
     from: String,
     to: String,
@@ -66,7 +93,7 @@ struct TopologyLink {
     kind: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, utoipa::ToSchema)]
 struct TopologyGroup {
     name: String,
     agent_ids: Vec<String>,
@@ -75,6 +102,14 @@ struct TopologyGroup {
 }
 
 /// Get the full agent topology for graph rendering.
+#[utoipa::path(
+    get,
+    path = "/topology",
+    responses(
+        (status = 200, body = TopologyResponse),
+    ),
+    tag = "links",
+)]
 pub async fn topology(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let agent_configs = state.agent_configs.load();
     let agents: Vec<TopologyAgent> = agent_configs
@@ -120,6 +155,10 @@ pub async fn topology(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
             role: h.role.clone(),
             bio: h.bio.clone(),
             description: h.description.clone(),
+            discord_id: h.discord_id.clone(),
+            telegram_id: h.telegram_id.clone(),
+            slack_id: h.slack_id.clone(),
+            email: h.email.clone(),
         })
         .collect();
 
@@ -133,7 +172,7 @@ pub async fn topology(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
 
 // -- Write endpoints --
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateLinkRequest {
     pub from: String,
     pub to: String,
@@ -151,13 +190,25 @@ fn default_kind() -> String {
     "peer".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateLinkRequest {
     pub direction: Option<String>,
     pub kind: Option<String>,
 }
 
 /// Create a new link between two agents. Persists to config.toml and updates in-memory state.
+#[utoipa::path(
+    post,
+    path = "/links",
+    request_body = CreateLinkRequest,
+    responses(
+        (status = 201, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Agent or human not found"),
+        (status = 409, description = "Link already exists"),
+    ),
+    tag = "links",
+)]
 pub async fn create_link(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateLinkRequest>,
@@ -263,6 +314,21 @@ pub async fn create_link(
 }
 
 /// Update a link's properties. Identifies the link by from/to agent IDs in the path.
+#[utoipa::path(
+    put,
+    path = "/links/{from}/{to}",
+    params(
+        ("from" = String, Path, description = "Source agent"),
+        ("to" = String, Path, description = "Target agent"),
+    ),
+    request_body = UpdateLinkRequest,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Link not found"),
+    ),
+    tag = "links",
+)]
 pub async fn update_link(
     State(state): State<Arc<ApiState>>,
     Path((from, to)): Path<(String, String)>,
@@ -334,6 +400,19 @@ pub async fn update_link(
 }
 
 /// Delete a link between two agents.
+#[utoipa::path(
+    delete,
+    path = "/links/{from}/{to}",
+    params(
+        ("from" = String, Path, description = "Source agent"),
+        ("to" = String, Path, description = "Target agent"),
+    ),
+    responses(
+        (status = 204),
+        (status = 404, description = "Link not found"),
+    ),
+    tag = "links",
+)]
 pub async fn delete_link(
     State(state): State<Arc<ApiState>>,
     Path((from, to)): Path<(String, String)>,
@@ -400,7 +479,7 @@ pub async fn delete_link(
 
 // -- Group CRUD --
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateGroupRequest {
     pub name: String,
     #[serde(default)]
@@ -408,7 +487,7 @@ pub struct CreateGroupRequest {
     pub color: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateGroupRequest {
     pub name: Option<String>,
     pub agent_ids: Option<Vec<String>>,
@@ -416,12 +495,31 @@ pub struct UpdateGroupRequest {
 }
 
 /// List all groups.
+#[utoipa::path(
+    get,
+    path = "/links/groups",
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+    tag = "links",
+)]
 pub async fn list_groups(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let groups = state.agent_groups.load();
     Json(serde_json::json!({ "groups": &**groups }))
 }
 
 /// Create a visual agent group.
+#[utoipa::path(
+    post,
+    path = "/links/groups",
+    request_body = CreateGroupRequest,
+    responses(
+        (status = 201, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 409, description = "Group already exists"),
+    ),
+    tag = "links",
+)]
 pub async fn create_group(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateGroupRequest>,
@@ -492,6 +590,21 @@ pub async fn create_group(
 }
 
 /// Update a group by name.
+#[utoipa::path(
+    put,
+    path = "/links/groups/{group_name}",
+    params(
+        ("group_name" = String, Path, description = "Group name"),
+    ),
+    request_body = UpdateGroupRequest,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Group not found"),
+        (status = 409, description = "Group name conflict"),
+    ),
+    tag = "links",
+)]
 pub async fn update_group(
     State(state): State<Arc<ApiState>>,
     Path(group_name): Path<String>,
@@ -580,6 +693,18 @@ pub async fn update_group(
 }
 
 /// Delete a group by name.
+#[utoipa::path(
+    delete,
+    path = "/links/groups/{group_name}",
+    params(
+        ("group_name" = String, Path, description = "Group name"),
+    ),
+    responses(
+        (status = 204),
+        (status = 404, description = "Group not found"),
+    ),
+    tag = "links",
+)]
 pub async fn delete_group(
     State(state): State<Arc<ApiState>>,
     Path(group_name): Path<String>,
@@ -639,7 +764,7 @@ pub async fn delete_group(
 
 // -- Human CRUD --
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateHumanRequest {
     pub id: String,
     pub display_name: Option<String>,
@@ -652,7 +777,7 @@ pub struct CreateHumanRequest {
     pub email: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UpdateHumanRequest {
     pub display_name: Option<String>,
     pub role: Option<String>,
@@ -665,6 +790,14 @@ pub struct UpdateHumanRequest {
 }
 
 /// List all humans.
+#[utoipa::path(
+    get,
+    path = "/links/humans",
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+    tag = "links",
+)]
 pub async fn list_humans(State(state): State<Arc<ApiState>>) -> impl IntoResponse {
     let humans = state.agent_humans.load();
     Json(serde_json::json!({ "humans": &**humans }))
@@ -717,6 +850,17 @@ fn ensure_humans_in_doc(doc: &mut toml_edit::DocumentMut, humans: &[crate::confi
 }
 
 /// Create an org-level human.
+#[utoipa::path(
+    post,
+    path = "/links/humans",
+    request_body = CreateHumanRequest,
+    responses(
+        (status = 201, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 409, description = "Human ID already exists"),
+    ),
+    tag = "links",
+)]
 pub async fn create_human(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateHumanRequest>,
@@ -848,6 +992,19 @@ pub async fn create_human(
 }
 
 /// Update a human by ID.
+#[utoipa::path(
+    put,
+    path = "/links/humans/{human_id}",
+    params(
+        ("human_id" = String, Path, description = "Human ID"),
+    ),
+    request_body = UpdateHumanRequest,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 404, description = "Human not found"),
+    ),
+    tag = "links",
+)]
 pub async fn update_human(
     State(state): State<Arc<ApiState>>,
     Path(human_id): Path<String>,
@@ -1019,6 +1176,18 @@ pub async fn update_human(
 }
 
 /// Delete a human by ID. Also removes any links involving this human.
+#[utoipa::path(
+    delete,
+    path = "/links/humans/{human_id}",
+    params(
+        ("human_id" = String, Path, description = "Human ID"),
+    ),
+    responses(
+        (status = 204),
+        (status = 404, description = "Human not found"),
+    ),
+    tag = "links",
+)]
 pub async fn delete_human(
     State(state): State<Arc<ApiState>>,
     Path(human_id): Path<String>,

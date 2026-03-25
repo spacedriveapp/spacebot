@@ -28,7 +28,7 @@ docker run -d \
   ghcr.io/spacedriveapp/spacebot:latest
 ```
 
-See [Docker deployment](/docs/docker) for image variants, compose files, and configuration options.
+See [Docker deployment](/docs/docker) for image tags, compose files, and configuration options.
 
 To update Docker installs, pull and recreate the container:
 
@@ -224,8 +224,10 @@ During development, the Vite dev server runs separately with API proxying:
 
 ```bash
 cd interface && bun run dev
-# UI at http://localhost:3000, proxies /api to http://localhost:19898
+# UI at http://localhost:19840, proxies /api to http://localhost:19898
 ```
+
+For desktop app development, see [Desktop app](/docs/desktop). A single `just desktop-dev` command handles sidecar bundling, frontend dev server, and Tauri automatically.
 
 ## Messaging platforms
 
@@ -260,6 +262,7 @@ Start/restart options:
 ## Next steps
 
 <Cards>
+  <Card title="Desktop app" href="/docs/desktop" />
   <Card title="Docker deployment" href="/docs/docker" />
   <Card title="Configuration" href="/docs/config" />
   <Card title="Model routing" href="/docs/routing" />

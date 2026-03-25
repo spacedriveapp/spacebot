@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Serialize, Clone)]
+#[derive(Serialize, Clone, utoipa::ToSchema)]
 pub(super) struct ModelInfo {
     /// Full routing string (e.g. "openrouter/anthropic/claude-sonnet-4")
     id: String,
@@ -25,18 +25,18 @@ pub(super) struct ModelInfo {
     input_audio: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ModelsResponse {
     models: Vec<ModelInfo>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct ModelsQuery {
     provider: Option<String>,
     capability: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ModelsDevProvider {
     #[allow(dead_code)]
     id: Option<String>,
@@ -46,7 +46,7 @@ struct ModelsDevProvider {
     models: HashMap<String, ModelsDevModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ModelsDevModel {
     #[allow(dead_code)]
     id: Option<String>,
@@ -60,12 +60,12 @@ struct ModelsDevModel {
     status: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ModelsDevLimit {
     context: u64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 struct ModelsDevModalities {
     input: Option<Vec<String>>,
     output: Option<Vec<String>>,
@@ -351,6 +351,19 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     providers
 }
 
+#[utoipa::path(
+    get,
+    path = "/models",
+    params(
+        ("provider" = Option<String>, Query, description = "Filter by provider ID"),
+        ("capability" = Option<String>, Query, description = "Filter by capability (input_audio, voice_transcription)"),
+    ),
+    responses(
+        (status = 200, body = ModelsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "models",
+)]
 pub(super) async fn get_models(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<ModelsQuery>,
@@ -441,6 +454,15 @@ pub(super) async fn get_models(
     Ok(Json(ModelsResponse { models }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/models/refresh",
+    responses(
+        (status = 200, body = ModelsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "models",
+)]
 pub(super) async fn refresh_models(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<ModelsResponse>, StatusCode> {

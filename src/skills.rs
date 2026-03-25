@@ -174,12 +174,28 @@ impl SkillSet {
 
     /// Remove a skill by name.
     ///
+    /// Only workspace-level skills can be removed via this method. Instance-level
+    /// skills are shared across all agents and must not be deleted through the
+    /// per-agent API.
+    ///
     /// Returns the base directory path if the skill was found and removed.
     pub async fn remove(&mut self, name: &str) -> anyhow::Result<Option<PathBuf>> {
-        let skill = match self.skills.remove(&name.to_lowercase()) {
+        let key = name.to_lowercase();
+        let skill = match self.skills.get(&key) {
             Some(s) => s,
             None => return Ok(None),
         };
+
+        if skill.source == SkillSource::Instance {
+            anyhow::bail!(
+                "cannot remove instance-level skill '{}' via the agent API; \
+                 instance skills are shared across all agents and must be \
+                 removed from the instance skills directory directly",
+                name
+            );
+        }
+
+        let skill = self.skills.remove(&key).unwrap();
 
         // Remove the skill directory from disk
         if skill.base_dir.exists() {
@@ -515,5 +531,78 @@ mod tests {
         let empty_set = SkillSet::default();
         let prompt = empty_set.render_worker_skills(&[], &engine).unwrap();
         assert!(prompt.is_empty());
+    }
+
+    fn make_skill(name: &str, source: SkillSource) -> Skill {
+        Skill {
+            name: name.into(),
+            description: format!("{name} skill"),
+            file_path: PathBuf::from(format!("/skills/{name}/SKILL.md")),
+            base_dir: PathBuf::from(format!("/tmp/test-skills-{}", uuid::Uuid::new_v4())),
+            content: format!("# {name}"),
+            source,
+            source_repo: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn remove_instance_skill_is_rejected() {
+        let mut set = SkillSet::default();
+        set.skills.insert(
+            "my-skill".into(),
+            make_skill("my-skill", SkillSource::Instance),
+        );
+
+        let result = set.remove("my-skill").await;
+        assert!(result.is_err());
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("instance-level skill"),
+            "unexpected error: {msg}"
+        );
+
+        // Skill should still be in the set (not removed)
+        assert!(set.skills.contains_key("my-skill"));
+    }
+
+    #[tokio::test]
+    async fn remove_workspace_skill_succeeds() {
+        let mut set = SkillSet::default();
+        let skill = make_skill("my-skill", SkillSource::Workspace);
+        // Don't create the directory on disk - remove should still return the path
+        let expected_dir = skill.base_dir.clone();
+        set.skills.insert("my-skill".into(), skill);
+
+        let result = set.remove("my-skill").await;
+        assert!(result.is_ok());
+        let path = result.unwrap();
+        assert_eq!(path, Some(expected_dir));
+        assert!(!set.skills.contains_key("my-skill"));
+    }
+
+    #[tokio::test]
+    async fn remove_nonexistent_skill_returns_none() {
+        let mut set = SkillSet::default();
+        let result = set.remove("nonexistent").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_is_case_insensitive() {
+        let mut set = SkillSet::default();
+        set.skills.insert(
+            "my-skill".into(),
+            make_skill("my-skill", SkillSource::Instance),
+        );
+
+        let result = set.remove("MY-SKILL").await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("instance-level skill")
+        );
     }
 }

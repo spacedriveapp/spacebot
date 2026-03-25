@@ -16,19 +16,19 @@ use std::sync::Arc;
 use zip::CompressionMethod;
 use zip::write::SimpleFileOptions;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct HealthResponse {
     status: &'static str,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IdleResponse {
     idle: bool,
     active_workers: usize,
     active_branches: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct StatusResponse {
     status: &'static str,
     version: &'static str,
@@ -36,12 +36,28 @@ pub(super) struct StatusResponse {
     uptime_seconds: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/health",
+    responses(
+        (status = 200, body = HealthResponse),
+    ),
+    tag = "system",
+)]
 pub(super) async fn health() -> Json<HealthResponse> {
     Json(HealthResponse { status: "ok" })
 }
 
 /// Reports whether the instance is idle (no active workers or branches).
 /// Used by the platform to gate rolling updates.
+#[utoipa::path(
+    get,
+    path = "/idle",
+    responses(
+        (status = 200, body = IdleResponse),
+    ),
+    tag = "system",
+)]
 pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleResponse> {
     let blocks = state.channel_status_blocks.read().await;
     let mut total_workers = 0;
@@ -60,6 +76,14 @@ pub(super) async fn idle(State(state): State<Arc<ApiState>>) -> Json<IdleRespons
     })
 }
 
+#[utoipa::path(
+    get,
+    path = "/status",
+    responses(
+        (status = 200, body = StatusResponse),
+    ),
+    tag = "system",
+)]
 pub(super) async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusResponse> {
     let uptime = state.started_at.elapsed();
     Json(StatusResponse {
@@ -71,6 +95,14 @@ pub(super) async fn status(State(state): State<Arc<ApiState>>) -> Json<StatusRes
 }
 
 /// SSE endpoint streaming all agent events to connected clients.
+#[utoipa::path(
+    get,
+    path = "/events",
+    responses(
+        (status = 200, description = "SSE event stream", content_type = "text/event-stream"),
+    ),
+    tag = "system",
+)]
 pub(super) async fn events_sse(
     State(state): State<Arc<ApiState>>,
 ) -> Sse<impl Stream<Item = Result<axum::response::sse::Event, Infallible>>> {
@@ -132,13 +164,22 @@ pub(super) async fn events_sse(
     )
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub struct StorageStatus {
     used_bytes: u64,
     total_bytes: u64,
     available_bytes: u64,
 }
 
+#[utoipa::path(
+    get,
+    path = "/system/storage",
+    responses(
+        (status = 200, body = StorageStatus),
+        (status = 503, description = "No runtime config available"),
+    ),
+    tag = "system",
+)]
 pub(super) async fn storage_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<StorageStatus>, (axum::http::StatusCode, String)> {
@@ -227,6 +268,15 @@ fn directory_size_bytes(root: &Path) -> anyhow::Result<u64> {
     Ok(total)
 }
 
+#[utoipa::path(
+    get,
+    path = "/system/backup/export",
+    responses(
+        (status = 200, description = "Backup archive", content_type = "application/zip"),
+        (status = 503, description = "No runtime config available"),
+    ),
+    tag = "system",
+)]
 pub(super) async fn backup_export(
     State(state): State<Arc<ApiState>>,
 ) -> Result<impl IntoResponse, (axum::http::StatusCode, String)> {
@@ -267,6 +317,17 @@ pub(super) async fn backup_export(
     Ok((headers, archive_bytes))
 }
 
+#[utoipa::path(
+    post,
+    path = "/system/backup/restore",
+    request_body = Vec<u8>,
+    responses(
+        (status = 200, description = "Backup restored successfully"),
+        (status = 400, description = "Empty payload"),
+        (status = 503, description = "No runtime config available"),
+    ),
+    tag = "system",
+)]
 pub(super) async fn backup_restore(
     State(state): State<Arc<ApiState>>,
     body: Bytes,

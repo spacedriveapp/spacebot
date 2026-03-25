@@ -1,20 +1,22 @@
 use super::providers::{
     ANTHROPIC_PROVIDER_BASE_URL, DEEPSEEK_PROVIDER_BASE_URL, FIREWORKS_PROVIDER_BASE_URL,
-    GEMINI_PROVIDER_BASE_URL, GROQ_PROVIDER_BASE_URL, KILO_PROVIDER_BASE_URL,
-    MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL, MISTRAL_PROVIDER_BASE_URL,
-    MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL, OLLAMA_PROVIDER_BASE_URL,
-    OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL, OPENCODE_ZEN_PROVIDER_BASE_URL,
-    OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL, XAI_PROVIDER_BASE_URL,
-    ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL, add_shorthand_provider,
-    infer_routing_from_providers, openrouter_extra_headers, resolve_routing,
+    GEMINI_PROVIDER_BASE_URL, GITHUB_COPILOT_DEFAULT_BASE_URL, GROQ_PROVIDER_BASE_URL,
+    KILO_PROVIDER_BASE_URL, MINIMAX_CN_PROVIDER_BASE_URL, MINIMAX_PROVIDER_BASE_URL,
+    MISTRAL_PROVIDER_BASE_URL, MOONSHOT_PROVIDER_BASE_URL, NVIDIA_PROVIDER_BASE_URL,
+    OLLAMA_PROVIDER_BASE_URL, OPENAI_PROVIDER_BASE_URL, OPENCODE_GO_PROVIDER_BASE_URL,
+    OPENCODE_ZEN_PROVIDER_BASE_URL, OPENROUTER_PROVIDER_BASE_URL, TOGETHER_PROVIDER_BASE_URL,
+    XAI_PROVIDER_BASE_URL, ZAI_CODING_PLAN_BASE_URL, ZHIPU_PROVIDER_BASE_URL,
+    add_shorthand_provider, infer_routing_from_providers, openrouter_extra_headers,
+    resolve_routing,
 };
 use super::toml_schema::*;
 use super::{
     AgentConfig, ApiConfig, ApiType, Binding, BrowserConfig, ChannelConfig, ClosePolicy,
     CoalesceConfig, CompactionConfig, Config, CortexConfig, CronDef, DefaultsConfig, DiscordConfig,
     DiscordInstanceConfig, EmailConfig, EmailInstanceConfig, GroupDef, HumanDef, IngestionConfig,
-    LinkDef, LlmConfig, McpServerConfig, McpTransport, MemoryPersistenceConfig, MessagingConfig,
-    MetricsConfig, OpenCodeConfig, ProjectsConfig, ProviderConfig, SlackCommandConfig, SlackConfig,
+    LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
+    MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
+    ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
     SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
     TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
     validate_named_messaging_adapters,
@@ -142,8 +144,17 @@ fn resolve_close_policy(
 }
 
 impl CortexConfig {
-    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> CortexConfig {
-        CortexConfig {
+    fn resolve(overrides: TomlCortexConfig, defaults: CortexConfig) -> Result<CortexConfig> {
+        let maintenance_interval_secs = overrides
+            .maintenance_interval_secs
+            .unwrap_or(defaults.maintenance_interval_secs);
+        if maintenance_interval_secs < 1 {
+            return Err(
+                ConfigError::Invalid("maintenance_interval_secs must be >= 1".to_string()).into(),
+            );
+        }
+
+        let config = CortexConfig {
             tick_interval_secs: overrides
                 .tick_interval_secs
                 .unwrap_or(defaults.tick_interval_secs),
@@ -171,6 +182,19 @@ impl CortexConfig {
             bulletin_max_turns: overrides
                 .bulletin_max_turns
                 .unwrap_or(defaults.bulletin_max_turns),
+            maintenance_interval_secs,
+            maintenance_decay_rate: overrides
+                .maintenance_decay_rate
+                .unwrap_or(defaults.maintenance_decay_rate),
+            maintenance_prune_threshold: overrides
+                .maintenance_prune_threshold
+                .unwrap_or(defaults.maintenance_prune_threshold),
+            maintenance_min_age_days: overrides
+                .maintenance_min_age_days
+                .unwrap_or(defaults.maintenance_min_age_days),
+            maintenance_merge_similarity_threshold: overrides
+                .maintenance_merge_similarity_threshold
+                .unwrap_or(defaults.maintenance_merge_similarity_threshold),
             association_interval_secs: overrides
                 .association_interval_secs
                 .unwrap_or(defaults.association_interval_secs),
@@ -183,7 +207,15 @@ impl CortexConfig {
             association_max_per_pass: overrides
                 .association_max_per_pass
                 .unwrap_or(defaults.association_max_per_pass),
-        }
+            knowledge_synthesis_max_words: overrides
+                .knowledge_synthesis_max_words
+                .unwrap_or(defaults.knowledge_synthesis_max_words),
+            knowledge_synthesis_debounce_secs: overrides
+                .knowledge_synthesis_debounce_secs
+                .unwrap_or(defaults.knowledge_synthesis_debounce_secs),
+        };
+        config.validate_maintenance_bounds()?;
+        Ok(config)
     }
 }
 
@@ -406,6 +438,7 @@ impl Config {
             minimax_cn_key: std::env::var("MINIMAX_CN_API_KEY").ok(),
             moonshot_key: std::env::var("MOONSHOT_API_KEY").ok(),
             zai_coding_plan_key: std::env::var("ZAI_CODING_PLAN_API_KEY").ok(),
+            github_copilot_key: std::env::var("GITHUB_COPILOT_API_KEY").ok(),
             providers: HashMap::new(),
         };
 
@@ -484,6 +517,16 @@ impl Config {
             OPENCODE_GO_PROVIDER_BASE_URL,
             None,
             false,
+        );
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "github-copilot",
+            llm.github_copilot_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            GITHUB_COPILOT_DEFAULT_BASE_URL,
+            Some("GitHub Copilot"),
+            true,
         );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
@@ -869,13 +912,22 @@ impl Config {
 
         let toml_config: TomlConfig =
             toml::from_str(content).context("failed to parse config TOML")?;
-        // Run full conversion to catch semantic errors (env resolution, defaults, etc.)
+        // Run full conversion with strict binding validation so config
+        // authoring catches unresolvable bindings as errors.
         let instance_dir = Self::default_instance_dir();
-        Self::from_toml(toml_config, instance_dir)?;
+        Self::from_toml_inner(toml_config, instance_dir, true)?;
         Ok(())
     }
 
     pub(super) fn from_toml(toml: TomlConfig, instance_dir: PathBuf) -> Result<Self> {
+        Self::from_toml_inner(toml, instance_dir, false)
+    }
+
+    fn from_toml_inner(
+        toml: TomlConfig,
+        instance_dir: PathBuf,
+        strict_bindings: bool,
+    ) -> Result<Self> {
         // Validate providers before processing
         for (provider_id, config) in &toml.llm.providers {
             // Validate provider_id
@@ -1036,6 +1088,12 @@ impl Config {
                 .as_deref()
                 .and_then(resolve_env_value)
                 .or_else(|| std::env::var("ZAI_CODING_PLAN_API_KEY").ok()),
+            github_copilot_key: toml
+                .llm
+                .github_copilot_key
+                .as_deref()
+                .and_then(resolve_env_value)
+                .or_else(|| std::env::var("GITHUB_COPILOT_API_KEY").ok()),
             providers: toml
                 .llm
                 .providers
@@ -1160,6 +1218,16 @@ impl Config {
             OPENCODE_GO_PROVIDER_BASE_URL,
             None,
             false,
+        );
+
+        add_shorthand_provider(
+            &mut llm.providers,
+            "github-copilot",
+            llm.github_copilot_key.clone(),
+            ApiType::OpenAiChatCompletions,
+            GITHUB_COPILOT_DEFAULT_BASE_URL,
+            Some("GitHub Copilot"),
+            true,
         );
 
         if let Some(minimax_key) = llm.minimax_key.clone() {
@@ -1418,6 +1486,7 @@ impl Config {
                 .defaults
                 .cortex
                 .map(|c| CortexConfig::resolve(c, base_defaults.cortex))
+                .transpose()?
                 .unwrap_or(base_defaults.cortex),
             warmup: toml
                 .defaults
@@ -1634,7 +1703,10 @@ impl Config {
                             .unwrap_or(defaults.ingestion.poll_interval_secs),
                         chunk_size: ig.chunk_size.unwrap_or(defaults.ingestion.chunk_size),
                     }),
-                    cortex: a.cortex.map(|c| CortexConfig::resolve(c, defaults.cortex)),
+                    cortex: a
+                        .cortex
+                        .map(|c| CortexConfig::resolve(c, defaults.cortex))
+                        .transpose()?,
                     warmup: a.warmup.map(|w| WarmupConfig {
                         enabled: w.enabled.unwrap_or(defaults.warmup.enabled),
                         eager_embedding_load: w
@@ -2120,6 +2192,103 @@ impl Config {
                     trigger_prefix: t.trigger_prefix,
                 })
             }),
+            signal: toml.messaging.signal.and_then(|s| {
+                let instances = s
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let http_url = instance.http_url.as_deref().and_then(resolve_env_value);
+                        let account = instance.account.as_deref().and_then(resolve_env_value);
+                        if instance.enabled && (http_url.is_none() || account.is_none()) {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "signal instance is enabled but http_url or account is missing/unresolvable — disabling"
+                            );
+                        }
+                        let has_credentials = http_url.is_some() && account.is_some();
+                        SignalInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            http_url: http_url.unwrap_or_default(),
+                            account: account.unwrap_or_default(),
+                            dm_allowed_users: instance.dm_allowed_users,
+                            group_ids: instance.group_ids,
+                            group_allowed_users: instance.group_allowed_users,
+                            ignore_stories: instance.ignore_stories,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let http_url = std::env::var("SIGNAL_HTTP_URL")
+                    .ok()
+                    .or_else(|| s.http_url.as_deref().and_then(resolve_env_value));
+                let account = std::env::var("SIGNAL_ACCOUNT")
+                    .ok()
+                    .or_else(|| s.account.as_deref().and_then(resolve_env_value));
+
+                if (http_url.is_none() || account.is_none()) && instances.is_empty() {
+                    return None;
+                }
+
+                Some(SignalConfig {
+                    enabled: s.enabled,
+                    http_url: http_url.unwrap_or_default(),
+                    account: account.unwrap_or_default(),
+                    instances,
+                    dm_allowed_users: s.dm_allowed_users,
+                    group_ids: s.group_ids,
+                    group_allowed_users: s.group_allowed_users,
+                    ignore_stories: s.ignore_stories,
+                })
+            }),
+            mattermost: toml.messaging.mattermost.and_then(|mm| {
+                let instances = mm
+                    .instances
+                    .into_iter()
+                    .map(|instance| {
+                        let token = instance.token.as_deref().and_then(resolve_env_value);
+                        let base_url = instance.base_url.as_deref().and_then(resolve_env_value);
+                        let has_credentials = token.is_some() && base_url.is_some();
+                        if instance.enabled && !has_credentials {
+                            tracing::warn!(
+                                adapter = %instance.name,
+                                "mattermost instance is enabled but credentials are missing/unresolvable — disabling"
+                            );
+                        }
+                        MattermostInstanceConfig {
+                            name: instance.name,
+                            enabled: instance.enabled && has_credentials,
+                            base_url: base_url.unwrap_or_default(),
+                            token: token.unwrap_or_default(),
+                            team_id: instance.team_id,
+                            dm_allowed_users: instance.dm_allowed_users,
+                            max_attachment_bytes: instance.max_attachment_bytes,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+
+                let token = std::env::var("MATTERMOST_TOKEN")
+                    .ok()
+                    .or_else(|| mm.token.as_deref().and_then(resolve_env_value));
+                let base_url = std::env::var("MATTERMOST_BASE_URL")
+                    .ok()
+                    .or_else(|| mm.base_url.as_deref().and_then(resolve_env_value));
+
+                if (token.is_none() || base_url.is_none()) && instances.is_empty() {
+                    tracing::warn!("mattermost config present but no credentials found");
+                    return None;
+                }
+
+                Some(MattermostConfig {
+                    enabled: mm.enabled,
+                    base_url: base_url.unwrap_or_default(),
+                    token: token.unwrap_or_default(),
+                    team_id: mm.team_id,
+                    instances,
+                    dm_allowed_users: mm.dm_allowed_users,
+                    max_attachment_bytes: mm.max_attachment_bytes,
+                })
+            }),
         };
 
         let bindings: Vec<Binding> = toml
@@ -2132,13 +2301,14 @@ impl Config {
                 guild_id: b.guild_id,
                 workspace_id: b.workspace_id,
                 chat_id: b.chat_id,
+                team_id: b.team_id,
                 channel_ids: b.channel_ids,
                 require_mention: b.require_mention,
                 dm_allowed_users: b.dm_allowed_users,
             })
             .collect();
 
-        validate_named_messaging_adapters(&messaging, &bindings)?;
+        let bindings = validate_named_messaging_adapters(&messaging, bindings, strict_bindings)?;
 
         let api = ApiConfig {
             enabled: toml.api.enabled,

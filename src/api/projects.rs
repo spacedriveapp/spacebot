@@ -48,19 +48,19 @@ fn sanitize_segment(name: &str) -> Result<String, StatusCode> {
 // Query / request types
 // ---------------------------------------------------------------------------
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct AgentQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct ProjectListQuery {
     agent_id: String,
     #[serde(default)]
     status: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateProjectRequest {
     agent_id: String,
     name: String,
@@ -78,7 +78,7 @@ pub(super) struct CreateProjectRequest {
     auto_discover: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateProjectRequest {
     agent_id: String,
     #[serde(default)]
@@ -95,7 +95,7 @@ pub(super) struct UpdateProjectRequest {
     status: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateRepoRequest {
     agent_id: String,
     name: String,
@@ -108,7 +108,7 @@ pub(super) struct CreateRepoRequest {
     description: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateWorktreeRequest {
     agent_id: String,
     repo_id: String,
@@ -123,40 +123,40 @@ pub(super) struct CreateWorktreeRequest {
 // Response types
 // ---------------------------------------------------------------------------
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProjectListResponse {
     projects: Vec<crate::projects::Project>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ProjectResponse {
     #[serde(flatten)]
     project: ProjectWithRelations,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RepoResponse {
     repo: crate::projects::ProjectRepo,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WorktreeResponse {
     worktree: crate::projects::ProjectWorktree,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct ActionResponse {
     success: bool,
     message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct DiskUsageResponse {
     total_bytes: u64,
     entries: Vec<DiskUsageEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct DiskUsageEntry {
     name: String,
     bytes: u64,
@@ -310,6 +310,18 @@ async fn compute_and_cache_disk_usage(
 // ---------------------------------------------------------------------------
 
 /// GET /agents/projects — list projects for an agent.
+#[utoipa::path(
+    get,
+    path = "/agents/projects",
+    params(
+        ProjectListQuery,
+    ),
+    responses(
+        (status = 200, body = ProjectListResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn list_projects(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<ProjectListQuery>,
@@ -331,6 +343,16 @@ pub(super) async fn list_projects(
 }
 
 /// POST /agents/projects — create a new project.
+#[utoipa::path(
+    post,
+    path = "/agents/projects",
+    request_body = CreateProjectRequest,
+    responses(
+        (status = 200, body = ProjectResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn create_project(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateProjectRequest>,
@@ -414,6 +436,19 @@ pub(super) async fn create_project(
 }
 
 /// GET /agents/projects/{id} — get a project with repos and worktrees.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{id}",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = ProjectResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn get_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -435,6 +470,19 @@ pub(super) async fn get_project(
 }
 
 /// PUT /agents/projects/{id} — update a project.
+#[utoipa::path(
+    put,
+    path = "/agents/projects/{id}",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+    ),
+    request_body = UpdateProjectRequest,
+    responses(
+        (status = 200, body = ProjectResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn update_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -479,6 +527,19 @@ pub(super) async fn update_project(
 }
 
 /// DELETE /agents/projects/{id} — delete a project (DB records only).
+#[utoipa::path(
+    delete,
+    path = "/agents/projects/{id}",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = ActionResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn delete_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -509,6 +570,19 @@ pub(super) async fn delete_project(
 }
 
 /// POST /agents/projects/{id}/scan — re-scan project root for repos and worktrees.
+#[utoipa::path(
+    post,
+    path = "/agents/projects/{id}/scan",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = ProjectResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn scan_project(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -594,6 +668,19 @@ pub(super) async fn scan_project(
 }
 
 /// POST /agents/projects/{id}/repos — add a repo to a project.
+#[utoipa::path(
+    post,
+    path = "/agents/projects/{id}/repos",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+    ),
+    request_body = CreateRepoRequest,
+    responses(
+        (status = 200, body = RepoResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn create_repo(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -635,6 +722,20 @@ pub(super) async fn create_repo(
 }
 
 /// DELETE /agents/projects/{project_id}/repos/{repo_id} — remove a repo.
+#[utoipa::path(
+    delete,
+    path = "/agents/projects/{project_id}/repos/{repo_id}",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("repo_id" = String, Path, description = "Repository ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = ActionResponse),
+        (status = 404, description = "Agent, project, or repo not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn delete_repo(
     State(state): State<Arc<ApiState>>,
     Path((project_id, repo_id)): Path<(String, String)>,
@@ -672,6 +773,19 @@ pub(super) async fn delete_repo(
 }
 
 /// POST /agents/projects/{id}/worktrees — create a worktree.
+#[utoipa::path(
+    post,
+    path = "/agents/projects/{id}/worktrees",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+    ),
+    request_body = CreateWorktreeRequest,
+    responses(
+        (status = 200, body = WorktreeResponse),
+        (status = 404, description = "Agent, project, or repo not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn create_worktree(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,
@@ -760,6 +874,20 @@ pub(super) async fn create_worktree(
 }
 
 /// DELETE /agents/projects/{project_id}/worktrees/{worktree_id} — remove a worktree.
+#[utoipa::path(
+    delete,
+    path = "/agents/projects/{project_id}/worktrees/{worktree_id}",
+    params(
+        ("project_id" = String, Path, description = "Project ID"),
+        ("worktree_id" = String, Path, description = "Worktree ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = ActionResponse),
+        (status = 404, description = "Agent, project, or worktree not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn delete_worktree(
     State(state): State<Arc<ApiState>>,
     Path((project_id, worktree_id)): Path<(String, String)>,
@@ -832,6 +960,19 @@ pub(super) async fn delete_worktree(
 }
 
 /// GET /agents/projects/{id}/disk-usage — calculate disk usage for a project.
+#[utoipa::path(
+    get,
+    path = "/agents/projects/{id}/disk-usage",
+    params(
+        ("id" = String, Path, description = "Project ID"),
+        AgentQuery,
+    ),
+    responses(
+        (status = 200, body = DiskUsageResponse),
+        (status = 404, description = "Agent or project not found"),
+    ),
+    tag = "projects",
+)]
 pub(super) async fn disk_usage(
     State(state): State<Arc<ApiState>>,
     Path(project_id): Path<String>,

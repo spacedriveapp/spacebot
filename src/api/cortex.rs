@@ -14,19 +14,19 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct CortexEventsResponse {
     events: Vec<CortexEvent>,
     total: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct CortexChatMessagesResponse {
     messages: Vec<CortexChatMessage>,
     thread_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CortexChatMessagesQuery {
     agent_id: String,
     /// If omitted, loads the latest thread.
@@ -39,7 +39,7 @@ fn default_cortex_chat_limit() -> i64 {
     50
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CortexChatSendRequest {
     agent_id: String,
     thread_id: String,
@@ -47,7 +47,7 @@ pub(super) struct CortexChatSendRequest {
     channel_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CortexEventsQuery {
     agent_id: String,
     #[serde(default = "default_cortex_events_limit")]
@@ -72,6 +72,21 @@ fn map_cortex_chat_send_error(error: &CortexChatSendError) -> StatusCode {
 /// Load persisted cortex chat history for a thread.
 /// If no thread_id is provided, loads the latest thread.
 /// If no threads exist, returns an empty list with a fresh thread_id.
+#[utoipa::path(
+    get,
+    path = "/cortex-chat/messages",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("thread_id" = Option<String>, Query, description = "Thread ID (omit for latest)"),
+        ("limit" = i64, Query, description = "Maximum messages to return (default: 50, max: 200)"),
+    ),
+    responses(
+        (status = 200, body = CortexChatMessagesResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "cortex",
+)]
 pub(super) async fn cortex_chat_messages(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<CortexChatMessagesQuery>,
@@ -112,6 +127,18 @@ pub(super) async fn cortex_chat_messages(
 /// - `tool_completed` — a tool call finished (with result preview)
 /// - `done` — full response text
 /// - `error` — if something went wrong
+#[utoipa::path(
+    post,
+    path = "/cortex-chat/send",
+    request_body = CortexChatSendRequest,
+    responses(
+        (status = 200, description = "SSE stream of chat events"),
+        (status = 404, description = "Agent not found"),
+        (status = 409, description = "Cortex chat session busy"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "cortex",
+)]
 pub(super) async fn cortex_chat_send(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<CortexChatSendRequest>,
@@ -164,23 +191,36 @@ pub(super) async fn cortex_chat_send(
 
 // -- Thread management --
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct CortexChatThreadsResponse {
     threads: Vec<CortexChatThread>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CortexChatThreadsQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CortexChatDeleteThreadRequest {
     agent_id: String,
     thread_id: String,
 }
 
 /// List all cortex chat threads for an agent, newest first.
+#[utoipa::path(
+    get,
+    path = "/cortex-chat/threads",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = CortexChatThreadsResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "cortex",
+)]
 pub(super) async fn cortex_chat_threads(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<CortexChatThreadsQuery>,
@@ -198,6 +238,17 @@ pub(super) async fn cortex_chat_threads(
 }
 
 /// Delete a cortex chat thread and all its messages.
+#[utoipa::path(
+    delete,
+    path = "/cortex-chat/thread",
+    request_body = CortexChatDeleteThreadRequest,
+    responses(
+        (status = 204, description = "Thread deleted successfully"),
+        (status = 404, description = "Agent or thread not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "cortex",
+)]
 pub(super) async fn cortex_chat_delete_thread(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<CortexChatDeleteThreadRequest>,
@@ -219,6 +270,22 @@ pub(super) async fn cortex_chat_delete_thread(
 }
 
 /// List cortex events for an agent with optional type filter, newest first.
+#[utoipa::path(
+    get,
+    path = "/cortex/events",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("limit" = i64, Query, description = "Maximum events to return (default: 50, max: 200)"),
+        ("offset" = i64, Query, description = "Offset for pagination (default: 0)"),
+        ("event_type" = Option<String>, Query, description = "Filter by event type"),
+    ),
+    responses(
+        (status = 200, body = CortexEventsResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "cortex",
+)]
 pub(super) async fn cortex_events(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<CortexEventsQuery>,

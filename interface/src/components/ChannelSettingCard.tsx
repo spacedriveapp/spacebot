@@ -23,11 +23,12 @@ import {
 	Toggle,
 } from "@/ui";
 import {PlatformIcon} from "@/lib/platformIcons";
+import {isValidE164, E164_ERROR_TEXT, validateSignalDmAllowedUsers} from "@/lib/format";
 import {TagInput} from "@/components/TagInput";
 import {FontAwesomeIcon} from "@fortawesome/react-fontawesome";
 import {faChevronDown, faPlus} from "@fortawesome/free-solid-svg-icons";
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal";
 
 const PLATFORM_LABELS: Record<Platform, string> = {
 	discord: "Discord",
@@ -36,6 +37,8 @@ const PLATFORM_LABELS: Record<Platform, string> = {
 	twitch: "Twitch",
 	email: "Email",
 	webhook: "Webhook",
+	mattermost: "Mattermost",
+	signal: "Signal",
 };
 
 const DOC_LINKS: Partial<Record<Platform, string>> = {
@@ -43,6 +46,8 @@ const DOC_LINKS: Partial<Record<Platform, string>> = {
 	slack: "https://docs.spacebot.sh/slack-setup",
 	telegram: "https://docs.spacebot.sh/telegram-setup",
 	twitch: "https://docs.spacebot.sh/twitch-setup",
+	mattermost: "https://docs.spacebot.sh/mattermost-setup",
+	signal: "https://docs.spacebot.sh/signal-setup",
 };
 
 // --- Platform Catalog (Left Column) ---
@@ -59,6 +64,8 @@ export function PlatformCatalog({onAddInstance}: PlatformCatalogProps) {
 		"twitch",
 		"email",
 		"webhook",
+		"mattermost",
+		"signal",
 	];
 
 	const COMING_SOON = [
@@ -636,6 +643,48 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 				credentials.webhook_bind = credentialInputs.webhook_bind.trim();
 			if (credentialInputs.webhook_auth_token?.trim())
 				credentials.webhook_auth_token = credentialInputs.webhook_auth_token.trim();
+		} else if (platform === "mattermost") {
+			if (!credentialInputs.mattermost_base_url?.trim()) {
+				setMessage({text: "Server URL is required", type: "error"});
+				return;
+			}
+			if (!credentialInputs.mattermost_token?.trim()) {
+				setMessage({text: "Access token is required", type: "error"});
+				return;
+			}
+			credentials.mattermost_base_url = credentialInputs.mattermost_base_url.trim();
+			credentials.mattermost_token = credentialInputs.mattermost_token.trim();
+		} else if (platform === "signal") {
+			if (!credentialInputs.signal_http_url?.trim()) {
+				setMessage({text: "HTTP URL is required", type: "error"});
+				return;
+			}
+			if (!credentialInputs.signal_account?.trim()) {
+				setMessage({text: "Account phone number is required", type: "error"});
+				return;
+			}
+			// Basic E.164 validation (frontend) - match backend rules
+			const account = credentialInputs.signal_account.trim();
+			if (!isValidE164(account)) {
+				setMessage({
+					text: E164_ERROR_TEXT,
+					type: "error"
+				});
+				return;
+			}
+			credentials.signal_http_url = credentialInputs.signal_http_url.trim();
+			credentials.signal_account = account;
+			// Normalize: always omit when blank (empty or undefined) for consistent empty-state behavior
+			if (credentialInputs.signal_dm_allowed_users?.trim()) {
+				const result = validateSignalDmAllowedUsers(credentialInputs.signal_dm_allowed_users);
+				if (!result.valid) {
+					setMessage({text: result.error, type: "error"});
+					return;
+				}
+				if (result.entries.length > 0) {
+					credentials.signal_dm_allowed_users = result.entries.join(',');
+				}
+			}
 		}
 
 		if (!isDefault && !instanceName.trim()) {
@@ -921,6 +970,75 @@ export function AddInstanceCard({platform, isDefault, onCancel, onCreated}: AddI
 								placeholder="Optional — leave empty for no auth"
 								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
 							/>
+						</div>
+					</>
+				)}
+
+				{platform === "mattermost" && (
+					<>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Server URL</label>
+							<Input
+								size="lg"
+								value={credentialInputs.mattermost_base_url ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_base_url: e.target.value})}
+								placeholder="https://mattermost.example.com"
+							/>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Access Token</label>
+							<Input
+								type="password"
+								size="lg"
+								value={credentialInputs.mattermost_token ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, mattermost_token: e.target.value})}
+								placeholder="Personal access token from Mattermost account settings"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+						</div>
+					</>
+				)}
+
+				{platform === "signal" && (
+					<>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">HTTP URL</label>
+							<Input
+								size="lg"
+								value={credentialInputs.signal_http_url ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, signal_http_url: e.target.value})}
+								placeholder="http://127.0.0.1:8686"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+							<p className="mt-1 text-xs text-ink-faint">
+								URL of your signal-cli daemon (e.g., http://127.0.0.1:8686)
+							</p>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">Account Phone Number</label>
+							<Input
+								size="lg"
+								value={credentialInputs.signal_account ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, signal_account: e.target.value})}
+								placeholder="+1234567890"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+							<p className="mt-1 text-xs text-ink-faint">
+								Your Signal phone number in E.164 format (+ followed by 6-15 digits, first digit 1-9)
+							</p>
+						</div>
+						<div>
+							<label className="mb-1.5 block text-sm font-medium text-ink-dull">DM Allowed Users (Optional)</label>
+							<Input
+								size="lg"
+								value={credentialInputs.signal_dm_allowed_users ?? ""}
+								onChange={(e) => setCredentialInputs({...credentialInputs, signal_dm_allowed_users: e.target.value})}
+								placeholder="+1234567890, +1987654321"
+								onKeyDown={(e) => { if (e.key === "Enter") handleSave(); }}
+							/>
+							<p className="mt-1 text-xs text-ink-faint">
+								Allowed DM senders: E.164 phone numbers (+1234567890) or uuid:xxx identifiers. Comma-separated. If empty, DMs are blocked.
+							</p>
 						</div>
 					</>
 				)}

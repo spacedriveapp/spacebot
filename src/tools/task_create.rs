@@ -12,6 +12,7 @@ pub struct TaskCreateTool {
     task_store: Arc<TaskStore>,
     agent_id: String,
     created_by: String,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 impl TaskCreateTool {
@@ -24,7 +25,13 @@ impl TaskCreateTool {
             task_store,
             agent_id: agent_id.into(),
             created_by: created_by.into(),
+            working_memory: None,
         }
+    }
+
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
+        self
     }
 }
 
@@ -120,7 +127,8 @@ impl Tool for TaskCreateTool {
         let task = self
             .task_store
             .create(CreateTaskInput {
-                agent_id: self.agent_id.clone(),
+                owner_agent_id: self.agent_id.clone(),
+                assigned_agent_id: self.agent_id.clone(),
                 title: args.title,
                 description: args.description,
                 status,
@@ -132,6 +140,16 @@ impl Tool for TaskCreateTool {
             })
             .await
             .map_err(|error| TaskCreateError(format!("{error}")))?;
+
+        if let Some(working_memory) = &self.working_memory {
+            working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::TaskUpdate,
+                    format!("Task created #{}: {}", task.task_number, task.title),
+                )
+                .importance(0.5)
+                .record();
+        }
 
         Ok(TaskCreateOutput {
             success: true,

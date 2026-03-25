@@ -9,7 +9,7 @@ use sqlx::{Row as _, SqlitePool};
 
 // Enums
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ProjectStatus {
     Active,
@@ -60,7 +60,7 @@ pub struct ProjectSettings {
 
 // Domain types
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct Project {
     pub id: String,
     pub agent_id: String,
@@ -83,7 +83,7 @@ impl Project {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProjectRepo {
     pub id: String,
     pub project_id: String,
@@ -99,7 +99,7 @@ pub struct ProjectRepo {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProjectWorktree {
     pub id: String,
     pub project_id: String,
@@ -114,7 +114,7 @@ pub struct ProjectWorktree {
 }
 
 /// Full project with nested repos and worktrees for API responses.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProjectWithRelations {
     #[serde(flatten)]
     pub project: Project,
@@ -123,7 +123,7 @@ pub struct ProjectWithRelations {
 }
 
 /// Worktree with the source repo name resolved.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct ProjectWorktreeWithRepo {
     #[serde(flatten)]
     pub worktree: ProjectWorktree,

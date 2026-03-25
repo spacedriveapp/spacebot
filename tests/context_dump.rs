@@ -122,13 +122,14 @@ async fn bootstrap_deps() -> anyhow::Result<(spacebot::AgentDeps, spacebot::conf
         links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
         agent_names: Arc::new(std::collections::HashMap::new()),
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-        task_store_registry: Arc::new(arc_swap::ArcSwap::from_pointee(
-            std::collections::HashMap::new(),
-        )),
         process_control_registry: Arc::new(
             spacebot::agent::process_control::ProcessControlRegistry::new(),
         ),
         injection_tx: tokio::sync::mpsc::channel(1).0,
+        working_memory: spacebot::memory::WorkingMemoryStore::new(
+            db.sqlite.clone(),
+            chrono_tz::Tz::UTC,
+        ),
     };
 
     Ok((deps, config))
@@ -186,7 +187,7 @@ fn build_channel_system_prompt(rc: &spacebot::config::RuntimeConfig) -> String {
         .expect("failed to render worker capabilities");
 
     let conversation_context = prompt_engine
-        .render_conversation_context("discord", Some("Test Server"), Some("#general"))
+        .render_conversation_context("discord", Some("Test Server"), Some("#general"), None)
         .ok();
 
     let empty_to_none = |s: String| if s.is_empty() { None } else { Some(s) };
@@ -225,7 +226,8 @@ async fn dump_channel_context() {
     let status_block = Arc::new(tokio::sync::RwLock::new(
         spacebot::agent::status::StatusBlock::new(),
     ));
-    let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
+    let (raw_tx, _response_rx) = tokio::sync::mpsc::channel(16);
+    let response_tx = spacebot::RoutedSender::new(raw_tx, spacebot::InboundMessage::empty());
 
     let state = spacebot::agent::channel::ChannelState {
         channel_id,
@@ -244,6 +246,10 @@ async fn dump_channel_context() {
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
         reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
+        prompt_snapshot_store: None,
+        live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -259,6 +265,8 @@ async fn dump_channel_context() {
         None,
         None,
         true,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -321,6 +329,7 @@ async fn dump_branch_context() {
         conversation_logger,
         channel_store,
         run_logger,
+        spacebot::tools::BranchToolProfile::Default,
     );
 
     let tool_defs = branch_tool_server
@@ -371,6 +380,7 @@ async fn dump_worker_context() {
             Vec::new(),
             &[],
             browser_config.persist_session,
+            None,
         )
         .expect("failed to render worker prompt");
     print_section("WORKER SYSTEM PROMPT", &worker_prompt);
@@ -455,7 +465,8 @@ async fn dump_all_contexts() {
     let channel_prompt = build_channel_system_prompt(rc);
 
     let channel_id: spacebot::ChannelId = Arc::from("test-channel");
-    let (response_tx, _response_rx) = tokio::sync::mpsc::channel(16);
+    let (raw_tx, _response_rx) = tokio::sync::mpsc::channel(16);
+    let response_tx = spacebot::RoutedSender::new(raw_tx, spacebot::InboundMessage::empty());
     let state = spacebot::agent::channel::ChannelState {
         channel_id,
         history: Arc::new(tokio::sync::RwLock::new(Vec::new())),
@@ -475,6 +486,10 @@ async fn dump_all_contexts() {
         screenshot_dir: std::path::PathBuf::from("/tmp/screenshots"),
         logs_dir: std::path::PathBuf::from("/tmp/logs"),
         reply_target_message_id: Arc::new(tokio::sync::RwLock::new(None)),
+        prompt_snapshot_store: None,
+        live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
+            std::collections::HashMap::new(),
+        )),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
@@ -489,6 +504,8 @@ async fn dump_all_contexts() {
         None,
         None,
         true,
+        None,
+        None,
     )
     .await
     .expect("failed to add channel tools");
@@ -520,6 +537,7 @@ async fn dump_all_contexts() {
         conversation_logger,
         channel_store,
         run_logger,
+        spacebot::tools::BranchToolProfile::Default,
     );
     let branch_tool_defs = branch_tool_server.get_tool_defs(None).await.unwrap();
     let branch_tools_text = format_tool_defs(&branch_tool_defs);
@@ -546,6 +564,7 @@ async fn dump_all_contexts() {
             Vec::new(),
             &[],
             browser_config.persist_session,
+            None,
         )
         .expect("failed to render worker prompt");
     let brave_search_key = (**rc.brave_search_key.load()).clone();

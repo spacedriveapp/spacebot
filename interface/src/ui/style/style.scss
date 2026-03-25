@@ -13,6 +13,12 @@
 		-ms-overflow-style: none;
 		scrollbar-width: none;
 	}
+
+}
+
+html, body {
+	overflow: hidden;
+	height: 100%;
 }
 
 html {

@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IngestFileInfo {
     content_hash: String,
     filename: String,
@@ -19,33 +19,46 @@ pub(super) struct IngestFileInfo {
     completed_at: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IngestFilesResponse {
     files: Vec<IngestFileInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IngestUploadResponse {
     uploaded: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IngestDeleteResponse {
     success: bool,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct IngestQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct IngestDeleteQuery {
     agent_id: String,
     content_hash: String,
 }
 
 /// List ingested files with progress info for in-progress ones.
+#[utoipa::path(
+    get,
+    path = "/agents/ingest/files",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = IngestFilesResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "ingest",
+)]
 pub(super) async fn list_ingest_files(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IngestQuery>,
@@ -95,6 +108,20 @@ pub(super) async fn list_ingest_files(
 }
 
 /// Upload one or more files to the agent's ingest directory.
+#[utoipa::path(
+    post,
+    path = "/agents/ingest/files",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = IngestUploadResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "ingest",
+)]
 pub(super) async fn upload_ingest_file(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IngestQuery>,
@@ -195,6 +222,20 @@ pub(super) async fn upload_ingest_file(
 }
 
 /// Delete a completed ingestion file record from history.
+#[utoipa::path(
+    delete,
+    path = "/agents/ingest/files",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("content_hash" = String, Query, description = "Content hash of the file to delete"),
+    ),
+    responses(
+        (status = 200, body = IngestDeleteResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "ingest",
+)]
 pub(super) async fn delete_ingest_file(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IngestDeleteQuery>,

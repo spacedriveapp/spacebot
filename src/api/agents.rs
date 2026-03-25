@@ -23,12 +23,12 @@ fn hosted_agent_limit() -> Option<usize> {
         .filter(|value| *value > 0)
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct AgentsResponse {
     agents: Vec<AgentInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct AgentOverviewResponse {
     memory_counts: HashMap<String, i64>,
     memory_total: i64,
@@ -42,27 +42,27 @@ pub(super) struct AgentOverviewResponse {
     latest_bulletin: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct DayCount {
     date: String,
     count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct ActivityDayCount {
     date: String,
     branches: i64,
     workers: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct HeatmapCell {
     day: i64,
     hour: i64,
     count: i64,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct CronJobInfo {
     id: String,
     prompt: String,
@@ -75,7 +75,7 @@ struct CronJobInfo {
     timeout_secs: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct InstanceOverviewResponse {
     version: &'static str,
     uptime_seconds: u64,
@@ -83,7 +83,7 @@ pub(super) struct InstanceOverviewResponse {
     agents: Vec<AgentSummary>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 struct AgentSummary {
     id: String,
     channel_count: usize,
@@ -95,24 +95,24 @@ struct AgentSummary {
     profile: Option<crate::agent::cortex::AgentProfile>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct AgentProfileResponse {
     profile: Option<crate::agent::cortex::AgentProfile>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct IdentityResponse {
     soul: Option<String>,
     identity: Option<String>,
     role: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct IdentityQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct IdentityUpdateRequest {
     agent_id: String,
     soul: Option<String>,
@@ -120,12 +120,12 @@ pub(super) struct IdentityUpdateRequest {
     role: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct AgentOverviewQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub struct CreateAgentRequest {
     pub agent_id: String,
     pub display_name: Option<String>,
@@ -139,7 +139,7 @@ pub struct CreateAgentResult {
     pub message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateAgentRequest {
     agent_id: String,
     display_name: Option<String>,
@@ -148,51 +148,51 @@ pub(super) struct UpdateAgentRequest {
     gradient_end: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct DeleteAgentQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct AgentMcpQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct ReconnectMcpRequest {
     agent_id: String,
     server_name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct AgentMcpResponse {
     servers: Vec<crate::mcp::McpServerStatus>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct WarmupQuery {
     agent_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct WarmupTriggerRequest {
     agent_id: Option<String>,
     #[serde(default)]
     force: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WarmupStatusEntry {
     agent_id: String,
     status: crate::config::WarmupStatus,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WarmupStatusResponse {
     statuses: Vec<WarmupStatusEntry>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct WarmupTriggerResponse {
     status: &'static str,
     forced: bool,
@@ -272,6 +272,14 @@ fn resolve_warmup_agent_ids(
 }
 
 /// List all configured agents with their config summaries.
+#[utoipa::path(
+    get,
+    path = "/agents",
+    responses(
+        (status = 200, body = AgentsResponse),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<AgentsResponse> {
     let agents = state.agent_configs.load();
     Json(AgentsResponse {
@@ -280,6 +288,18 @@ pub(super) async fn list_agents(State(state): State<Arc<ApiState>>) -> Json<Agen
 }
 
 /// List MCP connection status for an agent.
+#[utoipa::path(
+    get,
+    path = "/agents/mcp",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = AgentMcpResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn list_agent_mcp(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AgentMcpQuery>,
@@ -294,6 +314,17 @@ pub(super) async fn list_agent_mcp(
 }
 
 /// Force reconnect for a single MCP server on an agent.
+#[utoipa::path(
+    post,
+    path = "/agents/mcp/reconnect",
+    request_body = ReconnectMcpRequest,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 404, description = "Agent not found"),
+        (status = 400, description = "Failed to reconnect"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn reconnect_agent_mcp(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<ReconnectMcpRequest>,
@@ -325,6 +356,18 @@ pub(super) async fn reconnect_agent_mcp(
 }
 
 /// Get warmup status for one agent or all agents.
+#[utoipa::path(
+    get,
+    path = "/agents/warmup",
+    params(
+        ("agent_id" = Option<String>, Query, description = "Optional agent ID to get status for a specific agent"),
+    ),
+    responses(
+        (status = 200, body = WarmupStatusResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn get_warmup_status(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<WarmupQuery>,
@@ -354,6 +397,17 @@ pub(super) async fn get_warmup_status(
 }
 
 /// Trigger warmup for one agent or all agents.
+#[utoipa::path(
+    post,
+    path = "/agents/warmup/trigger",
+    request_body = WarmupTriggerRequest,
+    responses(
+        (status = 200, body = WarmupTriggerResponse),
+        (status = 503, description = "LLM manager not available"),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn trigger_warmup(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<WarmupTriggerRequest>,
@@ -371,8 +425,6 @@ pub(super) async fn trigger_warmup(
     let mcp_managers = state.mcp_managers.load();
     let pools = state.agent_pools.load();
     let sandboxes = state.sandboxes.load();
-    let task_stores = state.task_stores.load();
-
     let runtime_config_ids = runtime_configs.keys().cloned().collect::<HashSet<_>>();
     let memory_search_ids = memory_searches.keys().cloned().collect::<HashSet<_>>();
     let mcp_manager_ids = mcp_managers.keys().cloned().collect::<HashSet<_>>();
@@ -402,21 +454,32 @@ pub(super) async fn trigger_warmup(
         let Some(sandbox) = sandboxes.get(agent_id).cloned() else {
             continue;
         };
-        let task_store = task_stores
-            .get(agent_id)
-            .cloned()
-            .unwrap_or_else(|| Arc::new(crate::tasks::TaskStore::new(sqlite_pool.clone())));
+        let Some(task_store) = state.task_store.load().as_ref().clone() else {
+            tracing::warn!(
+                agent_id,
+                "global task store not initialized, skipping warmup"
+            );
+            continue;
+        };
 
         let llm_manager = llm_manager.clone();
         let force = request.force;
         let agent_id = agent_id.clone();
-        let task_store_registry = state.task_store_registry.clone();
         let injection_tx = state.injection_tx.clone();
         let humans = (**state.agent_humans.load()).clone();
         tokio::spawn(async move {
             let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let project_store =
                 std::sync::Arc::new(crate::projects::ProjectStore::new(sqlite_pool.clone()));
+            let working_memory_tz = runtime_config
+                .user_timezone
+                .load()
+                .as_deref()
+                .or(runtime_config.cron_timezone.load().as_deref())
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC);
+            let working_memory =
+                crate::memory::WorkingMemoryStore::new(sqlite_pool.clone(), working_memory_tz);
             let deps = crate::AgentDeps {
                 agent_id: Arc::from(agent_id.as_str()),
                 memory_search,
@@ -434,11 +497,11 @@ pub(super) async fn trigger_warmup(
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
                 humans: Arc::new(arc_swap::ArcSwap::from_pointee(humans)),
-                task_store_registry,
                 process_control_registry: Arc::new(
                     crate::agent::process_control::ProcessControlRegistry::new(),
                 ),
                 injection_tx,
+                working_memory,
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -453,6 +516,18 @@ pub(super) async fn trigger_warmup(
 }
 
 /// Create a new agent and initialize it live (directories, databases, memory, identity, cron, cortex).
+#[utoipa::path(
+    post,
+    path = "/agents",
+    request_body = CreateAgentRequest,
+    responses(
+        (status = 201, body = serde_json::Value, description = "Agent created successfully"),
+        (status = 400, description = "Invalid request or agent limit reached"),
+        (status = 409, description = "Agent already exists"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn create_agent(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateAgentRequest>,
@@ -518,6 +593,18 @@ pub async fn create_agent_internal(
     // Acquire the config write mutex to prevent concurrent read-modify-write races.
     let _config_guard = state.config_write_mutex.lock().await;
 
+    // Fail early if messaging manager is unavailable — before any config write,
+    // directory creation, or database init that would leave a half-created agent.
+    let messaging_manager = {
+        let guard = state.messaging_manager.read().await;
+        guard
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| {
+                "Messaging manager not initialized. Please ensure messaging adapters are configured before creating agents.".to_string()
+            })?
+    };
+
     let content = if config_path.exists() {
         tokio::fs::read_to_string(&config_path)
             .await
@@ -539,6 +626,19 @@ pub async fn create_agent_internal(
     let agents_array = doc["agents"]
         .as_array_of_tables_mut()
         .ok_or_else(|| "agents is not an array of tables in config.toml".to_string())?;
+
+    // Revalidate uniqueness under the lock — another request may have written the
+    // same agent_id to config.toml between our first check and mutex acquisition.
+    // Check against the parsed TOML document (agents_array) rather than the stale
+    // in-memory cache to ensure we catch concurrent writes.
+    if agents_array.iter().any(|t| {
+        t.get("id")
+            .and_then(|v| v.as_str())
+            .map(|id| id == agent_id)
+            .unwrap_or(false)
+    }) {
+        return Err(format!("Agent '{agent_id}' already exists"));
+    }
 
     let mut new_table = toml_edit::Table::new();
     new_table["id"] = toml_edit::value(&agent_id);
@@ -683,7 +783,12 @@ pub async fn create_agent_internal(
         embedding_table,
         embedding_model,
     ));
-    let task_store = std::sync::Arc::new(crate::tasks::TaskStore::new(db.sqlite.clone()));
+    let task_store = state
+        .task_store
+        .load()
+        .as_ref()
+        .clone()
+        .ok_or_else(|| "global task store not initialized".to_string())?;
 
     let (event_tx, memory_event_tx) = crate::create_process_event_buses();
     let arc_agent_id: crate::AgentId = std::sync::Arc::from(agent_id.as_str());
@@ -776,15 +881,11 @@ pub async fn create_agent_internal(
         event_tx: event_tx.clone(),
         memory_event_tx: memory_event_tx.clone(),
         sqlite_pool: db.sqlite.clone(),
-        messaging_manager: {
-            let guard = state.messaging_manager.read().await;
-            guard.as_ref().cloned()
-        },
+        messaging_manager: Some(messaging_manager.clone()),
         sandbox: sandbox.clone(),
         links: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_links.load()).clone(),
         )),
-        task_store_registry: state.task_store_registry.clone(),
         process_control_registry: Arc::new(
             crate::agent::process_control::ProcessControlRegistry::new(),
         ),
@@ -812,6 +913,15 @@ pub async fn create_agent_internal(
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_humans.load()).clone(),
         )),
+        working_memory: {
+            let tz = agent_config
+                .user_timezone
+                .as_deref()
+                .or(agent_config.cron_timezone.as_deref())
+                .and_then(|tz| tz.parse::<chrono_tz::Tz>().ok())
+                .unwrap_or(chrono_tz::Tz::UTC);
+            crate::memory::WorkingMemoryStore::new(db.sqlite.clone(), tz)
+        },
     };
 
     let event_rx = event_tx.subscribe();
@@ -822,19 +932,14 @@ pub async fn create_agent_internal(
         deps: deps.clone(),
         screenshot_dir: agent_config.screenshot_dir(),
         logs_dir: agent_config.logs_dir(),
-        messaging_manager: {
-            let guard = state.messaging_manager.read().await;
-            guard
-                .as_ref()
-                .cloned()
-                .unwrap_or_else(|| std::sync::Arc::new(crate::messaging::MessagingManager::new()))
-        },
+        messaging_manager: messaging_manager.clone(),
         store: cron_store.clone(),
     };
     let scheduler = std::sync::Arc::new(crate::cron::Scheduler::new(cron_context));
     runtime_config.set_cron(cron_store.clone(), scheduler.clone());
 
-    let cron_tool = crate::tools::CronTool::new(cron_store.clone(), scheduler.clone());
+    let cron_tool =
+        crate::tools::CronTool::new(cron_store.clone(), scheduler.clone(), messaging_manager);
 
     let browser_config = (**runtime_config.browser_config.load()).clone();
     let brave_search_key = (**runtime_config.brave_search_key.load()).clone();
@@ -915,16 +1020,6 @@ pub async fn create_agent_internal(
         searches.insert(agent_id.clone(), memory_search);
         state.memory_searches.store(std::sync::Arc::new(searches));
 
-        let mut task_stores = (**state.task_stores.load()).clone();
-        task_stores.insert(agent_id.clone(), task_store.clone());
-        state.task_stores.store(std::sync::Arc::new(task_stores));
-
-        let mut registry = (**state.task_store_registry.load()).clone();
-        registry.insert(agent_id.clone(), task_store);
-        state
-            .task_store_registry
-            .store(std::sync::Arc::new(registry));
-
         let mut workspaces = (**state.agent_workspaces.load()).clone();
         workspaces.insert(agent_id.clone(), agent_config.workspace.clone());
         state
@@ -966,7 +1061,7 @@ pub async fn create_agent_internal(
             role: agent_config.role.clone(),
             gradient_start: agent_config.gradient_start.clone(),
             gradient_end: agent_config.gradient_end.clone(),
-            workspace: agent_config.workspace.clone(),
+            workspace: agent_config.workspace.to_string_lossy().to_string(),
             context_window: agent_config.context_window,
             max_turns: agent_config.max_turns,
             max_concurrent_branches: agent_config.max_concurrent_branches,
@@ -1003,6 +1098,18 @@ pub async fn create_agent_internal(
 }
 
 /// Update an agent's display_name and role in config.toml.
+#[utoipa::path(
+    put,
+    path = "/agents",
+    request_body = UpdateAgentRequest,
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 404, description = "Agent not found"),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn update_agent(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<UpdateAgentRequest>,
@@ -1128,6 +1235,19 @@ pub(super) async fn update_agent(
 }
 
 /// Delete an agent: remove from config.toml, clean up API state, signal main loop.
+#[utoipa::path(
+    delete,
+    path = "/agents",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID to delete"),
+    ),
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn delete_agent(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<DeleteAgentQuery>,
@@ -1284,6 +1404,19 @@ pub(super) async fn delete_agent(
 }
 
 /// Get overview stats for an agent: memory breakdown, channels, cron, cortex.
+#[utoipa::path(
+    get,
+    path = "/agents/overview",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = AgentOverviewResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn agent_overview(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AgentOverviewQuery>,
@@ -1459,6 +1592,14 @@ pub(super) async fn agent_overview(
 }
 
 /// Get instance-wide overview for the main dashboard.
+#[utoipa::path(
+    get,
+    path = "/agents/instance",
+    responses(
+        (status = 200, body = InstanceOverviewResponse),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn instance_overview(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<InstanceOverviewResponse>, StatusCode> {
@@ -1472,6 +1613,16 @@ pub(super) async fn instance_overview(
         let agent_id = agent_config.id.clone();
 
         let Some(pool) = pools.get(&agent_id) else {
+            agents.push(AgentSummary {
+                id: agent_id,
+                channel_count: 0,
+                memory_total: 0,
+                cron_job_count: 0,
+                activity_sparkline: vec![0; 14],
+                last_activity_at: None,
+                last_bulletin_at: None,
+                profile: None,
+            });
             continue;
         };
 
@@ -1550,6 +1701,18 @@ pub(super) async fn instance_overview(
 }
 
 /// Get the cortex-generated profile for an agent.
+#[utoipa::path(
+    get,
+    path = "/agents/profile",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = AgentProfileResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn get_agent_profile(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AgentOverviewQuery>,
@@ -1563,6 +1726,18 @@ pub(super) async fn get_agent_profile(
 }
 
 /// Get identity files (SOUL.md, IDENTITY.md, ROLE.md) for an agent.
+#[utoipa::path(
+    get,
+    path = "/agents/identity",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = IdentityResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn get_identity(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<IdentityQuery>,
@@ -1583,6 +1758,17 @@ pub(super) async fn get_identity(
 
 /// Update identity files for an agent. Only writes files for fields that are present.
 /// The file watcher will pick up changes and hot-reload identity into RuntimeConfig.
+#[utoipa::path(
+    put,
+    path = "/agents/identity",
+    request_body = IdentityUpdateRequest,
+    responses(
+        (status = 200, body = IdentityResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn update_identity(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<IdentityUpdateRequest>,
@@ -1650,15 +1836,11 @@ mod tests {
         let (agent_remove_tx, _agent_remove_rx) = tokio::sync::mpsc::channel(1);
 
         let (injection_tx, _injection_rx) = tokio::sync::mpsc::channel(1);
-        let task_store_registry = Arc::new(arc_swap::ArcSwap::from_pointee(
-            std::collections::HashMap::new(),
-        ));
         Arc::new(ApiState::new_with_provider_sender(
             provider_setup_tx,
             agent_tx,
             agent_remove_tx,
             injection_tx,
-            task_store_registry,
         ))
     }
 
@@ -1820,6 +2002,18 @@ pub(super) struct AvatarQuery {
 }
 
 /// Serve the agent's avatar image.
+#[utoipa::path(
+    get,
+    path = "/agents/avatar",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, description = "Avatar image"),
+        (status = 404, description = "Avatar or agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn get_avatar(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AvatarQuery>,
@@ -1856,6 +2050,21 @@ pub(super) async fn get_avatar(
 use axum::response::IntoResponse;
 
 /// Upload (or replace) the agent's avatar image.
+#[utoipa::path(
+    post,
+    path = "/agents/avatar",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = serde_json::Value, description = "Avatar uploaded successfully"),
+        (status = 400, description = "Unsupported image type"),
+        (status = 404, description = "Agent not found"),
+        (status = 413, description = "Payload too large"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn upload_avatar(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AvatarQuery>,
@@ -1913,6 +2122,18 @@ pub(super) async fn upload_avatar(
 }
 
 /// Delete the agent's avatar image.
+#[utoipa::path(
+    delete,
+    path = "/agents/avatar",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "agents",
+)]
 pub(super) async fn delete_avatar(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AvatarQuery>,

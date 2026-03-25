@@ -315,7 +315,7 @@ impl CronStore {
 }
 
 /// Entry in the cron execution log.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct CronExecutionEntry {
     pub id: String,
     pub executed_at: String,

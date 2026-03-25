@@ -140,6 +140,10 @@ Example uses:
 
 Do not log or echo the secret value after storing it.
 
+{%- if status_text %}
+{{ status_text }}
+{%- endif %}
+
 ## Rules
 
 1. Do the work. Don't describe what you would do — use the tools and do it.

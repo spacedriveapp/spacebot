@@ -6,9 +6,10 @@ import { isOpenCodeWorker, type ChannelLiveState, type ActiveWorker, type Active
 import { CortexChatPanel } from "@/components/CortexChatPanel";
 import { LiveDuration } from "@/components/LiveDuration";
 import { Markdown } from "@/components/Markdown";
+import { PromptInspectModal } from "@/components/PromptInspectModal";
 import { formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 import { Button } from "@/ui";
-import { Cancel01Icon, IdeaIcon } from "@hugeicons/core-free-icons";
+import { Cancel01Icon, IdeaIcon, CodeIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 
 interface ChannelDetailProps {
@@ -270,13 +271,13 @@ function TimelineEntry({ item, liveWorkers, liveBranches, channelId, agentId }: 
 			);
 		case "branch_run": {
 			const live = liveBranches[item.id];
-			if (live) return <LiveBranchRunItem item={item} live={live} channelId={channelId} />;
-			return <BranchRunItem item={item} />;
+			if (live) return <LiveBranchRunItem item={item as TimelineBranchRun} live={live} channelId={channelId} />;
+			return <BranchRunItem item={item as TimelineBranchRun} />;
 		}
 		case "worker_run": {
 			const live = liveWorkers[item.id];
-			if (live) return <LiveWorkerRunItem item={item} live={live} channelId={channelId} agentId={agentId} />;
-			return <WorkerRunItem item={item} agentId={agentId} />;
+			if (live) return <LiveWorkerRunItem item={item as TimelineWorkerRun} live={live} channelId={channelId} agentId={agentId} />;
+			return <WorkerRunItem item={item as TimelineWorkerRun} agentId={agentId} />;
 		}
 	}
 }
@@ -292,6 +293,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 	const activeBranchCount = Object.keys(branches).length;
 	const hasActivity = activeWorkerCount > 0 || activeBranchCount > 0;
 	const [cortexOpen, setCortexOpen] = useState(true);
+	const [inspectOpen, setInspectOpen] = useState(false);
 
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const sentinelRef = useRef<HTMLDivElement>(null);
@@ -382,6 +384,15 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 						)}
 						<div className="flex overflow-hidden rounded-md border border-app-line bg-app-darkBox">
 							<Button
+								aria-label="Inspect prompt"
+								onClick={() => setInspectOpen(true)}
+								variant="ghost"
+								size="icon"
+								title="Inspect prompt"
+							>
+								<HugeiconsIcon icon={CodeIcon} className="h-4 w-4" />
+							</Button>
+							<Button
 								onClick={() => setCortexOpen(!cortexOpen)}
 								variant={cortexOpen ? "secondary" : "ghost"}
 								size="icon"
@@ -439,6 +450,8 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 					</div>
 				</div>
 			</div>
+
+			<PromptInspectModal open={inspectOpen} onOpenChange={setInspectOpen} channelId={channelId} />
 
 			{/* Cortex chat panel */}
 			<AnimatePresence>

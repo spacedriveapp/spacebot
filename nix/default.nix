@@ -8,38 +8,38 @@
   inherit (pkgs) lib onnxruntime stdenv;
 
   bunInstallOs =
-    if stdenv.hostPlatform.isDarwin
+    if stdenv.buildPlatform.isDarwin
     then "darwin"
-    else if stdenv.hostPlatform.isLinux
+    else if stdenv.buildPlatform.isLinux
     then "linux"
-    else throw "Unsupported host platform for frontend Bun install: ${stdenv.hostPlatform.system}";
+    else throw "Unsupported build platform for frontend Bun install: ${stdenv.buildPlatform.system}";
 
   bunInstallCpu =
-    if stdenv.hostPlatform.isAarch64
+    if stdenv.buildPlatform.isAarch64
     then "arm64"
-    else if stdenv.hostPlatform.isx86_64
+    else if stdenv.buildPlatform.isx86_64
     then "x64"
-    else throw "Unsupported host CPU for frontend Bun install: ${stdenv.hostPlatform.system}";
+    else throw "Unsupported build CPU for frontend Bun install: ${stdenv.buildPlatform.system}";
 
   rollupNativePackage =
-    if stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isx86_64
+    if stdenv.buildPlatform.isLinux && stdenv.buildPlatform.isx86_64
     then "@rollup/rollup-linux-x64-gnu"
-    else if stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64
+    else if stdenv.buildPlatform.isLinux && stdenv.buildPlatform.isAarch64
     then "@rollup/rollup-linux-arm64-gnu"
-    else if stdenv.hostPlatform.isDarwin && stdenv.hostPlatform.isx86_64
+    else if stdenv.buildPlatform.isDarwin && stdenv.buildPlatform.isx86_64
     then "@rollup/rollup-darwin-x64"
-    else if stdenv.hostPlatform.isDarwin && stdenv.hostPlatform.isAarch64
+    else if stdenv.buildPlatform.isDarwin && stdenv.buildPlatform.isAarch64
     then "@rollup/rollup-darwin-arm64"
     else null;
 
   esbuildNativePackage =
-    if stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isx86_64
+    if stdenv.buildPlatform.isLinux && stdenv.buildPlatform.isx86_64
     then "@esbuild/linux-x64"
-    else if stdenv.hostPlatform.isLinux && stdenv.hostPlatform.isAarch64
+    else if stdenv.buildPlatform.isLinux && stdenv.buildPlatform.isAarch64
     then "@esbuild/linux-arm64"
-    else if stdenv.hostPlatform.isDarwin && stdenv.hostPlatform.isx86_64
+    else if stdenv.buildPlatform.isDarwin && stdenv.buildPlatform.isx86_64
     then "@esbuild/darwin-x64"
-    else if stdenv.hostPlatform.isDarwin && stdenv.hostPlatform.isAarch64
+    else if stdenv.buildPlatform.isDarwin && stdenv.buildPlatform.isAarch64
     then "@esbuild/darwin-arm64"
     else null;
 
@@ -61,59 +61,65 @@
     cmake
   ] ++ lib.optionals stdenv.isLinux [pkgs.mold];
 
-  frontendNodeModules = stdenv.mkDerivation {
-    pname = "spacebot-frontend-node-modules";
-    inherit version;
-    src = "${frontendSrc}/interface";
+  frontendNodeModules = {
+    hash ? "sha256-uAfnobuwenX56PDKb0pAc6OJPK3yYAg/wTF5NrdhdCc=",
+  }:
+    stdenv.mkDerivation {
+      pname = "spacebot-frontend-node-modules";
+      inherit version;
+      src = "${frontendSrc}/interface";
 
-    nativeBuildInputs = with pkgs; [
-      bun
-      nodejs
-      writableTmpDirAsHomeHook
-    ];
+      nativeBuildInputs = with pkgs; [
+        bun
+        nodejs
+        writableTmpDirAsHomeHook
+      ];
 
-    dontConfigure = true;
-    dontFixup = true;
+      dontConfigure = true;
+      dontFixup = true;
 
-    buildPhase = ''
-      runHook preBuild
+      buildPhase = ''
+        runHook preBuild
 
-      export BUN_INSTALL_CACHE_DIR="$(mktemp -d)"
-      bun install \
-        --frozen-lockfile \
-        --ignore-scripts \
-        --no-progress \
-        --os=${bunInstallOs} \
-        --cpu=${bunInstallCpu}
+        export BUN_INSTALL_CACHE_DIR="$(mktemp -d)"
+        bun install \
+          --frozen-lockfile \
+          --ignore-scripts \
+          --no-progress \
+          --os=${bunInstallOs} \
+          --cpu=${bunInstallCpu}
 
-      esbuild_native_package="${if esbuildNativePackage == null then "" else esbuildNativePackage}"
-      if [ -n "$esbuild_native_package" ]; then
-        esbuild_version="$(node -p "require('./node_modules/esbuild/package.json').version")"
-        bun add --dev --no-save --no-progress "$esbuild_native_package@$esbuild_version"
-      fi
+        esbuild_native_package="${if esbuildNativePackage == null then "" else esbuildNativePackage}"
+        if [ -n "$esbuild_native_package" ] && [ -f ./node_modules/esbuild/package.json ]; then
+          esbuild_version="$(node -p "require('./node_modules/esbuild/package.json').version")"
+          bun add --dev --no-save --no-progress "$esbuild_native_package@$esbuild_version"
+        fi
 
-      rollup_native_package="${if rollupNativePackage == null then "" else rollupNativePackage}"
-      if [ -n "$rollup_native_package" ]; then
-        rollup_version="$(node -p "require('./node_modules/rollup/package.json').version")"
-        bun add --dev --no-save --no-progress "$rollup_native_package@$rollup_version"
-      fi
+        rollup_native_package="${if rollupNativePackage == null then "" else rollupNativePackage}"
+        if [ -n "$rollup_native_package" ] && [ -f ./node_modules/rollup/package.json ]; then
+          rollup_version="$(node -p "require('./node_modules/rollup/package.json').version")"
+          bun add --dev --no-save --no-progress "$rollup_native_package@$rollup_version"
+        fi
 
-      runHook postBuild
-    '';
+        runHook postBuild
+      '';
 
-    installPhase = ''
-      runHook preInstall
+      installPhase = ''
+        runHook preInstall
 
-      mkdir -p $out
-      cp -r node_modules $out/node_modules
+        mkdir -p $out
+        cp -r node_modules $out/node_modules
 
-      runHook postInstall
-    '';
+        runHook postInstall
+      '';
 
-    outputHash = "sha256-WPKB3bzJoBRvWk1BwKGSJGNQVkLuT49AjB8weDvm0dk=";
-    outputHashAlgo = "sha256";
-    outputHashMode = "recursive";
-  };
+      outputHash = hash;
+      outputHashAlgo = "sha256";
+      outputHashMode = "recursive";
+    };
+
+  # Default frontend node modules with fixed hash
+  frontendNodeModulesDefault = frontendNodeModules {};
 
   frontend = stdenv.mkDerivation {
     pname = "spacebot-frontend";
@@ -130,7 +136,7 @@
     buildPhase = ''
       runHook preBuild
 
-      cp -r ${frontendNodeModules}/node_modules .
+      cp -r ${frontendNodeModulesDefault}/node_modules .
       chmod -R u+w node_modules
       patchShebangs --build node_modules
 
@@ -147,13 +153,6 @@
 
       runHook postInstall
     '';
-  };
-
-  commonArgs = {
-    src = cargoSrc;
-    inherit nativeBuildInputs buildInputs;
-    strictDeps = true;
-    cargoExtraArgs = "";
   };
 
   commonRustBuildEnv = ''
@@ -180,80 +179,84 @@
 
   commonBuildEnvWithLinker = commonRustBuildEnvWithLinker + commonBuildEnv;
 
-  dummyRustSource = pkgs.writeText "dummy.rs" ''
-    fn main() {}
+  # Post-patch hook that replaces the vendored imap-proto with our patched version
+  postPatchImapProto = ''
+    replace_imap_proto() {
+      local dir="$1"
+      echo "Found imap-proto at: $dir"
+      if [ -f "$dir/Cargo.toml" ]; then
+        echo "Replacing with patched version"
+        rm -rf "$dir"
+        cp -r ${cargoSrc}/vendor/imap-proto-0.10.2 "$dir"
+        chmod -R u+w "$dir"
+      fi
+    }
+    export -f replace_imap_proto
+
+    # Find and replace imap-proto in cargo vendor directories
+    # Use specific version to avoid accidental matches and NIX_BUILD_TOP for robustness
+    find "''${NIX_BUILD_TOP:-/build}" -type d -name "imap-proto-0.10.2" 2>/dev/null -exec bash -c 'replace_imap_proto "$0"' {} \;
+
+    # Also check cargo home
+    if [ -d "$CARGO_HOME/registry/src" ]; then
+      find "$CARGO_HOME/registry/src" -type d -name "imap-proto-0.10.2" 2>/dev/null -exec bash -c 'replace_imap_proto "$0"' {} \;
+    fi
+
+    # Check in cargo vendor dir if set
+    if [ -n "''${cargoVendorDir:-}" ] && [ -d "$cargoVendorDir" ]; then
+      find "$cargoVendorDir" -type d -name "imap-proto-0.10.2" 2>/dev/null -exec bash -c 'replace_imap_proto "$0"' {} \;
+    fi
   '';
 
-  spacebotCargoArtifacts = craneLib.buildDepsOnly (commonArgs
-    // {
-      cargoExtraArgs = "--bin spacebot";
-      doCheck = false;
-      cargoCheckCommand = "true";
-      src = craneLib.mkDummySrc {
-        src = cargoSrc;
-        dummyrs = dummyRustSource;
-        dummyBuildrs = "build.rs";
-        extraDummyScript = ''
-          cp ${dummyRustSource} $out/build.rs
-        '';
+  spacebot = craneLib.buildPackage {
+    src = cargoSrc;
+    inherit nativeBuildInputs buildInputs;
+    strictDeps = true;
+    cargoExtraArgs = "";
+
+    doCheck = false;
+    cargoBuildCommand = "cargo build --release --bin spacebot";
+
+    postPatch = postPatchImapProto;
+
+    preBuild = commonBuildEnvWithLinker;
+
+    postInstall = ''
+      mkdir -p $out/share/spacebot
+      cp -r ${runtimeAssetsSrc}/prompts $out/share/spacebot/
+      cp -r ${runtimeAssetsSrc}/migrations $out/share/spacebot/
+      chmod -R u+w $out/share/spacebot
+    '';
+
+    meta = with lib; {
+      description = "An AI agent for teams, communities, and multi-user environments";
+      homepage = "https://spacebot.sh";
+      license = {
+        shortName = "FSL-1.1-ALv2";
+        fullName = "Functional Source License, Version 1.1, ALv2 Future License";
+        url = "https://fsl.software/";
+        free = true;
+        redistributable = true;
       };
-      preBuild = commonRustBuildEnvWithLinker;
-    });
+      platforms = platforms.linux ++ platforms.darwin;
+      mainProgram = "spacebot";
+    };
+  };
 
-  spacebotTestsCargoArtifacts = craneLib.buildDepsOnly (commonArgs
-    // {
-      doCheck = false;
-      cargoCheckCommand = "true";
-      src = craneLib.mkDummySrc {
-        src = cargoSrc;
-        dummyrs = dummyRustSource;
-        dummyBuildrs = "build.rs";
-        extraDummyScript = ''
-          cp ${dummyRustSource} $out/build.rs
-        '';
-      };
-      preBuild = commonRustBuildEnvWithLinker;
-    });
+  spacebot-tests = craneLib.cargoTest {
+    src = cargoSrc;
+    inherit nativeBuildInputs buildInputs;
+    strictDeps = true;
 
-  spacebot = craneLib.buildPackage (commonArgs
-    // {
-      cargoArtifacts = spacebotCargoArtifacts;
-      doCheck = false;
-      cargoExtraArgs = "--bin spacebot";
+    doCheck = true;
 
-      preBuild = commonBuildEnvWithLinker;
+    postPatch = postPatchImapProto;
 
-      postInstall = ''
-        mkdir -p $out/share/spacebot
-        cp -r ${runtimeAssetsSrc}/prompts $out/share/spacebot/
-        cp -r ${runtimeAssetsSrc}/migrations $out/share/spacebot/
-        chmod -R u+w $out/share/spacebot
-      '';
+    # Skip tests that require ONNX model file and known flaky suites in Nix builds
+    cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
 
-      meta = with lib; {
-        description = "An AI agent for teams, communities, and multi-user environments";
-        homepage = "https://spacebot.sh";
-        license = {
-          shortName = "FSL-1.1-ALv2";
-          fullName = "Functional Source License, Version 1.1, ALv2 Future License";
-          url = "https://fsl.software/";
-          free = true;
-          redistributable = true;
-        };
-        platforms = platforms.linux ++ platforms.darwin;
-        mainProgram = "spacebot";
-      };
-    });
-
-  spacebot-tests = craneLib.cargoTest (commonArgs
-    // {
-      cargoArtifacts = spacebotTestsCargoArtifacts;
-
-      # Skip tests that require ONNX model file and known flaky suites in Nix builds
-      cargoTestExtraArgs = "-- --skip memory::search::tests --skip memory::store::tests --skip config::tests::test_llm_provider_tables_parse_with_env_and_lowercase_keys";
-
-      preBuild = commonBuildEnvWithLinker;
-    });
+    preBuild = commonBuildEnvWithLinker;
+  };
 
   spacebot-full = pkgs.symlinkJoin {
     name = "spacebot-full";
@@ -265,7 +268,8 @@
       wrapProgram $out/bin/spacebot \
         --set CHROME_PATH "${pkgs.chromium}/bin/chromium" \
         --set CHROME_FLAGS "--no-sandbox --disable-dev-shm-usage --disable-gpu" \
-        --set ORT_LIB_LOCATION "${onnxruntime}/lib"
+        --set ORT_LIB_LOCATION "${onnxruntime}/lib" \
+        --prefix LD_LIBRARY_PATH : ${onnxruntime}/lib
     '';
 
     meta =
@@ -275,5 +279,5 @@
       };
   };
 in {
-  inherit frontend spacebot spacebot-full spacebot-tests;
+  inherit frontend frontendNodeModules spacebot spacebot-full spacebot-tests;
 }

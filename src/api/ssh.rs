@@ -27,18 +27,18 @@ const HOST_KEY_TYPES: &[&str] = &["rsa", "ecdsa", "ed25519"];
 /// Path to the sshd PID file used for lifecycle management.
 const PID_FILE: &str = "/run/spacebot-sshd.pid";
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct AuthorizedKeyRequest {
     public_key: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct AuthorizedKeyResponse {
     success: bool,
     message: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct SshStatusResponse {
     enabled: bool,
     port: u16,
@@ -46,6 +46,17 @@ pub(super) struct SshStatusResponse {
 }
 
 /// PUT /api/ssh/authorized-key — write the public key for SSH access.
+#[utoipa::path(
+    put,
+    path = "/ssh/authorized-key",
+    request_body = AuthorizedKeyRequest,
+    responses(
+        (status = 200, body = AuthorizedKeyResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "ssh",
+)]
 pub(super) async fn set_authorized_key(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<AuthorizedKeyRequest>,
@@ -90,6 +101,16 @@ pub(super) async fn set_authorized_key(
 }
 
 /// GET /api/ssh/status — check if SSH is available.
+#[utoipa::path(
+    get,
+    path = "/ssh/status",
+    responses(
+        (status = 200, body = SshStatusResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "ssh",
+)]
 pub(super) async fn ssh_status(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<SshStatusResponse>, StatusCode> {

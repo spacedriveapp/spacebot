@@ -3,7 +3,7 @@
 use crate::agent::compactor::estimate_history_tokens;
 use crate::config::BrowserConfig;
 use crate::error::Result;
-use crate::hooks::{SpacebotHook, ToolNudgePolicy};
+use crate::hooks::SpacebotHook;
 use crate::llm::SpacebotModel;
 use crate::llm::routing::{is_context_overflow_error, is_retriable_error};
 use crate::{AgentDeps, ChannelId, ProcessId, ProcessType, WorkerId};
@@ -546,38 +546,28 @@ impl Worker {
                 let mut follow_up_prompt = follow_up.clone();
                 let mut follow_up_overflow_retries = 0;
                 let mut follow_up_transient_retries = 0u32;
-                let follow_up_hook = self
-                    .hook
-                    .clone()
-                    .with_tool_nudge_policy(ToolNudgePolicy::Disabled);
 
                 let follow_up_result: std::result::Result<String, String> = loop {
-                    match follow_up_hook
-                        .prompt_once(&agent, &mut history, &follow_up_prompt)
+                    match self
+                        .hook
+                        .prompt_with_tool_nudge_retry(&agent, &mut history, &follow_up_prompt)
                         .await
                     {
                         Ok(response) => break Ok(response),
                         Err(rig::completion::PromptError::PromptCancelled {
                             ref reason, ..
-                        }) if SpacebotHook::is_context_injection_reason(reason) => {
-                            // Context injection during a follow-up: drain
-                            // buffered messages, append to history, and
-                            // re-prompt — same as the main task loop.
-                            let injected = follow_up_hook.take_injected_messages();
-                            for message in &injected {
-                                tracing::info!(
-                                    worker_id = %self.id,
-                                    "injecting context into worker follow-up history"
-                                );
-                                history.push(rig::message::Message::user(format!(
-                                    "[Context update from the user]: {message}"
-                                )));
-                            }
-                            follow_up_prompt = "New context has been provided above. \
-                                Incorporate this information and continue working \
-                                on your task. Do not repeat completed work."
-                                .to_string();
-                            continue;
+                        }) if SpacebotHook::is_tool_nudge_reason(reason) => {
+                            let failure_reason = format!(
+                                "follow-up ended without terminal outcome after {} nudge retries",
+                                SpacebotHook::TOOL_NUDGE_MAX_RETRIES
+                            );
+                            self.write_failure_log(&history, &failure_reason);
+                            tracing::warn!(
+                                worker_id = %self.id,
+                                %reason,
+                                "follow-up completion contract retries exhausted"
+                            );
+                            break Err(failure_reason);
                         }
                         Err(error) if is_context_overflow_error(&error.to_string()) => {
                             follow_up_overflow_retries += 1;
@@ -948,6 +938,10 @@ impl Worker {
                         }
                     }
                 }
+                rig::message::Message::System { content } => {
+                    let _ = writeln!(log, "[{index}] System:");
+                    let _ = writeln!(log, "  {content}");
+                }
             }
         }
 
@@ -1140,6 +1134,7 @@ fn build_worker_recap(messages: &[rig::message::Message]) -> String {
                     }
                 }
             }
+            rig::message::Message::System { .. } => {}
         }
     }
 

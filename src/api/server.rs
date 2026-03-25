@@ -8,16 +8,17 @@ use super::{
 };
 
 use axum::Json;
-
 use axum::Router;
 use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{any, delete, get, post, put};
+use axum::routing::any;
 use rust_embed::Embed;
 use serde_json::json;
 use tower_http::cors::CorsLayer;
+use utoipa::OpenApi;
+use utoipa_axum::{router::OpenApiRouter, routes};
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -28,6 +29,208 @@ use std::sync::Arc;
 #[allow(unused)]
 struct InterfaceAssets;
 
+/// API documentation structure for utoipa.
+#[derive(OpenApi)]
+#[openapi(
+    info(
+        title = "Spacebot API",
+        version = env!("CARGO_PKG_VERSION"),
+        description = "Spacebot agent system API"
+    ),
+    servers(
+        (url = "/api")
+    )
+)]
+struct ApiDoc;
+
+/// Build the OpenApiRouter for all API routes.
+/// This is separated so it can be used both by the server and the OpenAPI spec generator.
+pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
+        // System routes
+        .routes(routes!(system::health))
+        .routes(routes!(system::idle))
+        .routes(routes!(system::status))
+        .routes(routes!(system::storage_status))
+        .routes(routes!(system::backup_export))
+        .routes(routes!(system::backup_restore))
+        .routes(routes!(system::events_sse))
+        // Agent routes
+        .routes(routes!(agents::instance_overview))
+        .routes(routes!(agents::list_agents))
+        .routes(routes!(agents::create_agent))
+        .routes(routes!(agents::update_agent))
+        .routes(routes!(agents::delete_agent))
+        .routes(routes!(agents::list_agent_mcp))
+        .routes(routes!(agents::reconnect_agent_mcp))
+        .routes(routes!(agents::get_warmup_status))
+        .routes(routes!(agents::trigger_warmup))
+        .routes(routes!(agents::agent_overview))
+        .routes(routes!(agents::get_agent_profile))
+        .routes(routes!(
+            agents::get_avatar,
+            agents::upload_avatar,
+            agents::delete_avatar
+        ))
+        .routes(routes!(agents::get_identity, agents::update_identity))
+        // MCP routes
+        .routes(routes!(
+            mcp::list_mcp_servers,
+            mcp::create_mcp_server,
+            mcp::update_mcp_server
+        ))
+        .routes(routes!(mcp::delete_mcp_server))
+        .routes(routes!(mcp::reconnect_mcp_server))
+        .routes(routes!(mcp::mcp_status))
+        // Channel routes
+        .routes(routes!(channels::list_channels, channels::delete_channel))
+        .routes(routes!(channels::set_channel_archive))
+        .routes(routes!(channels::channel_messages))
+        .routes(routes!(channels::channel_status))
+        .routes(routes!(channels::inspect_prompt))
+        .routes(routes!(channels::set_prompt_capture))
+        .routes(routes!(channels::list_prompt_snapshots))
+        .routes(routes!(channels::get_prompt_snapshot))
+        .routes(routes!(channels::cancel_process))
+        // Worker routes
+        .routes(routes!(workers::list_workers))
+        .routes(routes!(workers::worker_detail))
+        // Memory routes
+        .routes(routes!(memories::list_memories))
+        .routes(routes!(memories::search_memories))
+        .routes(routes!(memories::memory_graph))
+        .routes(routes!(memories::memory_graph_neighbors))
+        // Cortex routes
+        .routes(routes!(cortex::cortex_events))
+        .routes(routes!(cortex::cortex_chat_messages))
+        .routes(routes!(cortex::cortex_chat_threads))
+        .routes(routes!(cortex::cortex_chat_delete_thread))
+        .routes(routes!(cortex::cortex_chat_send))
+        // Config routes
+        .routes(routes!(
+            config::get_agent_config,
+            config::update_agent_config
+        ))
+        // Cron routes
+        .routes(routes!(
+            cron::list_cron_jobs,
+            cron::create_or_update_cron,
+            cron::delete_cron
+        ))
+        .routes(routes!(cron::cron_executions))
+        .routes(routes!(cron::trigger_cron))
+        .routes(routes!(cron::toggle_cron))
+        // Task routes
+        .routes(routes!(tasks::list_tasks, tasks::create_task))
+        .routes(routes!(
+            tasks::get_task,
+            tasks::update_task,
+            tasks::delete_task
+        ))
+        .routes(routes!(tasks::approve_task))
+        .routes(routes!(tasks::execute_task))
+        .routes(routes!(tasks::assign_task))
+        // Project routes
+        .routes(routes!(projects::list_projects, projects::create_project))
+        .routes(routes!(
+            projects::get_project,
+            projects::update_project,
+            projects::delete_project
+        ))
+        .routes(routes!(projects::scan_project))
+        .routes(routes!(projects::disk_usage))
+        .routes(routes!(projects::create_repo))
+        .routes(routes!(projects::delete_repo))
+        .routes(routes!(projects::create_worktree))
+        .routes(routes!(projects::delete_worktree))
+        // Ingest routes
+        .routes(routes!(
+            ingest::list_ingest_files,
+            ingest::delete_ingest_file
+        ))
+        .routes(routes!(ingest::upload_ingest_file))
+        // Skill routes
+        .routes(routes!(skills::list_skills))
+        .routes(routes!(skills::get_skill_content))
+        .routes(routes!(skills::install_skill))
+        .routes(routes!(skills::upload_skill))
+        .routes(routes!(skills::remove_skill))
+        .routes(routes!(skills::registry_browse))
+        .routes(routes!(skills::registry_search))
+        .routes(routes!(skills::registry_skill_content))
+        // Tool routes
+        .routes(routes!(tools::list_tools))
+        // Secret routes
+        .routes(routes!(secrets::secrets_status))
+        .routes(routes!(secrets::list_secrets))
+        .routes(routes!(secrets::put_secret, secrets::delete_secret))
+        .routes(routes!(secrets::secret_info))
+        .routes(routes!(secrets::migrate_secrets))
+        .routes(routes!(secrets::enable_encryption))
+        .routes(routes!(secrets::unlock_secrets))
+        .routes(routes!(secrets::lock_secrets))
+        .routes(routes!(secrets::rotate_key))
+        .routes(routes!(secrets::export_secrets))
+        .routes(routes!(secrets::import_secrets))
+        // Provider routes
+        .routes(routes!(
+            providers::get_providers,
+            providers::update_provider
+        ))
+        .routes(routes!(providers::start_openai_browser_oauth))
+        .routes(routes!(providers::openai_browser_oauth_status))
+        .routes(routes!(providers::test_provider_model))
+        .routes(routes!(providers::delete_provider))
+        // Model routes
+        .routes(routes!(models::get_models))
+        .routes(routes!(models::refresh_models))
+        // Messaging routes
+        .routes(routes!(messaging::messaging_status))
+        .routes(routes!(messaging::disconnect_platform))
+        .routes(routes!(messaging::toggle_platform))
+        .routes(routes!(
+            messaging::create_messaging_instance,
+            messaging::delete_messaging_instance
+        ))
+        // Binding routes
+        .routes(routes!(
+            bindings::list_bindings,
+            bindings::create_binding,
+            bindings::update_binding,
+            bindings::delete_binding
+        ))
+        // Settings routes
+        .routes(routes!(
+            settings::get_global_settings,
+            settings::update_global_settings
+        ))
+        .routes(routes!(
+            settings::get_raw_config,
+            settings::update_raw_config
+        ))
+        .routes(routes!(settings::update_check, settings::update_check_now))
+        .routes(routes!(settings::update_apply))
+        .routes(routes!(settings::changelog))
+        // SSH routes
+        .routes(routes!(ssh::set_authorized_key))
+        .routes(routes!(ssh::ssh_status))
+        // Webchat routes
+        .routes(routes!(webchat::webchat_send))
+        .routes(routes!(webchat::webchat_history))
+        // Link routes
+        .routes(routes!(links::list_links, links::create_link))
+        .routes(routes!(links::update_link, links::delete_link))
+        .routes(routes!(links::agent_links))
+        .routes(routes!(links::topology))
+        .routes(routes!(links::list_groups, links::create_group))
+        .routes(routes!(links::update_group, links::delete_group))
+        .routes(routes!(links::list_humans, links::create_human))
+        .routes(routes!(links::update_human, links::delete_human))
+        // Factory routes
+        .routes(routes!(factory::list_presets))
+        .routes(routes!(factory::get_preset))
+}
+
 /// Start the HTTP server on the given address.
 ///
 /// The caller provides a pre-built `ApiState` so agent event streams and
@@ -37,6 +240,10 @@ pub async fn start_http_server(
     state: Arc<ApiState>,
     shutdown_rx: tokio::sync::watch::Receiver<bool>,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    // Note: credentials are intentionally disabled. The API uses Bearer
+    // token auth (Authorization header), not cookies. Enabling credentials
+    // with mirror_request origin would allow any site to make credentialed
+    // cross-origin requests if cookie-based auth were ever added.
     let cors = CorsLayer::new()
         .allow_origin(tower_http::cors::AllowOrigin::mirror_request())
         .allow_methods([
@@ -48,250 +255,36 @@ pub async fn start_http_server(
         ])
         .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION, header::ACCEPT]);
 
-    let api_routes = Router::new()
-        .route("/health", get(system::health))
-        .route("/idle", get(system::idle))
-        .route("/status", get(system::status))
-        .route("/system/storage", get(system::storage_status))
-        .route("/system/backup/export", get(system::backup_export))
-        .route("/system/backup/restore", post(system::backup_restore))
-        .route("/overview", get(agents::instance_overview))
-        .route("/events", get(system::events_sse))
+    // Build the OpenAPI router and split into routes and spec
+    let (api_routes, api) = api_router().split_for_parts();
+
+    // Create protected routes (require auth)
+    let protected_routes = Router::new()
+        // API routes under /api
+        .nest("/api", api_routes)
+        // Swagger UI and OpenAPI spec (protected)
+        .merge(utoipa_swagger_ui::SwaggerUi::new("/api/docs").url("/api/openapi.json", api))
+        // Opencode proxy routes (protected)
         .route(
-            "/agents",
-            get(agents::list_agents)
-                .post(agents::create_agent)
-                .put(agents::update_agent)
-                .delete(agents::delete_agent),
-        )
-        .route("/agents/mcp", get(agents::list_agent_mcp))
-        .route("/agents/mcp/reconnect", post(agents::reconnect_agent_mcp))
-        .route(
-            "/agents/warmup",
-            get(agents::get_warmup_status).post(agents::trigger_warmup),
-        )
-        .route(
-            "/mcp/servers",
-            get(mcp::list_mcp_servers)
-                .post(mcp::create_mcp_server)
-                .put(mcp::update_mcp_server),
-        )
-        .route("/mcp/servers/{name}", delete(mcp::delete_mcp_server))
-        .route(
-            "/mcp/servers/{name}/reconnect",
-            post(mcp::reconnect_mcp_server),
-        )
-        .route("/mcp/status", get(mcp::mcp_status))
-        .route("/agents/overview", get(agents::agent_overview))
-        .route(
-            "/channels",
-            get(channels::list_channels).delete(channels::delete_channel),
-        )
-        .route("/channels/archive", put(channels::set_channel_archive))
-        .route("/channels/messages", get(channels::channel_messages))
-        .route("/channels/status", get(channels::channel_status))
-        .route("/agents/workers", get(workers::list_workers))
-        .route("/agents/workers/detail", get(workers::worker_detail))
-        .route(
-            "/opencode/{port}/{*path}",
+            "/api/opencode/{port}/{*path}",
             any(opencode_proxy::opencode_proxy),
         )
-        .route("/opencode/{port}", any(opencode_proxy::opencode_proxy))
-        .route("/opencode/{port}/", any(opencode_proxy::opencode_proxy))
-        .route("/agents/memories", get(memories::list_memories))
-        .route("/agents/memories/search", get(memories::search_memories))
-        .route("/agents/memories/graph", get(memories::memory_graph))
-        .route(
-            "/agents/memories/graph/neighbors",
-            get(memories::memory_graph_neighbors),
-        )
-        .route("/cortex/events", get(cortex::cortex_events))
-        .route("/cortex-chat/messages", get(cortex::cortex_chat_messages))
-        .route("/cortex-chat/threads", get(cortex::cortex_chat_threads))
-        .route(
-            "/cortex-chat/thread",
-            delete(cortex::cortex_chat_delete_thread),
-        )
-        .route("/cortex-chat/send", post(cortex::cortex_chat_send))
-        .route("/agents/profile", get(agents::get_agent_profile))
-        .route(
-            "/agents/avatar",
-            get(agents::get_avatar)
-                .post(agents::upload_avatar)
-                .delete(agents::delete_avatar),
-        )
-        .route(
-            "/agents/identity",
-            get(agents::get_identity).put(agents::update_identity),
-        )
-        .route(
-            "/agents/config",
-            get(config::get_agent_config).put(config::update_agent_config),
-        )
-        .route(
-            "/agents/cron",
-            get(cron::list_cron_jobs)
-                .post(cron::create_or_update_cron)
-                .delete(cron::delete_cron),
-        )
-        .route("/agents/cron/executions", get(cron::cron_executions))
-        .route("/agents/cron/trigger", post(cron::trigger_cron))
-        .route("/agents/cron/toggle", put(cron::toggle_cron))
-        .route(
-            "/agents/tasks",
-            get(tasks::list_tasks).post(tasks::create_task),
-        )
-        .route(
-            "/agents/tasks/{number}",
-            get(tasks::get_task)
-                .put(tasks::update_task)
-                .delete(tasks::delete_task),
-        )
-        .route("/agents/tasks/{number}/approve", post(tasks::approve_task))
-        .route("/agents/tasks/{number}/execute", post(tasks::execute_task))
-        .route(
-            "/agents/projects",
-            get(projects::list_projects).post(projects::create_project),
-        )
-        .route(
-            "/agents/projects/{id}",
-            get(projects::get_project)
-                .put(projects::update_project)
-                .delete(projects::delete_project),
-        )
-        .route("/agents/projects/{id}/scan", post(projects::scan_project))
-        .route(
-            "/agents/projects/{id}/disk-usage",
-            get(projects::disk_usage),
-        )
-        .route("/agents/projects/{id}/repos", post(projects::create_repo))
-        .route(
-            "/agents/projects/{id}/repos/{repo_id}",
-            delete(projects::delete_repo),
-        )
-        .route(
-            "/agents/projects/{id}/worktrees",
-            post(projects::create_worktree),
-        )
-        .route(
-            "/agents/projects/{id}/worktrees/{wt_id}",
-            delete(projects::delete_worktree),
-        )
-        .route("/channels/cancel", post(channels::cancel_process))
-        .route(
-            "/agents/ingest/files",
-            get(ingest::list_ingest_files).delete(ingest::delete_ingest_file),
-        )
-        .route("/agents/ingest/upload", post(ingest::upload_ingest_file))
-        .route("/agents/skills", get(skills::list_skills))
-        .route("/agents/skills/content", get(skills::get_skill_content))
-        .route("/agents/skills/install", post(skills::install_skill))
-        .route("/agents/skills/upload", post(skills::upload_skill))
-        .route("/agents/skills/remove", delete(skills::remove_skill))
-        .route("/agents/tools", get(tools::list_tools))
-        // Secret store management
-        .route("/secrets/status", get(secrets::secrets_status))
-        .route("/secrets", get(secrets::list_secrets))
-        .route(
-            "/secrets/{name}",
-            put(secrets::put_secret).delete(secrets::delete_secret),
-        )
-        .route("/secrets/{name}/info", get(secrets::secret_info))
-        .route("/secrets/migrate", post(secrets::migrate_secrets))
-        .route("/secrets/encrypt", post(secrets::enable_encryption))
-        .route("/secrets/unlock", post(secrets::unlock_secrets))
-        .route("/secrets/lock", post(secrets::lock_secrets))
-        .route("/secrets/rotate", post(secrets::rotate_key))
-        .route("/secrets/export", post(secrets::export_secrets))
-        .route("/secrets/import", post(secrets::import_secrets))
-        .route("/skills/registry/browse", get(skills::registry_browse))
-        .route("/skills/registry/search", get(skills::registry_search))
-        .route(
-            "/skills/registry/content",
-            get(skills::registry_skill_content),
-        )
-        .route(
-            "/providers",
-            get(providers::get_providers).put(providers::update_provider),
-        )
-        .route(
-            "/providers/openai/oauth/browser/start",
-            post(providers::start_openai_browser_oauth),
-        )
-        .route(
-            "/providers/openai/oauth/browser/status",
-            get(providers::openai_browser_oauth_status),
-        )
-        .route("/providers/test", post(providers::test_provider_model))
-        .route("/providers/{provider}", delete(providers::delete_provider))
-        .route("/models", get(models::get_models))
-        .route("/models/refresh", post(models::refresh_models))
-        .route("/messaging/status", get(messaging::messaging_status))
-        .route(
-            "/messaging/disconnect",
-            post(messaging::disconnect_platform),
-        )
-        .route("/messaging/toggle", post(messaging::toggle_platform))
-        .route(
-            "/messaging/instances",
-            post(messaging::create_messaging_instance).delete(messaging::delete_messaging_instance),
-        )
-        .route(
-            "/bindings",
-            get(bindings::list_bindings)
-                .post(bindings::create_binding)
-                .put(bindings::update_binding)
-                .delete(bindings::delete_binding),
-        )
-        .route(
-            "/settings",
-            get(settings::get_global_settings).put(settings::update_global_settings),
-        )
-        .route(
-            "/config/raw",
-            get(settings::get_raw_config).put(settings::update_raw_config),
-        )
-        .route(
-            "/update/check",
-            get(settings::update_check).post(settings::update_check_now),
-        )
-        .route("/update/apply", post(settings::update_apply))
-        .route("/changelog", get(settings::changelog))
-        .route("/ssh/authorized-key", put(ssh::set_authorized_key))
-        .route("/ssh/status", get(ssh::ssh_status))
-        .route("/webchat/send", post(webchat::webchat_send))
-        .route("/webchat/history", get(webchat::webchat_history))
-        .route("/links", get(links::list_links).post(links::create_link))
-        .route(
-            "/links/{from}/{to}",
-            put(links::update_link).delete(links::delete_link),
-        )
-        .route("/agents/{id}/links", get(links::agent_links))
-        .route("/topology", get(links::topology))
-        .route("/groups", get(links::list_groups).post(links::create_group))
-        .route(
-            "/groups/{name}",
-            put(links::update_group).delete(links::delete_group),
-        )
-        .route("/humans", get(links::list_humans).post(links::create_human))
-        .route(
-            "/humans/{id}",
-            put(links::update_human).delete(links::delete_human),
-        )
-        // Factory: preset archetypes
-        .route("/factory/presets", get(factory::list_presets))
-        .route("/factory/presets/{id}", get(factory::get_preset))
-        .layer(DefaultBodyLimit::max(10 * 1024 * 1024))
+        .route("/api/opencode/{port}", any(opencode_proxy::opencode_proxy))
+        .route("/api/opencode/{port}/", any(opencode_proxy::opencode_proxy))
+        // Apply auth middleware to all protected routes
         .layer(middleware::from_fn_with_state(
             state.clone(),
             api_auth_middleware,
         ));
 
     #[cfg(feature = "metrics")]
-    let api_routes = api_routes.layer(middleware::from_fn(metrics_middleware));
+    let protected_routes = protected_routes.layer(middleware::from_fn(metrics_middleware));
 
+    // Build the main application router
     let app = Router::new()
-        .nest("/api", api_routes)
+        // Mount all protected routes
+        .merge(protected_routes)
+        // Static file handler for frontend (unprotected)
         .fallback(static_handler)
         .layer(cors)
         .layer(DefaultBodyLimit::max(10 * 1024 * 1024)) // 10 MiB

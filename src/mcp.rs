@@ -16,7 +16,7 @@ use tokio::sync::{Mutex, RwLock};
 
 type McpClientSession = RunningService<RoleClient, McpClientHandler>;
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum McpConnectionState {
     Connecting,
@@ -25,7 +25,7 @@ pub enum McpConnectionState {
     Disconnected,
 }
 
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct McpServerStatus {
     pub name: String,
     pub enabled: bool,

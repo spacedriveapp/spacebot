@@ -4,7 +4,6 @@
 //! all the prompt-building methods that assemble the channel's
 //! system prompt from identity, memory bulletin, skills, status, etc.
 
-use crate::error::Result;
 use chrono::{DateTime, Local, Utc};
 use chrono_tz::Tz;
 
@@ -122,22 +121,4 @@ impl TemporalContext {
             self.now_utc.format("%Y-%m-%d %H:%M:%S UTC")
         )
     }
-
-    pub(crate) fn worker_task_preamble(
-        &self,
-        prompt_engine: &crate::prompts::PromptEngine,
-    ) -> Result<String> {
-        let local_time = self.format_timestamp(self.now_utc);
-        let utc_time = self.now_utc.format("%Y-%m-%d %H:%M:%S UTC").to_string();
-        prompt_engine.render_system_worker_time_context(&local_time, &utc_time)
-    }
-}
-
-pub(crate) fn build_worker_task_with_temporal_context(
-    task: &str,
-    temporal_context: &TemporalContext,
-    prompt_engine: &crate::prompts::PromptEngine,
-) -> Result<String> {
-    let preamble = temporal_context.worker_task_preamble(prompt_engine)?;
-    Ok(format!("{preamble}\n\n{task}"))
 }

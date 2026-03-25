@@ -14,6 +14,9 @@ pub struct HistoryMessage {
     pub author: String,
     pub content: String,
     pub is_bot: bool,
+    /// When the message was sent. Used to give the LLM temporal context
+    /// for backfilled history so it can distinguish old from recent messages.
+    pub timestamp: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// Static trait for messaging adapters.

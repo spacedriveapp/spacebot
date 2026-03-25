@@ -238,11 +238,7 @@ async fn handle_message_event(
         }
     }
 
-    let base_conversation_id = if let Some(ref thread_ts) = msg_event.origin.thread_ts {
-        format!("slack:{}:{}:{}", team_id_str, channel_id, thread_ts.0)
-    } else {
-        format!("slack:{}:{}", team_id_str, channel_id)
-    };
+    let base_conversation_id = format!("slack:{}:{}", team_id_str, channel_id);
     let conversation_id =
         apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
@@ -376,11 +372,7 @@ async fn handle_app_mention_event(
         return Ok(());
     }
 
-    let base_conversation_id = if let Some(ref thread_ts) = mention.origin.thread_ts {
-        format!("slack:{}:{}:{}", team_id_str, channel_id, thread_ts.0)
-    } else {
-        format!("slack:{}:{}", team_id_str, channel_id)
-    };
+    let base_conversation_id = format!("slack:{}:{}", team_id_str, channel_id);
     let conversation_id =
         apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
@@ -658,11 +650,7 @@ async fn handle_interaction_event(
     // Use trigger_id as the unique message id for this interaction turn.
     let msg_id = block_actions.trigger_id.0.clone();
 
-    let base_conversation_id = if let Some(ref ts) = message_ts {
-        format!("slack:{}:{}:{}", team_id, channel_id, ts)
-    } else {
-        format!("slack:{}:{}", team_id, channel_id)
-    };
+    let base_conversation_id = format!("slack:{}:{}", team_id, channel_id);
     let conversation_id =
         apply_runtime_adapter_to_conversation_id(&adapter_state.runtime_key, base_conversation_id);
 
@@ -1136,7 +1124,13 @@ impl Messaging for SlackAdapter {
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let session = self.session();
 
-        let channel_id = if let Some(user_id_str) = target.strip_prefix("dm:") {
+        // Parse an optional thread target encoded as `#thread:<ts>` suffix.
+        let (bare_target, thread_ts) = match target.split_once("#thread:") {
+            Some((prefix, ts)) if !ts.is_empty() => (prefix, Some(SlackTs(ts.to_string()))),
+            _ => (target, None),
+        };
+
+        let channel_id = if let Some(user_id_str) = bare_target.strip_prefix("dm:") {
             let open_req = SlackApiConversationsOpenRequest::new()
                 .with_users(vec![SlackUserId(user_id_str.to_string())]);
             let open_resp = session
@@ -1145,16 +1139,17 @@ impl Messaging for SlackAdapter {
                 .context("failed to open Slack DM conversation")?;
             open_resp.channel.id
         } else {
-            SlackChannelId(target.to_string())
+            SlackChannelId(bare_target.to_string())
         };
 
         match response {
             OutboundResponse::Text(text) => {
                 for chunk in split_message(&text, 12_000) {
-                    let req = SlackApiChatPostMessageRequest::new(
+                    let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
                         markdown_content(chunk),
                     );
+                    req = req.opt_thread_ts(thread_ts.clone());
                     session
                         .chat_post_message(&req)
                         .await
@@ -1170,7 +1165,8 @@ impl Messaging for SlackAdapter {
                         .with_text(text)
                         .with_blocks(slack_blocks)
                 };
-                let req = SlackApiChatPostMessageRequest::new(channel_id.clone(), content);
+                let mut req = SlackApiChatPostMessageRequest::new(channel_id.clone(), content);
+                req = req.opt_thread_ts(thread_ts.clone());
                 session
                     .chat_post_message(&req)
                     .await
@@ -1254,10 +1250,12 @@ impl Messaging for SlackAdapter {
                 } else {
                     "unknown".to_string()
                 };
+                let timestamp = parse_slack_history_timestamp(&msg.origin.ts.0);
                 HistoryMessage {
                     author,
                     content: msg.content.text.clone().unwrap_or_default(),
                     is_bot,
+                    timestamp,
                 }
             })
             .collect();
@@ -1317,6 +1315,37 @@ fn extract_thread_ts(message: &InboundMessage) -> Option<SlackTs> {
         .get("slack_thread_ts")
         .and_then(|v| v.as_str())
         .map(|s| SlackTs(s.to_string()))
+}
+
+fn parse_slack_history_timestamp(raw_timestamp: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let Some(seconds_part) = raw_timestamp.split('.').next() else {
+        tracing::warn!(timestamp = %raw_timestamp, "slack history timestamp missing seconds");
+        return None;
+    };
+
+    let seconds = match seconds_part.parse::<i64>() {
+        Ok(seconds) => seconds,
+        Err(error) => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                %error,
+                "failed to parse slack history timestamp"
+            );
+            return None;
+        }
+    };
+
+    match chrono::DateTime::from_timestamp(seconds, 0) {
+        Some(timestamp) => Some(timestamp),
+        None => {
+            tracing::warn!(
+                timestamp = %raw_timestamp,
+                seconds,
+                "slack history timestamp out of range"
+            );
+            None
+        }
+    }
 }
 
 /// Build a `SlackMessageContent` using a Markdown block with plain text fallback.

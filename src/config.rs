@@ -15,7 +15,8 @@ pub(crate) use load::resolve_env_value;
 pub use load::set_resolve_secrets_store;
 pub use onboarding::run_onboarding;
 pub use permissions::{
-    DiscordPermissions, SlackPermissions, TelegramPermissions, TwitchPermissions,
+    DiscordPermissions, MattermostPermissions, SignalPermissions, SlackPermissions,
+    TelegramPermissions, TwitchPermissions,
 };
 pub(crate) use providers::default_provider_config;
 pub use runtime::RuntimeConfig;
@@ -59,14 +60,14 @@ mod tests {
 
     impl EnvGuard {
         fn new() -> Self {
-            // NOTE: Keep in sync with provider env vars that affect test behavior
-            const KEYS: [&str; 27] = [
+            const KEYS: &[&str] = &[
                 "SPACEBOT_DIR",
                 "SPACEBOT_DEPLOYMENT",
                 "SPACEBOT_CRON_TIMEZONE",
                 "SPACEBOT_USER_TIMEZONE",
                 "ANTHROPIC_API_KEY",
                 "ANTHROPIC_BASE_URL",
+                "ANTHROPIC_AUTH_TOKEN",
                 "ANTHROPIC_OAUTH_TOKEN",
                 "OPENAI_API_KEY",
                 "OPENROUTER_API_KEY",
@@ -88,14 +89,15 @@ mod tests {
                 "MINIMAX_CN_API_KEY",
                 "MOONSHOT_API_KEY",
                 "ZAI_CODING_PLAN_API_KEY",
+                "GITHUB_COPILOT_API_KEY",
             ];
 
             let vars = KEYS
-                .into_iter()
-                .map(|key| (key, std::env::var(key).ok()))
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
                 .collect::<Vec<_>>();
 
-            for key in KEYS {
+            for &key in KEYS {
                 unsafe {
                     std::env::remove_var(key);
                 }
@@ -520,6 +522,41 @@ bind = "127.0.0.1"
         assert_eq!(config.api.bind, "[::]");
     }
 
+    #[test]
+    fn test_docker_deployment_forces_api_bind_from_toml() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("SPACEBOT_DEPLOYMENT", "docker");
+        }
+
+        let toml = r#"
+[api]
+bind = "127.0.0.1"
+"#;
+
+        let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
+        let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
+
+        assert_eq!(config.api.bind, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_docker_deployment_forces_api_bind_from_env_defaults() {
+        let _lock = env_test_lock().lock();
+        let _env = EnvGuard::new();
+
+        unsafe {
+            std::env::set_var("SPACEBOT_DEPLOYMENT", "docker");
+        }
+
+        let config = Config::load_from_env(&Config::default_instance_dir())
+            .expect("failed to load config from env");
+
+        assert_eq!(config.api.bind, "0.0.0.0");
+    }
+
     /// Helper to build a minimal `SlackConfig` for permission tests.
     fn slack_config_with_dm_users(dm_allowed_users: Vec<String>) -> SlackConfig {
         SlackConfig {
@@ -541,6 +578,7 @@ bind = "127.0.0.1"
             guild_id: None,
             workspace_id: workspace_id.map(String::from),
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users,
@@ -985,6 +1023,9 @@ tick_interval_secs = 45
 detached_worker_timeout_retry_limit = 4
 supervisor_kill_budget_per_tick = 12
 bulletin_max_words = 1200
+maintenance_interval_secs = 1200
+maintenance_prune_threshold = 0.21
+maintenance_min_age_days = 17
 
 [[agents]]
 id = "main"
@@ -993,6 +1034,7 @@ id = "main"
 branch_timeout_secs = 77
 supervisor_kill_budget_per_tick = 3
 association_max_per_pass = 55
+maintenance_decay_rate = 0.33
 "#;
         let parsed: TomlConfig = toml::from_str(toml).expect("failed to parse test TOML");
         let config = Config::from_toml(parsed, PathBuf::from(".")).expect("failed to build Config");
@@ -1005,13 +1047,93 @@ association_max_per_pass = 55
         );
         assert_eq!(config.defaults.cortex.supervisor_kill_budget_per_tick, 12);
         assert_eq!(config.defaults.cortex.bulletin_max_words, 1200);
+        assert_eq!(config.defaults.cortex.maintenance_interval_secs, 1200);
+        assert_eq!(config.defaults.cortex.maintenance_prune_threshold, 0.21);
+        assert_eq!(config.defaults.cortex.maintenance_min_age_days, 17);
 
         assert_eq!(resolved.cortex.tick_interval_secs, 45);
         assert_eq!(resolved.cortex.branch_timeout_secs, 77);
         assert_eq!(resolved.cortex.detached_worker_timeout_retry_limit, 4);
         assert_eq!(resolved.cortex.supervisor_kill_budget_per_tick, 3);
         assert_eq!(resolved.cortex.bulletin_max_words, 1200);
+        assert_eq!(resolved.cortex.maintenance_interval_secs, 1200);
+        assert_eq!(resolved.cortex.maintenance_decay_rate, 0.33);
+        assert_eq!(resolved.cortex.maintenance_prune_threshold, 0.21);
+        assert_eq!(resolved.cortex.maintenance_min_age_days, 17);
+        assert_eq!(resolved.cortex.maintenance_merge_similarity_threshold, 0.95);
         assert_eq!(resolved.cortex.association_max_per_pass, 55);
+    }
+
+    #[test]
+    fn test_cortex_maintenance_config_rejects_invalid_ranges() {
+        let invalid_threshold = r#"
+[defaults.cortex]
+maintenance_prune_threshold = 1.2
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_threshold).expect("failed to parse invalid threshold TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid maintenance_prune_threshold to be rejected"
+        );
+
+        let invalid_min_age = r#"
+[defaults.cortex]
+maintenance_min_age_days = -3
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_min_age).expect("failed to parse invalid min age TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected negative maintenance_min_age_days to be rejected"
+        );
+
+        let invalid_agent_override = r#"
+[[agents]]
+id = "main"
+
+[agents.cortex]
+maintenance_decay_rate = -0.1
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_agent_override).expect("failed to parse invalid agent TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected invalid agent maintenance_decay_rate to be rejected"
+        );
+
+        let invalid_interval = r#"
+[defaults.cortex]
+maintenance_interval_secs = 0
+"#;
+        let parsed: TomlConfig =
+            toml::from_str(invalid_interval).expect("failed to parse invalid interval TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected maintenance_interval_secs = 0 to be rejected"
+        );
+
+        let invalid_merge_similarity_low = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = -0.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_low)
+            .expect("failed to parse invalid low merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected low maintenance_merge_similarity_threshold to be rejected"
+        );
+
+        let invalid_merge_similarity_high = r#"
+[defaults.cortex]
+maintenance_merge_similarity_threshold = 1.1
+"#;
+        let parsed: TomlConfig = toml::from_str(invalid_merge_similarity_high)
+            .expect("failed to parse invalid high merge similarity TOML");
+        assert!(
+            Config::from_toml(parsed, PathBuf::from(".")).is_err(),
+            "expected high maintenance_merge_similarity_threshold to be rejected"
+        );
     }
 
     #[test]
@@ -1093,7 +1215,8 @@ association_max_per_pass = 55
     }
 
     #[test]
-    fn test_work_readiness_rejects_stale_bulletin() {
+    fn test_work_readiness_allows_old_synthesis() {
+        // Knowledge synthesis is change-driven — staleness no longer blocks readiness.
         let readiness = evaluate_work_readiness(
             WarmupConfig {
                 refresh_secs: 60,
@@ -1109,10 +1232,9 @@ association_max_per_pass = 55
             122_000,
         );
 
-        assert_eq!(readiness.stale_after_secs, 120);
         assert_eq!(readiness.bulletin_age_secs, Some(121));
-        assert!(!readiness.ready);
-        assert_eq!(readiness.reason, Some(WorkReadinessReason::BulletinStale));
+        assert!(readiness.ready, "old synthesis should not block readiness");
+        assert_eq!(readiness.reason, None);
     }
 
     #[test]
@@ -1313,6 +1435,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1329,6 +1452,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1360,6 +1484,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1377,6 +1502,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1394,6 +1520,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1411,6 +1538,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1428,6 +1556,7 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
@@ -1455,6 +1584,8 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
+            mattermost: None,
         };
         let bindings = vec![
             Binding {
@@ -1464,6 +1595,7 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                team_id: None,
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
@@ -1475,16 +1607,19 @@ association_max_per_pass = 55
                 guild_id: None,
                 workspace_id: None,
                 chat_id: None,
+                team_id: None,
                 channel_ids: vec![],
                 require_mention: false,
                 dm_allowed_users: vec![],
             },
         ];
-        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_ok());
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert_eq!(result.len(), 2);
     }
 
     #[test]
-    fn validate_named_adapters_missing_instance() {
+    fn validate_named_adapters_missing_instance_skipped() {
         let messaging = MessagingConfig {
             discord: None,
             slack: None,
@@ -1497,6 +1632,8 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
+            mattermost: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1505,11 +1642,14 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
         }];
-        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(result.is_empty(), "unresolvable binding should be skipped");
     }
 
     #[test]
@@ -1559,6 +1699,8 @@ association_max_per_pass = 55
             }),
             webhook: None,
             twitch: None,
+            signal: None,
+            mattermost: None,
         };
         let bindings = vec![Binding {
             agent_id: "main".into(),
@@ -1567,15 +1709,21 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
         }];
-        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(
+            result.is_empty(),
+            "unsupported platform binding should be skipped"
+        );
     }
 
     #[test]
-    fn validate_binding_without_default_adapter_rejected() {
+    fn validate_binding_without_default_adapter_skipped() {
         let messaging = MessagingConfig {
             discord: None,
             slack: None,
@@ -1593,6 +1741,8 @@ association_max_per_pass = 55
             email: None,
             webhook: None,
             twitch: None,
+            signal: None,
+            mattermost: None,
         };
         // Binding targets default adapter, but no default credentials exist
         let bindings = vec![Binding {
@@ -1602,11 +1752,246 @@ association_max_per_pass = 55
             guild_id: None,
             workspace_id: None,
             chat_id: None,
+            team_id: None,
             channel_ids: vec![],
             require_mention: false,
             dm_allowed_users: vec![],
         }];
-        assert!(validate_named_messaging_adapters(&messaging, &bindings).is_err());
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(
+            result.is_empty(),
+            "binding without default adapter should be skipped"
+        );
+    }
+
+    #[test]
+    fn validate_mixed_valid_and_invalid_bindings_filters_correctly() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: true,
+                token: "tok".into(),
+                instances: vec![TelegramInstanceConfig {
+                    name: "support".into(),
+                    enabled: true,
+                    token: "tok2".into(),
+                    dm_allowed_users: vec![],
+                }],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+            signal: None,
+            mattermost: None,
+        };
+        let bindings = vec![
+            // Valid: default adapter with credentials
+            Binding {
+                agent_id: "agent-a".into(),
+                channel: "telegram".into(),
+                adapter: None,
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                team_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+            // Invalid: references a non-existent named adapter
+            Binding {
+                agent_id: "agent-b".into(),
+                channel: "telegram".into(),
+                adapter: Some("ghost".into()),
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                team_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+            // Valid: references an existing named adapter
+            Binding {
+                agent_id: "agent-c".into(),
+                channel: "telegram".into(),
+                adapter: Some("support".into()),
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                team_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+            // Invalid: no discord config at all
+            Binding {
+                agent_id: "agent-d".into(),
+                channel: "discord".into(),
+                adapter: None,
+                guild_id: None,
+                workspace_id: None,
+                chat_id: None,
+                team_id: None,
+                channel_ids: vec![],
+                require_mention: false,
+                dm_allowed_users: vec![],
+            },
+        ];
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert_eq!(
+            result.len(),
+            2,
+            "only the two valid bindings should survive"
+        );
+        assert_eq!(result[0].agent_id, "agent-a");
+        assert_eq!(result[1].agent_id, "agent-c");
+    }
+
+    #[test]
+    fn validate_missing_messaging_config_skipped() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: None,
+            email: None,
+            webhook: None,
+            twitch: None,
+            signal: None,
+            mattermost: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            team_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(
+            result.is_empty(),
+            "binding with no messaging config should be skipped"
+        );
+    }
+
+    #[test]
+    fn validate_strict_mode_rejects_missing_messaging_config() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: None,
+            email: None,
+            webhook: None,
+            twitch: None,
+            signal: None,
+            mattermost: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            team_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        let result = validate_named_messaging_adapters(&messaging, bindings, true);
+        assert!(
+            result.is_err(),
+            "strict mode should reject unresolvable bindings"
+        );
+    }
+
+    #[test]
+    fn validate_disabled_instance_is_filtered_out() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: true,
+                token: "tok".into(),
+                instances: vec![TelegramInstanceConfig {
+                    name: "support".into(),
+                    enabled: false,
+                    token: "tok2".into(),
+                    dm_allowed_users: vec![],
+                }],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+            signal: None,
+            mattermost: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: Some("support".into()),
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            team_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(
+            result.is_empty(),
+            "binding to disabled instance should be skipped"
+        );
+    }
+
+    #[test]
+    fn validate_disabled_platform_default_is_filtered_out() {
+        let messaging = MessagingConfig {
+            discord: None,
+            slack: None,
+            telegram: Some(TelegramConfig {
+                enabled: false,
+                token: "tok".into(),
+                instances: vec![],
+                dm_allowed_users: vec![],
+            }),
+            email: None,
+            webhook: None,
+            twitch: None,
+            signal: None,
+            mattermost: None,
+        };
+        let bindings = vec![Binding {
+            agent_id: "main".into(),
+            channel: "telegram".into(),
+            adapter: None,
+            guild_id: None,
+            workspace_id: None,
+            chat_id: None,
+            team_id: None,
+            channel_ids: vec![],
+            require_mention: false,
+            dm_allowed_users: vec![],
+        }];
+        let result = validate_named_messaging_adapters(&messaging, bindings, false)
+            .expect("bindings should be resolvable");
+        assert!(
+            result.is_empty(),
+            "binding to disabled platform default should be skipped"
+        );
     }
 
     #[test]

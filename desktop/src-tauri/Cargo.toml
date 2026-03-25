@@ -1,0 +1,22 @@
+[package]
+name = "spacebot-desktop"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "Spacebot"
+path = "src/main.rs"
+
+[dependencies]
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+sb-desktop-macos = { path = "crates/macos" }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }

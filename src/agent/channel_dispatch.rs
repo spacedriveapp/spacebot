@@ -4,11 +4,12 @@
 //! background processes: `spawn_branch_from_state`, `spawn_worker_from_state`,
 //! and `spawn_opencode_worker_from_state`.
 
-use crate::agent::branch::Branch;
+use crate::agent::branch::{Branch, BranchExecutionConfig};
 use crate::agent::channel::ChannelState;
-use crate::agent::channel_prompt::{TemporalContext, build_worker_task_with_temporal_context};
+use crate::agent::channel_prompt::TemporalContext;
 use crate::agent::worker::Worker;
 use crate::error::{AgentError, Error as SpacebotError};
+use crate::tools::{BranchToolProfile, MemoryPersistenceContractState};
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, WorkerId};
 use futures::FutureExt as _;
 use std::sync::Arc;
@@ -97,6 +98,26 @@ pub(crate) fn map_worker_completion_result(
     (result_text, notify, success)
 }
 
+/// Build the worker status text (time + system info) used in worker system prompts.
+///
+/// Centralises the `SystemInfo` + `TemporalContext` assembly so every worker
+/// spawn/resume path produces identical status context.
+fn build_worker_status_text(
+    runtime_config: &crate::config::RuntimeConfig,
+    sandbox: &crate::sandbox::Sandbox,
+) -> Option<String> {
+    let system_info =
+        crate::agent::status::SystemInfo::from_runtime_config(runtime_config, sandbox);
+    let temporal_context = TemporalContext::from_runtime(runtime_config);
+    let current_time_line = temporal_context.current_time_line();
+    Some(system_info.render_for_worker(&current_time_line))
+}
+
+#[derive(Debug, Clone)]
+struct BranchSpawnOptions {
+    profile: BranchToolProfile,
+}
+
 /// Spawn a branch from a ChannelState. Used by the BranchTool.
 pub async fn spawn_branch_from_state(
     state: &ChannelState,
@@ -119,6 +140,9 @@ pub async fn spawn_branch_from_state(
         &system_prompt,
         &description,
         "branch",
+        BranchSpawnOptions {
+            profile: BranchToolProfile::Default,
+        },
     )
     .await
 }
@@ -132,6 +156,8 @@ pub(crate) async fn spawn_memory_persistence_branch(
     state: &ChannelState,
     deps: &AgentDeps,
 ) -> std::result::Result<BranchId, AgentError> {
+    let contract_state = Arc::new(MemoryPersistenceContractState::default());
+
     let prompt_engine = deps.runtime_config.prompts.load();
     let system_prompt = prompt_engine
         .render_static("memory_persistence")
@@ -147,6 +173,13 @@ pub(crate) async fn spawn_memory_persistence_branch(
         &system_prompt,
         "persisting memories...",
         "memory_persistence_branch",
+        BranchSpawnOptions {
+            profile: BranchToolProfile::MemoryPersistence {
+                contract_state,
+                working_memory: Some(state.deps.working_memory.clone()),
+                channel_id: Some(state.channel_id.to_string()),
+            },
+        },
     )
     .await
 }
@@ -200,7 +233,14 @@ async fn spawn_branch(
     system_prompt: &str,
     status_label: &str,
     dispatch_type: &'static str,
+    branch_options: BranchSpawnOptions,
 ) -> std::result::Result<BranchId, AgentError> {
+    let BranchSpawnOptions { profile } = branch_options;
+    let memory_persistence_contract = match &profile {
+        BranchToolProfile::MemoryPersistence { contract_state, .. } => Some(contract_state.clone()),
+        BranchToolProfile::Default => None,
+    };
+
     let max_branches = **state.deps.runtime_config.max_concurrent_branches.load();
     {
         let branches = state.active_branches.read().await;
@@ -228,6 +268,7 @@ async fn spawn_branch(
         state.conversation_logger.clone(),
         state.channel_store.clone(),
         crate::conversation::ProcessRunLogger::new(state.deps.sqlite_pool.clone()),
+        profile,
     );
     let branch_max_turns = **state.deps.runtime_config.branch_max_turns.load();
 
@@ -238,7 +279,10 @@ async fn spawn_branch(
         system_prompt,
         history,
         tool_server,
-        branch_max_turns,
+        BranchExecutionConfig {
+            max_turns: branch_max_turns,
+            memory_persistence_contract,
+        },
     );
 
     let branch_id = branch.id;
@@ -414,10 +458,9 @@ async fn spawn_worker_inner(
 ) -> std::result::Result<WorkerId, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
-    let temporal_context = TemporalContext::from_runtime(rc.as_ref());
-    let worker_task =
-        build_worker_task_with_temporal_context(task, &temporal_context, &prompt_engine)
-            .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
+
+    let worker_status_text = build_worker_status_text(rc.as_ref(), &state.deps.sandbox);
+
     let sandbox_enabled = state.deps.sandbox.mode_enabled();
     let sandbox_containment_active = state.deps.sandbox.containment_active();
     let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
@@ -440,6 +483,7 @@ async fn spawn_worker_inner(
             sandbox_write_allowlist,
             &tool_secret_names,
             browser_config.persist_session,
+            worker_status_text,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
@@ -462,7 +506,7 @@ async fn spawn_worker_inner(
     let worker = if interactive {
         let (worker, input_tx, inject_tx) = Worker::new_interactive(
             Some(state.channel_id.clone()),
-            &worker_task,
+            task,
             &system_prompt,
             state.deps.clone(),
             browser_config.clone(),
@@ -485,7 +529,7 @@ async fn spawn_worker_inner(
     } else {
         let (worker, inject_tx) = Worker::new(
             Some(state.channel_id.clone()),
-            &worker_task,
+            task,
             &system_prompt,
             state.deps.clone(),
             browser_config,
@@ -540,6 +584,17 @@ async fn spawn_worker_inner(
         })
         .ok();
 
+    state
+        .deps
+        .working_memory
+        .emit(
+            crate::memory::WorkingMemoryEventType::WorkerSpawned,
+            format!("Worker spawned: {task}"),
+        )
+        .channel(state.channel_id.to_string())
+        .importance(0.6)
+        .record();
+
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "worker spawned");
 
     Ok(worker_id)
@@ -586,11 +641,6 @@ async fn spawn_opencode_worker_inner(
     let directory = expand_tilde(directory);
 
     let rc = &state.deps.runtime_config;
-    let prompt_engine = rc.prompts.load();
-    let temporal_context = TemporalContext::from_runtime(rc.as_ref());
-    let worker_task =
-        build_worker_task_with_temporal_context(task, &temporal_context, &prompt_engine)
-            .map_err(|error| AgentError::Other(anyhow::anyhow!("{error}")))?;
     let opencode_config = rc.opencode.load();
 
     if !opencode_config.enabled {
@@ -614,11 +664,15 @@ async fn spawn_opencode_worker_inner(
 
     let oc_secrets_store = state.deps.runtime_config.secrets.load().as_ref().clone();
 
+    // Build temporal/status context so OpenCode workers get the same system
+    // info (time, model, context window) as builtin workers.
+    let worker_status_text = build_worker_status_text(rc.as_ref(), &state.deps.sandbox);
+
     let worker = if interactive {
         let (worker, input_tx) = crate::opencode::OpenCodeWorker::new_interactive(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
-            &worker_task,
+            task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
@@ -629,6 +683,10 @@ async fn spawn_opencode_worker_inner(
             .write()
             .await
             .insert(worker_id, input_tx);
+        let worker = match worker_status_text {
+            Some(ref prompt) => worker.with_system_prompt(prompt),
+            None => worker,
+        };
         let worker = match &oc_secrets_store {
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
@@ -638,11 +696,15 @@ async fn spawn_opencode_worker_inner(
         let worker = crate::opencode::OpenCodeWorker::new(
             Some(state.channel_id.clone()),
             state.deps.agent_id.clone(),
-            &worker_task,
+            task,
             directory,
             server_pool,
             state.deps.event_tx.clone(),
         );
+        let worker = match worker_status_text {
+            Some(ref prompt) => worker.with_system_prompt(prompt),
+            None => worker,
+        };
         let worker = match &oc_secrets_store {
             Some(store) => worker.with_secrets_store(store.clone()),
             None => worker,
@@ -724,6 +786,17 @@ async fn spawn_opencode_worker_inner(
             directory: Some(persist_directory.to_string_lossy().to_string()),
         })
         .ok();
+
+    state
+        .deps
+        .working_memory
+        .emit(
+            crate::memory::WorkingMemoryEventType::WorkerSpawned,
+            format!("Worker spawned (opencode): {task}"),
+        )
+        .channel(state.channel_id.to_string())
+        .importance(0.6)
+        .record();
 
     tracing::info!(worker_id = %worker_id, task = %task, interactive, "OpenCode worker spawned");
 
@@ -986,6 +1059,9 @@ pub async fn resume_idle_worker_into_state(
 
             let rc = &state.deps.runtime_config;
             let prompt_engine = rc.prompts.load();
+
+            let worker_status_text = build_worker_status_text(rc.as_ref(), &state.deps.sandbox);
+
             let sandbox_enabled = state.deps.sandbox.mode_enabled();
             let sandbox_containment_active = state.deps.sandbox.containment_active();
             let sandbox_read_allowlist = state.deps.sandbox.prompt_read_allowlist();
@@ -1006,6 +1082,7 @@ pub async fn resume_idle_worker_into_state(
                     sandbox_write_allowlist,
                     &tool_secret_names,
                     browser_config.persist_session,
+                    worker_status_text,
                 )
                 .map_err(|error| format!("failed to render worker prompt: {error}"))?;
             let brave_search_key = (**rc.brave_search_key.load()).clone();

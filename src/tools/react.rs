@@ -1,20 +1,19 @@
 //! React tool for adding emoji reactions to messages (channel only).
 
-use crate::OutboundResponse;
+use crate::{OutboundResponse, RoutedSender};
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
 
 /// Tool for reacting to messages with emoji.
 #[derive(Debug, Clone)]
 pub struct ReactTool {
-    response_tx: mpsc::Sender<OutboundResponse>,
+    response_tx: RoutedSender,
 }
 
 impl ReactTool {
-    pub fn new(response_tx: mpsc::Sender<OutboundResponse>) -> Self {
+    pub fn new(response_tx: RoutedSender) -> Self {
         Self { response_tx }
     }
 }

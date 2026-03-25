@@ -19,12 +19,7 @@ import {cx} from "@/ui/utils";
 import {badgeStyles} from "@/ui/Badge";
 import {ProviderIcon} from "@/lib/providerIcons";
 
-/** RFC 4648 base64url encoding (no padding), matching OpenCode's directory encoding. */
-export function base64UrlEncode(value: string): string {
-	const bytes = new TextEncoder().encode(value);
-	const binary = Array.from(bytes, (b) => String.fromCharCode(b)).join("");
-	return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
-}
+import {OpenCodeEmbed, base64UrlEncode} from "@/components/OpenCodeEmbed";
 
 const STATUS_FILTERS = ["all", "running", "idle", "done", "failed"] as const;
 type StatusFilter = (typeof STATUS_FILTERS)[number];
@@ -36,19 +31,6 @@ function normalizeStatus(status: string): string {
 	// Legacy rows where set_status text overwrote the state enum.
 	// If it has a completed_at it finished, otherwise it was interrupted.
 	return "failed";
-}
-
-function statusBadgeVariant(status: string) {
-	switch (status) {
-		case "running":
-			return "amber" as const;
-		case "idle":
-			return "blue" as const;
-		case "failed":
-			return "red" as const;
-		default:
-			return "outline" as const;
-	}
 }
 
 function durationBetween(start: string, end: string | null): string {
@@ -148,7 +130,11 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 				live_status: live.status,
 				tool_calls: live.toolCalls,
 				opencode_port: null,
+				opencode_session_id: null,
+				directory: null,
 				interactive: live.interactive,
+				project_id: null,
+				project_name: null,
 			}));
 
 		return [...synthetic, ...merged];
@@ -230,7 +216,7 @@ export function AgentWorkers({agentId}: {agentId: string}) {
 							className={cx(
 								"rounded-full px-2.5 py-0.5 text-tiny font-medium transition-colors",
 								statusFilter === filter
-									? "bg-accent/15 text-accent"
+									? "bg-app-hover text-ink"
 									: "text-ink-faint hover:bg-app-hover hover:text-ink-dull",
 							)}
 						>
@@ -314,23 +300,26 @@ function WorkerCard({
 			onClick={onClick}
 			className={cx(
 				"flex w-full flex-col gap-1 border-b border-app-line/30 px-4 py-3 text-left transition-colors",
-				selected ? "bg-app-selected/50" : "",
+				selected ? "bg-app-hover/30" : "",
 			)}
 		>
-			<div className="flex items-start justify-between gap-2">
-				<p className={cx("line-clamp-2 flex-1 text-xs font-medium", selected ? "text-ink" : "text-ink-dull")}>
-					{worker.task}
+			<div className="flex items-center justify-between gap-2">
+				<p className={cx("min-w-0 flex-1 truncate text-xs font-medium", selected ? "text-ink" : "text-ink-dull")}>
+					{worker.task.replace(/^\[opencode]\s*/, "")}
 				</p>
-				<div className="flex items-center gap-1.5">
-					{isInteractive && (
+				<div className="flex shrink-0 items-center gap-1.5 pointer-events-none">
+					{worker.worker_type === "opencode" ? (
+						<Badge variant="outline" size="sm">
+							OpenCode
+						</Badge>
+					) : isInteractive ? (
 						<Badge variant="outline" size="sm">
 							interactive
 						</Badge>
-					)}
+					) : null}
 					<Badge
-						variant={statusBadgeVariant(displayStatus)}
+						variant="outline"
 						size="sm"
-						className={!isLive && worker.status === "done" ? "hover:border-app-line hover:text-ink-dull" : undefined}
 					>
 						{isLive && !isIdle && (
 							<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-current" />
@@ -382,7 +371,7 @@ function WorkerDetail({
 }) {
 	const isLive = detail.status === "running" || !!liveWorker;
 	const isIdle = liveWorker?.isIdle ?? detail.status === "idle";
-	const duration = durationBetween(detail.started_at, detail.completed_at);
+	const duration = durationBetween(detail.started_at, detail.completed_at ?? null);
 	const displayStatus = liveWorker?.status;
 	const currentTool = liveWorker?.currentTool;
 	const toolCalls = liveWorker?.toolCalls ?? detail.tool_calls ?? 0;
@@ -451,33 +440,61 @@ function WorkerDetail({
 						/>
 					)}
 				</div>
-				<div className="flex items-center gap-3 text-tiny text-ink-faint">
-					{detail.channel_name && <span>{detail.channel_name}</span>}
-					{hasOpenCodeEmbed && detail.opencode_port && (
-						<OpenCodeDirectLink
-							port={detail.opencode_port}
-							sessionId={detail.opencode_session_id!}
-							directory={detail.directory}
-						/>
-					)}
-					{isRunning ? (
-						<span>
-							Running for{" "}
-							<LiveDuration
-								startMs={
-									liveWorker?.startedAt ??
-									new Date(detail.started_at).getTime()
-								}
-							/>
-						</span>
-					) : isIdle ? (
-						<span className="text-blue-500">Idle — waiting for follow-up</span>
-					) : (
-						duration && <span>{duration}</span>
-					)}
-					{!isLive && <span>{formatTimeAgo(detail.started_at)}</span>}
-					{toolCalls > 0 && (
-						<span>{toolCalls} tool calls</span>
+				<div className="flex items-center justify-between gap-3">
+					<div className="flex items-center gap-3 text-tiny text-ink-faint">
+						{detail.channel_name && <span>{detail.channel_name}</span>}
+				{hasOpenCodeEmbed && detail.opencode_port && (
+					<OpenCodeDirectLink
+						port={detail.opencode_port}
+						sessionId={detail.opencode_session_id!}
+						directory={detail.directory ?? null}
+					/>
+				)}
+						{isRunning ? (
+							<span>
+								Running for{" "}
+								<LiveDuration
+									startMs={
+										liveWorker?.startedAt ??
+										new Date(detail.started_at).getTime()
+									}
+								/>
+							</span>
+						) : isIdle ? (
+							<span className="text-blue-500">Idle — waiting for follow-up</span>
+						) : (
+							duration && <span>{duration}</span>
+						)}
+						{!isLive && <span>{formatTimeAgo(detail.started_at)}</span>}
+						{toolCalls > 0 && (
+							<span>{toolCalls} tool calls</span>
+						)}
+					</div>
+					{hasOpenCodeEmbed && (
+						<div className="flex items-center gap-1 rounded-full border border-app-line/50 p-0.5">
+							<button
+								onClick={() => setActiveTab("opencode")}
+								className={cx(
+									"rounded-full px-2 py-0.5 text-tiny font-medium transition-colors",
+									activeTab === "opencode"
+										? "bg-app-hover/50 text-ink"
+										: "text-ink-faint hover:text-ink-dull",
+								)}
+							>
+								OpenCode
+							</button>
+							<button
+								onClick={() => setActiveTab("transcript")}
+								className={cx(
+									"rounded-full px-2 py-0.5 text-tiny font-medium transition-colors",
+									activeTab === "transcript"
+										? "bg-app-hover/50 text-ink"
+										: "text-ink-faint hover:text-ink-dull",
+								)}
+							>
+								Transcript
+							</button>
+						</div>
 					)}
 				</div>
 				{/* Live status bar for running workers */}
@@ -494,41 +511,13 @@ function WorkerDetail({
 				)}
 			</div>
 
-			{/* Tab bar (only for OpenCode workers with embed data) */}
-			{hasOpenCodeEmbed && (
-				<div className="flex border-b border-app-line/50">
-					<button
-						onClick={() => setActiveTab("opencode")}
-						className={cx(
-							"px-4 py-2 text-xs font-medium transition-colors",
-							activeTab === "opencode"
-								? "border-b-2 border-accent text-accent"
-								: "text-ink-faint hover:text-ink-dull",
-						)}
-					>
-						OpenCode
-					</button>
-					<button
-						onClick={() => setActiveTab("transcript")}
-						className={cx(
-							"px-4 py-2 text-xs font-medium transition-colors",
-							activeTab === "transcript"
-								? "border-b-2 border-accent text-accent"
-								: "text-ink-faint hover:text-ink-dull",
-						)}
-					>
-						Transcript
-					</button>
-				</div>
-			)}
-
 			{/* Content */}
-			{activeTab === "opencode" && hasOpenCodeEmbed ? (
-				<OpenCodeEmbed
-					port={detail.opencode_port!}
-					sessionId={detail.opencode_session_id!}
-					directory={detail.directory}
-				/>
+		{activeTab === "opencode" && hasOpenCodeEmbed ? (
+			<OpenCodeEmbed
+				port={detail.opencode_port!}
+				sessionId={detail.opencode_session_id!}
+				directory={detail.directory ?? null}
+			/>
 			) : (
 				<div ref={transcriptRef} className="flex-1 overflow-y-auto">
 					{/* Result section */}
@@ -663,334 +652,6 @@ function OpenCodeDirectLink({
 			<ProviderIcon provider="opencode-zen" size={12} className="text-current" />
 			OpenCode ::{port}
 		</a>
-	);
-}
-
-/**
- * Cache for the OpenCode embed assets. Once loaded, the JS module and CSS
- * text are reused across mounts so we don't re-fetch on every tab switch.
- */
-let embedAssetsPromise: Promise<{
-	mountOpenCode: (el: HTMLElement, config: { serverUrl: string; initialRoute?: string }) => {
-		dispose: () => void;
-		navigate: (route: string) => void;
-	};
-	cssText: string;
-}> | null = null;
-
-function loadScript(src: string): Promise<void> {
-	return new Promise((resolve, reject) => {
-		// Don't add the same script twice
-		if (document.querySelector(`script[src="${src}"]`)) {
-			resolve();
-			return;
-		}
-		const script = document.createElement("script");
-		script.type = "module";
-		script.src = src;
-		script.onload = () => resolve();
-		script.onerror = () => reject(new Error(`Failed to load script: ${src}`));
-		document.head.appendChild(script);
-	});
-}
-
-function loadEmbedAssets() {
-	if (embedAssetsPromise) return embedAssetsPromise;
-	embedAssetsPromise = (async () => {
-		// Load the manifest to find hashed asset filenames
-		const manifestRes = await fetch("/opencode-embed/manifest.json");
-		if (!manifestRes.ok) throw new Error("Failed to load opencode-embed manifest");
-		const manifest: { js: string; css: string } = await manifestRes.json();
-
-		// Guard against path traversal or unexpected values from the manifest
-		const validAssetPath = (p: unknown): p is string =>
-			typeof p === "string" && p.startsWith("assets/") && !p.includes("..");
-		if (!validAssetPath(manifest.js) || !validAssetPath(manifest.css)) {
-			throw new Error("Invalid asset paths in opencode-embed manifest");
-		}
-
-		// Load JS via <script> tag (required for /public files in Vite dev)
-		// and CSS via fetch (to inject into Shadow DOM) in parallel
-		const [, cssRes] = await Promise.all([
-			loadScript(`/opencode-embed/${manifest.js}`),
-			fetch(`/opencode-embed/${manifest.css}`),
-		]);
-
-		if (!cssRes.ok) throw new Error("Failed to load opencode-embed CSS");
-		const cssText = await cssRes.text();
-
-		// The embed entry attaches mountOpenCode to window.__opencode_embed__
-		const embedApi = (window as any).__opencode_embed__;
-		if (!embedApi?.mountOpenCode) {
-			throw new Error("OpenCode embed module did not export mountOpenCode");
-		}
-
-		return { mountOpenCode: embedApi.mountOpenCode, cssText };
-	})();
-	// If loading fails, clear the cache so the next attempt retries
-	embedAssetsPromise.catch(() => { embedAssetsPromise = null; });
-	return embedAssetsPromise;
-}
-
-function OpenCodeEmbed({
-	port,
-	sessionId,
-	directory: initialDirectory,
-}: {
-	port: number;
-	sessionId: string;
-	directory: string | null;
-}) {
-	const [state, setState] = useState<"loading" | "ready" | "error">("loading");
-	const [errorMessage, setErrorMessage] = useState<string | null>(null);
-	const hostRef = useRef<HTMLDivElement>(null);
-	const handleRef = useRef<{ dispose: () => void; navigate: (route: string) => void } | null>(null);
-
-	// Route through the Spacebot proxy so it works for hosted/Tailscale
-	// users, not just local dev. The proxy handles forwarding to the
-	// actual OpenCode instance. In local dev the Vite proxy forwards
-	// /api/* to the Rust backend at 19898; in production it's same-origin.
-	const serverUrl = `/api/opencode/${port}`;
-
-	// Discover the event directory from the OpenCode server.
-	// OpenCode tags SSE events with Instance.directory (the process CWD),
-	// which may differ from the session's directory field. The SPA subscribes
-	// to events by directory, so we must use the event-tagged directory in
-	// the route or live updates won't work.
-	const [eventDirectory, setEventDirectory] = useState<string | null>(null);
-
-	// Reset when the worker changes (props point to a different OpenCode instance)
-	useEffect(() => {
-		setEventDirectory(null);
-	}, [port, sessionId]);
-
-	useEffect(() => {
-		const controller = new AbortController();
-
-		(async () => {
-			try {
-				// Strategy 1: Probe the SSE stream briefly. The first non-heartbeat
-				// event carries the actual Instance.directory.
-				// Use a separate controller for the probe timeout so aborting the
-				// probe doesn't poison the fallback fetch or the unmount controller.
-				const probeController = new AbortController();
-				const onUnmount = () => probeController.abort();
-				controller.signal.addEventListener("abort", onUnmount);
-
-				const sseRes = await fetch(`${serverUrl}/global/event`, {
-					headers: { Accept: "text/event-stream" },
-					signal: probeController.signal,
-				});
-				if (!sseRes.ok || !sseRes.body) throw new Error("SSE probe failed");
-
-				const reader = sseRes.body.pipeThrough(new TextDecoderStream()).getReader();
-				const timeout = setTimeout(() => probeController.abort(), 8000);
-				let buffer = "";
-
-				while (!probeController.signal.aborted) {
-					const { done, value } = await reader.read();
-					if (done) break;
-					buffer += value;
-
-					// Parse SSE lines
-					const lines = buffer.split("\n");
-					buffer = lines.pop() ?? "";
-					for (const line of lines) {
-						if (!line.startsWith("data: ")) continue;
-						try {
-							const event = JSON.parse(line.slice(6));
-							if (event.directory && event.directory !== "global") {
-								setEventDirectory(event.directory);
-								clearTimeout(timeout);
-								reader.cancel();
-								return;
-							}
-						} catch { /* not JSON, skip */ }
-					}
-				}
-				clearTimeout(timeout);
-			} catch {
-				// If SSE probe fails (aborted, timeout, etc.), fall back to
-				// the session API directory — unless the component unmounted.
-				if (!controller.signal.aborted) {
-					try {
-						const res = await fetch(`${serverUrl}/session/${sessionId}`, {
-							signal: controller.signal,
-						});
-						if (res.ok) {
-							const session = await res.json();
-							if (session?.directory) setEventDirectory(session.directory);
-						}
-					} catch { /* ignore */ }
-				}
-			}
-		})();
-
-		return () => controller.abort();
-	}, [serverUrl, sessionId]);
-
-	// Use the discovered event directory, fall back to the prop directory
-	const resolvedDirectory = eventDirectory ?? initialDirectory;
-
-	// Build the initial route for the memory router
-	const initialRoute = resolvedDirectory
-		? `/${base64UrlEncode(resolvedDirectory)}/session/${sessionId}`
-		: "/";
-
-	// Mount the OpenCode SPA into a Shadow DOM
-	useEffect(() => {
-		const host = hostRef.current;
-		if (!host) return;
-
-		let disposed = false;
-
-		(async () => {
-			try {
-				setState("loading");
-
-				// Pre-seed OpenCode layout preferences so it starts with a clean
-				// chat-only view (sidebar, terminal, file tree, review all closed).
-				const layoutKey = "opencode.global.dat:layout";
-				if (!localStorage.getItem(layoutKey)) {
-					localStorage.setItem(layoutKey, JSON.stringify({
-						sidebar: { opened: false, width: 344, workspaces: {}, workspacesDefault: false },
-						terminal: { height: 280, opened: false },
-						review: { diffStyle: "split", panelOpened: false },
-						fileTree: { opened: false, width: 344, tab: "changes" },
-						session: { width: 600 },
-						mobileSidebar: { opened: false },
-						sessionTabs: {},
-						sessionView: {},
-						handoff: {},
-					}));
-				}
-
-				// First check if the OpenCode server is reachable
-				const healthRes = await fetch(`${serverUrl}/global/health`);
-				if (!healthRes.ok) throw new Error("OpenCode server not reachable");
-
-				// Load the embed assets (cached after first load)
-				const { mountOpenCode, cssText } = await loadEmbedAssets();
-
-				if (disposed) return;
-
-				// Create Shadow DOM for CSS isolation
-				const shadow = host.shadowRoot ?? host.attachShadow({ mode: "open" });
-
-				// Clear any previous content
-				shadow.innerHTML = "";
-
-				// Inject the OpenCode CSS into the shadow root
-				const style = document.createElement("style");
-				style.textContent = cssText;
-				shadow.appendChild(style);
-
-				// Hide the sidebar and mobile sidebar in embedded mode —
-				// we only want the session/chat view.
-				const overrides = document.createElement("style");
-				overrides.textContent = `
-					[data-component="sidebar-nav-desktop"],
-					[data-component="sidebar-nav-mobile"] { display: none !important; }
-				`;
-				shadow.appendChild(overrides);
-
-				// Create the mount point inside the shadow.
-				// Apply the base styles that OpenCode normally gets from
-				// <body class="text-12-regular antialiased overflow-hidden">
-				// and ensure rem units resolve correctly by setting font-size
-				// on the shadow host (rem in Shadow DOM still resolves against
-				// document <html>, but this establishes the inherited font-size
-				// for em/% units used by child elements).
-				host.style.fontSize = "16px";
-				const mountDiv = document.createElement("div");
-				mountDiv.id = "opencode-root";
-				mountDiv.style.cssText = "display:flex;flex-direction:column;height:100%;width:100%;overflow:hidden;font-size:13px;line-height:150%;-webkit-font-smoothing:antialiased;";
-				shadow.appendChild(mountDiv);
-
-				// Inject a copy of OpenCode's CSS into the document <head>
-				// so that Kobalte portals (dropdowns, dialogs, toasts) that
-				// escape the Shadow DOM into document.body still get styled.
-				// We scope it to avoid polluting Spacebot's own styles by
-				// wrapping in a layer.
-				let portalStyle = document.getElementById("opencode-portal-css");
-				if (!portalStyle) {
-					portalStyle = document.createElement("style");
-					portalStyle.id = "opencode-portal-css";
-					// Use a CSS layer so OpenCode's global resets (*, html, body)
-					// don't override Spacebot's styles. Portal elements from
-					// Kobalte will pick up the right vars because they inherit
-					// from :root where the CSS custom properties are set.
-					portalStyle.textContent = `@layer opencode-portals {\n${cssText}\n}`;
-					document.head.appendChild(portalStyle);
-				}
-
-				// Mount the SolidJS app
-				const handle = mountOpenCode(mountDiv, {
-					serverUrl,
-					initialRoute,
-				});
-
-				handleRef.current = handle;
-				setState("ready");
-			} catch (error) {
-				if (!disposed) {
-					setState("error");
-					setErrorMessage(error instanceof Error ? error.message : "Unknown error");
-				}
-			}
-		})();
-
-		return () => {
-			disposed = true;
-			// Dispose the SolidJS app on unmount
-			if (handleRef.current) {
-				handleRef.current.dispose();
-				handleRef.current = null;
-			}
-			// Clean up shadow DOM content
-			if (host.shadowRoot) {
-				host.shadowRoot.innerHTML = "";
-			}
-			// Remove portal CSS from document head
-			const portalStyle = document.getElementById("opencode-portal-css");
-			if (portalStyle) portalStyle.remove();
-		};
-	}, [serverUrl, initialRoute]);
-
-	// Navigate the embedded app when the route changes
-	useEffect(() => {
-		if (handleRef.current && resolvedDirectory) {
-			const route = `/${base64UrlEncode(resolvedDirectory)}/session/${sessionId}`;
-			handleRef.current.navigate(route);
-		}
-	}, [resolvedDirectory, sessionId]);
-
-	// Always render the host div so the ref is available for the mount
-	// effect. Overlay loading/error states on top.
-	return (
-		<div className="relative flex-1 overflow-hidden">
-			<div
-				ref={hostRef}
-				className="absolute inset-0"
-				style={{ contain: "strict" }}
-			/>
-			{state === "loading" && (
-				<div className="absolute inset-0 flex items-center justify-center bg-app-darkBox/80">
-					<div className="flex items-center gap-2 text-xs text-ink-faint">
-						<span className="h-2 w-2 animate-pulse rounded-full bg-accent" />
-						Loading OpenCode...
-					</div>
-				</div>
-			)}
-			{state === "error" && (
-				<div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-app-darkBox/80 text-ink-faint">
-					<p className="text-xs">Failed to load OpenCode</p>
-					<p className="text-tiny">
-						{errorMessage || "The server may have been stopped. Try the Transcript tab for available data."}
-					</p>
-				</div>
-			)}
-		</div>
 	);
 }
 

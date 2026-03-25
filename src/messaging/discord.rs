@@ -10,10 +10,11 @@ use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use serenity::all::{
     ButtonStyle, ChannelId, ChannelType, Context, CreateActionRow, CreateAttachment, CreateButton,
-    CreateEmbed, CreateEmbedFooter, CreateInteractionResponse, CreateInteractionResponseMessage,
-    CreateMessage, CreatePoll, CreatePollAnswer, CreateSelectMenu, CreateSelectMenuKind,
-    CreateSelectMenuOption, CreateThread, EditMessage, EventHandler, GatewayIntents, GetMessages,
-    Http, Interaction, Message, MessageId, ReactionType, Ready, ShardManager, User, UserId,
+    CreateEmbed, CreateEmbedAuthor, CreateEmbedFooter, CreateInteractionResponse,
+    CreateInteractionResponseMessage, CreateMessage, CreatePoll, CreatePollAnswer,
+    CreateSelectMenu, CreateSelectMenuKind, CreateSelectMenuOption, CreateThread, EditMessage,
+    EventHandler, GatewayIntents, GetMessages, Http, Interaction, Message, MessageId, ReactionType,
+    Ready, ShardManager, Timestamp, User, UserId,
 };
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -164,7 +165,7 @@ impl Messaging for DiscordAdapter {
                 }
             }
             OutboundResponse::RichMessage {
-                mut text,
+                text,
                 cards,
                 interactive_elements,
                 poll,
@@ -172,37 +173,15 @@ impl Messaging for DiscordAdapter {
             } => {
                 self.stop_typing(message).await;
                 let reply_to = Self::extract_reply_message_id(message);
-
-                // Derive a plaintext fallback from cards when text is empty so
-                // the message is never blank (notifications, logging, etc.).
-                if text.trim().is_empty() {
-                    let derived = crate::OutboundResponse::text_from_cards(&cards);
-                    if !derived.trim().is_empty() {
-                        text = derived;
-                    }
+                let parts =
+                    prepare_rich_message_parts(text, &cards, &interactive_elements, poll.as_ref());
+                if parts.dropped_invalid_poll {
+                    tracing::warn!(
+                        "dropping invalid discord poll payload while sending rich message"
+                    );
                 }
 
-                // Enforce Discord API limits: max 10 embeds, 5 action rows.
-                let cards = if cards.len() > 10 {
-                    tracing::warn!(
-                        count = cards.len(),
-                        "truncating cards to Discord embed limit (10)"
-                    );
-                    &cards[..10]
-                } else {
-                    &cards
-                };
-                let interactive_elements = if interactive_elements.len() > 5 {
-                    tracing::warn!(
-                        count = interactive_elements.len(),
-                        "truncating interactive elements to Discord action row limit (5)"
-                    );
-                    &interactive_elements[..5]
-                } else {
-                    &interactive_elements
-                };
-
-                let chunks = split_message(&text, 2000);
+                let chunks = split_message(&parts.text, 2000);
                 for (i, chunk) in chunks.iter().enumerate() {
                     let is_last = i == chunks.len() - 1;
                     let mut msg = CreateMessage::new();
@@ -212,19 +191,22 @@ impl Messaging for DiscordAdapter {
 
                     // Attach rich content only to the final chunk
                     if is_last {
-                        let embeds: Vec<_> = cards.iter().map(build_embed).collect();
+                        let embeds: Vec<_> = parts.cards.iter().map(build_embed).collect();
                         if !embeds.is_empty() {
                             msg = msg.embeds(embeds);
                         }
 
-                        let components: Vec<_> =
-                            interactive_elements.iter().map(build_action_row).collect();
+                        let components: Vec<_> = parts
+                            .interactive_elements
+                            .iter()
+                            .map(build_action_row)
+                            .collect();
                         if !components.is_empty() {
                             msg = msg.components(components);
                         }
 
-                        if let Some(poll_data) = &poll {
-                            msg = msg.poll(build_poll(poll_data));
+                        if let Some(poll_data) = parts.poll.as_ref().and_then(build_poll) {
+                            msg = msg.poll(poll_data);
                         }
                     }
 
@@ -448,42 +430,22 @@ impl Messaging for DiscordAdapter {
                     .context("failed to broadcast discord message")?;
             }
         } else if let OutboundResponse::RichMessage {
-            mut text,
+            text,
             cards,
             interactive_elements,
             poll,
             ..
         } = response
         {
-            // Derive a plaintext fallback from cards when text is empty.
-            if text.trim().is_empty() {
-                let derived = crate::OutboundResponse::text_from_cards(&cards);
-                if !derived.trim().is_empty() {
-                    text = derived;
-                }
+            let parts =
+                prepare_rich_message_parts(text, &cards, &interactive_elements, poll.as_ref());
+            if parts.dropped_invalid_poll {
+                tracing::warn!(
+                    "dropping invalid discord poll payload while broadcasting rich message"
+                );
             }
 
-            // Enforce Discord API limits: max 10 embeds, 5 action rows.
-            let cards = if cards.len() > 10 {
-                tracing::warn!(
-                    count = cards.len(),
-                    "truncating cards to Discord embed limit (10)"
-                );
-                &cards[..10]
-            } else {
-                &cards
-            };
-            let interactive_elements = if interactive_elements.len() > 5 {
-                tracing::warn!(
-                    count = interactive_elements.len(),
-                    "truncating interactive elements to Discord action row limit (5)"
-                );
-                &interactive_elements[..5]
-            } else {
-                &interactive_elements
-            };
-
-            let chunks = split_message(&text, 2000);
+            let chunks = split_message(&parts.text, 2000);
             for (i, chunk) in chunks.iter().enumerate() {
                 let is_last = i == chunks.len() - 1;
                 let mut msg = CreateMessage::new();
@@ -493,19 +455,22 @@ impl Messaging for DiscordAdapter {
 
                 // Attach rich content only to the final chunk
                 if is_last {
-                    let embeds: Vec<_> = cards.iter().map(build_embed).collect();
+                    let embeds: Vec<_> = parts.cards.iter().map(build_embed).collect();
                     if !embeds.is_empty() {
                         msg = msg.embeds(embeds);
                     }
 
-                    let components: Vec<_> =
-                        interactive_elements.iter().map(build_action_row).collect();
+                    let components: Vec<_> = parts
+                        .interactive_elements
+                        .iter()
+                        .map(build_action_row)
+                        .collect();
                     if !components.is_empty() {
                         msg = msg.components(components);
                     }
 
-                    if let Some(poll_data) = &poll {
-                        msg = msg.poll(build_poll(poll_data));
+                    if let Some(poll_data) = parts.poll.as_ref().and_then(build_poll) {
+                        msg = msg.poll(poll_data);
                     }
                 }
 
@@ -582,6 +547,7 @@ impl Messaging for DiscordAdapter {
                     author,
                     content: resolved_content,
                     is_bot,
+                    timestamp: Some(*message.timestamp),
                 }
             })
             .collect();
@@ -1073,7 +1039,39 @@ fn build_embed(card: &crate::Card) -> CreateEmbed {
         embed = embed.url(url);
     }
     if let Some(footer) = &card.footer {
-        embed = embed.footer(CreateEmbedFooter::new(footer));
+        let footer_text = footer.text.trim();
+        if !footer_text.is_empty() {
+            let mut footer_builder = CreateEmbedFooter::new(footer_text);
+            if let Some(icon_url) = &footer.icon_url {
+                footer_builder = footer_builder.icon_url(icon_url);
+            }
+            embed = embed.footer(footer_builder);
+        }
+    }
+    if let Some(thumbnail) = &card.thumbnail {
+        embed = embed.thumbnail(&thumbnail.url);
+    }
+    if let Some(image) = &card.image {
+        embed = embed.image(&image.url);
+    }
+    if let Some(author) = &card.author {
+        let author_name = author.name.trim();
+        if !author_name.is_empty() {
+            let mut author_builder = CreateEmbedAuthor::new(author_name);
+            if let Some(url) = &author.url {
+                author_builder = author_builder.url(url);
+            }
+            if let Some(icon_url) = &author.icon_url {
+                author_builder = author_builder.icon_url(icon_url);
+            }
+            embed = embed.author(author_builder);
+        }
+    }
+    if let Some(timestamp) = &card.timestamp {
+        match timestamp.parse::<Timestamp>() {
+            Ok(ts) => embed = embed.timestamp(ts),
+            Err(e) => tracing::warn!(timestamp, %e, "invalid ISO 8601 timestamp in card, skipping"),
+        }
     }
 
     for (i, field) in card.fields.iter().enumerate() {
@@ -1148,23 +1146,90 @@ fn build_action_row(elements: &crate::InteractiveElements) -> CreateActionRow {
     }
 }
 
+struct RichMessageParts<'a> {
+    text: String,
+    cards: &'a [crate::Card],
+    interactive_elements: &'a [crate::InteractiveElements],
+    poll: Option<crate::Poll>,
+    dropped_invalid_poll: bool,
+}
+
+fn prepare_rich_message_parts<'a>(
+    mut text: String,
+    cards: &'a [crate::Card],
+    interactive_elements: &'a [crate::InteractiveElements],
+    poll: Option<&crate::Poll>,
+) -> RichMessageParts<'a> {
+    // Derive a plaintext fallback from cards when text is empty so the message
+    // is never blank for notifications, logs, or non-rich adapters.
+    if text.trim().is_empty() {
+        let derived = crate::OutboundResponse::text_from_cards(cards);
+        if !derived.trim().is_empty() {
+            text = derived;
+        }
+    }
+
+    let cards = if cards.len() > 10 {
+        tracing::warn!(
+            count = cards.len(),
+            "truncating cards to Discord embed limit (10)"
+        );
+        &cards[..10]
+    } else {
+        cards
+    };
+
+    let interactive_elements = if interactive_elements.len() > 5 {
+        tracing::warn!(
+            count = interactive_elements.len(),
+            "truncating interactive elements to Discord action row limit (5)"
+        );
+        &interactive_elements[..5]
+    } else {
+        interactive_elements
+    };
+
+    let had_poll = poll.is_some();
+    let poll = poll.filter(|poll| build_poll(poll).is_some()).cloned();
+    let dropped_invalid_poll = had_poll && poll.is_none();
+
+    RichMessageParts {
+        text,
+        cards,
+        interactive_elements,
+        poll,
+        dropped_invalid_poll,
+    }
+}
+
 fn build_poll(
     poll: &crate::Poll,
-) -> serenity::builder::CreatePoll<serenity::builder::create_poll::Ready> {
+) -> Option<serenity::builder::CreatePoll<serenity::builder::create_poll::Ready>> {
+    let question = poll.question.trim();
+    if question.is_empty() {
+        return None;
+    }
+
     // Discord limits: max 10 answers
     let answers: Vec<_> = poll
         .answers
         .iter()
+        .map(|answer| answer.trim())
+        .filter(|answer| !answer.is_empty())
         .take(10)
-        .map(|a| CreatePollAnswer::new().text(a))
+        .map(|answer| CreatePollAnswer::new().text(answer))
         .collect();
+
+    if answers.len() < 2 {
+        return None;
+    }
 
     // Duration must be at least 1 hour, usually up to 720 hours (30 days).
     // The builder just takes std::time::Duration but it has specific allowed values.
     let hours = poll.duration_hours.clamp(1, 720);
 
     let mut p = CreatePoll::new()
-        .question(&poll.question)
+        .question(question)
         .answers(answers)
         .duration(std::time::Duration::from_secs((hours as u64) * 3600));
 
@@ -1172,7 +1237,7 @@ fn build_poll(
         p = p.allow_multiselect();
     }
 
-    p
+    Some(p)
 }
 
 #[cfg(test)]
@@ -1233,7 +1298,62 @@ mod tests {
         }
 
         // build_poll should limit answers to 10 and duration to 720
-        let _ = build_poll(&poll);
+        let built = build_poll(&poll);
+        assert!(built.is_some());
         // Again, can't easily inspect CreatePoll fields, but we verify it runs.
+    }
+
+    #[test]
+    fn test_build_poll_rejects_blank_question() {
+        let poll = Poll {
+            question: "   ".into(),
+            answers: vec!["Yes".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+
+        assert!(build_poll(&poll).is_none());
+    }
+
+    #[test]
+    fn test_build_poll_rejects_single_non_empty_answer() {
+        let poll = Poll {
+            question: "Question?".into(),
+            answers: vec!["Yes".into(), "   ".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+
+        assert!(build_poll(&poll).is_none());
+    }
+
+    #[test]
+    fn test_prepare_rich_message_parts_drops_invalid_poll_but_keeps_text() {
+        let poll = Poll {
+            question: "   ".into(),
+            answers: vec!["Yes".into(), "No".into()],
+            allow_multiselect: false,
+            duration_hours: 24,
+        };
+
+        let parts = prepare_rich_message_parts("plain text reply".into(), &[], &[], Some(&poll));
+
+        assert_eq!(parts.text, "plain text reply");
+        assert!(parts.poll.is_none());
+        assert!(parts.dropped_invalid_poll);
+    }
+
+    #[test]
+    fn test_prepare_rich_message_parts_derives_text_fallback_from_cards() {
+        let cards = vec![Card {
+            title: Some("Status".into()),
+            description: Some("All green".into()),
+            ..Default::default()
+        }];
+
+        let parts = prepare_rich_message_parts(String::new(), &cards, &[], None);
+
+        assert_eq!(parts.text, "Status\n\nAll green");
+        assert!(!parts.dropped_invalid_poll);
     }
 }

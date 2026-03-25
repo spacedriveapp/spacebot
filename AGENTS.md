@@ -43,6 +43,32 @@ Additional rules:
 - For changes in async/stateful paths (worker lifecycle, cancellation, retrigger, recall cache behavior), include explicit race/terminal-state reasoning in the PR summary and run targeted tests in addition to `just gate-pr`.
 - Do not push if any gate is red.
 
+## Nix Flake Workflow
+
+### Frontend Dependencies
+
+When updating frontend dependencies in `interface/`:
+
+1. **Update deps:** Modify `interface/package.json` or `interface/bun.lock` as needed
+2. **Update the Nix hash:** Run `just update-frontend-hash`
+   - This builds the `frontend-updater` package with `fakeHash`
+   - Extracts the new hash from the build output
+   - Updates `nix/default.nix` automatically
+3. **Verify:** Run `nix build .#frontend` to confirm the build works
+4. **Commit:** Include both the dependency changes and the hash update in the same PR
+
+**Note:** The `just update-frontend-hash` command uses the `fakeHash` pattern (standard Nix practice) where the build intentionally fails to reveal the correct hash, which is then extracted and applied automatically.
+
+### Nix Flake Inputs
+
+To update all Nix flake inputs (nixpkgs, crane, etc.) and regenerate `flake.lock`:
+
+```bash
+just update-flake
+```
+
+This runs `nix flake update` and updates all inputs to their latest versions.
+
 ## Architecture Overview
 
 Five process types. Every LLM process is a Rig `Agent<SpacebotModel, SpacebotHook>`. They differ in system prompt, tools, history, and hooks.

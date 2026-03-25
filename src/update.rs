@@ -19,7 +19,7 @@ pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CHECK_INTERVAL: Duration = Duration::from_secs(3600);
 
 /// Deployment environment, detected from SPACEBOT_DEPLOYMENT env var.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Deployment {
     Docker,
@@ -55,7 +55,7 @@ fn is_running_in_container() -> bool {
 }
 
 /// Result of an update check.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct UpdateStatus {
     pub current_version: String,
     pub latest_version: Option<String>,

@@ -14,7 +14,7 @@ use rust_embed::Embed;
 struct PresetAssets;
 
 /// Metadata for a preset archetype (returned in list responses).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct PresetMeta {
     pub id: String,
     pub name: String,
@@ -31,14 +31,14 @@ pub struct PresetMeta {
 /// Model routing is intentionally excluded — presets are provider-agnostic.
 /// The factory conversation handles model selection at creation time when the
 /// user's available providers are known.
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
 pub struct PresetDefaults {
     pub max_concurrent_workers: Option<u32>,
     pub max_turns: Option<u32>,
 }
 
 /// A fully loaded preset with all identity file content.
-#[derive(Debug, Clone, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize, utoipa::ToSchema)]
 pub struct Preset {
     pub meta: PresetMeta,
     pub soul: String,

@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct BindingResponse {
     agent_id: String,
     channel: String,
@@ -14,23 +14,24 @@ pub(super) struct BindingResponse {
     guild_id: Option<String>,
     workspace_id: Option<String>,
     chat_id: Option<String>,
+    team_id: Option<String>,
     channel_ids: Vec<String>,
     require_mention: bool,
     dm_allowed_users: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct BindingsListResponse {
     bindings: Vec<BindingResponse>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct BindingsQuery {
     #[serde(default)]
     agent_id: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateBindingRequest {
     agent_id: String,
     channel: String,
@@ -43,6 +44,8 @@ pub(super) struct CreateBindingRequest {
     #[serde(default)]
     chat_id: Option<String>,
     #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
     require_mention: bool,
@@ -53,7 +56,7 @@ pub(super) struct CreateBindingRequest {
     platform_credentials: Option<PlatformCredentials>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct PlatformCredentials {
     #[serde(default)]
     discord_token: Option<String>,
@@ -95,7 +98,7 @@ pub(super) struct PlatformCredentials {
     twitch_refresh_token: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct CreateBindingResponse {
     success: bool,
     /// True if platform credentials were added/changed (adapter needs restart).
@@ -103,7 +106,7 @@ pub(super) struct CreateBindingResponse {
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct DeleteBindingRequest {
     agent_id: String,
     channel: String,
@@ -115,15 +118,17 @@ pub(super) struct DeleteBindingRequest {
     workspace_id: Option<String>,
     #[serde(default)]
     chat_id: Option<String>,
+    #[serde(default)]
+    team_id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct DeleteBindingResponse {
     success: bool,
     message: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateBindingRequest {
     original_agent_id: String,
     original_channel: String,
@@ -135,6 +140,8 @@ pub(super) struct UpdateBindingRequest {
     original_workspace_id: Option<String>,
     #[serde(default)]
     original_chat_id: Option<String>,
+    #[serde(default)]
+    original_team_id: Option<String>,
 
     agent_id: String,
     channel: String,
@@ -147,6 +154,8 @@ pub(super) struct UpdateBindingRequest {
     #[serde(default)]
     chat_id: Option<String>,
     #[serde(default)]
+    team_id: Option<String>,
+    #[serde(default)]
     channel_ids: Vec<String>,
     #[serde(default)]
     require_mention: bool,
@@ -154,13 +163,25 @@ pub(super) struct UpdateBindingRequest {
     dm_allowed_users: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct UpdateBindingResponse {
     success: bool,
     message: String,
 }
 
 /// List all bindings, optionally filtered by agent_id.
+#[utoipa::path(
+    get,
+    path = "/bindings",
+    params(
+        ("agent_id" = Option<String>, Query, description = "Filter by agent ID"),
+    ),
+    responses(
+        (status = 200, body = BindingsListResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "bindings",
+)]
 pub(super) async fn list_bindings(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<BindingsQuery>,
@@ -185,6 +206,7 @@ pub(super) async fn list_bindings(
             guild_id: b.guild_id,
             workspace_id: b.workspace_id,
             chat_id: b.chat_id,
+            team_id: b.team_id,
             channel_ids: b.channel_ids,
             require_mention: b.require_mention,
             dm_allowed_users: b.dm_allowed_users,
@@ -195,6 +217,17 @@ pub(super) async fn list_bindings(
 }
 
 /// Create a new binding (and optionally configure platform credentials).
+#[utoipa::path(
+    post,
+    path = "/bindings",
+    request_body = CreateBindingRequest,
+    responses(
+        (status = 200, body = CreateBindingResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "bindings",
+)]
 pub(super) async fn create_binding(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<CreateBindingRequest>,
@@ -433,6 +466,14 @@ pub(super) async fn create_binding(
     if let Some(chat_id) = &request.chat_id {
         binding_table["chat_id"] = toml_edit::value(chat_id.as_str());
     }
+    if let Some(team_id) = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding_table["team_id"] = toml_edit::value(team_id);
+    }
     if !request.channel_ids.is_empty() {
         let mut arr = toml_edit::Array::new();
         for id in &request.channel_ids {
@@ -656,6 +697,18 @@ pub(super) async fn create_binding(
     }))
 }
 
+/// Update an existing binding.
+#[utoipa::path(
+    put,
+    path = "/bindings",
+    request_body = UpdateBindingRequest,
+    responses(
+        (status = 200, body = UpdateBindingResponse),
+        (status = 404, description = "Binding not found or config not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "bindings",
+)]
 pub(super) async fn update_binding(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<UpdateBindingRequest>,
@@ -682,6 +735,12 @@ pub(super) async fn update_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request
+        .original_team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -700,32 +759,39 @@ pub(super) async fn update_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.original_guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.original_workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.original_chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
+        let toml_team_id = table
+            .get("team_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
             && matches_guild
             && matches_workspace
             && matches_chat
+            && matches_team
         {
             match_idx = Some(i);
             break;
@@ -750,6 +816,7 @@ pub(super) async fn update_binding(
     binding.remove("guild_id");
     binding.remove("workspace_id");
     binding.remove("chat_id");
+    binding.remove("team_id");
 
     if let Some(adapter) = request
         .adapter
@@ -774,6 +841,14 @@ pub(super) async fn update_binding(
         && !chat_id.is_empty()
     {
         binding["chat_id"] = toml_edit::value(chat_id);
+    }
+    if let Some(team_id) = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        binding["team_id"] = toml_edit::value(team_id);
     }
 
     if !request.channel_ids.is_empty() {
@@ -850,6 +925,17 @@ pub(super) async fn update_binding(
 }
 
 /// Delete a binding by matching agent_id + channel + platform-specific identifiers.
+#[utoipa::path(
+    delete,
+    path = "/bindings",
+    request_body = DeleteBindingRequest,
+    responses(
+        (status = 200, body = DeleteBindingResponse),
+        (status = 404, description = "Binding not found or config not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "bindings",
+)]
 pub(super) async fn delete_binding(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<DeleteBindingRequest>,
@@ -876,6 +962,12 @@ pub(super) async fn delete_binding(
         .and_then(|b| b.as_array_of_tables_mut())
         .ok_or(StatusCode::NOT_FOUND)?;
 
+    let request_team_id = request
+        .team_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
     let mut match_idx: Option<usize> = None;
     for (i, table) in bindings_array.iter().enumerate() {
         let matches_agent = table
@@ -894,32 +986,39 @@ pub(super) async fn delete_binding(
             None => table.get("adapter").is_none(),
         };
         let matches_guild = match &request.guild_id {
-            Some(gid) => table
+            Some(guild_id) => table
                 .get("guild_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == gid),
+                .is_some_and(|v| v == guild_id),
             None => table.get("guild_id").is_none(),
         };
         let matches_workspace = match &request.workspace_id {
-            Some(wid) => table
+            Some(workspace_id) => table
                 .get("workspace_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == wid),
+                .is_some_and(|v| v == workspace_id),
             None => table.get("workspace_id").is_none(),
         };
         let matches_chat = match &request.chat_id {
-            Some(cid) => table
+            Some(chat_id) => table
                 .get("chat_id")
                 .and_then(|v: &toml_edit::Item| v.as_str())
-                .is_some_and(|v| v == cid),
+                .is_some_and(|v| v == chat_id),
             None => table.get("chat_id").is_none(),
         };
+        let toml_team_id = table
+            .get("team_id")
+            .and_then(|v: &toml_edit::Item| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let matches_team = request_team_id == toml_team_id;
         if matches_agent
             && matches_channel
             && matches_adapter
             && matches_guild
             && matches_workspace
             && matches_chat
+            && matches_team
         {
             match_idx = Some(i);
             break;

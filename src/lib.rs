@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod db;
 pub mod error;
 pub mod factory;
+pub mod github_copilot_auth;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -34,9 +35,18 @@ pub mod update;
 
 pub use error::{Error, Result};
 
+/// Generate the OpenAPI JSON specification.
+/// This function is called by the `openapi-spec` binary.
+pub fn openapi_json() -> anyhow::Result<String> {
+    let (_, api) = api::api_router().split_for_parts();
+    api.to_json()
+        .map_err(|e| anyhow::anyhow!("Failed to serialize OpenAPI spec: {}", e))
+}
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 
 /// Signal from the API to the main event loop to trigger provider setup.
 #[derive(Debug)]
@@ -397,16 +407,12 @@ pub struct AgentDeps {
     /// Org-level human definitions (hot-reloadable). Used by `build_org_context()`
     /// to surface human display names, roles, and descriptions in agent prompts.
     pub humans: Arc<arc_swap::ArcSwap<Vec<config::HumanDef>>>,
-    /// Cross-agent task store registry. Maps agent_id → TaskStore for agents
-    /// reachable via links. Used by `send_agent_message` to create tasks on
-    /// target agents and by the cortex to look up delegation metadata.
-    /// Populated after all agents are initialized.
-    pub task_store_registry:
-        Arc<arc_swap::ArcSwap<std::collections::HashMap<String, Arc<tasks::TaskStore>>>>,
     pub process_control_registry: Arc<agent::process_control::ProcessControlRegistry>,
     /// Sender for injecting messages into channels from outside the normal
     /// inbound message flow (e.g. cross-agent task completion notifications).
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
+    /// Working memory event log for temporal situational awareness.
+    pub working_memory: Arc<memory::WorkingMemoryStore>,
 }
 
 impl AgentDeps {
@@ -473,6 +479,23 @@ pub struct InboundMessage {
 }
 
 impl InboundMessage {
+    /// Construct an empty placeholder message. Used as a fallback when no
+    /// inbound context is available for outbound routing.
+    pub fn empty() -> Self {
+        Self {
+            id: String::new(),
+            source: String::new(),
+            adapter: None,
+            conversation_id: String::new(),
+            sender_id: String::new(),
+            agent_id: None,
+            content: MessageContent::Text(String::new()),
+            timestamp: chrono::Utc::now(),
+            metadata: HashMap::new(),
+            formatted_author: None,
+        }
+    }
+
     /// Runtime adapter key for routing outbound operations.
     ///
     /// Falls back to the platform source for backward compatibility.
@@ -569,6 +592,45 @@ pub struct Attachment {
     /// Excluded from serialization to prevent credential leakage.
     #[serde(skip)]
     pub auth_header: Option<String>,
+}
+
+/// An outbound response paired with the inbound message that triggered it.
+///
+/// This ensures outbound routing targets the correct thread/conversation even
+/// when multiple threads share the same channel (e.g. Slack threads within a
+/// single channel). The paired `InboundMessage` carries the platform metadata
+/// (thread_ts, message_ts, etc.) needed to route the response correctly.
+#[derive(Debug, Clone)]
+pub struct RoutedResponse {
+    pub response: OutboundResponse,
+    pub target: InboundMessage,
+}
+
+/// A sender that automatically pairs outbound responses with a captured
+/// inbound message target. Used by channel tools (reply, react, etc.) so
+/// they don't need direct access to the triggering `InboundMessage`.
+#[derive(Debug, Clone)]
+pub struct RoutedSender {
+    inner: mpsc::Sender<RoutedResponse>,
+    target: InboundMessage,
+}
+
+impl RoutedSender {
+    pub fn new(inner: mpsc::Sender<RoutedResponse>, target: InboundMessage) -> Self {
+        Self { inner, target }
+    }
+
+    pub async fn send(
+        &self,
+        response: OutboundResponse,
+    ) -> std::result::Result<(), mpsc::error::SendError<RoutedResponse>> {
+        self.inner
+            .send(RoutedResponse {
+                response,
+                target: self.target.clone(),
+            })
+            .await
+    }
 }
 
 /// Outbound response to messaging platforms.
@@ -682,9 +744,20 @@ impl OutboundResponse {
                 }
             }
             if let Some(footer) = &card.footer
-                && !footer.trim().is_empty()
+                && !footer.text.trim().is_empty()
             {
-                lines.push(footer.trim().to_string());
+                lines.push(footer.text.trim().to_string());
+            }
+            if let Some(author) = &card.author
+                && !author.name.trim().is_empty()
+            {
+                lines.push(author.name.trim().to_string());
+            }
+            if let Some(timestamp) = &card.timestamp
+                && !timestamp.trim().is_empty()
+                && chrono::DateTime::parse_from_rfc3339(timestamp.trim()).is_ok()
+            {
+                lines.push(timestamp.trim().to_string());
             }
             if !lines.is_empty() {
                 sections.push(lines.join("\n\n"));
@@ -703,7 +776,112 @@ pub struct Card {
     pub url: Option<String>,
     #[serde(default)]
     pub fields: Vec<CardField>,
-    pub footer: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_card_footer")]
+    pub footer: Option<CardFooter>,
+    /// Small image in the top-right corner of the embed.
+    pub thumbnail: Option<CardImage>,
+    /// Large image at the bottom of the embed.
+    pub image: Option<CardImage>,
+    /// Author bar at the top of the embed.
+    pub author: Option<CardAuthor>,
+    /// ISO 8601 timestamp displayed in the footer area.
+    pub timestamp: Option<String>,
+}
+
+/// A card footer that can be either a plain string or a structured object.
+/// Discord embeds support a text field and optional icon URL.
+#[derive(Debug, Clone, Serialize, Default, schemars::JsonSchema)]
+pub struct CardFooter {
+    pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub icon_url: Option<String>,
+}
+
+impl CardFooter {
+    /// Create a new footer with just text.
+    pub fn new(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            icon_url: None,
+        }
+    }
+
+    /// Get the footer content as a string (for backward compatibility).
+    pub fn as_str(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for CardFooter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.text)
+    }
+}
+
+/// Deserialize a card footer that may be either a string or an object.
+///
+/// LLMs sometimes send `"footer": "plain text"` and sometimes
+/// `"footer": {"text": "rich text", "icon_url": "..."}`.
+/// This handles both forms so the tool call doesn't fail.
+fn deserialize_card_footer<'de, D>(
+    deserializer: D,
+) -> std::result::Result<Option<CardFooter>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de;
+
+    struct CardFooterVisitor;
+
+    impl<'de> de::Visitor<'de> for CardFooterVisitor {
+        type Value = Option<CardFooter>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+            formatter.write_str("a string or an object with a 'text' field")
+        }
+
+        fn visit_str<E: de::Error>(self, value: &str) -> std::result::Result<Self::Value, E> {
+            Ok(Some(CardFooter::new(value)))
+        }
+
+        fn visit_string<E: de::Error>(self, value: String) -> std::result::Result<Self::Value, E> {
+            Ok(Some(CardFooter::new(value)))
+        }
+
+        fn visit_map<M: de::MapAccess<'de>>(
+            self,
+            mut map: M,
+        ) -> std::result::Result<Self::Value, M::Error> {
+            let mut text = None;
+            let mut icon_url = None;
+
+            while let Some(key) = map.next_key::<String>()? {
+                match key.as_str() {
+                    "text" => text = Some(map.next_value::<String>()?),
+                    "icon_url" => icon_url = map.next_value::<Option<String>>()?,
+                    _ => {
+                        // Skip unknown fields
+                        let _: serde::de::IgnoredAny = map.next_value()?;
+                    }
+                }
+            }
+
+            match text {
+                Some(t) => Ok(Some(CardFooter { text: t, icon_url })),
+                None => Err(de::Error::missing_field("text")),
+            }
+        }
+
+        fn visit_none<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+
+        fn visit_unit<E: de::Error>(self) -> std::result::Result<Self::Value, E> {
+            Ok(None)
+        }
+    }
+
+    deserializer.deserialize_any(CardFooterVisitor)
 }
 
 /// A field within a generic Card.
@@ -713,6 +891,20 @@ pub struct CardField {
     pub value: String,
     #[serde(default)]
     pub inline: bool,
+}
+
+/// Image (thumbnail or main image) for a Card.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CardImage {
+    pub url: String,
+}
+
+/// Author for a Card.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct CardAuthor {
+    pub name: String,
+    pub url: Option<String>,
+    pub icon_url: Option<String>,
 }
 
 /// Container for interactive elements (maps to ActionRows in Discord).
@@ -817,4 +1009,76 @@ pub enum StatusUpdate {
         worker_id: WorkerId,
         result: String,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn card_footer_deserializes_from_string() {
+        let json = r#"{"title": "Test", "footer": "plain text"}"#;
+        let card: Card = serde_json::from_str(json).expect("should parse footer as string");
+        assert!(card.footer.is_some());
+        assert_eq!(card.footer.as_ref().unwrap().text, "plain text");
+    }
+
+    #[test]
+    fn card_footer_deserializes_from_object() {
+        let json = r#"{"title": "Test", "footer": {"text": "rich text", "icon_url": "http://example.com/icon.png"}}"#;
+        let card: Card = serde_json::from_str(json).expect("should parse footer as object");
+        assert!(card.footer.is_some());
+        assert_eq!(card.footer.as_ref().unwrap().text, "rich text");
+        assert_eq!(
+            card.footer.as_ref().unwrap().icon_url,
+            Some("http://example.com/icon.png".to_string())
+        );
+    }
+
+    #[test]
+    fn card_footer_deserializes_from_object_text_only() {
+        // This is the problematic case from issue #478
+        let json = r#"{"title": "Test", "footer": {"text": "Week of March 23, 2026"}}"#;
+        let card: Card = serde_json::from_str(json).expect("should parse footer with text only");
+        assert!(card.footer.is_some());
+        assert_eq!(card.footer.as_ref().unwrap().text, "Week of March 23, 2026");
+        assert!(card.footer.as_ref().unwrap().icon_url.is_none());
+    }
+
+    #[test]
+    fn card_footer_deserializes_from_object_with_null_icon_url() {
+        // Regression test: icon_url: null should deserialize without error
+        let json = r#"{"title": "Test", "footer": {"text": "x", "icon_url": null}}"#;
+        let card: Card =
+            serde_json::from_str(json).expect("should parse footer with null icon_url");
+        assert!(card.footer.is_some());
+        assert_eq!(card.footer.as_ref().unwrap().text, "x");
+        assert!(card.footer.as_ref().unwrap().icon_url.is_none());
+    }
+
+    #[test]
+    fn card_footer_deserializes_when_missing() {
+        let json = r#"{"title": "Test"}"#;
+        let card: Card = serde_json::from_str(json).expect("should parse without footer");
+        assert!(card.footer.is_none());
+    }
+
+    #[test]
+    fn card_footer_deserializes_when_null() {
+        let json = r#"{"title": "Test", "footer": null}"#;
+        let card: Card = serde_json::from_str(json).expect("should parse null footer");
+        assert!(card.footer.is_none());
+    }
+
+    #[test]
+    fn card_footer_display_trait_works() {
+        let footer = CardFooter::new("test text");
+        assert_eq!(format!("{}", footer), "test text");
+    }
+
+    #[test]
+    fn card_footer_as_str_works() {
+        let footer = CardFooter::new("test text");
+        assert_eq!(footer.as_str(), "test text");
+    }
 }

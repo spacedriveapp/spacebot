@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateMcpServerRequest {
     pub name: String,
     pub transport: String,
@@ -32,7 +32,7 @@ fn default_enabled() -> bool {
     true
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct McpServerInfo {
     pub name: String,
     pub transport: String,
@@ -40,19 +40,28 @@ pub(super) struct McpServerInfo {
     pub state: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct McpAgentStatus {
     pub agent_id: String,
     pub servers: Vec<McpServerInfo>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct MutationResponse {
     pub success: bool,
     pub message: String,
 }
 
 /// GET /api/mcp/servers — list all configured MCP servers from config.toml.
+#[utoipa::path(
+    get,
+    path = "/mcp/servers",
+    responses(
+        (status = 200, body = Vec<McpServerInfo>),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn list_mcp_servers(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<Vec<McpServerInfo>>, StatusCode> {
@@ -108,6 +117,16 @@ pub(super) async fn list_mcp_servers(
 }
 
 /// POST /api/mcp/servers — add a new MCP server definition to config.toml.
+#[utoipa::path(
+    post,
+    path = "/mcp/servers",
+    request_body = CreateMcpServerRequest,
+    responses(
+        (status = 200, body = MutationResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn create_mcp_server(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateMcpServerRequest>,
@@ -206,6 +225,16 @@ pub(super) async fn create_mcp_server(
 }
 
 /// PUT /api/mcp/servers — update an existing MCP server definition.
+#[utoipa::path(
+    put,
+    path = "/mcp/servers",
+    request_body = CreateMcpServerRequest,
+    responses(
+        (status = 200, body = MutationResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn update_mcp_server(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateMcpServerRequest>,
@@ -286,6 +315,18 @@ pub(super) async fn update_mcp_server(
 }
 
 /// DELETE /api/mcp/servers/{name} — remove a server definition from config.toml.
+#[utoipa::path(
+    delete,
+    path = "/mcp/servers/{name}",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    responses(
+        (status = 200, body = MutationResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn delete_mcp_server(
     State(state): State<Arc<ApiState>>,
     Path(server_name): Path<String>,
@@ -348,6 +389,14 @@ pub(super) async fn delete_mcp_server(
 }
 
 /// GET /api/mcp/status — per-agent MCP connection status.
+#[utoipa::path(
+    get,
+    path = "/mcp/status",
+    responses(
+        (status = 200, body = Vec<McpAgentStatus>),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn mcp_status(State(state): State<Arc<ApiState>>) -> Json<Vec<McpAgentStatus>> {
     let managers = state.mcp_managers.load();
     let mut result = Vec::with_capacity(managers.len());
@@ -379,6 +428,18 @@ pub(super) async fn mcp_status(State(state): State<Arc<ApiState>>) -> Json<Vec<M
 }
 
 /// POST /api/mcp/servers/{name}/reconnect — force-reconnect a specific server.
+#[utoipa::path(
+    post,
+    path = "/mcp/servers/{name}/reconnect",
+    params(
+        ("name" = String, Path, description = "Server name"),
+    ),
+    responses(
+        (status = 200, body = MutationResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "mcp",
+)]
 pub(super) async fn reconnect_mcp_server(
     State(state): State<Arc<ApiState>>,
     Path(server_name): Path<String>,

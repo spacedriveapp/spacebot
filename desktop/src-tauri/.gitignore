@@ -1,0 +1,5 @@
+# Generated icon assets (compiled by build.rs via xcrun actool)
+gen/icon/
+
+# Sidecar binary (built by scripts/bundle-sidecar.sh)
+binaries/

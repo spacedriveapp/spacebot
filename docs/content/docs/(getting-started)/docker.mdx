@@ -1,11 +1,11 @@
 ---
 title: Docker
-description: Run Spacebot in a container with slim or full image variants.
+description: Run Spacebot in a container with the unified Spacebot image.
 ---
 
 # Docker
 
-Run Spacebot in a container. Two image variants: `slim` (no browser) and `full` (includes Chromium for browser workers).
+Run Spacebot in a container with the unified Spacebot image.
 
 ## Quick Start
 
@@ -15,28 +15,19 @@ docker run -d \
   -e ANTHROPIC_API_KEY="sk-ant-..." \
   -v spacebot-data:/data \
   -p 19898:19898 \
-  ghcr.io/spacedriveapp/spacebot:slim
+  ghcr.io/spacedriveapp/spacebot:latest
 ```
 
 The web UI is available at `http://localhost:19898`.
 
-## Image Variants
+## Image Behavior
 
-### `spacebot:slim`
+There is one published image: `ghcr.io/spacedriveapp/spacebot`.
 
-Minimal runtime. Everything works except the browser tool.
-
-- Base: `debian:bookworm-slim`
-- Size: ~150MB
-- Includes: Spacebot binary, CA certs, SQLite libs, bubblewrap (process sandbox), embedded frontend
-
-### `spacebot:full`
-
-Includes Chromium for browser workers (headless Chrome automation via CDP).
-
-- Base: `debian:bookworm-slim` + Chromium
-- Size: ~800MB
-- Includes: everything in slim + Chromium + browser dependencies
+- `latest` tracks the rolling release
+- `vX.Y.Z` pins a specific release
+- Browser support is built in: Chromium is downloaded on first browser-tool use and cached under `/data`
+- Legacy `-slim` / `-full` tags are deprecated
 
 ## Data Volume
 
@@ -72,7 +63,7 @@ docker run -d \
   -e DISCORD_BOT_TOKEN="..." \
   -v spacebot-data:/data \
   -p 19898:19898 \
-  ghcr.io/spacedriveapp/spacebot:slim
+  ghcr.io/spacedriveapp/spacebot:latest
 ```
 
 Available environment variables:
@@ -99,7 +90,7 @@ docker run -d \
   -v spacebot-data:/data \
   -v ./config.toml:/data/config.toml:ro \
   -p 19898:19898 \
-  ghcr.io/spacedriveapp/spacebot:slim
+  ghcr.io/spacedriveapp/spacebot:latest
 ```
 
 Config values can reference environment variables with `env:VAR_NAME`:
@@ -116,7 +107,7 @@ See [Configuration](/docs/config) for the full config reference.
 ```yaml
 services:
   spacebot:
-    image: ghcr.io/spacedriveapp/spacebot:slim
+    image: ghcr.io/spacedriveapp/spacebot:latest
     container_name: spacebot
     restart: unless-stopped
     ports:
@@ -132,48 +123,23 @@ volumes:
   spacebot-data:
 ```
 
-### With Browser Workers
+### Browser Workers
 
-```yaml
-services:
-  spacebot:
-    image: ghcr.io/spacedriveapp/spacebot:full
-    container_name: spacebot
-    restart: unless-stopped
-    ports:
-      - "19898:19898"
-    volumes:
-      - spacebot-data:/data
-    environment:
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-    # Chromium needs these for headless operation
-    security_opt:
-      - seccomp=unconfined
-    shm_size: 1gb
-
-volumes:
-  spacebot-data:
-```
-
-The `shm_size` and `seccomp` settings are needed for Chromium to run properly in a container.
+No alternate image is needed. The browser tool downloads Chromium on demand and
+caches it on the mounted `/data` volume.
 
 ## Building the Image
 
 From the spacebot repo root:
 
 ```bash
-# Slim (no browser)
-docker build --target slim -t spacebot:slim .
-
-# Full (with Chromium)
-docker build --target full -t spacebot:full .
+docker build -t spacebot:local .
 ```
 
-The multi-stage Dockerfile:
+The multi-stage Dockerfile has two stages:
 
 1. **Builder stage** -- Rust toolchain + Bun. Compiles the React frontend, then builds the Rust binary with the frontend embedded.
-2. **Slim stage** -- Minimal Debian runtime with the compiled binary.
-3. **Full stage** -- Slim + Chromium and its dependencies.
+2. **Runtime stage** -- Minimal Debian runtime with Chrome's shared-library dependencies. The browser binary itself is fetched on demand.
 
 Build time is ~5-10 minutes on first build (downloading and compiling Rust dependencies). Subsequent builds use the cargo cache.
 
@@ -211,7 +177,7 @@ Spacebot checks for new releases on startup and every hour. When a new version i
 
 You can also open **Settings → Updates** for update status, one-click apply controls (Docker), and manual command snippets.
 
-`latest` is supported and continues to receive updates (it tracks the rolling `full` image). Use explicit version tags only when you want controlled rollouts.
+`latest` is supported and continues to receive updates. Use explicit version tags only when you want controlled rollouts.
 
 ### Manual Update
 
@@ -235,7 +201,7 @@ Mount the Docker socket to enable updating directly from the web UI:
 ```yaml
 services:
   spacebot:
-    image: ghcr.io/spacedriveapp/spacebot:slim
+    image: ghcr.io/spacedriveapp/spacebot:latest
     container_name: spacebot
     restart: unless-stopped
     ports:
@@ -289,17 +255,14 @@ Images are built and pushed to `ghcr.io/spacedriveapp/spacebot` via GitHub Actio
 
 **Tags pushed per release:**
 
-| Tag           | Description              |
-| ------------- | ------------------------ |
-| `v0.1.0-slim` | Versioned slim           |
-| `v0.1.0-full` | Versioned full           |
-| `slim`        | Rolling slim             |
-| `full`        | Rolling full             |
-| `latest`      | Rolling (points to full) |
+| Tag      | Description       |
+| -------- | ----------------- |
+| `v0.1.0` | Versioned release |
+| `latest` | Rolling release   |
 
 ```bash
 # Manual single-instance deploy
-fly launch --image ghcr.io/spacedriveapp/spacebot:slim
+fly launch --image ghcr.io/spacedriveapp/spacebot:latest
 fly volumes create spacebot_data --size 5
 fly secrets set ANTHROPIC_API_KEY="sk-ant-..."
 fly deploy

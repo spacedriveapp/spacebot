@@ -6,25 +6,38 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Deserialize)]
+// ---------------------------------------------------------------------------
+// Request / response types
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct TaskListQuery {
-    agent_id: String,
+    /// Convenience filter: matches tasks where owner OR assigned equals this value.
+    #[serde(default)]
+    agent_id: Option<String>,
+    /// Filter by owner agent. Optional.
+    #[serde(default)]
+    owner_agent_id: Option<String>,
+    /// Filter by assigned agent. Optional.
+    #[serde(default)]
+    assigned_agent_id: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
     priority: Option<String>,
+    #[serde(default)]
+    created_by: Option<String>,
     #[serde(default = "default_task_limit")]
     limit: i64,
 }
 
-#[derive(Deserialize)]
-pub(super) struct TaskGetQuery {
-    agent_id: String,
-}
-
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct CreateTaskRequest {
-    agent_id: String,
+    /// Agent that owns (created) this task.
+    owner_agent_id: String,
+    /// Agent assigned to execute. Defaults to `owner_agent_id`.
+    #[serde(default)]
+    assigned_agent_id: Option<String>,
     title: String,
     #[serde(default)]
     description: Option<String>,
@@ -42,9 +55,8 @@ pub(super) struct CreateTaskRequest {
     created_by: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct UpdateTaskRequest {
-    agent_id: String,
     #[serde(default)]
     title: Option<String>,
     #[serde(default)]
@@ -53,6 +65,8 @@ pub(super) struct UpdateTaskRequest {
     status: Option<String>,
     #[serde(default)]
     priority: Option<String>,
+    #[serde(default)]
+    assigned_agent_id: Option<String>,
     #[serde(default)]
     subtasks: Option<Vec<crate::tasks::TaskSubtask>>,
     #[serde(default)]
@@ -65,73 +79,149 @@ pub(super) struct UpdateTaskRequest {
     approved_by: Option<String>,
 }
 
-#[derive(Deserialize)]
-pub(super) struct DeleteTaskQuery {
-    agent_id: String,
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct ApproveRequest {
+    #[serde(default)]
+    approved_by: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct AssignRequest {
+    assigned_agent_id: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskListResponse {
     tasks: Vec<crate::tasks::Task>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskResponse {
     task: crate::tasks::Task,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct TaskActionResponse {
     success: bool,
     message: String,
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 fn default_task_limit() -> i64 {
-    20
+    100
 }
 
+/// Extract the global task store, returning 503 if not yet initialized.
+fn get_task_store(state: &ApiState) -> Result<Arc<crate::tasks::TaskStore>, StatusCode> {
+    state
+        .task_store
+        .load()
+        .as_ref()
+        .clone()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)
+}
+
+fn parse_status(value: Option<&str>) -> Result<Option<crate::tasks::TaskStatus>, StatusCode> {
+    match value {
+        None => Ok(None),
+        Some(value) => Ok(Some(
+            crate::tasks::TaskStatus::parse(value).ok_or(StatusCode::BAD_REQUEST)?,
+        )),
+    }
+}
+
+fn parse_priority(value: Option<&str>) -> Result<Option<crate::tasks::TaskPriority>, StatusCode> {
+    match value {
+        None => Ok(None),
+        Some(value) => Ok(Some(
+            crate::tasks::TaskPriority::parse(value).ok_or(StatusCode::BAD_REQUEST)?,
+        )),
+    }
+}
+
+fn emit_task_event(state: &ApiState, task: &crate::tasks::Task, action: &str) {
+    state
+        .event_tx
+        .send(super::state::ApiEvent::TaskUpdated {
+            agent_id: task.assigned_agent_id.clone(),
+            task_number: task.task_number,
+            status: task.status.to_string(),
+            action: action.to_string(),
+        })
+        .ok();
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+/// `GET /tasks` — list tasks with optional filters.
+#[utoipa::path(
+    get,
+    path = "/tasks",
+    params(TaskListQuery),
+    responses(
+        (status = 200, body = TaskListResponse),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn list_tasks(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<TaskListQuery>,
 ) -> Result<Json<TaskListResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
-    let status = match query.status.as_deref() {
-        None => None,
-        Some(value) => Some(crate::tasks::TaskStatus::parse(value).ok_or(StatusCode::BAD_REQUEST)?),
-    };
-    let priority = match query.priority.as_deref() {
-        None => None,
-        Some(value) => {
-            Some(crate::tasks::TaskPriority::parse(value).ok_or(StatusCode::BAD_REQUEST)?)
-        }
-    };
+    let status = parse_status(query.status.as_deref())?;
+    let priority = parse_priority(query.priority.as_deref())?;
 
     let tasks = store
-        .list(&query.agent_id, status, priority, query.limit.clamp(1, 500))
+        .list(crate::tasks::TaskListFilter {
+            agent_id: query.agent_id,
+            owner_agent_id: query.owner_agent_id,
+            assigned_agent_id: query.assigned_agent_id,
+            status,
+            priority,
+            created_by: query.created_by,
+            limit: Some(query.limit.clamp(1, 500)),
+        })
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, "failed to list tasks");
+            tracing::warn!(%error, "failed to list tasks");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
     Ok(Json(TaskListResponse { tasks }))
 }
 
+/// `GET /tasks/{number}` — get a task by globally unique number.
+#[utoipa::path(
+    get,
+    path = "/tasks/{number}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn get_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
-    Query(query): Query<TaskGetQuery>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
     let task = store
-        .get_by_number(&query.agent_id, number)
+        .get_by_number(number)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, task_number = number, "failed to get task");
+            tracing::warn!(%error, task_number = number, "failed to get task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
@@ -139,25 +229,37 @@ pub(super) async fn get_task(
     Ok(Json(TaskResponse { task }))
 }
 
+/// `POST /tasks` — create a task.
+#[utoipa::path(
+    post,
+    path = "/tasks",
+    request_body = CreateTaskRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn create_task(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
-    let status = match request.status.as_deref() {
-        None => crate::tasks::TaskStatus::Backlog,
-        Some(value) => crate::tasks::TaskStatus::parse(value).ok_or(StatusCode::BAD_REQUEST)?,
-    };
-    let priority = match request.priority.as_deref() {
-        None => crate::tasks::TaskPriority::Medium,
-        Some(value) => crate::tasks::TaskPriority::parse(value).ok_or(StatusCode::BAD_REQUEST)?,
-    };
+    let status =
+        parse_status(request.status.as_deref())?.unwrap_or(crate::tasks::TaskStatus::Backlog);
+    let priority =
+        parse_priority(request.priority.as_deref())?.unwrap_or(crate::tasks::TaskPriority::Medium);
+
+    let assigned = request
+        .assigned_agent_id
+        .unwrap_or_else(|| request.owner_agent_id.clone());
 
     let task = store
         .create(crate::tasks::CreateTaskInput {
-            agent_id: request.agent_id.clone(),
+            owner_agent_id: request.owner_agent_id,
+            assigned_agent_id: assigned,
             title: request.title,
             description: request.description,
             status,
@@ -169,51 +271,49 @@ pub(super) async fn create_task(
         })
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, "failed to create task");
+            tracing::warn!(%error, "failed to create task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
 
-    state
-        .event_tx
-        .send(super::state::ApiEvent::TaskUpdated {
-            agent_id: task.agent_id.clone(),
-            task_number: task.task_number,
-            status: task.status.to_string(),
-            action: "created".to_string(),
-        })
-        .ok();
-
+    emit_task_event(&state, &task, "created");
     Ok(Json(TaskResponse { task }))
 }
 
+/// `PUT /tasks/{number}` — update a task.
+#[utoipa::path(
+    put,
+    path = "/tasks/{number}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    request_body = UpdateTaskRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn update_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
     Json(request): Json<UpdateTaskRequest>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
-    let status = match request.status.as_deref() {
-        None => None,
-        Some(value) => Some(crate::tasks::TaskStatus::parse(value).ok_or(StatusCode::BAD_REQUEST)?),
-    };
-    let priority = match request.priority.as_deref() {
-        None => None,
-        Some(value) => {
-            Some(crate::tasks::TaskPriority::parse(value).ok_or(StatusCode::BAD_REQUEST)?)
-        }
-    };
+    let status = parse_status(request.status.as_deref())?;
+    let priority = parse_priority(request.priority.as_deref())?;
 
     let task = store
         .update(
-            &request.agent_id,
             number,
             crate::tasks::UpdateTaskInput {
                 title: request.title,
                 description: request.description,
                 status,
                 priority,
+                assigned_agent_id: request.assigned_agent_id,
                 subtasks: request.subtasks,
                 metadata: request.metadata,
                 worker_id: request.worker_id,
@@ -224,39 +324,49 @@ pub(super) async fn update_task(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, task_number = number, "failed to update task");
+            tracing::warn!(%error, task_number = number, "failed to update task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    state
-        .event_tx
-        .send(super::state::ApiEvent::TaskUpdated {
-            agent_id: task.agent_id.clone(),
-            task_number: task.task_number,
-            status: task.status.to_string(),
-            action: "updated".to_string(),
-        })
-        .ok();
-
+    emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
 }
 
+/// `DELETE /tasks/{number}` — delete a task.
+#[utoipa::path(
+    delete,
+    path = "/tasks/{number}",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    responses(
+        (status = 200, body = TaskActionResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn delete_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
-    Query(query): Query<DeleteTaskQuery>,
 ) -> Result<Json<TaskActionResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&query.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
-    let deleted = store
-        .delete(&query.agent_id, number)
+    // Fetch before delete so we can emit an event with the correct agent_id.
+    let task = store
+        .get_by_number(number)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %query.agent_id, task_number = number, "failed to delete task");
+            tracing::warn!(%error, task_number = number, "failed to get task for deletion");
             StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let deleted = store.delete(number).await.map_err(|error| {
+        tracing::warn!(%error, task_number = number, "failed to delete task");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     if !deleted {
         return Err(StatusCode::NOT_FOUND);
@@ -265,7 +375,7 @@ pub(super) async fn delete_task(
     state
         .event_tx
         .send(super::state::ApiEvent::TaskUpdated {
-            agent_id: query.agent_id.clone(),
+            agent_id: task.assigned_agent_id,
             task_number: number,
             status: "deleted".to_string(),
             action: "deleted".to_string(),
@@ -278,17 +388,30 @@ pub(super) async fn delete_task(
     }))
 }
 
+/// `POST /tasks/{number}/approve` — approve a task (move to ready).
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/approve",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    request_body = ApproveRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn approve_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
-    Json(request): Json<UpdateTaskRequest>,
+    Json(request): Json<ApproveRequest>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
     let task = store
         .update(
-            &request.agent_id,
             number,
             crate::tasks::UpdateTaskInput {
                 status: Some(crate::tasks::TaskStatus::Ready),
@@ -298,45 +421,48 @@ pub(super) async fn approve_task(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, task_number = number, "failed to approve task");
+            tracing::warn!(%error, task_number = number, "failed to approve task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    state
-        .event_tx
-        .send(super::state::ApiEvent::TaskUpdated {
-            agent_id: task.agent_id.clone(),
-            task_number: task.task_number,
-            status: task.status.to_string(),
-            action: "updated".to_string(),
-        })
-        .ok();
-
+    emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
 }
 
-/// Move a task to `ready` so the cortex ready-task loop picks it up and spawns
-/// a worker. Tasks already in `ready` or `in_progress` are returned as-is.
+/// `POST /tasks/{number}/execute` — move a task to ready for execution.
+/// Tasks already in `ready` or `in_progress` are returned as-is.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/execute",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    request_body = ApproveRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 409, description = "Task pending approval"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
 pub(super) async fn execute_task(
     State(state): State<Arc<ApiState>>,
     Path(number): Path<i64>,
-    Json(request): Json<UpdateTaskRequest>,
+    Json(request): Json<ApproveRequest>,
 ) -> Result<Json<TaskResponse>, StatusCode> {
-    let stores = state.task_stores.load();
-    let store = stores.get(&request.agent_id).ok_or(StatusCode::NOT_FOUND)?;
+    let store = get_task_store(&state)?;
 
-    // Fetch current task to check if transition is needed.
     let current = store
-        .get_by_number(&request.agent_id, number)
+        .get_by_number(number)
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, task_number = number, "failed to get task for execution");
+            tracing::warn!(%error, task_number = number, "failed to get task for execution");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    // If already ready or in-progress, return as-is — cortex will handle it.
     if matches!(
         current.status,
         crate::tasks::TaskStatus::Ready | crate::tasks::TaskStatus::InProgress
@@ -344,9 +470,13 @@ pub(super) async fn execute_task(
         return Ok(Json(TaskResponse { task: current }));
     }
 
+    // Reject pending_approval tasks — they must be approved first.
+    if current.status == crate::tasks::TaskStatus::PendingApproval {
+        return Err(StatusCode::CONFLICT);
+    }
+
     let task = store
         .update(
-            &request.agent_id,
             number,
             crate::tasks::UpdateTaskInput {
                 status: Some(crate::tasks::TaskStatus::Ready),
@@ -356,20 +486,52 @@ pub(super) async fn execute_task(
         )
         .await
         .map_err(|error| {
-            tracing::warn!(%error, agent_id = %request.agent_id, task_number = number, "failed to execute task");
+            tracing::warn!(%error, task_number = number, "failed to execute task");
             StatusCode::INTERNAL_SERVER_ERROR
         })?
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    state
-        .event_tx
-        .send(super::state::ApiEvent::TaskUpdated {
-            agent_id: task.agent_id.clone(),
-            task_number: task.task_number,
-            status: task.status.to_string(),
-            action: "updated".to_string(),
-        })
-        .ok();
+    emit_task_event(&state, &task, "updated");
+    Ok(Json(TaskResponse { task }))
+}
 
+/// `POST /tasks/{number}/assign` — reassign a task to a different agent.
+#[utoipa::path(
+    post,
+    path = "/tasks/{number}/assign",
+    params(
+        ("number" = i64, Path, description = "Task number"),
+    ),
+    request_body = AssignRequest,
+    responses(
+        (status = 200, body = TaskResponse),
+        (status = 404, description = "Task not found"),
+        (status = 503, description = "Task store not initialized"),
+    ),
+    tag = "tasks",
+)]
+pub(super) async fn assign_task(
+    State(state): State<Arc<ApiState>>,
+    Path(number): Path<i64>,
+    Json(request): Json<AssignRequest>,
+) -> Result<Json<TaskResponse>, StatusCode> {
+    let store = get_task_store(&state)?;
+
+    let task = store
+        .update(
+            number,
+            crate::tasks::UpdateTaskInput {
+                assigned_agent_id: Some(request.assigned_agent_id),
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(%error, task_number = number, "failed to assign task");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    emit_task_event(&state, &task, "updated");
     Ok(Json(TaskResponse { task }))
 }

@@ -209,13 +209,13 @@ export function AgentDetail({ agentId, liveStates }: AgentDetailProps) {
 				)}
 
 				{/* Recent Cortex Events */}
-				{overviewData && overviewData.recent_cortex_events.length > 0 && (
-					<CortexEventsSection
-						agentId={agentId}
-						events={overviewData.recent_cortex_events}
-						lastBulletinAt={overviewData.last_bulletin_at}
-					/>
-				)}
+			{overviewData && overviewData.recent_cortex_events.length > 0 && (
+				<CortexEventsSection
+					agentId={agentId}
+					events={overviewData.recent_cortex_events as CortexEvent[]}
+					lastBulletinAt={overviewData.last_bulletin_at ?? null}
+				/>
+			)}
 			</div>
 		</div>
 	);
@@ -233,7 +233,7 @@ function HeroSection({
 	onDelete,
 }: {
 	agentId: string;
-	displayName?: string;
+	displayName?: string | null | undefined;
 	channelCount: number;
 	workers: number;
 	branches: number;
@@ -365,8 +365,8 @@ function MemoryGrowthChart({ data }: { data: { date: string; count: number }[] }
 	});
 
 	return (
-		<div className="h-48">
-			<ResponsiveContainer width="100%" height="100%">
+		<div className="h-48 min-h-[192px]">
+			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
 				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
 					<defs>
 						<linearGradient id="memoryGradient" x1="0" y1="0" x2="0" y2="1">
@@ -426,8 +426,8 @@ function ProcessActivityChart({ data }: { data: { date: string; branches: number
 	}));
 
 	return (
-		<div className="h-48">
-			<ResponsiveContainer width="100%" height="100%">
+		<div className="h-48 min-h-[192px]">
+			<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
 				<AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
 					<defs>
 						<linearGradient id="branchGradient" x1="0" y1="0" x2="0" y2="1">
@@ -552,8 +552,8 @@ function MemoryDonut({ counts }: { counts: Record<string, number> }) {
 
 	return (
 			<div>
-			<div className="relative h-40">
-				<ResponsiveContainer width="100%" height="100%">
+			<div className="relative h-40 min-h-[160px]">
+				<ResponsiveContainer width="100%" height="100%" minWidth={100} minHeight={100}>
 					<PieChart>
 						<Pie
 							data={data}
@@ -718,9 +718,9 @@ function CronSection({ agentId, jobs }: { agentId: string; jobs: CronJobInfo[] }
 						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull" title={job.prompt}>
 							{job.prompt}
 						</span>
-						<code className="rounded bg-app-lightBox/60 px-1.5 py-0.5 font-mono text-tiny text-ink-faint">
-							{formatCronSchedule(job.cron_expr, job.interval_secs)}
-						</code>
+					<code className="rounded bg-app-lightBox/60 px-1.5 py-0.5 font-mono text-tiny text-ink-faint">
+						{formatCronSchedule(job.cron_expr ?? null, job.interval_secs)}
+					</code>
 						{job.active_hours && (
 							<span className="text-tiny text-ink-faint">
 								{String(job.active_hours[0]).padStart(2, "0")}:00-{String(job.active_hours[1]).padStart(2, "0")}:00

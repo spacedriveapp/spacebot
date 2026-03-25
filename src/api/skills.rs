@@ -30,7 +30,7 @@ static REGISTRY_SKILL_CONTENT_CACHE: LazyLock<Cache<String, Option<String>>> =
             .build()
     });
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct SkillInfo {
     name: String,
     description: String,
@@ -41,12 +41,12 @@ pub(super) struct SkillInfo {
     source_repo: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct SkillsListResponse {
     skills: Vec<SkillInfo>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct InstallSkillRequest {
     agent_id: String,
     spec: String,
@@ -54,24 +54,24 @@ pub(super) struct InstallSkillRequest {
     instance: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct InstallSkillResponse {
     installed: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct RemoveSkillRequest {
     agent_id: String,
     name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RemoveSkillResponse {
     success: bool,
     path: Option<String>,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[derive(Serialize, Deserialize, Clone, utoipa::ToSchema)]
 pub(super) struct RegistrySkill {
     source: String,
     #[serde(rename = "skillId")]
@@ -85,7 +85,7 @@ pub(super) struct RegistrySkill {
     id: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RegistryBrowseResponse {
     skills: Vec<RegistrySkill>,
     has_more: bool,
@@ -93,20 +93,20 @@ pub(super) struct RegistryBrowseResponse {
     total: Option<u64>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RegistrySearchResponse {
     skills: Vec<RegistrySkill>,
     query: String,
     count: usize,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct SkillContentQuery {
     agent_id: String,
     name: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct SkillContentResponse {
     name: String,
     description: String,
@@ -118,17 +118,17 @@ pub(super) struct SkillContentResponse {
     source_repo: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct UploadSkillResponse {
     installed: Vec<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct SkillsQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct RegistryBrowseQuery {
     #[serde(default = "default_registry_view")]
     view: String,
@@ -140,7 +140,7 @@ fn default_registry_view() -> String {
     "all-time".into()
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct RegistrySearchQuery {
     q: String,
     #[serde(default = "default_registry_search_limit")]
@@ -151,7 +151,7 @@ fn default_registry_search_limit() -> u32 {
     50
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct RegistrySkillContentQuery {
     /// GitHub `owner/repo`.
     source: String,
@@ -159,7 +159,7 @@ pub(super) struct RegistrySkillContentQuery {
     skill_id: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RegistrySkillContentResponse {
     source: String,
     skill_id: String,
@@ -167,21 +167,36 @@ pub(super) struct RegistrySkillContentResponse {
 }
 
 /// List installed skills for an agent.
+#[utoipa::path(
+    get,
+    path = "/agents/skills",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = SkillsListResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn list_skills(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<SkillsQuery>,
 ) -> Result<Json<SkillsListResponse>, StatusCode> {
-    let configs = state.agent_configs.load();
-    let agent = configs
-        .iter()
-        .find(|a| a.id == query.agent_id)
-        .ok_or(StatusCode::NOT_FOUND)?;
+    let skills: crate::skills::SkillSet;
+    {
+        let configs = state.agent_configs.load();
+        let agent = configs
+            .iter()
+            .find(|a| a.id == query.agent_id)
+            .ok_or(StatusCode::NOT_FOUND)?;
 
-    let instance_dir = state.instance_dir.load();
-    let instance_skills_dir = instance_dir.join("skills");
-    let workspace_skills_dir = agent.workspace.join("skills");
+        let instance_dir = state.instance_dir.load();
+        let instance_skills_dir = instance_dir.join("skills");
+        let workspace_skills_dir = std::path::PathBuf::from(&agent.workspace).join("skills");
 
-    let skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
+        skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
+    }
 
     let skill_infos: Vec<SkillInfo> = skills
         .list()
@@ -205,6 +220,17 @@ pub(super) async fn list_skills(
 }
 
 /// Install a skill from GitHub.
+#[utoipa::path(
+    post,
+    path = "/agents/skills/install",
+    request_body = InstallSkillRequest,
+    responses(
+        (status = 200, body = InstallSkillResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn install_skill(
     State(state): State<Arc<ApiState>>,
     axum::extract::Json(req): axum::extract::Json<InstallSkillRequest>,
@@ -218,7 +244,7 @@ pub(super) async fn install_skill(
     let target_dir = if req.instance {
         state.instance_dir.load().as_ref().join("skills")
     } else {
-        agent.workspace.join("skills")
+        std::path::PathBuf::from(&agent.workspace).join("skills")
     };
 
     let installed = crate::skills::install_from_github(&req.spec, &target_dir)
@@ -234,6 +260,18 @@ pub(super) async fn install_skill(
 }
 
 /// Remove an installed skill.
+#[utoipa::path(
+    delete,
+    path = "/agents/skills/remove",
+    request_body = RemoveSkillRequest,
+    responses(
+        (status = 200, body = RemoveSkillResponse),
+        (status = 403, description = "Cannot remove instance-level skill"),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn remove_skill(
     State(state): State<Arc<ApiState>>,
     axum::extract::Json(req): axum::extract::Json<RemoveSkillRequest>,
@@ -246,14 +284,20 @@ pub(super) async fn remove_skill(
 
     let instance_dir = state.instance_dir.load();
     let instance_skills_dir = instance_dir.join("skills");
-    let workspace_skills_dir = agent.workspace.join("skills");
+    let workspace_skills_dir = std::path::PathBuf::from(&agent.workspace).join("skills");
 
     let mut skills =
         crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
 
     let removed_path = skills.remove(&req.name).await.map_err(|error| {
-        tracing::warn!(%error, skill = %req.name, "failed to remove skill");
-        StatusCode::INTERNAL_SERVER_ERROR
+        let msg = error.to_string();
+        if msg.contains("instance-level skill") {
+            tracing::warn!(skill = %req.name, "rejected removal of instance-level skill");
+            StatusCode::FORBIDDEN
+        } else {
+            tracing::warn!(%error, skill = %req.name, "failed to remove skill");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
     })?;
 
     state.send_event(ApiEvent::ConfigReloaded);
@@ -271,6 +315,19 @@ pub(super) async fn remove_skill(
 }
 
 /// Get the full content of an installed skill.
+#[utoipa::path(
+    get,
+    path = "/agents/skills/content",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("name" = String, Query, description = "Skill name"),
+    ),
+    responses(
+        (status = 200, body = SkillContentResponse),
+        (status = 404, description = "Agent or skill not found"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn get_skill_content(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<SkillContentQuery>,
@@ -283,7 +340,7 @@ pub(super) async fn get_skill_content(
 
     let instance_dir = state.instance_dir.load();
     let instance_skills_dir = instance_dir.join("skills");
-    let workspace_skills_dir = agent.workspace.join("skills");
+    let workspace_skills_dir = std::path::PathBuf::from(&agent.workspace).join("skills");
 
     let skills = crate::skills::SkillSet::load(&instance_skills_dir, &workspace_skills_dir).await;
 
@@ -304,6 +361,20 @@ pub(super) async fn get_skill_content(
 }
 
 /// Upload skill files (zip archives or directories) from the user's computer.
+#[utoipa::path(
+    post,
+    path = "/agents/skills/upload",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+    ),
+    responses(
+        (status = 200, body = UploadSkillResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn upload_skill(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<SkillsQuery>,
@@ -315,7 +386,7 @@ pub(super) async fn upload_skill(
         .find(|a| a.id == query.agent_id)
         .ok_or(StatusCode::NOT_FOUND)?;
 
-    let target_dir = agent.workspace.join("skills");
+    let target_dir = std::path::PathBuf::from(&agent.workspace).join("skills");
 
     tokio::fs::create_dir_all(&target_dir)
         .await
@@ -396,6 +467,19 @@ pub(super) async fn upload_skill(
 }
 
 /// Proxy browse requests to skills.sh leaderboard API.
+#[utoipa::path(
+    get,
+    path = "/skills/registry/browse",
+    params(
+        ("view" = String, Query, description = "View type (all-time, trending, hot)"),
+        ("page" = u32, Query, description = "Page number"),
+    ),
+    responses(
+        (status = 200, body = RegistryBrowseResponse),
+        (status = 502, description = "Bad gateway"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn registry_browse(
     Query(query): Query<RegistryBrowseQuery>,
 ) -> Result<Json<RegistryBrowseResponse>, StatusCode> {
@@ -422,7 +506,7 @@ pub(super) async fn registry_browse(
         return Err(StatusCode::BAD_GATEWAY);
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, utoipa::ToSchema)]
     struct UpstreamResponse {
         skills: Vec<RegistrySkill>,
         #[serde(default)]
@@ -449,6 +533,20 @@ pub(super) async fn registry_browse(
 }
 
 /// Proxy search requests to skills.sh search API.
+#[utoipa::path(
+    get,
+    path = "/skills/registry/search",
+    params(
+        ("q" = String, Query, description = "Search query"),
+        ("limit" = u32, Query, description = "Result limit"),
+    ),
+    responses(
+        (status = 200, body = RegistrySearchResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 502, description = "Bad gateway"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn registry_search(
     Query(query): Query<RegistrySearchQuery>,
 ) -> Result<Json<RegistrySearchResponse>, StatusCode> {
@@ -476,7 +574,7 @@ pub(super) async fn registry_search(
         return Err(StatusCode::BAD_GATEWAY);
     }
 
-    #[derive(Deserialize)]
+    #[derive(Deserialize, utoipa::ToSchema)]
     struct UpstreamSearchResponse {
         skills: Vec<RegistrySkill>,
         count: usize,
@@ -500,6 +598,19 @@ pub(super) async fn registry_search(
 }
 
 /// Fetch the full SKILL.md content for a registry skill from GitHub.
+#[utoipa::path(
+    get,
+    path = "/skills/registry/content",
+    params(
+        ("source" = String, Query, description = "GitHub owner/repo"),
+        ("skill_id" = String, Query, description = "Skill identifier within the repo"),
+    ),
+    responses(
+        (status = 200, body = RegistrySkillContentResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "skills",
+)]
 pub(super) async fn registry_skill_content(
     Query(query): Query<RegistrySkillContentQuery>,
 ) -> Result<Json<RegistrySkillContentResponse>, StatusCode> {

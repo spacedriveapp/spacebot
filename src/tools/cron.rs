@@ -2,6 +2,7 @@
 
 use crate::cron::scheduler::{CronConfig, Scheduler};
 use crate::cron::store::CronStore;
+use crate::messaging::MessagingManager;
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::JsonSchema;
@@ -16,24 +17,48 @@ const MIN_CRON_INTERVAL_SECS: u64 = 60;
 const MAX_CRON_PROMPT_LENGTH: usize = 10_000;
 
 /// Tool for managing cron jobs (scheduled recurring tasks).
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CronTool {
     store: Arc<CronStore>,
     scheduler: Arc<Scheduler>,
+    messaging_manager: Arc<MessagingManager>,
     default_delivery_target: Option<String>,
+    current_adapter: Option<String>,
+}
+
+impl std::fmt::Debug for CronTool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CronTool")
+            .field("store", &self.store)
+            .field("scheduler", &self.scheduler)
+            .field("default_delivery_target", &self.default_delivery_target)
+            .field("current_adapter", &self.current_adapter)
+            .finish_non_exhaustive()
+    }
 }
 
 impl CronTool {
-    pub fn new(store: Arc<CronStore>, scheduler: Arc<Scheduler>) -> Self {
+    pub fn new(
+        store: Arc<CronStore>,
+        scheduler: Arc<Scheduler>,
+        messaging_manager: Arc<MessagingManager>,
+    ) -> Self {
         Self {
             store,
             scheduler,
+            messaging_manager,
             default_delivery_target: None,
+            current_adapter: None,
         }
     }
 
     pub fn with_default_delivery_target(mut self, default_delivery_target: Option<String>) -> Self {
         self.default_delivery_target = default_delivery_target;
+        self
+    }
+
+    pub fn with_current_adapter(mut self, current_adapter: Option<String>) -> Self {
+        self.current_adapter = current_adapter;
         self
     }
 }
@@ -194,12 +219,14 @@ impl CronTool {
             .filter(|value| !value.is_empty())
             .map(ToString::to_string);
         let interval_secs = args.interval_secs.unwrap_or(3600);
-        let delivery_target = args
+        let explicit_delivery_target = args
             .delivery_target
             .as_deref()
             .map(str::trim)
             .filter(|value| !value.is_empty())
-            .map(|value| value.to_string())
+            .map(|value| value.to_string());
+        let delivery_target = explicit_delivery_target
+            .clone()
             .or_else(|| self.default_delivery_target.clone())
             .ok_or_else(|| {
                 CronError(
@@ -207,6 +234,84 @@ impl CronTool {
                         .into(),
                 )
             })?;
+
+        // Only normalize delivery target when it came from the conversation default,
+        // not when the user explicitly provided one. An explicit "signal:uuid:xxx"
+        // targets the default adapter by design; the default fallback from the
+        // conversation context should be rewritten for the named instance.
+        //
+        // For explicit signal: targets, resolve the adapter using the same logic as
+        // send_message_to_another_channel to handle deployments with only named instances.
+        let delivery_target = if explicit_delivery_target.is_some() {
+            let parsed_delivery_target = crate::messaging::target::parse_delivery_target(
+                &delivery_target,
+            )
+            .ok_or_else(|| CronError(format!("invalid 'delivery_target': '{delivery_target}'")))?;
+            let should_resolve_signal_default = parsed_delivery_target.adapter == "signal";
+
+            if should_resolve_signal_default {
+                let target_part = parsed_delivery_target.target;
+                let resolved_adapter =
+                    crate::tools::send_message_to_another_channel::resolve_signal_adapter(
+                        &self.messaging_manager,
+                        self.current_adapter.as_deref(),
+                    )
+                    .await
+                    .map_err(|e| CronError(format!("Failed to resolve Signal adapter: {e}")))?;
+                if resolved_adapter == "signal"
+                    && !self.messaging_manager.has_adapter("signal").await
+                {
+                    return Err(CronError(
+                        "No Signal adapter running. Cannot create cron with Signal delivery target."
+                            .into(),
+                    ));
+                }
+                format!("{resolved_adapter}:{target_part}")
+            } else {
+                if !self
+                    .messaging_manager
+                    .has_adapter(&parsed_delivery_target.adapter)
+                    .await
+                {
+                    return Err(CronError(if parsed_delivery_target.adapter.contains(':') {
+                        format!("No '{}' adapter running.", parsed_delivery_target.adapter)
+                    } else {
+                        format!(
+                            "No '{}' adapter running. Use '{}:<instance>:...' to target a specific instance.",
+                            parsed_delivery_target.adapter, parsed_delivery_target.adapter
+                        )
+                    }));
+                }
+                delivery_target
+            }
+        } else if let Some(current) = &self.current_adapter
+            && self.messaging_manager.has_adapter(current).await
+        {
+            normalize_delivery_target(&delivery_target, &self.current_adapter)
+        } else {
+            // Validate the raw delivery_target before persisting — the adapter may have
+            // been captured earlier but is no longer available, or was never valid.
+            let parsed_delivery_target = crate::messaging::target::parse_delivery_target(
+                &delivery_target,
+            )
+            .ok_or_else(|| CronError(format!("invalid 'delivery_target': '{delivery_target}'")))?;
+
+            if !self
+                .messaging_manager
+                .has_adapter(&parsed_delivery_target.adapter)
+                .await
+            {
+                return Err(CronError(if parsed_delivery_target.adapter.contains(':') {
+                    format!("No '{}' adapter running.", parsed_delivery_target.adapter)
+                } else {
+                    format!(
+                        "No '{}' adapter running. Use '{}:<instance>:...' to target a specific instance.",
+                        parsed_delivery_target.adapter, parsed_delivery_target.adapter
+                    )
+                }));
+            }
+            delivery_target
+        };
 
         // Validate cron job ID: alphanumeric, hyphens, underscores only
         if id.is_empty()
@@ -409,5 +514,177 @@ fn format_interval(secs: u64) -> String {
         }
     } else {
         format!("every {secs} seconds")
+    }
+}
+
+/// Normalize delivery target for named instances.
+///
+/// If the LLM provided a bare platform adapter (e.g., "signal", "slack") but we're in
+/// a named instance conversation (e.g., "signal:gvoice1", "slack:work"), rewrite to
+/// include the instance name. This ensures the cron job can find the correct adapter
+/// at runtime.
+fn normalize_delivery_target(delivery_target: &str, current_adapter: &Option<String>) -> String {
+    if let Some(parsed) = crate::messaging::target::parse_delivery_target(delivery_target)
+        && let Some(current_adapter) = current_adapter.as_ref()
+    {
+        let expected_prefix = format!("{}:", parsed.adapter);
+        if current_adapter.starts_with(&expected_prefix) {
+            // current_adapter is a named instance of the parsed platform
+            return format!("{current_adapter}:{}", parsed.target);
+        }
+    }
+    delivery_target.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_delivery_target;
+
+    #[test]
+    fn test_normalize_signal_named_instance() {
+        // Bare signal + named instance context → rewrite
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal:gvoice1".to_string()),
+        );
+        assert_eq!(
+            result,
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_normalize_signal_group_named_instance() {
+        // Signal group + named instance context → rewrite
+        let result =
+            normalize_delivery_target("signal:group:grp123", &Some("signal:work".to_string()));
+        assert_eq!(result, "signal:work:group:grp123");
+    }
+
+    #[test]
+    fn test_normalize_signal_default_instance_no_rewrite() {
+        // Bare signal + default signal context → no change
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_signal_no_context_no_rewrite() {
+        // Bare signal + no context → no change
+        let result =
+            normalize_delivery_target("signal:uuid:550e8400-e29b-41d4-a716-446655440000", &None);
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_slack_named_instance() {
+        // Bare slack + named instance context → rewrite
+        let result = normalize_delivery_target("slack:C123456", &Some("slack:work".to_string()));
+        assert_eq!(result, "slack:work:C123456");
+    }
+
+    #[test]
+    fn test_normalize_discord_named_instance() {
+        // Bare discord + named instance context → rewrite
+        let result =
+            normalize_delivery_target("discord:987654321", &Some("discord:personal".to_string()));
+        assert_eq!(result, "discord:personal:987654321");
+    }
+
+    #[test]
+    fn test_normalize_telegram_named_instance() {
+        // Bare telegram + named instance context → rewrite
+        let result =
+            normalize_delivery_target("telegram:-1001234", &Some("telegram:bot1".to_string()));
+        assert_eq!(result, "telegram:bot1:-1001234");
+    }
+
+    #[test]
+    fn test_normalize_different_platform_no_rewrite() {
+        // Signal target but in Discord context → no change
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("discord:general".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_cron_context_no_rewrite() {
+        // Any target in cron context → no change (cron can't receive delivery)
+        let result = normalize_delivery_target(
+            "signal:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("cron".to_string()),
+        );
+        assert_eq!(result, "signal:uuid:550e8400-e29b-41d4-a716-446655440000");
+    }
+
+    #[test]
+    fn test_normalize_already_qualified_no_rewrite() {
+        // Already qualified with instance name → no change
+        let result = normalize_delivery_target(
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000",
+            &Some("signal:gvoice1".to_string()),
+        );
+        assert_eq!(
+            result,
+            "signal:gvoice1:uuid:550e8400-e29b-41d4-a716-446655440000"
+        );
+    }
+
+    #[test]
+    fn test_normalize_email_no_rewrite() {
+        // Email doesn't use named instances → no change
+        let result =
+            normalize_delivery_target("email:alice@example.com", &Some("email".to_string()));
+        assert_eq!(result, "email:alice@example.com");
+    }
+
+    // Regression tests: already-qualified non-Signal targets must not be double-prefixed
+    #[test]
+    fn test_normalize_slack_already_qualified_no_rewrite() {
+        let result =
+            normalize_delivery_target("slack:team1:userid:123", &Some("slack:team1".to_string()));
+        assert_eq!(result, "slack:team1:userid:123");
+    }
+
+    #[test]
+    fn test_normalize_discord_already_qualified_no_rewrite() {
+        let result = normalize_delivery_target(
+            "discord:guild1:userid:456",
+            &Some("discord:guild1".to_string()),
+        );
+        assert_eq!(result, "discord:guild1:userid:456");
+    }
+
+    #[test]
+    fn test_normalize_telegram_already_qualified_no_rewrite() {
+        let result = normalize_delivery_target(
+            "telegram:bot1:userid:789",
+            &Some("telegram:bot1".to_string()),
+        );
+        assert_eq!(result, "telegram:bot1:userid:789");
+    }
+
+    #[test]
+    fn test_parse_signal_already_qualified_not_default() {
+        // Already-qualified Signal targets (signal:<instance>:...) should not be
+        // treated as default "signal" adapter. parse_delivery_target extracts
+        // the adapter correctly.
+        let parsed = crate::messaging::target::parse_delivery_target("signal:work:+15551234567");
+        assert!(parsed.is_some());
+        let target = parsed.unwrap();
+        assert_eq!(target.adapter, "signal:work");
+        assert_eq!(target.target, "+15551234567");
+
+        // This is different from bare signal: prefix which uses adapter "signal"
+        let parsed_default = crate::messaging::target::parse_delivery_target("signal:+15551234567");
+        assert!(parsed_default.is_some());
+        let target_default = parsed_default.unwrap();
+        assert_eq!(target_default.adapter, "signal");
+        assert_eq!(target_default.target, "+15551234567");
     }
 }

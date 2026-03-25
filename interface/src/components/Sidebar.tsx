@@ -1,7 +1,6 @@
 import { useMemo, useState } from "react";
 import { Link, useMatchRoute } from "@tanstack/react-router";
 import { useQuery } from "@tanstack/react-query";
-import { motion } from "framer-motion";
 import {
 	DndContext,
 	closestCenter,
@@ -19,32 +18,27 @@ import {
 	verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { api, BASE_PATH } from "@/api/client";
+import { api } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { Button } from "@/ui";
-import { ArrowLeft01Icon, DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { DashboardSquare01Icon, Settings01Icon, LeftToRightListBulletIcon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
 
 interface SidebarProps {
 	liveStates: Record<string, ChannelLiveState>;
-	collapsed: boolean;
-	onToggle: () => void;
 }
 
 interface SortableAgentItemProps {
 	agentId: string;
-	displayName?: string;
-	gradientStart?: string;
-	gradientEnd?: string;
-	activity?: { workers: number; branches: number };
+	displayName?: string | null | undefined;
+	gradientStart?: string | null | undefined;
+	gradientEnd?: string | null | undefined;
 	isActive: boolean;
-	collapsed: boolean;
 }
 
-function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, activity, isActive, collapsed }: SortableAgentItemProps) {
+function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, isActive }: SortableAgentItemProps) {
 	const {
 		attributes,
 		listeners,
@@ -61,68 +55,35 @@ function SortableAgentItem({ agentId, displayName, gradientStart, gradientEnd, a
 		cursor: isDragging ? 'grabbing' : 'grab',
 	};
 
-	if (collapsed) {
-		return (
-			<div ref={setNodeRef} style={style} {...attributes} {...listeners}>
-				<Link
-					to="/agents/$agentId"
-					params={{ agentId }}
-					className="flex h-8 w-8 items-center justify-center"
-					style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
-					title={displayName ?? agentId}
-				>
-					<ProfileAvatar seed={agentId} name={displayName ?? agentId} size={28} className={`rounded-full ${isActive ? "ring-2 ring-sidebar-line" : "opacity-70 hover:opacity-100"}`} gradientStart={gradientStart} gradientEnd={gradientEnd} />
-				</Link>
-			</div>
-		);
-	}
-
 	return (
-		<div ref={setNodeRef} style={style} className="mx-2" {...attributes} {...listeners}>
+		<div ref={setNodeRef} style={style} {...attributes} {...listeners}>
 			<Link
 				to="/agents/$agentId"
 				params={{ agentId }}
-				className={`flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-					isActive
-						? "bg-sidebar-selected text-sidebar-ink"
-						: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-				}`}
+				className="flex h-8 w-8 items-center justify-center"
 				style={{ pointerEvents: isDragging ? 'none' : 'auto' }}
+				title={displayName ?? agentId}
 			>
-				<ProfileAvatar seed={agentId} name={displayName ?? agentId} size={20} className="shrink-0 rounded-full" gradientStart={gradientStart} gradientEnd={gradientEnd} />
-				<span className="flex-1 truncate">{displayName ?? agentId}</span>
-				{activity && (activity.workers > 0 || activity.branches > 0) && (
-					<div className="flex items-center gap-1">
-						{activity.workers > 0 && (
-							<span className="rounded bg-amber-500/15 px-1 py-0.5 text-tiny text-amber-400">
-								{activity.workers}w
-							</span>
-						)}
-						{activity.branches > 0 && (
-							<span className="rounded bg-violet-500/15 px-1 py-0.5 text-tiny text-violet-400">
-								{activity.branches}b
-							</span>
-						)}
-					</div>
-				)}
+				<ProfileAvatar
+					seed={agentId}
+					name={displayName ?? agentId}
+					size={28}
+					className={`rounded-full ${isActive ? "ring-2 ring-sidebar-line" : "opacity-70 hover:opacity-100"}`}
+					gradientStart={gradientStart}
+					gradientEnd={gradientEnd}
+				/>
 			</Link>
 		</div>
 	);
 }
 
-export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
+export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	const [createOpen, setCreateOpen] = useState(false);
 
 	const { data: agentsData } = useQuery({
 		queryKey: ["agents"],
 		queryFn: api.agents,
 		refetchInterval: 30_000,
-	});
-
-	const { data: channelsData } = useQuery({
-		queryKey: ["channels"],
-		queryFn: api.channels,
-		refetchInterval: 10_000,
 	});
 
 	const { data: providersData } = useQuery({
@@ -134,16 +95,15 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	const hasProvider = providersData?.has_any ?? false;
 
 	const agents = agentsData?.agents ?? [];
-	const channels = channelsData?.channels ?? [];
-	
+
 	const agentIds = useMemo(() => agents.map((a) => a.id), [agents]);
 	const agentDisplayNames = useMemo(() => {
-		const map: Record<string, string | undefined> = {};
+		const map: Record<string, string | null | undefined> = {};
 		for (const a of agents) map[a.id] = a.display_name;
 		return map;
 	}, [agents]);
 	const agentGradients = useMemo(() => {
-		const map: Record<string, { start?: string; end?: string }> = {};
+		const map: Record<string, { start?: string | null | undefined; end?: string | null | undefined }> = {};
 		for (const a of agents) map[a.id] = { start: a.gradient_start, end: a.gradient_end };
 		return map;
 	}, [agents]);
@@ -151,19 +111,9 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 
 	const matchRoute = useMatchRoute();
 	const isOverview = matchRoute({ to: "/" });
+	const isTasks = matchRoute({ to: "/tasks" });
 	const isSettings = matchRoute({ to: "/settings" });
-
-	const agentActivity = useMemo(() => {
-		const byAgent: Record<string, { workers: number; branches: number }> = {};
-		for (const channel of channels) {
-			const live = liveStates[channel.id];
-			if (!live) continue;
-			if (!byAgent[channel.agent_id]) byAgent[channel.agent_id] = { workers: 0, branches: 0 };
-			byAgent[channel.agent_id].workers += Object.keys(live.workers).length;
-			byAgent[channel.agent_id].branches += Object.keys(live.branches).length;
-		}
-		return byAgent;
-	}, [channels, liveStates]);
+	const isOrchestrate = matchRoute({ to: "/orchestrate" });
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -187,40 +137,9 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 	};
 
 	return (
-		<motion.nav
-			className="flex h-full flex-col overflow-hidden border-r border-sidebar-line bg-sidebar"
-			animate={{ width: collapsed ? 56 : 224 }}
-			transition={{ type: "spring", stiffness: 500, damping: 35 }}
-		>
-			{/* Logo + collapse toggle */}
-			<div className="flex h-12 items-center border-b border-sidebar-line px-3">
-			{collapsed ? (
-				<button onClick={onToggle} className="flex h-full w-full items-center justify-center">
-					<img src={`${BASE_PATH}/ball.png`} alt="" className="h-6 w-6 transition-transform duration-150 ease-out hover:scale-110 active:scale-95" draggable={false} />
-				</button>
-			) : (
-				<div className="flex flex-1 items-center justify-between">
-					<Link to="/" className="flex items-center gap-2">
-						<img src={`${BASE_PATH}/ball.png`} alt="" className="h-6 w-6 flex-shrink-0 transition-transform duration-150 ease-out hover:scale-110 active:scale-95" draggable={false} />
-						<span className="whitespace-nowrap font-plex text-sm font-semibold text-sidebar-ink">
-							Spacebot
-						</span>
-					</Link>
-					<Button
-						onClick={onToggle}
-						variant="ghost"
-						size="icon"
-						className="h-6 w-6 text-sidebar-inkFaint hover:bg-sidebar-selected/50 hover:text-sidebar-inkDull"
-					>
-						<HugeiconsIcon icon={ArrowLeft01Icon} className="h-4 w-4" />
-					</Button>
-				</div>
-			)}
-			</div>
-
-			{/* Collapsed: icon-only nav */}
-			{collapsed ? (
-				<div className="flex flex-col items-center gap-1 pt-2">
+		<nav className="flex w-14 shrink-0 flex-col items-center overflow-hidden border-r border-sidebar-line bg-sidebar">
+			{/* Icon nav */}
+			<div className="flex flex-col items-center gap-1 pt-2">
 				<Link
 					to="/"
 					className={`flex h-8 w-8 items-center justify-center rounded-md ${
@@ -229,6 +148,28 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					title="Dashboard"
 				>
 					<HugeiconsIcon icon={DashboardSquare01Icon} className="h-4 w-4" />
+				</Link>
+				<Link
+					to="/orchestrate"
+					className={`flex h-8 w-8 items-center justify-center rounded-md ${
+						isOrchestrate ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					title="Orchestrate"
+				>
+					<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+						<rect x="1" y="2" width="4" height="12" rx="1" />
+						<rect x="6" y="2" width="4" height="12" rx="1" />
+						<rect x="11" y="2" width="4" height="12" rx="1" />
+					</svg>
+				</Link>
+				<Link
+					to="/tasks"
+					className={`flex h-8 w-8 items-center justify-center rounded-md ${
+						isTasks ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					title="Tasks"
+				>
+					<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-4 w-4" />
 				</Link>
 				<Link
 					to="/settings"
@@ -246,20 +187,19 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 					onDragEnd={handleDragEnd}
 				>
 					<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
-					{agentOrder.map((agentId) => {
-						const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
-						return (
-							<SortableAgentItem
-								key={agentId}
-								agentId={agentId}
-								displayName={agentDisplayNames[agentId]}
-								gradientStart={agentGradients[agentId]?.start}
-								gradientEnd={agentGradients[agentId]?.end}
-								isActive={isActive}
-								collapsed={true}
-							/>
-						);
-					})}
+						{agentOrder.map((agentId) => {
+							const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
+							return (
+								<SortableAgentItem
+									key={agentId}
+									agentId={agentId}
+									displayName={agentDisplayNames[agentId]}
+									gradientStart={agentGradients[agentId]?.start}
+									gradientEnd={agentGradients[agentId]?.end}
+									isActive={isActive}
+								/>
+							);
+						})}
 					</SortableContext>
 				</DndContext>
 				{hasProvider && (
@@ -271,87 +211,10 @@ export function Sidebar({ liveStates, collapsed, onToggle }: SidebarProps) {
 						+
 					</button>
 				)}
-				</div>
-			) : (
-				<>
-					{/* Top-level nav */}
-					<div className="flex flex-col gap-0.5 pt-2">
-						<Link
-							to="/"
-							className={`mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-								isOverview
-									? "bg-sidebar-selected text-sidebar-ink"
-									: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-							}`}
-						>
-							Dashboard
-						</Link>
-					<Link
-						to="/settings"
-						className={`mx-2 flex items-center gap-2 rounded-md px-2 py-1.5 text-sm ${
-							isSettings
-								? "bg-sidebar-selected text-sidebar-ink"
-								: "text-sidebar-inkDull hover:bg-sidebar-selected/50"
-						}`}
-					>
-						Settings
-					</Link>
-				</div>
-
-					{/* Agents */}
-					<div className="flex flex-1 flex-col overflow-y-auto pt-3">
-						<span className="px-3 pb-1 text-tiny font-medium uppercase tracking-wider text-sidebar-inkFaint">
-							Agents
-						</span>
-						{agents.length === 0 ? (
-							<span className="px-3 py-2 text-tiny text-sidebar-inkFaint">
-								No agents configured
-							</span>
-						) : (
-							<DndContext
-								sensors={sensors}
-								collisionDetection={closestCenter}
-								onDragEnd={handleDragEnd}
-							>
-								<SortableContext items={agentOrder} strategy={verticalListSortingStrategy}>
-									<div className="flex flex-col gap-0.5">
-									{agentOrder.map((agentId) => {
-										const activity = agentActivity[agentId];
-										const isActive = !!matchRoute({ to: "/agents/$agentId", params: { agentId }, fuzzy: true });
-
-										return (
-											<SortableAgentItem
-												key={agentId}
-												agentId={agentId}
-												displayName={agentDisplayNames[agentId]}
-												gradientStart={agentGradients[agentId]?.start}
-												gradientEnd={agentGradients[agentId]?.end}
-												activity={activity}
-												isActive={isActive}
-												collapsed={false}
-											/>
-										);
-									})}
-									</div>
-								</SortableContext>
-							</DndContext>
-						)}
-					{hasProvider && (
-						<Button
-							variant="outline"
-							size="sm"
-							onClick={() => setCreateOpen(true)}
-							className="mx-2 mt-1 w-auto justify-center border-dashed border-sidebar-line text-sidebar-inkFaint hover:border-sidebar-inkFaint hover:text-sidebar-inkDull"
-						>
-							+ New Agent
-						</Button>
-					)}
-					</div>
-				</>
-			)}
+			</div>
 			{agents[0] && (
 				<CreateAgentDialog open={createOpen} onOpenChange={setCreateOpen} agentId={agents[0].id} />
 			)}
-		</motion.nav>
+		</nav>
 	);
 }

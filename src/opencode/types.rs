@@ -543,7 +543,7 @@ impl OpenCodeEnvConfig {
 ///
 /// This is a typed Rust subset of OpenCode's Part — only the variants the
 /// frontend cares about are included.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OpenCodePart {
     /// Assistant text output.
@@ -578,7 +578,7 @@ impl OpenCodePart {
 }
 
 /// Tool execution state for the frontend. Flattened into the Tool variant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum OpenCodeToolState {
     Pending,

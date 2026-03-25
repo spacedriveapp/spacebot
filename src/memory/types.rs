@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 /// Memory structure.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct Memory {
     pub id: String,
     pub content: String,
@@ -15,7 +15,7 @@ pub struct Memory {
     pub last_accessed_at: chrono::DateTime<chrono::Utc>,
     pub access_count: i64,
     pub source: Option<String>,
-    pub channel_id: Option<crate::ChannelId>,
+    pub channel_id: Option<String>,
     /// Soft-delete flag. Forgotten memories are excluded from search and recall
     /// but remain in the database.
     pub forgotten: bool,
@@ -57,7 +57,7 @@ impl Memory {
 
     /// Set the channel ID.
     pub fn with_channel_id(mut self, channel_id: crate::ChannelId) -> Self {
-        self.channel_id = Some(channel_id);
+        self.channel_id = Some(channel_id.to_string());
         self
     }
 
@@ -89,7 +89,7 @@ impl MemoryType {
 }
 
 /// Memory types.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryType {
     /// Something that is true.
@@ -140,7 +140,7 @@ impl std::fmt::Display for MemoryType {
 }
 
 /// Association between memories.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, utoipa::ToSchema)]
 pub struct Association {
     pub id: String,
     pub source_id: String,
@@ -175,7 +175,7 @@ impl Association {
 }
 
 /// Relation types for memory associations.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum RelationType {
     /// General semantic connection.
@@ -206,7 +206,7 @@ impl std::fmt::Display for RelationType {
 }
 
 /// Search result combining memory with relevance score.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct MemorySearchResult {
     pub memory: Memory,
     pub score: f32,

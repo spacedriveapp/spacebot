@@ -392,6 +392,15 @@ impl Tool for DetachedSpawnWorkerTool {
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let rc = &self.deps.runtime_config;
         let prompt_engine = rc.prompts.load();
+
+        // Build worker status text (time + model) for the system prompt.
+        let system_info =
+            crate::agent::status::SystemInfo::from_runtime_config(rc.as_ref(), &self.deps.sandbox);
+        let temporal_context =
+            crate::agent::channel_prompt::TemporalContext::from_runtime(rc.as_ref());
+        let current_time_line = temporal_context.current_time_line();
+        let worker_status_text = Some(system_info.render_for_worker(&current_time_line));
+
         let sandbox_enabled = self.deps.sandbox.mode_enabled();
         let sandbox_containment_active = self.deps.sandbox.containment_active();
         let sandbox_read_allowlist = self.deps.sandbox.prompt_read_allowlist();
@@ -414,6 +423,7 @@ impl Tool for DetachedSpawnWorkerTool {
                 sandbox_write_allowlist,
                 &tool_secret_names,
                 browser_config.persist_session,
+                worker_status_text,
             )
             .map_err(|error| {
                 SpawnWorkerError(format!("failed to render worker prompt: {error}"))
@@ -445,6 +455,15 @@ impl Tool for DetachedSpawnWorkerTool {
             interactive: false,
             directory: None,
         });
+
+        self.deps
+            .working_memory
+            .emit(
+                crate::memory::WorkingMemoryEventType::WorkerSpawned,
+                format!("Worker spawned (cortex): {}", &args.task),
+            )
+            .importance(0.5)
+            .record();
 
         // Log to worker_runs directly since there's no parent channel to do it.
         let run_logger =

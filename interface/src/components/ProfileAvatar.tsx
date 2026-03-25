@@ -23,9 +23,9 @@ interface ProfileAvatarProps {
 	/** Extra CSS classes on the outer element. */
 	className?: string;
 	/** Custom gradient start color (overrides seed gradient). */
-	gradientStart?: string;
+	gradientStart?: string | null | undefined;
 	/** Custom gradient end color (overrides seed gradient). */
-	gradientEnd?: string;
+	gradientEnd?: string | null | undefined;
 	/** URL to a custom avatar image (takes precedence over gradient). */
 	avatarUrl?: string;
 }

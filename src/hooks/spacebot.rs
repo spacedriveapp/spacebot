@@ -1,9 +1,11 @@
 //! SpacebotHook: Prompt hook for channels, branches, and workers.
 
 use crate::hooks::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
+use crate::tools::{MemoryPersistenceContractState, MemoryPersistenceTerminalOutcome};
 use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, ProcessType};
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{CompletionModel, CompletionResponse, Message, Prompt, PromptError};
+use std::sync::Arc;
 use tokio::sync::broadcast;
 
 /// Controls whether hook-driven tool nudge retries are enabled.
@@ -38,6 +40,7 @@ pub struct SpacebotHook {
     tool_nudge_policy: ToolNudgePolicy,
     completion_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     nudge_request_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    completion_contract_request_active: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Set to `true` when the worker calls `set_status` with `kind: "outcome"`.
     /// Once signaled, the nudge system allows text-only responses to pass
     /// through as legitimate completions.
@@ -57,6 +60,7 @@ pub struct SpacebotHook {
     /// `prompt_with_tool_nudge_retry` loop reads and clears this buffer to
     /// append the messages to history before re-prompting.
     injected_messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
 }
 
 impl SpacebotHook {
@@ -68,8 +72,19 @@ impl SpacebotHook {
     pub const TOOL_NUDGE_REASON: &str = "spacebot_tool_nudge_retry";
     /// PromptCancelled reason used when injected context is pending.
     pub const CONTEXT_INJECTION_REASON: &str = "spacebot_context_injection";
+    /// PromptCancelled reason used for memory-persistence contract retries.
+    pub const MEMORY_PERSISTENCE_CONTRACT_REASON: &str =
+        "spacebot_memory_persistence_contract_retry";
     /// Maximum nudge retries per prompt request.
     pub const TOOL_NUDGE_MAX_RETRIES: usize = 2;
+    /// Maximum completion-contract retries per prompt request.
+    pub const MEMORY_PERSISTENCE_CONTRACT_MAX_RETRIES: usize = 2;
+    /// Prompt used to nudge memory-persistence branches toward a terminal tool outcome.
+    pub const MEMORY_PERSISTENCE_CONTRACT_PROMPT: &str = "You must finish this memory-persistence run by calling memory_persistence_complete. \
+         First recall relevant memories, then save real memories if needed, then call \
+         memory_persistence_complete with either outcome=\"saved\" and exact saved_memory_ids \
+         from successful memory_save calls in this run, or outcome=\"no_memories\" with a short \
+         reason and no saved IDs. Do not invent memory IDs.";
 
     /// Create a new hook.
     pub fn new(
@@ -89,6 +104,9 @@ impl SpacebotHook {
             tool_nudge_policy: ToolNudgePolicy::for_process(process_type),
             completion_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             nudge_request_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            completion_contract_request_active: std::sync::Arc::new(
+                std::sync::atomic::AtomicBool::new(false),
+            ),
             outcome_signaled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             nudge_attempts: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             loop_guard: std::sync::Arc::new(std::sync::Mutex::new(LoopGuard::new(
@@ -96,12 +114,21 @@ impl SpacebotHook {
             ))),
             inject_rx: None,
             injected_messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            memory_persistence_contract: None,
         }
     }
 
     /// Override the default process-scoped nudge policy.
     pub fn with_tool_nudge_policy(mut self, policy: ToolNudgePolicy) -> Self {
         self.tool_nudge_policy = policy;
+        self
+    }
+
+    pub fn with_memory_persistence_contract(
+        mut self,
+        contract_state: Arc<MemoryPersistenceContractState>,
+    ) -> Self {
+        self.memory_persistence_contract = Some(contract_state);
         self
     }
 
@@ -144,6 +171,11 @@ impl SpacebotHook {
             .store(active, std::sync::atomic::Ordering::Relaxed);
     }
 
+    pub fn set_completion_contract_request_active(&self, active: bool) {
+        self.completion_contract_request_active
+            .store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+
     /// Return true if a PromptCancelled reason indicates a tool nudge retry.
     pub fn is_tool_nudge_reason(reason: &str) -> bool {
         reason == Self::TOOL_NUDGE_REASON
@@ -152,6 +184,10 @@ impl SpacebotHook {
     /// Return true if a PromptCancelled reason indicates context injection.
     pub fn is_context_injection_reason(reason: &str) -> bool {
         reason == Self::CONTEXT_INJECTION_REASON
+    }
+
+    pub fn is_memory_persistence_contract_reason(reason: &str) -> bool {
+        reason == Self::MEMORY_PERSISTENCE_CONTRACT_REASON
     }
 
     /// Drain and return all buffered injected messages.
@@ -177,6 +213,7 @@ impl SpacebotHook {
     {
         self.reset_tool_nudge_state();
         self.set_tool_nudge_request_active(true);
+        self.set_completion_contract_request_active(false);
 
         let mut current_prompt = std::borrow::Cow::Borrowed(prompt);
         let mut using_tool_nudge_prompt = false;
@@ -239,6 +276,7 @@ impl SpacebotHook {
                     if attempts >= Self::TOOL_NUDGE_MAX_RETRIES {
                         // Retries exhausted — propagate the cancellation.
                         self.set_tool_nudge_request_active(false);
+                        self.set_completion_contract_request_active(false);
                         return result;
                     }
                     Self::prune_tool_nudge_retry_history(
@@ -265,6 +303,7 @@ impl SpacebotHook {
                         );
                     }
                     self.set_tool_nudge_request_active(false);
+                    self.set_completion_contract_request_active(false);
                     return result;
                 }
             }
@@ -538,6 +577,74 @@ impl SpacebotHook {
                 )
             })
     }
+
+    fn should_reject_memory_persistence_completion<M>(
+        &self,
+        response: &CompletionResponse<M::Response>,
+    ) -> bool
+    where
+        M: CompletionModel,
+    {
+        let Some(contract_state) = &self.memory_persistence_contract else {
+            return false;
+        };
+        if !self
+            .completion_contract_request_active
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return false;
+        }
+        if contract_state.has_terminal_outcome() {
+            return false;
+        }
+
+        !response
+            .choice
+            .iter()
+            .any(|content| matches!(content, rig::message::AssistantContent::ToolCall(_)))
+    }
+
+    fn parse_memory_persistence_terminal_outcome(
+        result: &str,
+    ) -> Option<MemoryPersistenceTerminalOutcome> {
+        let parsed = serde_json::from_str::<serde_json::Value>(result).ok()?;
+        if parsed.get("success").and_then(|value| value.as_bool()) != Some(true) {
+            return None;
+        }
+
+        match parsed.get("outcome").and_then(|value| value.as_str()) {
+            Some("saved") => {
+                let saved_memory_ids = parsed
+                    .get("saved_memory_ids")
+                    .and_then(|value| value.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str())
+                            .map(str::trim)
+                            .filter(|memory_id| !memory_id.is_empty())
+                            .map(ToOwned::to_owned)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                if saved_memory_ids.is_empty() {
+                    return None;
+                }
+                Some(MemoryPersistenceTerminalOutcome::Saved { saved_memory_ids })
+            }
+            Some("no_memories") => {
+                let reason = parsed
+                    .get("reason")
+                    .and_then(|value| value.as_str())
+                    .map(str::trim)
+                    .filter(|reason| !reason.is_empty())?;
+                Some(MemoryPersistenceTerminalOutcome::NoMemories {
+                    reason: reason.to_string(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 // Timer map for tool call duration measurement. Entries are inserted in
@@ -608,6 +715,12 @@ where
         if self.should_nudge_tool_usage::<M>(response) {
             return HookAction::Terminate {
                 reason: Self::TOOL_NUDGE_REASON.into(),
+            };
+        }
+
+        if self.should_reject_memory_persistence_completion::<M>(response) {
+            return HookAction::Terminate {
+                reason: Self::MEMORY_PERSISTENCE_CONTRACT_REASON.into(),
             };
         }
 
@@ -803,11 +916,31 @@ where
             guard.record_outcome(tool_name, _args, result);
         }
 
+        let is_tool_error = result.starts_with("Toolset error:");
+
+        // Log tool errors so operators can see when tools fail (including
+        // deserialization errors that happen before the tool's call() method).
+        if is_tool_error {
+            tracing::warn!(
+                process_id = %self.process_id,
+                tool_name = %tool_name,
+                error = %result,
+                "tool call failed"
+            );
+        }
+
+        if !is_tool_error
+            && tool_name == "memory_persistence_complete"
+            && let Some(contract_state) = &self.memory_persistence_contract
+            && let Some(outcome) = Self::parse_memory_persistence_terminal_outcome(result)
+        {
+            contract_state.set_terminal_outcome(outcome);
+        }
+
         // A successful tool call proves the worker is still productive.
         // Reset the consecutive nudge counter so a brief narration blip
         // after many tool calls doesn't exhaust the retry budget.
         // Tool errors (from Rig's error path) don't count as productive.
-        let is_tool_error = result.starts_with("Toolset error:");
         if self.tool_nudge_policy.is_enabled() && !is_tool_error {
             self.nudge_attempts
                 .store(0, std::sync::atomic::Ordering::Relaxed);
@@ -827,12 +960,22 @@ where
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
 
-        // Channel turns should end immediately after a successful reply tool call.
-        // This avoids extra post-reply LLM iterations that add latency, cost, and
-        // noisy logs when providers return empty trailing responses.
-        if self.process_type == ProcessType::Channel && tool_name == "reply" {
+        // Channel turns should end immediately after a successful reply or skip
+        // tool call. This avoids extra post-reply LLM iterations that add latency,
+        // cost, and noisy logs when providers return empty trailing responses.
+        // For skip, terminating is critical: without it the model receives the tool
+        // result and almost always generates narration like "The skip was successful"
+        // which either leaks to the user (retrigger path) or wastes tokens.
+        if !is_tool_error
+            && self.process_type == ProcessType::Channel
+            && (tool_name == "reply" || tool_name == "skip")
+        {
             return HookAction::Terminate {
-                reason: "reply delivered".into(),
+                reason: if tool_name == "reply" {
+                    "reply delivered".into()
+                } else {
+                    "skip".into()
+                },
             };
         }
 
@@ -846,11 +989,13 @@ mod tests {
     use crate::ProcessEvent;
     use crate::llm::SpacebotModel;
     use crate::llm::model::RawResponse;
+    use crate::tools::MemoryPersistenceContractState;
     use crate::{ProcessId, ProcessType};
     use rig::OneOrMany;
     use rig::agent::{HookAction, PromptHook};
     use rig::completion::{CompletionResponse, Message, Usage};
     use rig::message::AssistantContent;
+    use std::sync::Arc;
 
     fn make_hook() -> SpacebotHook {
         let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
@@ -861,6 +1006,20 @@ mod tests {
             None,
             event_tx,
         )
+    }
+
+    fn make_memory_persistence_hook() -> (SpacebotHook, Arc<MemoryPersistenceContractState>) {
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let contract_state = Arc::new(MemoryPersistenceContractState::default());
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Branch(uuid::Uuid::new_v4()),
+            ProcessType::Branch,
+            None,
+            event_tx,
+        )
+        .with_memory_persistence_contract(contract_state.clone());
+        (hook, contract_state)
     }
 
     fn prompt_message() -> Message {
@@ -1610,5 +1769,157 @@ mod tests {
             ),
             "Nudge should still work when inject_rx is attached but empty"
         );
+    }
+
+    #[tokio::test]
+    async fn memory_persistence_plain_text_completion_is_rejected_without_terminal_tool() {
+        let (hook, _contract_state) = make_memory_persistence_hook();
+        let prompt = prompt_message();
+        hook.set_completion_contract_request_active(true);
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("Saved the memories."),
+        )
+        .await;
+
+        assert!(matches!(
+            action,
+            HookAction::Terminate { ref reason }
+            if reason == SpacebotHook::MEMORY_PERSISTENCE_CONTRACT_REASON
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_persistence_fabricated_saved_ids_are_rejected() {
+        let (hook, contract_state) = make_memory_persistence_hook();
+        let prompt = prompt_message();
+        hook.set_completion_contract_request_active(true);
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_save",
+            None,
+            "internal_1",
+            "{}",
+            "{\"success\":true,\"memory_id\":\"mem_real_1\"}",
+        )
+        .await;
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_persistence_complete",
+            None,
+            "internal_2",
+            "{\"outcome\":\"saved\",\"saved_memory_ids\":[\"mem_fake\"]}",
+            "Toolset error: memory_persistence_complete failed: saved_memory_ids mismatch",
+        )
+        .await;
+
+        assert!(
+            !contract_state.has_terminal_outcome(),
+            "terminal outcome must not be recorded for fabricated IDs"
+        );
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("Done."),
+        )
+        .await;
+
+        assert!(matches!(
+            action,
+            HookAction::Terminate { ref reason }
+            if reason == SpacebotHook::MEMORY_PERSISTENCE_CONTRACT_REASON
+        ));
+    }
+
+    #[tokio::test]
+    async fn memory_persistence_saved_outcome_accepts_real_memory_save_ids() {
+        let (hook, contract_state) = make_memory_persistence_hook();
+        let prompt = prompt_message();
+        hook.set_completion_contract_request_active(true);
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_save",
+            None,
+            "internal_1",
+            "{}",
+            "{\"success\":true,\"memory_id\":\"mem_real_1\"}",
+        )
+        .await;
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_save",
+            None,
+            "internal_2",
+            "{}",
+            "{\"success\":true,\"memory_id\":\"mem_real_2\"}",
+        )
+        .await;
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_persistence_complete",
+            None,
+            "internal_3",
+            "{}",
+            "{\"success\":true,\"outcome\":\"saved\",\"saved_memory_ids\":[\"mem_real_1\",\"mem_real_2\"]}",
+        )
+        .await;
+
+        assert!(contract_state.has_terminal_outcome());
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("Persisted memories."),
+        )
+        .await;
+
+        assert!(matches!(action, HookAction::Continue));
+    }
+
+    #[tokio::test]
+    async fn memory_persistence_no_memories_outcome_is_accepted_without_saves() {
+        let (hook, contract_state) = make_memory_persistence_hook();
+        let prompt = prompt_message();
+        hook.set_completion_contract_request_active(true);
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_persistence_complete",
+            None,
+            "internal_1",
+            "{}",
+            "{\"success\":true,\"outcome\":\"no_memories\",\"saved_memory_ids\":[],\"reason\":\"No durable facts found\"}",
+        )
+        .await;
+
+        assert!(contract_state.has_terminal_outcome());
+
+        let _ =
+            <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_call(&hook, &prompt, &[])
+                .await;
+        let action = <SpacebotHook as PromptHook<SpacebotModel>>::on_completion_response(
+            &hook,
+            &prompt,
+            &text_response("No memories persisted."),
+        )
+        .await;
+
+        assert!(matches!(action, HookAction::Continue));
     }
 }

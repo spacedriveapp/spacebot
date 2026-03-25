@@ -17,8 +17,11 @@ pub enum TaskUpdateScope {
 #[derive(Debug, Clone)]
 pub struct TaskUpdateTool {
     task_store: Arc<TaskStore>,
+    // Retained for future authorization checks on global task updates.
+    #[allow(dead_code)]
     agent_id: AgentId,
     scope: TaskUpdateScope,
+    working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
 impl TaskUpdateTool {
@@ -27,6 +30,7 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Branch,
+            working_memory: None,
         }
     }
 
@@ -35,7 +39,13 @@ impl TaskUpdateTool {
             task_store,
             agent_id,
             scope: TaskUpdateScope::Worker(worker_id),
+            working_memory: None,
         }
+    }
+
+    pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
+        self.working_memory = Some(store);
+        self
     }
 }
 
@@ -93,7 +103,7 @@ impl Tool for TaskUpdateTool {
                             "required": ["title", "completed"]
                         }
                     },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
+                    "metadata": { "type": "object", "description": "Metadata object deep-merged with current metadata" },
                     "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" }
                 },
                 "required": ["task_number"]
@@ -127,7 +137,7 @@ impl Tool for TaskUpdateTool {
                             "required": ["title", "completed"]
                         }
                     },
-                    "metadata": { "type": "object", "description": "Metadata object merged with current metadata" },
+                    "metadata": { "type": "object", "description": "Metadata object deep-merged with current metadata" },
                     "complete_subtask": { "type": "integer", "description": "Subtask index to mark complete" },
                     "worker_id": { "type": "string", "description": "Optional worker ID to bind to this task" },
                     "approved_by": { "type": "string", "description": "Optional approver identifier" }
@@ -206,7 +216,6 @@ impl Tool for TaskUpdateTool {
         let updated = self
             .task_store
             .update(
-                &self.agent_id,
                 task_number,
                 UpdateTaskInput {
                     title: args.title,
@@ -219,11 +228,25 @@ impl Tool for TaskUpdateTool {
                     clear_worker_id: false,
                     approved_by: args.approved_by,
                     complete_subtask,
+                    ..Default::default()
                 },
             )
             .await
             .map_err(|error| TaskUpdateError(format!("{error}")))?
             .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?;
+
+        if let Some(working_memory) = &self.working_memory {
+            working_memory
+                .emit(
+                    crate::memory::WorkingMemoryEventType::TaskUpdate,
+                    format!(
+                        "Task #{} updated to {}",
+                        updated.task_number, updated.status
+                    ),
+                )
+                .importance(0.4)
+                .record();
+        }
 
         Ok(TaskUpdateOutput {
             success: true,

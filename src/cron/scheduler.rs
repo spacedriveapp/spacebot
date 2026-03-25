@@ -10,7 +10,7 @@ use crate::cron::store::CronStore;
 use crate::error::Result;
 use crate::messaging::MessagingManager;
 use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
-use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse};
+use crate::{AgentDeps, InboundMessage, MessageContent, OutboundResponse, RoutedResponse};
 use chrono::Timelike;
 use chrono_tz::Tz;
 use cron::Schedule;
@@ -349,6 +349,16 @@ impl Scheduler {
                                 ])
                                 .inc();
 
+                            exec_context
+                                .deps
+                                .working_memory
+                                .emit(
+                                    crate::memory::WorkingMemoryEventType::CronExecuted,
+                                    format!("Cron completed: {exec_job_id}"),
+                                )
+                                .importance(0.4)
+                                .record();
+
                             let mut j = exec_jobs.write().await;
                             if let Some(j) = j.get_mut(&exec_job_id) {
                                 j.consecutive_failures = 0;
@@ -364,6 +374,16 @@ impl Scheduler {
                                     "failure",
                                 ])
                                 .inc();
+
+                            exec_context
+                                .deps
+                                .working_memory
+                                .emit(
+                                    crate::memory::WorkingMemoryEventType::Error,
+                                    format!("Cron failed: {exec_job_id}: {error}"),
+                                )
+                                .importance(0.8)
+                                .record();
 
                             tracing::error!(
                                 cron_id = %exec_job_id,
@@ -471,6 +491,16 @@ impl Scheduler {
     pub async fn is_registered(&self, job_id: &str) -> bool {
         let jobs = self.jobs.read().await;
         jobs.contains_key(job_id)
+    }
+
+    /// Return the number of enabled (active) cron jobs.
+    pub async fn job_count(&self) -> usize {
+        self.jobs
+            .read()
+            .await
+            .values()
+            .filter(|job| job.enabled)
+            .count()
     }
 
     /// Trigger a cron job immediately, outside the timer loop.
@@ -839,7 +869,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
     // Create the outbound response channel to collect whatever the channel produces
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<OutboundResponse>(32);
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(32);
 
     // Subscribe to the agent's event bus (the channel needs this for branch/worker events)
     let event_rx = context.deps.event_tx.subscribe();
@@ -851,6 +881,8 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         event_rx,
         context.screenshot_dir.clone(),
         context.logs_dir.clone(),
+        None, // cron channels don't capture prompt snapshots
+        None, // cron channels don't share live transcript cache
     );
 
     // Spawn the channel's event loop
@@ -861,10 +893,19 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     });
 
     // Send the cron job prompt as a synthetic message
+    // Derive source from the delivery target's adapter so adapter_selector() can extract
+    // the platform prefix (e.g., "signal" from "signal:gvoice1"). This ensures the channel
+    // correctly identifies as being "from" that messaging platform and tools resolve properly.
+    let source_adapter = job
+        .delivery_target
+        .adapter
+        .split(':')
+        .next()
+        .unwrap_or("cron");
     let message = InboundMessage {
         id: uuid::Uuid::new_v4().to_string(),
-        source: "cron".into(),
-        adapter: None,
+        source: source_adapter.into(),
+        adapter: Some(job.delivery_target.adapter.clone()),
         conversation_id: format!("cron:{}", job.id),
         sender_id: "system".into(),
         agent_id: Some(context.deps.agent_id.clone()),
@@ -898,10 +939,16 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
             break;
         }
         match tokio::time::timeout(remaining, response_rx.recv()).await {
-            Ok(Some(OutboundResponse::Text(text))) => {
+            Ok(Some(RoutedResponse {
+                response: OutboundResponse::Text(text),
+                ..
+            })) => {
                 collected_text.push(text);
             }
-            Ok(Some(OutboundResponse::RichMessage { text, .. })) => {
+            Ok(Some(RoutedResponse {
+                response: OutboundResponse::RichMessage { text, .. },
+                ..
+            })) => {
                 collected_text.push(text);
             }
             Ok(Some(_)) => {}

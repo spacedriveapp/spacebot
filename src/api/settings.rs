@@ -6,7 +6,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct GlobalSettingsResponse {
     brave_search_key: Option<String>,
     api_enabled: bool,
@@ -17,7 +17,7 @@ pub(super) struct GlobalSettingsResponse {
     ssh_enabled: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OpenCodeSettingsResponse {
     enabled: bool,
     path: String,
@@ -27,14 +27,14 @@ pub(super) struct OpenCodeSettingsResponse {
     permissions: OpenCodePermissionsResponse,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OpenCodePermissionsResponse {
     edit: String,
     bash: String,
     webfetch: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct GlobalSettingsUpdate {
     brave_search_key: Option<String>,
     api_enabled: Option<bool>,
@@ -45,7 +45,7 @@ pub(super) struct GlobalSettingsUpdate {
     ssh_enabled: Option<bool>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct OpenCodeSettingsUpdate {
     enabled: Option<bool>,
     path: Option<String>,
@@ -55,36 +55,45 @@ pub(super) struct OpenCodeSettingsUpdate {
     permissions: Option<OpenCodePermissionsUpdate>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct OpenCodePermissionsUpdate {
     edit: Option<String>,
     bash: Option<String>,
     webfetch: Option<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct GlobalSettingsUpdateResponse {
     success: bool,
     message: String,
     requires_restart: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RawConfigResponse {
     content: String,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema)]
 pub(super) struct RawConfigUpdateRequest {
     content: String,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct RawConfigUpdateResponse {
     success: bool,
     message: String,
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings",
+    responses(
+        (status = 200, body = GlobalSettingsResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn get_global_settings(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<GlobalSettingsResponse>, StatusCode> {
@@ -233,6 +242,16 @@ pub(super) async fn get_global_settings(
     }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/settings",
+    request_body = GlobalSettingsUpdate,
+    responses(
+        (status = 200, body = GlobalSettingsUpdateResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn update_global_settings(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<GlobalSettingsUpdate>,
@@ -431,6 +450,14 @@ pub(super) async fn update_global_settings(
 }
 
 /// Return the embedded CHANGELOG.md content.
+#[utoipa::path(
+    get,
+    path = "/changelog",
+    responses(
+        (status = 200, body = serde_json::Value),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn changelog() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "content": crate::self_awareness::changelog_content(),
@@ -438,6 +465,14 @@ pub(super) async fn changelog() -> Json<serde_json::Value> {
 }
 
 /// Return the current update status (from background check).
+#[utoipa::path(
+    get,
+    path = "/update-check",
+    responses(
+        (status = 200, body = crate::update::UpdateStatus),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn update_check(
     State(state): State<Arc<ApiState>>,
 ) -> Json<crate::update::UpdateStatus> {
@@ -446,6 +481,14 @@ pub(super) async fn update_check(
 }
 
 /// Force an immediate update check against GitHub.
+#[utoipa::path(
+    post,
+    path = "/update-check",
+    responses(
+        (status = 200, body = crate::update::UpdateStatus),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn update_check_now(
     State(state): State<Arc<ApiState>>,
 ) -> Json<crate::update::UpdateStatus> {
@@ -455,6 +498,15 @@ pub(super) async fn update_check_now(
 }
 
 /// Pull the new Docker image and recreate this container.
+#[utoipa::path(
+    post,
+    path = "/update-apply",
+    responses(
+        (status = 200, body = serde_json::Value),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn update_apply(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
@@ -470,6 +522,15 @@ pub(super) async fn update_apply(
     }
 }
 
+#[utoipa::path(
+    get,
+    path = "/settings/raw",
+    responses(
+        (status = 200, body = RawConfigResponse),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn get_raw_config(
     State(state): State<Arc<ApiState>>,
 ) -> Result<Json<RawConfigResponse>, StatusCode> {
@@ -493,6 +554,17 @@ pub(super) async fn get_raw_config(
     Ok(Json(RawConfigResponse { content }))
 }
 
+#[utoipa::path(
+    put,
+    path = "/settings/raw",
+    request_body = RawConfigUpdateRequest,
+    responses(
+        (status = 200, body = RawConfigUpdateResponse),
+        (status = 400, description = "Validation error"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "settings",
+)]
 pub(super) async fn update_raw_config(
     State(state): State<Arc<ApiState>>,
     Json(request): Json<RawConfigUpdateRequest>,

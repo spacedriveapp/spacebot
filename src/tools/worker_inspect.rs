@@ -135,6 +135,9 @@ impl Tool for WorkerInspectTool {
                             worker_transcript::TranscriptStep::UserText { text } => {
                                 summary.push_str(&format!("**User:** {text}\n\n"));
                             }
+                            worker_transcript::TranscriptStep::SystemText { text } => {
+                                summary.push_str(&format!("**System:** {text}\n\n"));
+                            }
                             worker_transcript::TranscriptStep::ToolResult {
                                 name, text, ..
                             } => {
@@ -195,6 +198,7 @@ impl WorkerInspectTool {
                 "running" => "[running]",
                 "done" => "[done]",
                 "failed" => "[failed]",
+                "cancelled" => "[cancelled]",
                 _ => "[-]",
             };
             summary.push_str(&format!(

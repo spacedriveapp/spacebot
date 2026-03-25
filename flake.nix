@@ -35,6 +35,17 @@
             ./src
             ./migrations
             ./prompts
+            ./presets
+            ./docs/content
+            ./docs/README.md
+            ./docs/docker.md
+            ./docs/metrics.md
+            ./AGENTS.md
+            ./README.md
+            ./CHANGELOG.md
+            ./.cargo/config.toml
+            (pkgs.lib.fileset.maybeMissing ./interface/dist)
+            ./vendor
           ];
         };
 
@@ -66,11 +77,14 @@
           inherit pkgs craneLib cargoSrc runtimeAssetsSrc frontendSrc;
         };
 
-        inherit (spacebotPackages) frontend spacebot spacebot-full spacebot-tests;
+        inherit (spacebotPackages) frontend frontendNodeModules spacebot spacebot-full spacebot-tests;
       in {
         packages = {
           default = spacebot;
           inherit frontend spacebot spacebot-full;
+          # Updater for frontend deps - run this to get the correct hash after updating interface deps
+          # Usage: nix build .#frontend-updater 2>&1 | grep "got:" | awk '{print $2}'
+          frontend-updater = frontendNodeModules { hash = pkgs.lib.fakeHash; };
         };
 
         devShells = {
@@ -88,11 +102,10 @@
               openssl
               pkg-config
               onnxruntime
-              chromium
-            ];
+            ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.chromium ];
 
             ORT_LIB_LOCATION = "${pkgs.onnxruntime}/lib";
-            CHROME_PATH = "${pkgs.chromium}/bin/chromium";
+            CHROME_PATH = if pkgs.stdenv.isLinux then "${pkgs.chromium}/bin/chromium" else "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
             CHROME_FLAGS = "--no-sandbox --disable-dev-shm-usage --disable-gpu";
           };
 

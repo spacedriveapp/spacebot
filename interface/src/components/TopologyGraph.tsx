@@ -30,6 +30,8 @@ import {
 	type AgentSummary,
 	type TopologyResponse,
 	type TopologyGroup,
+	type TopologyAgent,
+	type TopologyHuman,
 	type LinkDirection,
 	type LinkKind,
 } from "@/api/client";
@@ -529,17 +531,7 @@ function EdgeConfigPanel({
 // -- Human Edit Dialog --
 
 interface HumanEditDialogProps {
-	human: {
-		id: string;
-		display_name?: string;
-		role?: string;
-		bio?: string;
-		description?: string;
-		discord_id?: string;
-		telegram_id?: string;
-		slack_id?: string;
-		email?: string;
-	} | null;
+	human: TopologyHuman | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onUpdate: (fields: {
@@ -757,7 +749,7 @@ function HumanEditDialog({
 // -- Agent Edit Dialog --
 
 interface AgentEditDialogProps {
-	agent: { id: string; display_name?: string; role?: string } | null;
+	agent: TopologyAgent | null;
 	open: boolean;
 	onOpenChange: (open: boolean) => void;
 	onUpdate: (displayName: string, role: string) => void;
@@ -936,9 +928,9 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const queryClient = useQueryClient();
 	const [selectedEdge, setSelectedEdge] = useState<Edge | null>(null);
 	const [selectedGroup, setSelectedGroup] = useState<TopologyGroup | null>(null);
-	const [selectedHuman, setSelectedHuman] = useState<{ id: string; display_name?: string; role?: string; bio?: string } | null>(null);
+	const [selectedHuman, setSelectedHuman] = useState<TopologyHuman | null>(null);
 	const [humanDialogOpen, setHumanDialogOpen] = useState(false);
-	const [selectedAgent, setSelectedAgent] = useState<{ id: string; display_name?: string; role?: string } | null>(null);
+	const [selectedAgent, setSelectedAgent] = useState<TopologyAgent | null>(null);
 	const [agentDialogOpen, setAgentDialogOpen] = useState(false);
 
 	const { data, isLoading, error } = useQuery({
@@ -969,7 +961,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 
 	// Build agent info lookup (for gradient colors)
 	const agentInfoMap = useMemo(() => {
-		const map = new Map<string, { gradient_start?: string; gradient_end?: string }>();
+		const map = new Map<string, { gradient_start?: string | null | undefined; gradient_end?: string | null | undefined }>();
 		for (const info of agentInfoData?.agents ?? []) {
 			map.set(info.id, { gradient_start: info.gradient_start, gradient_end: info.gradient_end });
 		}
@@ -1280,11 +1272,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 		(agentId: string) => {
 			const topoAgent = data?.agents.find((a) => a.id === agentId);
 			if (topoAgent) {
-				setSelectedAgent({
-					id: topoAgent.id,
-					display_name: topoAgent.display_name,
-					role: topoAgent.role,
-				});
+				setSelectedAgent(topoAgent);
 				setAgentDialogOpen(true);
 				setSelectedEdge(null);
 				setSelectedGroup(null);
@@ -1627,7 +1615,7 @@ function buildGraph(
 	data: TopologyResponse,
 	activeEdges: Set<string>,
 	agentProfiles: Map<string, AgentSummary>,
-	agentInfoMap: Map<string, { gradient_start?: string; gradient_end?: string }>,
+	agentInfoMap: Map<string, { gradient_start?: string | null | undefined; gradient_end?: string | null | undefined }>,
 ): { initialNodes: Node[]; initialEdges: Edge[] } {
 	const saved = loadPositions();
 	const savedHandles = loadHandles();

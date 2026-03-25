@@ -12,6 +12,7 @@ import { faSearch } from "@fortawesome/free-solid-svg-icons";
 import { parse as parseToml } from "smol-toml";
 import { useTheme, THEMES, type ThemeId } from "@/hooks/useTheme";
 import { Markdown } from "@/components/Markdown";
+import { useSetTopBar } from "@/components/TopBar";
 
 type SectionId = "appearance" | "providers" | "channels" | "api-keys" | "secrets" | "server" | "opencode" | "worker-logs" | "updates" | "config-file" | "changelog";
 
@@ -144,7 +145,7 @@ const PROVIDERS = [
 		description: "GLM coding models (glm-4.7, glm-5, glm-4.5-air)",
 		placeholder: "...",
 		envVar: "ZAI_CODING_PLAN_API_KEY",
-		defaultModel: "glm-5",
+		defaultModel: "zai-coding-plan/glm-5",
 	},
 	{
 		id: "zhipu",
@@ -241,6 +242,14 @@ const PROVIDERS = [
 		placeholder: "sk-...",
 		envVar: "MOONSHOT_API_KEY",
 		defaultModel: "moonshot/kimi-k2.5",
+	},
+	{
+		id: "github-copilot",
+		name: "GitHub Copilot",
+		description: "GitHub Copilot API (uses GitHub PAT for token exchange)",
+		placeholder: "ghp_... or gh auth token",
+		envVar: "GITHUB_COPILOT_API_KEY",
+		defaultModel: "github-copilot/claude-sonnet-4",
 	},
 	{
 		id: "ollama",
@@ -564,6 +573,16 @@ export function Settings() {
 		return data.providers[statusKey] ?? false;
 	};
 
+	const sectionLabel = SECTIONS.find((s) => s.id === activeSection)?.label;
+
+	useSetTopBar(
+		<div className="flex h-full items-center px-6">
+			<h1 className="font-plex text-sm font-medium text-ink">
+				{sectionLabel ?? "Settings"}
+			</h1>
+		</div>,
+	);
+
 	return (
 		<div className="flex h-full min-h-0 overflow-hidden">
 			{/* Sidebar */}
@@ -588,11 +607,6 @@ export function Settings() {
 
 			{/* Content */}
 			<div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-				<header className="flex h-12 items-center border-b border-app-line bg-app-darkBox/50 px-6">
-					<h1 className="font-plex text-sm font-medium text-ink">
-						{SECTIONS.find((s) => s.id === activeSection)?.label}
-					</h1>
-				</header>
 				<div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
 					{activeSection === "appearance" ? (
 						<AppearanceSection />
@@ -870,7 +884,7 @@ function ThemePreview({ themeId }: { themeId: ThemeId }) {
 	);
 }
 
-type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook";
+type Platform = "discord" | "slack" | "telegram" | "twitch" | "email" | "webhook" | "mattermost" | "signal";
 
 function ChannelsSection() {
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);

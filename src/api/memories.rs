@@ -9,31 +9,31 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct MemoriesListResponse {
     memories: Vec<Memory>,
     total: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct MemoriesSearchResponse {
     results: Vec<MemorySearchResult>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct MemoryGraphResponse {
     nodes: Vec<Memory>,
     edges: Vec<Association>,
     total: usize,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct MemoryGraphNeighborsResponse {
     nodes: Vec<Memory>,
     edges: Vec<Association>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct MemoriesListQuery {
     agent_id: String,
     #[serde(default = "default_memories_limit")]
@@ -76,7 +76,7 @@ pub(super) fn parse_memory_type(type_str: &str) -> Option<MemoryType> {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct MemoriesSearchQuery {
     agent_id: String,
     q: String,
@@ -90,7 +90,7 @@ fn default_search_limit() -> usize {
     20
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct MemoryGraphQuery {
     agent_id: String,
     #[serde(default = "default_graph_limit")]
@@ -107,7 +107,7 @@ fn default_graph_limit() -> i64 {
     200
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct MemoryGraphNeighborsQuery {
     agent_id: String,
     memory_id: String,
@@ -123,6 +123,23 @@ fn default_neighbor_depth() -> u32 {
 }
 
 /// List memories for an agent with sorting, filtering, and pagination.
+#[utoipa::path(
+    get,
+    path = "/agents/memories",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("limit" = i64, Query, description = "Maximum number of results to return (default 50, max 200)"),
+        ("offset" = usize, Query, description = "Number of results to skip for pagination"),
+        ("memory_type" = Option<String>, Query, description = "Filter by memory type (fact, preference, decision, identity, event, observation, goal, todo)"),
+        ("sort" = String, Query, description = "Sort order: recent, importance, most_accessed (default: recent)"),
+    ),
+    responses(
+        (status = 200, body = MemoriesListResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "memories",
+)]
 pub(super) async fn list_memories(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<MemoriesListQuery>,
@@ -151,6 +168,22 @@ pub(super) async fn list_memories(
 }
 
 /// Search memories using hybrid search (vector + FTS + graph).
+#[utoipa::path(
+    get,
+    path = "/agents/memories/search",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("q" = String, Query, description = "Search query string"),
+        ("limit" = usize, Query, description = "Maximum number of results to return (default 20, max 100)"),
+        ("memory_type" = Option<String>, Query, description = "Filter by memory type"),
+    ),
+    responses(
+        (status = 200, body = MemoriesSearchResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "memories",
+)]
 pub(super) async fn search_memories(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<MemoriesSearchQuery>,
@@ -176,6 +209,23 @@ pub(super) async fn search_memories(
 }
 
 /// Get a subgraph of memories: nodes + all edges between them.
+#[utoipa::path(
+    get,
+    path = "/agents/memories/graph",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("limit" = i64, Query, description = "Maximum number of nodes to return (default 200, max 500)"),
+        ("offset" = usize, Query, description = "Number of nodes to skip for pagination"),
+        ("memory_type" = Option<String>, Query, description = "Filter by memory type"),
+        ("sort" = String, Query, description = "Sort order: recent, importance, most_accessed (default: recent)"),
+    ),
+    responses(
+        (status = 200, body = MemoryGraphResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "memories",
+)]
 pub(super) async fn memory_graph(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<MemoryGraphQuery>,
@@ -218,6 +268,22 @@ pub(super) async fn memory_graph(
 
 /// Get the neighbors of a specific memory node. Returns new nodes
 /// and edges not already present in the client's graph.
+#[utoipa::path(
+    get,
+    path = "/agents/memories/graph/neighbors",
+    params(
+        ("agent_id" = String, Query, description = "Agent ID"),
+        ("memory_id" = String, Query, description = "Memory ID to get neighbors for"),
+        ("depth" = u32, Query, description = "Neighbor traversal depth (default 1, max 3)"),
+        ("exclude" = Option<String>, Query, description = "Comma-separated list of memory IDs to exclude from results"),
+    ),
+    responses(
+        (status = 200, body = MemoryGraphNeighborsResponse),
+        (status = 404, description = "Agent not found"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "memories",
+)]
 pub(super) async fn memory_graph_neighbors(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<MemoryGraphNeighborsQuery>,

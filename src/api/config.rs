@@ -7,7 +7,7 @@ use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct RoutingSection {
     channel: String,
     branch: String,
@@ -18,7 +18,7 @@ pub(super) struct RoutingSection {
     rate_limit_cooldown_secs: u64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct TuningSection {
     max_concurrent_branches: usize,
     max_concurrent_workers: usize,
@@ -28,16 +28,17 @@ pub(super) struct TuningSection {
     history_backfill_count: usize,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct CompactionSection {
     background_threshold: f32,
     aggressive_threshold: f32,
     emergency_threshold: f32,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct CortexSection {
     tick_interval_secs: u64,
+    maintenance_interval_secs: u64,
     worker_timeout_secs: u64,
     branch_timeout_secs: u64,
     detached_worker_timeout_retry_limit: u8,
@@ -46,9 +47,13 @@ pub(super) struct CortexSection {
     bulletin_interval_secs: u64,
     bulletin_max_words: usize,
     bulletin_max_turns: usize,
+    maintenance_decay_rate: f32,
+    maintenance_prune_threshold: f32,
+    maintenance_min_age_days: i64,
+    maintenance_merge_similarity_threshold: f32,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct WarmupSection {
     enabled: bool,
     eager_embedding_load: bool,
@@ -56,7 +61,7 @@ pub(super) struct WarmupSection {
     startup_delay_secs: u64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct CoalesceSection {
     enabled: bool,
     debounce_ms: u64,
@@ -65,13 +70,13 @@ pub(super) struct CoalesceSection {
     multi_user_only: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct MemoryPersistenceSection {
     enabled: bool,
     message_interval: usize,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct BrowserSection {
     enabled: bool,
     headless: bool,
@@ -80,19 +85,19 @@ pub(super) struct BrowserSection {
     close_policy: String,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct ChannelSection {
     listen_only_mode: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct SandboxSection {
     mode: String,
     writable_paths: Vec<String>,
     passthrough_env: Vec<String>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct ProjectsSection {
     use_worktrees: bool,
     worktree_name_template: String,
@@ -102,13 +107,13 @@ pub(super) struct ProjectsSection {
     disk_usage_warning_threshold: u64,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct DiscordSection {
     enabled: bool,
     allow_bot_messages: bool,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, Debug, utoipa::ToSchema)]
 pub(super) struct AgentConfigResponse {
     routing: RoutingSection,
     tuning: TuningSection,
@@ -124,12 +129,12 @@ pub(super) struct AgentConfigResponse {
     discord: DiscordSection,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
 pub(super) struct AgentConfigQuery {
     agent_id: String,
 }
 
-#[derive(Deserialize, Debug, Default)]
+#[derive(Deserialize, Debug, Default, utoipa::ToSchema)]
 pub(super) struct AgentConfigUpdateRequest {
     agent_id: String,
     #[serde(default)]
@@ -158,7 +163,7 @@ pub(super) struct AgentConfigUpdateRequest {
     discord: Option<DiscordUpdate>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct RoutingUpdate {
     channel: Option<String>,
     branch: Option<String>,
@@ -169,7 +174,7 @@ pub(super) struct RoutingUpdate {
     rate_limit_cooldown_secs: Option<u64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct TuningUpdate {
     max_concurrent_branches: Option<usize>,
     max_concurrent_workers: Option<usize>,
@@ -179,16 +184,17 @@ pub(super) struct TuningUpdate {
     history_backfill_count: Option<usize>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct CompactionUpdate {
     background_threshold: Option<f32>,
     aggressive_threshold: Option<f32>,
     emergency_threshold: Option<f32>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct CortexUpdate {
     tick_interval_secs: Option<u64>,
+    maintenance_interval_secs: Option<u64>,
     worker_timeout_secs: Option<u64>,
     branch_timeout_secs: Option<u64>,
     detached_worker_timeout_retry_limit: Option<u8>,
@@ -197,9 +203,13 @@ pub(super) struct CortexUpdate {
     bulletin_interval_secs: Option<u64>,
     bulletin_max_words: Option<usize>,
     bulletin_max_turns: Option<usize>,
+    maintenance_decay_rate: Option<f32>,
+    maintenance_prune_threshold: Option<f32>,
+    maintenance_min_age_days: Option<i64>,
+    maintenance_merge_similarity_threshold: Option<f32>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct WarmupUpdate {
     enabled: Option<bool>,
     eager_embedding_load: Option<bool>,
@@ -207,7 +217,7 @@ pub(super) struct WarmupUpdate {
     startup_delay_secs: Option<u64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct CoalesceUpdate {
     enabled: Option<bool>,
     debounce_ms: Option<u64>,
@@ -216,13 +226,13 @@ pub(super) struct CoalesceUpdate {
     multi_user_only: Option<bool>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct MemoryPersistenceUpdate {
     enabled: Option<bool>,
     message_interval: Option<usize>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct BrowserUpdate {
     enabled: Option<bool>,
     headless: Option<bool>,
@@ -231,19 +241,19 @@ pub(super) struct BrowserUpdate {
     close_policy: Option<ClosePolicy>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct ChannelUpdate {
     listen_only_mode: Option<bool>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct SandboxUpdate {
     mode: Option<String>,
     writable_paths: Option<Vec<String>>,
     passthrough_env: Option<Vec<String>>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct ProjectsUpdate {
     use_worktrees: Option<bool>,
     worktree_name_template: Option<String>,
@@ -253,13 +263,23 @@ pub(super) struct ProjectsUpdate {
     disk_usage_warning_threshold: Option<u64>,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, utoipa::ToSchema)]
 pub(super) struct DiscordUpdate {
     allow_bot_messages: Option<bool>,
 }
 
 /// Get the resolved configuration for an agent.
 /// Reads live values from the agent's RuntimeConfig (hot-reloaded via ArcSwap).
+#[utoipa::path(
+    get,
+    path = "/agents/config",
+    params(AgentConfigQuery),
+    responses(
+        (status = 200, body = AgentConfigResponse),
+        (status = 404, description = "Agent not found"),
+    ),
+    tag = "config",
+)]
 pub(super) async fn get_agent_config(
     State(state): State<Arc<ApiState>>,
     Query(query): Query<AgentConfigQuery>,
@@ -305,6 +325,7 @@ pub(super) async fn get_agent_config(
         },
         cortex: CortexSection {
             tick_interval_secs: cortex.tick_interval_secs,
+            maintenance_interval_secs: cortex.maintenance_interval_secs,
             worker_timeout_secs: cortex.worker_timeout_secs,
             branch_timeout_secs: cortex.branch_timeout_secs,
             detached_worker_timeout_retry_limit: cortex.detached_worker_timeout_retry_limit,
@@ -313,6 +334,10 @@ pub(super) async fn get_agent_config(
             bulletin_interval_secs: cortex.bulletin_interval_secs,
             bulletin_max_words: cortex.bulletin_max_words,
             bulletin_max_turns: cortex.bulletin_max_turns,
+            maintenance_decay_rate: cortex.maintenance_decay_rate,
+            maintenance_prune_threshold: cortex.maintenance_prune_threshold,
+            maintenance_min_age_days: cortex.maintenance_min_age_days,
+            maintenance_merge_similarity_threshold: cortex.maintenance_merge_similarity_threshold,
         },
         warmup: WarmupSection {
             enabled: warmup.enabled,
@@ -384,6 +409,17 @@ pub(super) async fn get_agent_config(
 
 /// Update agent configuration by editing config.toml with toml_edit.
 /// This preserves formatting and comments while writing the new values.
+#[utoipa::path(
+    put,
+    path = "/agents/config",
+    request_body = AgentConfigUpdateRequest,
+    responses(
+        (status = 200, body = AgentConfigResponse),
+        (status = 400, description = "Invalid request"),
+        (status = 500, description = "Internal server error"),
+    ),
+    tag = "config",
+)]
 pub(super) async fn update_agent_config(
     State(state): State<Arc<ApiState>>,
     axum::Json(request): axum::Json<AgentConfigUpdateRequest>,
@@ -451,7 +487,13 @@ pub(super) async fn update_agent_config(
         update_discord_table(&mut doc, discord)?;
     }
 
-    tokio::fs::write(&config_path, doc.to_string())
+    let updated_content = doc.to_string();
+    if let Err(error) = crate::config::Config::validate_toml(&updated_content) {
+        tracing::warn!(%error, "rejected config API update due to invalid resulting TOML");
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    tokio::fs::write(&config_path, updated_content)
         .await
         .map_err(|error| {
             tracing::warn!(%error, "failed to write config.toml");
@@ -635,6 +677,32 @@ fn update_compaction_table(
     Ok(())
 }
 
+fn validate_maintenance_unit_interval(name: &str, value: f32) -> Result<(), StatusCode> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        tracing::warn!(
+            field = name,
+            value,
+            "invalid maintenance value in config update"
+        );
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    Ok(())
+}
+
+fn to_i64_from_u64(field: &'static str, value: u64) -> Result<i64, StatusCode> {
+    i64::try_from(value).map_err(|_| {
+        tracing::warn!(field, value, "config value exceeds i64 range");
+        StatusCode::BAD_REQUEST
+    })
+}
+
+fn to_i64_from_usize(field: &'static str, value: usize) -> Result<i64, StatusCode> {
+    i64::try_from(value).map_err(|_| {
+        tracing::warn!(field, value, "config value exceeds i64 range");
+        StatusCode::BAD_REQUEST
+    })
+}
+
 fn update_cortex_table(
     doc: &mut toml_edit::DocumentMut,
     agent_idx: usize,
@@ -643,32 +711,63 @@ fn update_cortex_table(
     let agent = get_agent_table_mut(doc, agent_idx)?;
     let table = get_or_create_subtable(agent, "cortex")?;
     if let Some(v) = cortex.tick_interval_secs {
-        table["tick_interval_secs"] = toml_edit::value(v as i64);
+        table["tick_interval_secs"] = toml_edit::value(to_i64_from_u64("tick_interval_secs", v)?);
     }
     if let Some(v) = cortex.worker_timeout_secs {
-        table["worker_timeout_secs"] = toml_edit::value(v as i64);
+        table["worker_timeout_secs"] = toml_edit::value(to_i64_from_u64("worker_timeout_secs", v)?);
     }
     if let Some(v) = cortex.branch_timeout_secs {
-        table["branch_timeout_secs"] = toml_edit::value(v as i64);
+        table["branch_timeout_secs"] = toml_edit::value(to_i64_from_u64("branch_timeout_secs", v)?);
     }
     if let Some(v) = cortex.detached_worker_timeout_retry_limit {
-        table["detached_worker_timeout_retry_limit"] = toml_edit::value(v as i64);
+        table["detached_worker_timeout_retry_limit"] = toml_edit::value(i64::from(v));
     }
     if let Some(v) = cortex.supervisor_kill_budget_per_tick {
         table["supervisor_kill_budget_per_tick"] =
-            toml_edit::value(i64::try_from(v).map_err(|_| StatusCode::BAD_REQUEST)?);
+            toml_edit::value(to_i64_from_usize("supervisor_kill_budget_per_tick", v)?);
     }
     if let Some(v) = cortex.circuit_breaker_threshold {
-        table["circuit_breaker_threshold"] = toml_edit::value(v as i64);
+        table["circuit_breaker_threshold"] = toml_edit::value(i64::from(v));
     }
     if let Some(v) = cortex.bulletin_interval_secs {
-        table["bulletin_interval_secs"] = toml_edit::value(v as i64);
+        table["bulletin_interval_secs"] =
+            toml_edit::value(to_i64_from_u64("bulletin_interval_secs", v)?);
     }
     if let Some(v) = cortex.bulletin_max_words {
-        table["bulletin_max_words"] = toml_edit::value(v as i64);
+        table["bulletin_max_words"] = toml_edit::value(to_i64_from_usize("bulletin_max_words", v)?);
     }
     if let Some(v) = cortex.bulletin_max_turns {
-        table["bulletin_max_turns"] = toml_edit::value(v as i64);
+        table["bulletin_max_turns"] = toml_edit::value(to_i64_from_usize("bulletin_max_turns", v)?);
+    }
+    if let Some(v) = cortex.maintenance_interval_secs {
+        if v == 0 {
+            tracing::warn!("maintenance_interval_secs must be >= 1");
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        table["maintenance_interval_secs"] =
+            toml_edit::value(to_i64_from_u64("maintenance_interval_secs", v)?);
+    }
+    if let Some(v) = cortex.maintenance_decay_rate {
+        validate_maintenance_unit_interval("maintenance_decay_rate", v)?;
+        table["maintenance_decay_rate"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = cortex.maintenance_prune_threshold {
+        validate_maintenance_unit_interval("maintenance_prune_threshold", v)?;
+        table["maintenance_prune_threshold"] = toml_edit::value(v as f64);
+    }
+    if let Some(v) = cortex.maintenance_min_age_days {
+        if v < 0 {
+            tracing::warn!(
+                maintenance_min_age_days = v,
+                "maintenance_min_age_days must be >= 0"
+            );
+            return Err(StatusCode::BAD_REQUEST);
+        }
+        table["maintenance_min_age_days"] = toml_edit::value(v);
+    }
+    if let Some(v) = cortex.maintenance_merge_similarity_threshold {
+        validate_maintenance_unit_interval("maintenance_merge_similarity_threshold", v)?;
+        table["maintenance_merge_similarity_threshold"] = toml_edit::value(v as f64);
     }
     Ok(())
 }
@@ -1000,7 +1099,7 @@ id = "main"
     }
 
     #[test]
-    fn test_update_cortex_table_rejects_large_usize_value() {
+    fn test_update_cortex_table_rejects_large_numeric_values() {
         let mut doc: toml_edit::DocumentMut = r#"
 [[agents]]
 id = "main"
@@ -1012,6 +1111,7 @@ id = "main"
             find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
         let update = CortexUpdate {
             tick_interval_secs: None,
+            maintenance_interval_secs: None,
             worker_timeout_secs: None,
             branch_timeout_secs: None,
             detached_worker_timeout_retry_limit: None,
@@ -1020,6 +1120,10 @@ id = "main"
             bulletin_interval_secs: None,
             bulletin_max_words: None,
             bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
         };
 
         let result = update_cortex_table(&mut doc, agent_idx, &update);
@@ -1028,5 +1132,258 @@ id = "main"
         } else {
             assert!(result.is_ok());
         }
+
+        let overflow_u64_update = CortexUpdate {
+            tick_interval_secs: Some(u64::MAX),
+            maintenance_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
+        };
+        assert_eq!(
+            update_cortex_table(&mut doc, agent_idx, &overflow_u64_update),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn test_update_cortex_table_rejects_invalid_maintenance_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+
+        let invalid_decay = CortexUpdate {
+            tick_interval_secs: None,
+            maintenance_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: Some(1.1),
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
+        };
+        assert_eq!(
+            update_cortex_table(&mut doc, agent_idx, &invalid_decay),
+            Err(StatusCode::BAD_REQUEST)
+        );
+
+        let invalid_min_age = CortexUpdate {
+            tick_interval_secs: None,
+            maintenance_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: Some(-1),
+            maintenance_merge_similarity_threshold: None,
+        };
+        assert_eq!(
+            update_cortex_table(&mut doc, agent_idx, &invalid_min_age),
+            Err(StatusCode::BAD_REQUEST)
+        );
+
+        let invalid_interval = CortexUpdate {
+            tick_interval_secs: None,
+            maintenance_interval_secs: Some(0),
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
+        };
+        assert_eq!(
+            update_cortex_table(&mut doc, agent_idx, &invalid_interval),
+            Err(StatusCode::BAD_REQUEST)
+        );
+    }
+
+    #[test]
+    fn test_update_cortex_table_writes_values() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let update = CortexUpdate {
+            tick_interval_secs: Some(45),
+            maintenance_interval_secs: Some(3_600),
+            worker_timeout_secs: Some(321),
+            branch_timeout_secs: Some(12),
+            detached_worker_timeout_retry_limit: Some(3),
+            supervisor_kill_budget_per_tick: Some(12),
+            circuit_breaker_threshold: Some(6),
+            bulletin_interval_secs: Some(120),
+            bulletin_max_words: Some(4000),
+            bulletin_max_turns: Some(5),
+            maintenance_decay_rate: Some(0.16),
+            maintenance_prune_threshold: Some(0.17),
+            maintenance_min_age_days: Some(15),
+            maintenance_merge_similarity_threshold: Some(0.98),
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &update).expect("failed to update cortex");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let cortex = agent
+            .get("cortex")
+            .and_then(|item| item.as_table())
+            .expect("missing cortex table");
+
+        assert_eq!(cortex["tick_interval_secs"].as_integer(), Some(45));
+        assert_eq!(
+            cortex["maintenance_interval_secs"].as_integer(),
+            Some(3_600)
+        );
+        assert_eq!(cortex["worker_timeout_secs"].as_integer(), Some(321));
+        assert_eq!(cortex["branch_timeout_secs"].as_integer(), Some(12));
+        assert_eq!(
+            cortex["detached_worker_timeout_retry_limit"].as_integer(),
+            Some(3)
+        );
+        assert_eq!(
+            cortex["supervisor_kill_budget_per_tick"].as_integer(),
+            Some(12)
+        );
+        assert_eq!(cortex["bulletin_interval_secs"].as_integer(), Some(120));
+        assert_eq!(cortex["bulletin_max_words"].as_integer(), Some(4000));
+        assert_eq!(cortex["bulletin_max_turns"].as_integer(), Some(5));
+        assert!((cortex["maintenance_decay_rate"].as_float().unwrap_or(0.0) - 0.16).abs() < 1e-6);
+        assert!(
+            (cortex["maintenance_prune_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.17)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(cortex["maintenance_min_age_days"].as_integer(), Some(15));
+        assert!(
+            (cortex["maintenance_merge_similarity_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.98)
+                .abs()
+                < 1e-6
+        );
+        assert_eq!(cortex["circuit_breaker_threshold"].as_integer(), Some(6));
+    }
+
+    #[test]
+    fn test_update_cortex_table_partial_update_only_sets_requested_keys() {
+        let mut doc: toml_edit::DocumentMut = r#"
+[[agents]]
+id = "main"
+"#
+        .parse()
+        .expect("failed to parse test TOML");
+
+        let agent_idx =
+            find_or_create_agent_table(&mut doc, "main").expect("failed to find/create agent");
+        let initial = CortexUpdate {
+            tick_interval_secs: Some(45),
+            maintenance_interval_secs: None,
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: None,
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: None,
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &initial).expect("failed to apply initial update");
+
+        let second = CortexUpdate {
+            tick_interval_secs: Some(60),
+            maintenance_interval_secs: Some(4_800),
+            worker_timeout_secs: None,
+            branch_timeout_secs: None,
+            detached_worker_timeout_retry_limit: None,
+            supervisor_kill_budget_per_tick: None,
+            circuit_breaker_threshold: None,
+            bulletin_interval_secs: None,
+            bulletin_max_words: None,
+            bulletin_max_turns: None,
+            maintenance_decay_rate: Some(0.2),
+            maintenance_prune_threshold: None,
+            maintenance_min_age_days: None,
+            maintenance_merge_similarity_threshold: Some(0.85),
+        };
+
+        update_cortex_table(&mut doc, agent_idx, &second).expect("failed to apply partial update");
+
+        let agent = doc
+            .get("agents")
+            .and_then(|item| item.as_array_of_tables())
+            .and_then(|agents| agents.get(agent_idx))
+            .expect("missing agent table");
+        let cortex = agent
+            .get("cortex")
+            .and_then(|item| item.as_table())
+            .expect("missing cortex table");
+
+        assert_eq!(cortex["tick_interval_secs"].as_integer(), Some(60));
+        assert_eq!(
+            cortex["maintenance_interval_secs"].as_integer(),
+            Some(4_800)
+        );
+        assert!((cortex["maintenance_decay_rate"].as_float().unwrap_or(0.0) - 0.2).abs() < 1e-6);
+        assert!(
+            (cortex["maintenance_merge_similarity_threshold"]
+                .as_float()
+                .unwrap_or(0.0)
+                - 0.85)
+                .abs()
+                < 1e-6
+        );
+        assert!(cortex.get("worker_timeout_secs").is_none());
+        assert!(cortex.get("maintenance_prune_threshold").is_none());
     }
 }
