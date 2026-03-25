@@ -1,4 +1,4 @@
-import { createContext, useContext, useRef, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
+import { createContext, useContext, useRef, useEffect, useCallback, useSyncExternalStore, type ReactNode, type MouseEvent } from "react";
 import { Link } from "@tanstack/react-router";
 import { BASE_PATH } from "@/api/client";
 import { IS_TAURI, startDragging } from "@/platform";
@@ -59,9 +59,13 @@ export function useSetTopBar(node: ReactNode) {
 	const store = useContext(TopBarContext);
 	if (!store) throw new Error("useSetTopBar must be used within TopBarProvider");
 
-	// Update content synchronously during render (like useSyncExternalStore pattern).
-	// This avoids the useEffect loop entirely.
-	store.setContent(node);
+	const nodeRef = useRef(node);
+	nodeRef.current = node;
+
+	useEffect(() => {
+		store.setContent(nodeRef.current);
+		return () => store.setContent(null);
+	});
 }
 
 // ── Component ────────────────────────────────────────────────────────────
