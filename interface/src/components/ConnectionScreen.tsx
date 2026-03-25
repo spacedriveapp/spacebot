@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useRef, lazy, Suspense } from "react";
 import { Button } from "@/ui/Button";
 import { Input } from "@/ui/Input";
 import { useServer } from "@/hooks/useServer";
@@ -85,6 +85,15 @@ export function ConnectionScreen() {
 			);
 		}
 	}, [setServerUrl]);
+
+	// Auto-start the sidecar when running in Tauri with a bundled binary
+	const autoStarted = useRef(false);
+	useEffect(() => {
+		if (hasSidecar && !autoStarted.current && sidecarState === "idle" && state === "disconnected") {
+			autoStarted.current = true;
+			handleStartLocal();
+		}
+	}, [hasSidecar, sidecarState, state, handleStartLocal]);
 
 	const isChecking = state === "checking";
 

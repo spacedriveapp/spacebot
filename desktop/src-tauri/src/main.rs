@@ -5,7 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use tauri::Emitter;
 use tauri::Manager;
-use tauri_plugin_global_shortcut::{Code, Modifiers, Shortcut};
+use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut};
 
 // ── Voice overlay dimensions ─────────────────────────────────────────────
 const OVERLAY_INITIAL_WIDTH: f64 = 520.0;
@@ -201,16 +201,14 @@ fn main() {
     // Option+Space toggles the overlay. Option+Shift+Space is hold-to-talk.
     let toggle_shortcut = Shortcut::new(Some(Modifiers::ALT), Code::Space);
     let voice_shortcut = Shortcut::new(Some(Modifiers::ALT | Modifiers::SHIFT), Code::Space);
+    let toggle_shortcut_setup = toggle_shortcut.clone();
+    let voice_shortcut_setup = voice_shortcut.clone();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
-                .with_shortcut(toggle_shortcut.clone())
-                .unwrap()
-                .with_shortcut(voice_shortcut.clone())
-                .unwrap()
                 .with_handler(
                     move |app, _shortcut, event| match (_shortcut, event.state) {
                         (shortcut, tauri_plugin_global_shortcut::ShortcutState::Pressed)
@@ -240,7 +238,7 @@ fn main() {
             toggle_voice_overlay,
             resize_overlay_window,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // Apply macOS titlebar style (invisible toolbar for traffic light padding)
             #[cfg(target_os = "macos")]
             {
@@ -257,8 +255,19 @@ fn main() {
                 }
             }
 
+            // Register global shortcuts (non-fatal if already registered by another instance)
+            let gs = app.global_shortcut();
+            if let Err(e) = gs.register(toggle_shortcut_setup) {
+                tracing::warn!("Failed to register toggle shortcut: {e}");
+            }
+            if let Err(e) = gs.register(voice_shortcut_setup) {
+                tracing::warn!("Failed to register voice shortcut: {e}");
+            }
+
             // Show window after setup
             if let Some(window) = app.get_webview_window("main") {
+                #[cfg(debug_assertions)]
+                window.open_devtools();
                 let _ = window.show();
             }
 
