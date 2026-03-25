@@ -16,6 +16,7 @@ use rig::one_or_many::OneOrMany;
 use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::error::Error as StdError;
 use std::sync::Arc;
 
 const STREAM_REQUEST_TIMEOUT_SECS: u64 = 30 * 60;
@@ -541,7 +542,8 @@ impl CompletionModel for SpacebotModel {
                 self.stream_openai_compatible(request, "Google Gemini", &provider_config)
                     .await
             }
-            ApiType::Anthropic | ApiType::OpenAiResponses => {
+            ApiType::Anthropic => self.stream_anthropic(request, &provider_config).await,
+            ApiType::OpenAiResponses => {
                 let response = self.attempt_completion(request).await?;
                 Ok(stream_from_completion_response(response))
             }
@@ -550,6 +552,11 @@ impl CompletionModel for SpacebotModel {
 }
 
 impl SpacebotModel {
+    /// Non-streaming Anthropic completion that uses SSE streaming internally.
+    ///
+    /// Sends `"stream": true` and collects all SSE chunks into a single
+    /// `CompletionResponse`. This keeps the TCP connection alive with continuous
+    /// data, preventing corporate proxy idle-timeout kills (504 Gateway Timeout).
     async fn call_anthropic(
         &self,
         request: CompletionRequest,
@@ -562,7 +569,9 @@ impl SpacebotModel {
             .as_ref()
             .map(|r| r.thinking_effort_for_model(&self.model_name))
             .unwrap_or("auto");
-        let anthropic_request = crate::llm::anthropic::build_anthropic_request(
+
+        // Build SSE request with custom client (auto-decompression disabled)
+        let (builder, metadata) = build_anthropic_sse_request(
             self.llm_manager.http_client(),
             api_key,
             &provider_config.base_url,
@@ -570,48 +579,403 @@ impl SpacebotModel {
             &request,
             effort,
             provider_config.use_bearer_auth,
-        );
+        )?;
 
-        let is_oauth =
-            anthropic_request.auth_path == crate::llm::anthropic::AnthropicAuthPath::OAuthToken;
-        let original_tools = anthropic_request.original_tools;
-
-        let response = anthropic_request
-            .builder
+        let response = builder
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
-        let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
-        })?;
-
-        let response_body: serde_json::Value =
-            serde_json::from_str(&response_text).map_err(|e| {
-                CompletionError::ProviderError(format!(
-                    "Anthropic response ({status}) is not valid JSON: {e}\nBody: {}",
-                    truncate_body(&response_text)
-                ))
-            })?;
-
         if !status.is_success() {
-            let message = response_body["error"]["message"]
-                .as_str()
-                .unwrap_or("unknown error");
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("failed to read error response body: {e:#}"));
+            // Try to parse JSON error, fall back to raw body
+            if let Ok(body) = serde_json::from_str::<serde_json::Value>(&response_text) {
+                let message = body["error"]["message"].as_str().unwrap_or("unknown error");
+                return Err(CompletionError::ProviderError(format!(
+                    "Anthropic API error ({status}): {message}"
+                )));
+            }
             return Err(CompletionError::ProviderError(format!(
-                "Anthropic API error ({status}): {message}"
+                "Anthropic response ({status}) error: {}",
+                truncate_body(&response_text)
             )));
         }
 
-        let mut completion = parse_anthropic_response(response_body)?;
+        // Log response headers for proxy debugging
+        {
+            let headers = response.headers();
+            let ct = headers
+                .get("content-type")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            let ce = headers
+                .get("content-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            let te = headers
+                .get("transfer-encoding")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("(none)");
+            tracing::warn!(
+                content_type = ct,
+                content_encoding = ce,
+                transfer_encoding = te,
+                "Anthropic SSE response headers"
+            );
+        }
+
+        // Collect SSE chunks into a single response
+        use futures::StreamExt;
+        let mut byte_stream = response.bytes_stream();
+
+        // Log first chunk raw bytes for proxy debugging
+        let mut first_chunk_logged = false;
+        let mut block_buffer = String::new();
+        let mut input_tokens: u64 = 0;
+        let mut output_tokens: u64 = 0;
+        let mut cached_input_tokens: u64 = 0;
+        let mut message_id: Option<String> = None;
+        let mut text_parts: Vec<String> = Vec::new();
+        let mut tool_calls: Vec<ToolCall> = Vec::new();
+        let mut pending_tool_calls: BTreeMap<usize, AnthropicStreamingToolCall> = BTreeMap::new();
+
+        while let Some(chunk_result) = byte_stream.next().await {
+            let chunk = chunk_result.map_err(|e| {
+                CompletionError::ProviderError(format!(
+                    "Anthropic stream read failed: {e:#} (source: {:?})",
+                    StdError::source(&e).map(|s| format!("{s:#}"))
+                ))
+            })?;
+
+            if !first_chunk_logged {
+                first_chunk_logged = true;
+                let raw_hex: String = chunk
+                    .iter()
+                    .take(128)
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                let raw_text = String::from_utf8_lossy(&chunk[..chunk.len().min(200)]);
+                tracing::warn!(hex = %raw_hex, text = %raw_text, len = chunk.len(), "Anthropic SSE first chunk");
+            }
+
+            let chunk_text = String::from_utf8_lossy(&chunk).to_string();
+            block_buffer.push_str(&chunk_text);
+
+            while let Some(block) = extract_sse_block(&mut block_buffer) {
+                let Some(event) = parse_anthropic_sse_event(&block) else {
+                    continue;
+                };
+
+                match event {
+                    AnthropicSseEvent::MessageStart {
+                        message_id: id,
+                        input_tokens: inp,
+                        cached_input_tokens: cached,
+                    } => {
+                        message_id = Some(id);
+                        input_tokens += inp;
+                        cached_input_tokens += cached;
+                    }
+                    AnthropicSseEvent::UsageDelta { output_tokens: out } => {
+                        output_tokens += out;
+                    }
+                    AnthropicSseEvent::TextDelta(text) => {
+                        text_parts.push(text);
+                    }
+                    AnthropicSseEvent::ToolCallStart { index, id, name } => {
+                        pending_tool_calls.insert(
+                            index,
+                            AnthropicStreamingToolCall {
+                                id,
+                                name,
+                                arguments_json: String::new(),
+                            },
+                        );
+                    }
+                    AnthropicSseEvent::ToolCallDelta {
+                        index,
+                        partial_json,
+                    } => {
+                        if let Some(tc) = pending_tool_calls.get_mut(&index) {
+                            tc.arguments_json.push_str(&partial_json);
+                        }
+                    }
+                    AnthropicSseEvent::ToolCallComplete { index } => {
+                        if let Some(tc) = pending_tool_calls.remove(&index) {
+                            let arguments: serde_json::Value =
+                                serde_json::from_str(&tc.arguments_json).unwrap_or_else(|e| {
+                                    tracing::warn!(
+                                        error = %e,
+                                        json = %tc.arguments_json,
+                                        "failed to parse Anthropic tool call arguments, using empty object"
+                                    );
+                                    serde_json::Value::Object(serde_json::Map::new())
+                                });
+
+                            let tool_call = make_tool_call(tc.id, tc.name, arguments);
+                            tool_calls.push(tool_call);
+                        }
+                    }
+                    AnthropicSseEvent::ThinkingDelta(_) => {
+                        // Thinking blocks are internal reasoning; not included
+                        // in the non-streaming completion response.
+                    }
+                    AnthropicSseEvent::MessageStop | AnthropicSseEvent::Ignore => {}
+                    AnthropicSseEvent::Error(message) => {
+                        return Err(CompletionError::ProviderError(format!(
+                            "Anthropic streaming error: {message}"
+                        )));
+                    }
+                }
+            }
+        }
+
+        // Assemble the collected response into AssistantContent blocks
+        let mut assistant_content = Vec::new();
+
+        let full_text = text_parts.join("");
+        if !full_text.is_empty() {
+            assistant_content.push(AssistantContent::Text(Text { text: full_text }));
+        }
+
+        for tc in tool_calls {
+            assistant_content.push(AssistantContent::ToolCall(tc));
+        }
+
+        let choice = match OneOrMany::many(assistant_content) {
+            Ok(choice) => choice,
+            Err(_) => {
+                // Empty response — return synthetic whitespace placeholder
+                // (matches parse_anthropic_response behavior for end_turn)
+                tracing::debug!(
+                    "empty assistant_content from Anthropic streaming — returning synthetic whitespace placeholder"
+                );
+                OneOrMany::one(AssistantContent::Text(Text {
+                    text: " ".to_string(),
+                }))
+            }
+        };
+
+        let mut completion = completion::CompletionResponse {
+            choice,
+            usage: completion::Usage {
+                input_tokens,
+                output_tokens,
+                total_tokens: input_tokens + cached_input_tokens + output_tokens,
+                cached_input_tokens,
+            },
+            raw_response: RawResponse {
+                body: serde_json::Value::Null,
+            },
+            message_id,
+        };
 
         // Reverse-map tool names when using OAuth (Claude Code canonical → original)
-        if is_oauth && !original_tools.is_empty() {
-            reverse_map_tool_names(&mut completion, &original_tools);
+        if metadata.is_oauth && !metadata.original_tools.is_empty() {
+            reverse_map_tool_names(&mut completion, &metadata.original_tools);
         }
 
         Ok(completion)
+    }
+
+    /// Streaming Anthropic completion via SSE.
+    ///
+    /// Sends `"stream": true` in the request body and parses Anthropic SSE events
+    /// (`content_block_delta`, `message_delta`, `message_stop`, etc.) into
+    /// `RawStreamingChoice` items. This keeps the TCP connection alive with
+    /// continuous data, preventing corporate proxy idle-timeout kills (504s).
+    async fn stream_anthropic(
+        &self,
+        request: CompletionRequest,
+        provider_config: &ProviderConfig,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let api_key = provider_config.api_key.as_str();
+
+        let effort = self
+            .routing
+            .as_ref()
+            .map(|r| r.thinking_effort_for_model(&self.model_name))
+            .unwrap_or("auto");
+
+        // Build SSE request with custom client (auto-decompression disabled)
+        let (builder, metadata) = build_anthropic_sse_request(
+            self.llm_manager.http_client(),
+            api_key,
+            &provider_config.base_url,
+            &self.model_name,
+            &request,
+            effort,
+            provider_config.use_bearer_auth,
+        )?;
+
+        let response = builder
+            .send()
+            .await
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|e| format!("failed to read error response body: {e:#}"));
+            return Err(CompletionError::ProviderError(format!(
+                "Anthropic API error ({status}): {}",
+                truncate_body(&response_text)
+            )));
+        }
+
+        let is_oauth = metadata.is_oauth;
+        let original_tools = metadata.original_tools;
+
+        let stream = async_stream::stream! {
+            let mut byte_stream = response.bytes_stream();
+            let mut block_buffer = String::new();
+            let mut input_tokens: u64 = 0;
+            let mut output_tokens: u64 = 0;
+            let mut cached_input_tokens: u64 = 0;
+            let mut pending_tool_calls: BTreeMap<usize, AnthropicStreamingToolCall> = BTreeMap::new();
+            let mut message_id: Option<String> = None;
+
+            while let Some(chunk_result) = byte_stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        yield Err(CompletionError::ProviderError(format!(
+                            "Anthropic stream read failed: {error:#}"
+                        )));
+                        return;
+                    }
+                };
+
+                let chunk_text = String::from_utf8_lossy(&chunk).to_string();
+                block_buffer.push_str(&chunk_text);
+
+                while let Some(block) = extract_sse_block(&mut block_buffer) {
+                    let Some(event) = parse_anthropic_sse_event(&block) else {
+                        continue;
+                    };
+
+                    match event {
+                        AnthropicSseEvent::MessageStart {
+                            message_id: id,
+                            input_tokens: inp,
+                            cached_input_tokens: cached,
+                        } => {
+                            message_id = Some(id.clone());
+                            input_tokens += inp;
+                            cached_input_tokens += cached;
+                            yield Ok(RawStreamingChoice::MessageId(id));
+                        }
+                        AnthropicSseEvent::UsageDelta { output_tokens: out } => {
+                            output_tokens += out;
+                        }
+                        AnthropicSseEvent::TextDelta(text) => {
+                            yield Ok(RawStreamingChoice::Message(text));
+                        }
+                        AnthropicSseEvent::ToolCallStart { index, id, name } => {
+                            pending_tool_calls.insert(
+                                index,
+                                AnthropicStreamingToolCall {
+                                    id,
+                                    name,
+                                    arguments_json: String::new(),
+                                },
+                            );
+                        }
+                        AnthropicSseEvent::ToolCallDelta {
+                            index,
+                            partial_json,
+                        } => {
+                            if let Some(tool_call) = pending_tool_calls.get_mut(&index) {
+                                tool_call.arguments_json.push_str(&partial_json);
+                            }
+                        }
+                        AnthropicSseEvent::ToolCallComplete { index } => {
+                            if let Some(tool_call) = pending_tool_calls.remove(&index) {
+                                let arguments: serde_json::Value =
+                                    serde_json::from_str(&tool_call.arguments_json).unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            error = %e,
+                                            json = %tool_call.arguments_json,
+                                            "failed to parse Anthropic tool call arguments, using empty object"
+                                        );
+                                        serde_json::Value::Object(serde_json::Map::new())
+                                    });
+
+                                let mut tc = make_tool_call(tool_call.id.clone(), tool_call.name, arguments);
+
+                                // Reverse-map tool names for OAuth (Claude Code canonical → original)
+                                if is_oauth && !original_tools.is_empty() {
+                                    for (orig_name, _) in &original_tools {
+                                        let canonical = crate::llm::anthropic::to_claude_code_name(orig_name);
+                                        if tc.function.name == canonical {
+                                            tc.function.name = orig_name.clone();
+                                            break;
+                                        }
+                                    }
+                                }
+
+                                yield Ok(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                                    id: tc.id.clone(),
+                                    internal_call_id: if tc.id.is_empty() {
+                                        uuid::Uuid::new_v4().to_string()
+                                    } else {
+                                        tc.id
+                                    },
+                                    call_id: tc.call_id,
+                                    name: tc.function.name,
+                                    arguments: tc.function.arguments,
+                                    signature: tc.signature,
+                                    additional_params: tc.additional_params,
+                                }));
+                            }
+                        }
+                        AnthropicSseEvent::ThinkingDelta(text) => {
+                            yield Ok(RawStreamingChoice::Reasoning {
+                                id: message_id.clone(),
+                                content: ReasoningContent::Text {
+                                    text,
+                                    signature: None,
+                                },
+                            });
+                        }
+                        AnthropicSseEvent::MessageStop | AnthropicSseEvent::Ignore => {}
+                        AnthropicSseEvent::Error(message) => {
+                            yield Err(CompletionError::ProviderError(format!(
+                                "Anthropic streaming error: {message}"
+                            )));
+                            return;
+                        }
+                    }
+                }
+            }
+
+            // Emit final response with usage
+            yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+                body: serde_json::json!({
+                    "type": "message",
+                    "usage": {
+                        "input_tokens": input_tokens,
+                        "output_tokens": output_tokens,
+                        "cache_read_input_tokens": cached_input_tokens,
+                    }
+                }),
+                usage: Some(completion::Usage {
+                    input_tokens,
+                    output_tokens,
+                    total_tokens: input_tokens + output_tokens,
+                    cached_input_tokens,
+                }),
+            }));
+        };
+
+        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
     }
 
     async fn call_openai(
@@ -819,11 +1183,11 @@ impl SpacebotModel {
             .json(&body)
             .send()
             .await
-            .map_err(|e| CompletionError::ProviderError(e.to_string()))?;
+            .map_err(|e| CompletionError::ProviderError(format!("{e:#}")))?;
 
         let status = response.status();
         let response_text = response.text().await.map_err(|e| {
-            CompletionError::ProviderError(format!("failed to read response body: {e}"))
+            CompletionError::ProviderError(format!("failed to read response body: {e:#}"))
         })?;
 
         if !status.is_success() {
@@ -1677,6 +2041,242 @@ struct OpenAiStreamingToolCall {
     arguments: String,
 }
 
+/// Tracks a partially-received Anthropic tool call during SSE streaming.
+struct AnthropicStreamingToolCall {
+    id: String,
+    name: String,
+    arguments_json: String,
+}
+
+/// Metadata returned by the SSE request builder.
+struct AnthropicSseRequestMetadata {
+    is_oauth: bool,
+    original_tools: Vec<(String, String)>,
+}
+
+/// Builds an HTTP request builder for Anthropic SSE streaming.
+///
+/// Returns the configured request builder and metadata (OAuth flag, original tools).
+/// The request builder uses a custom client with auto-decompression disabled.
+fn build_anthropic_sse_request(
+    http_client: &reqwest::Client,
+    api_key: &str,
+    base_url: &str,
+    model_name: &str,
+    request: &CompletionRequest,
+    thinking_effort: &str,
+    use_bearer_auth: bool,
+) -> Result<(reqwest::RequestBuilder, AnthropicSseRequestMetadata), CompletionError> {
+    let anthropic_request = crate::llm::anthropic::build_anthropic_request(
+        http_client,
+        api_key,
+        base_url,
+        model_name,
+        request,
+        thinking_effort,
+        use_bearer_auth,
+    );
+
+    let is_oauth =
+        anthropic_request.auth_path == crate::llm::anthropic::AnthropicAuthPath::OAuthToken;
+    let original_tools = anthropic_request.original_tools;
+
+    // Enable streaming to keep the proxy connection alive during long completions.
+    let mut stream_body = anthropic_request.body;
+    stream_body["stream"] = serde_json::json!(true);
+
+    let url = crate::llm::anthropic::anthropic_messages_url(base_url);
+
+    // Build a one-off client with auto-decompression disabled.
+    // Corporate proxies may advertise Content-Encoding: gzip on SSE responses
+    // but send raw text, causing reqwest's auto-decompressor to fail with
+    // "error decoding response body". We send accept-encoding: identity and
+    // disable built-in decompression to handle the raw bytes ourselves.
+    let sse_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .tcp_keepalive(std::time::Duration::from_secs(30))
+        .pool_idle_timeout(std::time::Duration::from_secs(90))
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .build()
+        .map_err(|e| {
+            CompletionError::ProviderError(format!("failed to build SSE client: {e:#}"))
+        })?;
+
+    let builder = sse_client
+        .post(&url)
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .header("accept", "text/event-stream")
+        .header("accept-encoding", "identity");
+
+    let (builder, _auth_path) =
+        crate::llm::anthropic::apply_auth_headers(builder, api_key, false, use_bearer_auth);
+
+    let builder = builder
+        .json(&stream_body)
+        .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS));
+
+    Ok((
+        builder,
+        AnthropicSseRequestMetadata {
+            is_oauth,
+            original_tools,
+        },
+    ))
+}
+
+/// Result of processing a single Anthropic SSE event.
+enum AnthropicSseEvent {
+    /// Message started (contains message ID and initial usage)
+    MessageStart {
+        message_id: String,
+        input_tokens: u64,
+        cached_input_tokens: u64,
+    },
+    /// Update usage tokens (from message_delta)
+    UsageDelta { output_tokens: u64 },
+    /// Text delta
+    TextDelta(String),
+    /// Tool call started
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+    /// Tool call JSON fragment
+    ToolCallDelta { index: usize, partial_json: String },
+    /// Tool call completed
+    ToolCallComplete { index: usize },
+    /// Thinking delta (for streaming only)
+    ThinkingDelta(String),
+    /// Stream ended (message_stop)
+    MessageStop,
+    /// Error event
+    Error(String),
+    /// Ping or unknown event (ignore)
+    Ignore,
+}
+
+/// Parses a single Anthropic SSE event block into a structured event.
+fn parse_anthropic_sse_event(block: &str) -> Option<AnthropicSseEvent> {
+    // Extract event type from "event:" line
+    let event_type = block
+        .lines()
+        .find(|l| l.starts_with("event:"))
+        .map(|l| l.trim_start_matches("event:").trim().to_string());
+
+    // Extract data payload
+    let data = extract_sse_data_payload(block)?;
+    let data = data.trim();
+    if data.is_empty() {
+        return Some(AnthropicSseEvent::Ignore);
+    }
+
+    // Parse JSON body
+    let event_body: serde_json::Value = match serde_json::from_str(data) {
+        Ok(body) => body,
+        Err(error) => {
+            tracing::trace!(%error, payload = %data, "failed to parse Anthropic SSE chunk");
+            return Some(AnthropicSseEvent::Ignore);
+        }
+    };
+
+    // Determine event type from explicit "event:" line or from body["type"]
+    let event_type_str = event_type
+        .as_deref()
+        .or_else(|| event_body["type"].as_str())
+        .unwrap_or("");
+
+    match event_type_str {
+        "message_start" => {
+            let msg = event_body.get("message")?;
+            let message_id = msg["id"].as_str()?.to_string();
+            let input_tokens = msg
+                .get("usage")
+                .and_then(|u| u["input_tokens"].as_u64())
+                .unwrap_or(0);
+            let cached_input_tokens = msg
+                .get("usage")
+                .and_then(|u| u["cache_read_input_tokens"].as_u64())
+                .unwrap_or(0);
+
+            Some(AnthropicSseEvent::MessageStart {
+                message_id,
+                input_tokens,
+                cached_input_tokens,
+            })
+        }
+        "content_block_start" => {
+            let index = event_body["index"].as_u64().unwrap_or(0) as usize;
+            let block = event_body.get("content_block")?;
+            if block["type"].as_str() == Some("tool_use") {
+                let id = block["id"].as_str().unwrap_or("").to_string();
+                let name = block["name"].as_str().unwrap_or("").to_string();
+                Some(AnthropicSseEvent::ToolCallStart { index, id, name })
+            } else {
+                Some(AnthropicSseEvent::Ignore)
+            }
+        }
+        "content_block_delta" => {
+            let index = event_body["index"].as_u64().unwrap_or(0) as usize;
+            let delta = event_body.get("delta")?;
+            match delta["type"].as_str() {
+                Some("text_delta") => {
+                    let text = delta["text"].as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        Some(AnthropicSseEvent::Ignore)
+                    } else {
+                        Some(AnthropicSseEvent::TextDelta(text))
+                    }
+                }
+                Some("input_json_delta") => {
+                    let partial = delta["partial_json"].as_str().unwrap_or("").to_string();
+                    Some(AnthropicSseEvent::ToolCallDelta {
+                        index,
+                        partial_json: partial,
+                    })
+                }
+                Some("thinking_delta") => {
+                    let text = delta["thinking"].as_str().unwrap_or("").to_string();
+                    if text.is_empty() {
+                        Some(AnthropicSseEvent::Ignore)
+                    } else {
+                        Some(AnthropicSseEvent::ThinkingDelta(text))
+                    }
+                }
+                _ => Some(AnthropicSseEvent::Ignore),
+            }
+        }
+        "content_block_stop" => {
+            let index = event_body["index"].as_u64().unwrap_or(0) as usize;
+            Some(AnthropicSseEvent::ToolCallComplete { index })
+        }
+        "message_delta" => {
+            let output_tokens = event_body
+                .get("usage")
+                .and_then(|u| u["output_tokens"].as_u64())
+                .unwrap_or(0);
+            Some(AnthropicSseEvent::UsageDelta { output_tokens })
+        }
+        "message_stop" => Some(AnthropicSseEvent::MessageStop),
+        "error" => {
+            let message = event_body["error"]["message"]
+                .as_str()
+                .unwrap_or("unknown streaming error")
+                .to_string();
+            Some(AnthropicSseEvent::Error(message))
+        }
+        "ping" => Some(AnthropicSseEvent::Ignore),
+        _ => {
+            tracing::trace!(event = %event_type_str, "unknown Anthropic SSE event type");
+            Some(AnthropicSseEvent::Ignore)
+        }
+    }
+}
+
 impl Default for OpenAiStreamingToolCall {
     fn default() -> Self {
         Self {
@@ -2367,6 +2967,7 @@ fn make_tool_call(id: String, name: String, arguments: serde_json::Value) -> Too
     }
 }
 
+#[cfg(test)]
 fn parse_anthropic_response(
     body: serde_json::Value,
 ) -> Result<completion::CompletionResponse<RawResponse>, CompletionError> {
