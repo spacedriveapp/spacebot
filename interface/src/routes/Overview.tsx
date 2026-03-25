@@ -28,13 +28,19 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 	const {data: overviewData, isLoading: overviewLoading} = useQuery({
 		queryKey: ["overview"],
 		queryFn: api.overview,
-		refetchInterval: 10_000,
+		refetchInterval: 60_000,
 	});
 
 	const {data: channelsData} = useQuery({
 		queryKey: ["channels"],
 		queryFn: api.channels,
 		refetchInterval: 10000,
+	});
+
+	const {data: agentsData} = useQuery({
+		queryKey: ["agents"],
+		queryFn: api.agents,
+		refetchInterval: 30_000,
 	});
 
 	const {data: providersData} = useQuery({
@@ -44,7 +50,10 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 	});
 
 	const channels = channelsData?.channels ?? [];
-	const agents = overviewData?.agents ?? [];
+	// Use the lightweight agents list for the header count (loads instantly),
+	// and the heavy overview agents only for the topology graph.
+	const agents = agentsData?.agents ?? [];
+	const overviewAgents = overviewData?.agents ?? [];
 
 	// Aggregate live activity across all agents
 	const activity = useMemo(() => {
@@ -137,7 +146,7 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 
 			{/* Full-screen topology */}
 			<div className="flex-1 overflow-hidden">
-				{overviewLoading ? (
+				{overviewLoading && agents.length > 0 ? (
 					<div className="flex h-full items-center justify-center">
 						<div className="flex items-center gap-2 text-ink-dull">
 							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
@@ -193,7 +202,7 @@ export function Overview({liveStates, activeLinks}: OverviewProps) {
 						)}
 					</div>
 				) : (
-					<TopologyGraph activeEdges={activeLinks} agents={agents} />
+					<TopologyGraph activeEdges={activeLinks} agents={overviewAgents} />
 				)}
 			</div>
 

@@ -8,7 +8,7 @@ import { ModelSelect } from "@/components/ModelSelect";
 import { ProviderIcon } from "@/lib/providerIcons";
 import { FontAwesomeIcon } from "@fortawesome/react-fontawesome";
 import { faSearch } from "@fortawesome/free-solid-svg-icons";
-import { IS_TAURI } from "@/api/client";
+import { IS_TAURI } from "@/platform";
 
 import { parse as parseToml } from "smol-toml";
 

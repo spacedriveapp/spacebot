@@ -212,6 +212,7 @@ pub(super) async fn storage_status(
     Ok(Json(status))
 }
 
+#[cfg(unix)]
 fn read_filesystem_usage(path: &Path) -> anyhow::Result<StorageStatus> {
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
     let path_cstring = std::ffi::CString::new(path.as_os_str().as_encoded_bytes())?;
@@ -234,6 +235,38 @@ fn read_filesystem_usage(path: &Path) -> anyhow::Result<StorageStatus> {
         used_bytes,
         total_bytes,
         available_bytes,
+    })
+}
+
+#[cfg(windows)]
+fn read_filesystem_usage(path: &Path) -> anyhow::Result<StorageStatus> {
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::fileapi::GetDiskFreeSpaceExW;
+
+    let wide_path: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+    let mut free_bytes_available: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut total_free_bytes: u64 = 0;
+
+    let result = unsafe {
+        GetDiskFreeSpaceExW(
+            wide_path.as_ptr(),
+            &mut free_bytes_available as *mut u64 as *mut _,
+            &mut total_bytes as *mut u64 as *mut _,
+            &mut total_free_bytes as *mut u64 as *mut _,
+        )
+    };
+
+    if result == 0 {
+        return Err(anyhow::anyhow!("GetDiskFreeSpaceExW call failed"));
+    }
+
+    let used_bytes = directory_size_bytes(path)?;
+
+    Ok(StorageStatus {
+        used_bytes,
+        total_bytes,
+        available_bytes: free_bytes_available,
     })
 }
 

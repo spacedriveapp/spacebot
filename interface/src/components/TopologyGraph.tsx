@@ -936,7 +936,7 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const { data, isLoading, error } = useQuery({
 		queryKey: ["topology"],
 		queryFn: api.topology,
-		refetchInterval: 10_000,
+		refetchInterval: 30_000,
 	});
 
 	// Stable refs for opening edit dialogs from node callbacks
@@ -991,12 +991,29 @@ function TopologyGraphInner({ activeEdges, agents }: TopologyGraphInnerProps) {
 	const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
 	const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
-	// Sync when topology data or agent profiles change
-	const prevDataRef = useRef(data);
-	const prevProfilesRef = useRef(agentProfiles);
-	if (data !== prevDataRef.current || agentProfiles !== prevProfilesRef.current) {
-		prevDataRef.current = data;
-		prevProfilesRef.current = agentProfiles;
+	// Sync when topology data or agent profiles *meaningfully* change.
+	// Use a content-based fingerprint rather than reference equality to avoid
+	// rebuilding the graph on every poll when only non-visual fields (e.g.
+	// timestamps) changed.
+	const graphKey = useMemo(() => {
+		if (!data) return "";
+		const now = Date.now();
+		const threshold = now - 5 * 60 * 1000;
+		const a = data.agents.map((ag) => {
+			const s = agentProfiles.get(ag.id);
+			const inf = agentInfoMap.get(ag.id);
+			const online = s?.last_activity_at != null && new Date(s.last_activity_at).getTime() > threshold;
+			return `${ag.id}|${ag.display_name}|${ag.role}|${s?.profile?.display_name}|${s?.profile?.bio}|${s?.profile?.avatar_seed}|${inf?.gradient_start}|${inf?.gradient_end}|${online}|${s?.channel_count}|${s?.memory_total}`;
+		}).join("\n");
+		const l = data.links.map((lk) => `${lk.from}-${lk.to}-${lk.direction}-${lk.kind}`).join(",");
+		const g = data.groups.map((gr) => `${gr.name}:${gr.agent_ids.join("+")}:${gr.color ?? ""}`).join(",");
+		const h = data.humans.map((hu) => `${hu.id}|${hu.display_name}`).join(",");
+		return `${a}||${l}||${g}||${h}`;
+	}, [data, agentProfiles, agentInfoMap]);
+
+	const prevGraphKeyRef = useRef(graphKey);
+	if (graphKey !== prevGraphKeyRef.current) {
+		prevGraphKeyRef.current = graphKey;
 		if (data) {
 			const { initialNodes: newNodes, initialEdges: newEdges } = buildGraph(
 				data,

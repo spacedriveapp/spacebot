@@ -8491,6 +8491,7 @@ dependencies = [
  "utoipa-axum",
  "utoipa-swagger-ui",
  "uuid",
+ "winapi",
  "zip 2.4.2",
 ]
 

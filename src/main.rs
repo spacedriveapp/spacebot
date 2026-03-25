@@ -1612,6 +1612,10 @@ async fn run(
         api_state.set_secrets_store(store.clone());
     }
 
+    // Populate agent configs before the HTTP server starts so the overview
+    // endpoint never returns 0 agents during the startup window.
+    api_state.set_agent_configs(configured_agent_infos(&config));
+
     // Start background update checker
     spacebot::update::spawn_update_checker(api_state.update_status.clone());
 
@@ -1730,7 +1734,6 @@ async fn run(
     api_state.set_agent_links((**agent_links.load()).clone());
     api_state.set_agent_groups(config.groups.clone());
     api_state.set_agent_humans(config.humans.clone());
-    api_state.set_agent_configs(configured_agent_infos(&config));
 
     // Track whether agents have been initialized
     let mut agents_initialized = false;

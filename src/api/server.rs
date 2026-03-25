@@ -13,7 +13,7 @@ use axum::extract::{DefaultBodyLimit, Request, State};
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::any;
+use axum::routing::{any, get, post};
 use rust_embed::Embed;
 use serde_json::json;
 use tower_http::cors::CorsLayer;

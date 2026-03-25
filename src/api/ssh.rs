@@ -352,9 +352,17 @@ async fn install_authorized_keys(src: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-/// Set Unix file permissions.
-async fn set_permissions(path: &Path, mode: u32) -> Result<(), std::io::Error> {
-    use std::os::unix::fs::PermissionsExt;
-    let perms = std::fs::Permissions::from_mode(mode);
-    tokio::fs::set_permissions(path, perms).await
+/// Set restrictive file permissions (Unix only, no-op on Windows).
+async fn set_permissions(path: &Path, _mode: u32) -> Result<(), std::io::Error> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(_mode);
+        tokio::fs::set_permissions(path, perms).await
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
