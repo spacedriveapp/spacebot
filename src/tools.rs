@@ -6,7 +6,7 @@
 //! ## ToolServer Topology
 //!
 //! **Channel ToolServer** (one per channel):
-//! - `reply`, `branch`, `spawn_worker`, `route`, `cancel`, `skip`, `react` — added
+//! - `reply`, `branch`, `spawn_worker`, `route`, `cancel`, `skip`, `react`, `react_remove` — added
 //!   dynamically per conversation turn via `add_channel_tools()` /
 //!   `remove_channel_tools()` because they hold per-channel state.
 //! - No memory tools — the channel delegates memory work to branches.
@@ -45,6 +45,7 @@ pub mod memory_recall;
 pub mod memory_save;
 pub mod project_manage;
 pub mod react;
+pub mod react_remove;
 pub mod read_skill;
 pub mod reply;
 pub mod route;
@@ -115,6 +116,7 @@ pub use project_manage::{
     ProjectManageArgs, ProjectManageError, ProjectManageOutput, ProjectManageTool,
 };
 pub use react::{ReactArgs, ReactError, ReactOutput, ReactTool};
+pub use react_remove::{ReactRemoveArgs, ReactRemoveError, ReactRemoveOutput, ReactRemoveTool};
 pub use read_skill::{ReadSkillArgs, ReadSkillError, ReadSkillOutput, ReadSkillTool};
 pub use reply::{RepliedFlag, ReplyArgs, ReplyError, ReplyOutput, ReplyTool, new_replied_flag};
 pub use route::{RouteArgs, RouteError, RouteOutput, RouteTool};
@@ -433,6 +435,9 @@ pub async fn add_channel_tools(
         .add_tool(SkipTool::new(skip_flag.clone(), response_tx.clone()))
         .await?;
     handle.add_tool(ReactTool::new(response_tx.clone())).await?;
+    handle
+        .add_tool(ReactRemoveTool::new(response_tx.clone()))
+        .await?;
     if let Some(cron_tool) = cron_tool {
         let cron_tool = cron_tool
             .with_default_delivery_target(default_delivery_target_for_conversation(
@@ -492,6 +497,7 @@ pub async fn remove_channel_tools(
     handle.remove_tool(SkipTool::NAME).await?;
     handle.remove_tool(SendFileTool::NAME).await?;
     handle.remove_tool(ReactTool::NAME).await?;
+    handle.remove_tool(ReactRemoveTool::NAME).await?;
     handle.remove_tool(ProjectManageTool::NAME).await?;
     // Cron, send_message, send_agent_message, and attachment_recall removal is
     // best-effort since not all channels have them
