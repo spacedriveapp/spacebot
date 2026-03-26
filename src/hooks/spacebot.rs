@@ -3,8 +3,13 @@
 use crate::hooks::loop_guard::{LoopGuard, LoopGuardConfig, LoopGuardVerdict};
 use crate::tools::{MemoryPersistenceContractState, MemoryPersistenceTerminalOutcome};
 use crate::{AgentId, ChannelId, ProcessEvent, ProcessId, ProcessType};
+use futures::StreamExt;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
-use rig::completion::{CompletionModel, CompletionResponse, Message, Prompt, PromptError};
+use rig::completion::{
+    CompletionModel, CompletionResponse, GetTokenUsage, Message, Prompt, PromptError,
+};
+use rig::message::{AssistantContent, ToolResultContent, UserContent};
+use rig::streaming::{StreamedAssistantContent, StreamingCompletion};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -61,6 +66,15 @@ pub struct SpacebotHook {
     /// append the messages to history before re-prompting.
     injected_messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
     memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
+    reply_tool_delta_state:
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, ReplyToolDeltaState>>>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ReplyToolDeltaState {
+    tool_name: Option<String>,
+    raw_args: String,
+    emitted_content: String,
 }
 
 impl SpacebotHook {
@@ -115,6 +129,9 @@ impl SpacebotHook {
             inject_rx: None,
             injected_messages: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
             memory_persistence_contract: None,
+            reply_tool_delta_state: std::sync::Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
         }
     }
 
@@ -174,6 +191,51 @@ impl SpacebotHook {
     pub fn set_completion_contract_request_active(&self, active: bool) {
         self.completion_contract_request_active
             .store(active, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn extract_partial_reply_content(raw_args: &str) -> Option<String> {
+        let key_index = raw_args.find("\"content\"")?;
+        let after_key = &raw_args[key_index + "\"content\"".len()..];
+        let colon_index = after_key.find(':')?;
+        let after_colon = &after_key[colon_index + 1..];
+        let quote_index = after_colon.find('"')?;
+        let content_slice = &after_colon[quote_index + 1..];
+
+        let mut result = String::new();
+        let mut chars = content_slice.chars();
+        while let Some(ch) = chars.next() {
+            match ch {
+                '"' => break,
+                '\\' => {
+                    let Some(escaped) = chars.next() else {
+                        break;
+                    };
+                    match escaped {
+                        '"' => result.push('"'),
+                        '\\' => result.push('\\'),
+                        '/' => result.push('/'),
+                        'b' => result.push('\u{0008}'),
+                        'f' => result.push('\u{000C}'),
+                        'n' => result.push('\n'),
+                        'r' => result.push('\r'),
+                        't' => result.push('\t'),
+                        'u' => {
+                            let hex: String = chars.by_ref().take(4).collect();
+                            if hex.len() == 4
+                                && let Ok(value) = u32::from_str_radix(&hex, 16)
+                                && let Some(decoded) = char::from_u32(value)
+                            {
+                                result.push(decoded);
+                            }
+                        }
+                        other => result.push(other),
+                    }
+                }
+                other => result.push(other),
+            }
+        }
+
+        Some(result)
     }
 
     /// Return true if a PromptCancelled reason indicates a tool nudge retry.
@@ -378,6 +440,260 @@ impl SpacebotHook {
             .with_history(history)
             .with_hook(self.clone())
             .await
+    }
+
+    /// Prompt once using Rig's streaming path so text/tool deltas reach the hook.
+    pub async fn prompt_once_streaming<M>(
+        &self,
+        agent: &rig::agent::Agent<M>,
+        history: &mut Vec<Message>,
+        prompt: &str,
+        max_turns: usize,
+    ) -> std::result::Result<String, PromptError>
+    where
+        M: CompletionModel + 'static,
+        M::StreamingResponse: GetTokenUsage + Send,
+    {
+        self.reset_tool_nudge_state();
+        self.set_tool_nudge_request_active(false);
+
+        let mut chat_history = history.clone();
+        let prompt_message = Message::from(prompt);
+        chat_history.push(prompt_message.clone());
+
+        let mut current_max_turns = 0usize;
+        let mut last_text_response = String::new();
+        let mut did_call_tool = false;
+
+        loop {
+            let current_prompt = chat_history
+                .last()
+                .cloned()
+                .expect("chat history should always include current prompt");
+
+            if current_max_turns > max_turns + 1 {
+                return Err(PromptError::MaxTurnsError {
+                    max_turns,
+                    chat_history: Box::new(chat_history),
+                    prompt: Box::new(prompt.to_string().into()),
+                });
+            }
+
+            current_max_turns += 1;
+
+            if let HookAction::Terminate { reason } =
+                <SpacebotHook as PromptHook<M>>::on_completion_call(
+                    self,
+                    &current_prompt,
+                    &chat_history[..chat_history.len() - 1],
+                )
+                .await
+            {
+                return Err(PromptError::PromptCancelled {
+                    chat_history: Box::new(chat_history),
+                    reason,
+                });
+            }
+
+            let request = agent
+                .stream_completion(
+                    current_prompt.clone(),
+                    chat_history[..chat_history.len() - 1].to_vec(),
+                )
+                .await
+                .map_err(PromptError::CompletionError)?;
+
+            let mut stream = request
+                .stream()
+                .await
+                .map_err(PromptError::CompletionError)?;
+
+            let mut tool_calls = vec![];
+            let mut tool_results = vec![];
+            let mut is_text_response = false;
+
+            while let Some(content) = stream.next().await {
+                match content.map_err(PromptError::CompletionError)? {
+                    StreamedAssistantContent::Text(text) => {
+                        if !is_text_response {
+                            last_text_response.clear();
+                            is_text_response = true;
+                        }
+                        last_text_response.push_str(&text.text);
+                        if let HookAction::Terminate { reason } =
+                            <SpacebotHook as PromptHook<M>>::on_text_delta(
+                                self,
+                                &text.text,
+                                &last_text_response,
+                            )
+                            .await
+                        {
+                            return Err(PromptError::PromptCancelled {
+                                chat_history: Box::new(chat_history),
+                                reason,
+                            });
+                        }
+                        did_call_tool = false;
+                    }
+                    StreamedAssistantContent::ToolCall {
+                        tool_call,
+                        internal_call_id,
+                    } => {
+                        let tool_args = serde_json::to_string(&tool_call.function.arguments)
+                            .unwrap_or_else(|_| "{}".to_string());
+                        match <SpacebotHook as PromptHook<M>>::on_tool_call(
+                            self,
+                            &tool_call.function.name,
+                            tool_call.call_id.clone(),
+                            &internal_call_id,
+                            &tool_args,
+                        )
+                        .await
+                        {
+                            ToolCallHookAction::Terminate { reason } => {
+                                return Err(PromptError::PromptCancelled {
+                                    chat_history: Box::new(chat_history),
+                                    reason,
+                                });
+                            }
+                            ToolCallHookAction::Skip { reason } => {
+                                tool_calls.push(AssistantContent::ToolCall(tool_call.clone()));
+                                tool_results.push((
+                                    tool_call.id.clone(),
+                                    tool_call.call_id.clone(),
+                                    reason,
+                                ));
+                                did_call_tool = true;
+                            }
+                            ToolCallHookAction::Continue => {
+                                let tool_result = match agent
+                                    .tool_server_handle
+                                    .call_tool(&tool_call.function.name, &tool_args)
+                                    .await
+                                {
+                                    Ok(result) => result,
+                                    Err(error) => error.to_string(),
+                                };
+
+                                if let HookAction::Terminate { reason } =
+                                    <SpacebotHook as PromptHook<M>>::on_tool_result(
+                                        self,
+                                        &tool_call.function.name,
+                                        tool_call.call_id.clone(),
+                                        &internal_call_id,
+                                        &tool_args,
+                                        &tool_result,
+                                    )
+                                    .await
+                                {
+                                    return Err(PromptError::PromptCancelled {
+                                        chat_history: Box::new(chat_history),
+                                        reason,
+                                    });
+                                }
+
+                                tool_calls.push(AssistantContent::ToolCall(tool_call.clone()));
+                                tool_results.push((
+                                    tool_call.id.clone(),
+                                    tool_call.call_id.clone(),
+                                    tool_result,
+                                ));
+                                did_call_tool = true;
+                            }
+                        }
+                    }
+                    StreamedAssistantContent::ToolCallDelta {
+                        id,
+                        internal_call_id,
+                        content,
+                    } => {
+                        let (name, delta) = match &content {
+                            rig::streaming::ToolCallDeltaContent::Name(name) => {
+                                (Some(name.as_str()), "")
+                            }
+                            rig::streaming::ToolCallDeltaContent::Delta(delta) => {
+                                (None, delta.as_str())
+                            }
+                        };
+                        if let HookAction::Terminate { reason } =
+                            <SpacebotHook as PromptHook<M>>::on_tool_call_delta(
+                                self,
+                                &id,
+                                &internal_call_id,
+                                name,
+                                delta,
+                            )
+                            .await
+                        {
+                            return Err(PromptError::PromptCancelled {
+                                chat_history: Box::new(chat_history),
+                                reason,
+                            });
+                        }
+                    }
+                    StreamedAssistantContent::Final(final_response) => {
+                        if is_text_response {
+                            if let HookAction::Terminate { reason } =
+								<SpacebotHook as PromptHook<M>>::on_stream_completion_response_finish(
+									self,
+									&current_prompt,
+									&final_response,
+								)
+								.await
+							{
+								return Err(PromptError::PromptCancelled {
+									chat_history: Box::new(chat_history),
+									reason,
+								});
+							}
+                            is_text_response = false;
+                        }
+                    }
+                    StreamedAssistantContent::Reasoning(_)
+                    | StreamedAssistantContent::ReasoningDelta { .. } => {
+                        did_call_tool = false;
+                    }
+                }
+            }
+
+            if !tool_calls.is_empty() {
+                chat_history.push(Message::Assistant {
+                    id: None,
+                    content: rig::OneOrMany::many(tool_calls)
+                        .expect("tool call list should not be empty"),
+                });
+            }
+
+            for (id, call_id, tool_result) in tool_results {
+                if let Some(call_id) = call_id {
+                    chat_history.push(Message::User {
+                        content: rig::OneOrMany::one(UserContent::tool_result_with_call_id(
+                            &id,
+                            call_id,
+                            rig::OneOrMany::one(ToolResultContent::text(&tool_result)),
+                        )),
+                    });
+                } else {
+                    chat_history.push(Message::User {
+                        content: rig::OneOrMany::one(UserContent::tool_result(
+                            &id,
+                            rig::OneOrMany::one(ToolResultContent::text(&tool_result)),
+                        )),
+                    });
+                }
+            }
+
+            if !did_call_tool {
+                chat_history.push(Message::Assistant {
+                    id: None,
+                    content: rig::OneOrMany::one(AssistantContent::text(
+                        last_text_response.clone(),
+                    )),
+                });
+                *history = chat_history;
+                return Ok(last_text_response);
+            }
+        }
     }
 
     /// Send a status update event.
@@ -778,6 +1094,74 @@ where
         HookAction::Continue
     }
 
+    async fn on_tool_call_delta(
+        &self,
+        _tool_call_id: &str,
+        internal_call_id: &str,
+        tool_name: Option<&str>,
+        tool_call_delta: &str,
+    ) -> HookAction {
+        if self.process_type != ProcessType::Channel {
+            return HookAction::Continue;
+        }
+
+        let Some(channel_id) = self.channel_id.clone() else {
+            return HookAction::Continue;
+        };
+
+        let mut guard = match self.reply_tool_delta_state.lock() {
+            Ok(guard) => guard,
+            Err(_) => return HookAction::Continue,
+        };
+
+        let state = guard
+            .entry(internal_call_id.to_string())
+            .or_insert_with(ReplyToolDeltaState::default);
+
+        if let Some(tool_name) = tool_name {
+            state.tool_name = Some(tool_name.to_string());
+        }
+
+        if state.tool_name.as_deref() != Some("reply") {
+            return HookAction::Continue;
+        }
+
+        state.raw_args.push_str(tool_call_delta);
+        let Some(content) = Self::extract_partial_reply_content(&state.raw_args) else {
+            return HookAction::Continue;
+        };
+
+        if !content.starts_with(&state.emitted_content) {
+            return HookAction::Continue;
+        }
+
+        let delta = &content[state.emitted_content.len()..];
+        if delta.is_empty() {
+            return HookAction::Continue;
+        }
+
+        state.emitted_content = content.clone();
+        self.event_tx
+            .send(ProcessEvent::TextDelta {
+                agent_id: self.agent_id.clone(),
+                process_id: self.process_id.clone(),
+                channel_id: Some(channel_id),
+                text_delta: delta.to_string(),
+                aggregated_text: content,
+            })
+            .ok();
+
+        HookAction::Continue
+    }
+
+    async fn on_stream_completion_response_finish(
+        &self,
+        _prompt: &Message,
+        _response: &<M as CompletionModel>::StreamingResponse,
+    ) -> HookAction {
+        HookAction::Continue
+    }
+
     async fn on_tool_call(
         &self,
         tool_name: &str,
@@ -785,6 +1169,11 @@ where
         _internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
+        if tool_name == "reply"
+            && let Ok(mut guard) = self.reply_tool_delta_state.lock()
+        {
+            guard.remove(_internal_call_id);
+        }
         // Loop guard: check for repetitive tool calling before execution.
         // Runs for all process types. Block → Skip (message becomes tool
         // result), CircuitBreak → Terminate.
@@ -860,6 +1249,11 @@ where
         _args: &str,
         result: &str,
     ) -> HookAction {
+        if tool_name == "reply"
+            && let Ok(mut guard) = self.reply_tool_delta_state.lock()
+        {
+            guard.remove(internal_call_id);
+        }
         let guard_action = self.guard_tool_result(tool_name, result);
         if !matches!(guard_action, HookAction::Continue) {
             self.record_tool_result_metrics(tool_name, internal_call_id);
@@ -1521,6 +1915,58 @@ mod tests {
                 ref aggregated_text,
                 ..
             } if text_delta == "hi" && aggregated_text == "hi"
+        ));
+    }
+
+    #[tokio::test]
+    async fn reply_tool_call_delta_emits_process_event() {
+        let (event_tx, mut event_rx) = tokio::sync::broadcast::channel(8);
+        let hook = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Channel(std::sync::Arc::<str>::from("channel")),
+            ProcessType::Channel,
+            Some(std::sync::Arc::<str>::from("channel")),
+            event_tx,
+        );
+
+        let first = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call_delta(
+            &hook,
+            "reply-call",
+            "internal-reply",
+            Some("reply"),
+            "{\"content\":\"hel",
+        )
+        .await;
+        let second = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_call_delta(
+            &hook,
+            "reply-call",
+            "internal-reply",
+            None,
+            "lo\"}",
+        )
+        .await;
+
+        assert!(matches!(first, HookAction::Continue));
+        assert!(matches!(second, HookAction::Continue));
+
+        let event = event_rx.recv().await.expect("first reply delta event");
+        assert!(matches!(
+            event,
+            ProcessEvent::TextDelta {
+                ref text_delta,
+                ref aggregated_text,
+                ..
+            } if text_delta == "hel" && aggregated_text == "hel"
+        ));
+
+        let event = event_rx.recv().await.expect("second reply delta event");
+        assert!(matches!(
+            event,
+            ProcessEvent::TextDelta {
+                ref text_delta,
+                ref aggregated_text,
+                ..
+            } if text_delta == "lo" && aggregated_text == "hello"
         ));
     }
 

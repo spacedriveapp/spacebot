@@ -2415,7 +2415,10 @@ impl Channel {
         // ── Prompt snapshot capture (fire-and-forget) ──
         self.maybe_capture_snapshot(system_prompt, user_text, &history);
 
-        let mut result = self.hook.prompt_once(&agent, &mut history, user_text).await;
+        let mut result = self
+            .hook
+            .prompt_once_streaming(&agent, &mut history, user_text, max_turns)
+            .await;
 
         // If the LLM responded with text that looks like tool call syntax, it failed
         // to use the tool calling API. Inject a correction and retry a couple
@@ -2440,7 +2443,7 @@ impl Channel {
             let correction = prompt_engine.render_system_tool_syntax_correction()?;
             result = self
                 .hook
-                .prompt_once(&agent, &mut history, &correction)
+                .prompt_once_streaming(&agent, &mut history, &correction, max_turns)
                 .await;
         }
 

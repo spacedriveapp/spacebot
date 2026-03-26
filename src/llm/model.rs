@@ -13,6 +13,13 @@ use rig::message::{
     ToolCall, ToolFunction, UserContent,
 };
 use rig::one_or_many::OneOrMany;
+use rig::providers::openai::responses_api::Output as OpenAiResponsesOutput;
+use rig::providers::openai::responses_api::streaming::{
+    ItemChunkKind as OpenAiResponsesItemChunkKind,
+    ResponseChunkKind as OpenAiResponsesResponseChunkKind,
+    StreamingCompletionChunk as OpenAiResponsesStreamingCompletionChunk,
+    StreamingItemDoneOutput as OpenAiResponsesStreamingItemDoneOutput,
+};
 use rig::streaming::{RawStreamingChoice, RawStreamingToolCall, StreamingCompletionResponse};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -541,9 +548,13 @@ impl CompletionModel for SpacebotModel {
                 self.stream_openai_compatible(request, "Google Gemini", &provider_config)
                     .await
             }
-            ApiType::Anthropic | ApiType::OpenAiResponses => {
+            ApiType::Anthropic => {
                 let response = self.attempt_completion(request).await?;
                 Ok(stream_from_completion_response(response))
+            }
+            ApiType::OpenAiResponses => {
+                self.stream_openai_responses(request, &provider_config)
+                    .await
             }
         }
     }
@@ -846,6 +857,287 @@ impl SpacebotModel {
         };
 
         parse_openai_responses_response(response_body, &provider_label)
+    }
+
+    async fn stream_openai_responses(
+        &self,
+        request: CompletionRequest,
+        provider_config: &ProviderConfig,
+    ) -> Result<StreamingCompletionResponse<RawStreamingResponse>, CompletionError> {
+        let base_url = provider_config.base_url.trim_end_matches('/');
+        let is_chatgpt_codex = self.provider == "openai-chatgpt";
+        let responses_url = if is_chatgpt_codex {
+            format!("{base_url}/responses")
+        } else {
+            format!("{base_url}/v1/responses")
+        };
+        let api_key = provider_config.api_key.as_str();
+        let provider_label = provider_config
+            .name
+            .as_deref()
+            .filter(|name| !name.trim().is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| provider_display_name(&self.provider));
+
+        let input = convert_messages_to_openai_responses(&request.chat_history);
+        let api_model_name = self.remap_model_name_for_api();
+        let mut body = serde_json::json!({
+            "model": api_model_name,
+            "input": input,
+            "stream": true,
+        });
+
+        if let Some(preamble) = &request.preamble {
+            body["instructions"] = serde_json::json!(preamble);
+        } else if is_chatgpt_codex {
+            body["instructions"] = serde_json::json!(
+                "You are Spacebot. Follow instructions exactly and respond concisely."
+            );
+        }
+
+        if !is_chatgpt_codex && let Some(max_tokens) = request.max_tokens {
+            body["max_output_tokens"] = serde_json::json!(max_tokens);
+        }
+
+        if !is_chatgpt_codex && let Some(temperature) = request.temperature {
+            body["temperature"] = serde_json::json!(temperature);
+        }
+
+        if is_chatgpt_codex {
+            body["store"] = serde_json::json!(false);
+        }
+
+        if !request.tools.is_empty() {
+            let tools: Vec<serde_json::Value> = request
+                .tools
+                .iter()
+                .map(|tool_definition| {
+                    serde_json::json!({
+                        "type": "function",
+                        "name": tool_definition.name,
+                        "description": tool_definition.description,
+                        "parameters": tool_definition.parameters,
+                    })
+                })
+                .collect();
+            body["tools"] = serde_json::json!(tools);
+        }
+
+        let openai_account_id = if self.provider == "openai-chatgpt" {
+            self.llm_manager.get_openai_account_id().await
+        } else {
+            None
+        };
+
+        let mut request_builder = self
+            .llm_manager
+            .http_client()
+            .post(&responses_url)
+            .header("authorization", format!("Bearer {api_key}"))
+            .header("content-type", "application/json")
+            .header("accept-encoding", "identity")
+            .timeout(std::time::Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS));
+        if let Some(account_id) = openai_account_id {
+            request_builder = request_builder.header("ChatGPT-Account-Id", account_id);
+        }
+        if is_chatgpt_codex {
+            request_builder = request_builder
+                .header("originator", "opencode")
+                .header(
+                    "session_id",
+                    format!("spacebot-{}", chrono::Utc::now().timestamp()),
+                )
+                .header(
+                    "user-agent",
+                    format!("spacebot/{}", env!("CARGO_PKG_VERSION")),
+                );
+        }
+
+        let response = request_builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(|error| CompletionError::ProviderError(error.to_string()))?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let response_text = response
+                .text()
+                .await
+                .unwrap_or_else(|error| format!("failed to read error response body: {error}"));
+
+            return Err(CompletionError::ProviderError(format!(
+                "{provider_label} Responses API error ({status}): {}",
+                parse_openai_error_message(&response_text)
+                    .unwrap_or_else(|| "unknown error".to_string())
+            )));
+        }
+
+        let provider_label = provider_label.to_string();
+        let stream = async_stream::stream! {
+            let mut stream = response.bytes_stream();
+            let mut block_buffer = String::new();
+            let mut raw_text = String::new();
+            let mut sse_text = String::new();
+            let mut saw_data_event = false;
+            let mut pending_tool_calls: std::collections::HashMap<String, OpenAiStreamingToolCall> = std::collections::HashMap::new();
+
+            while let Some(chunk_result) = stream.next().await {
+                let chunk = match chunk_result {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        yield Err(CompletionError::ProviderError(format!(
+                            "{provider_label} stream read failed: {error}"
+                        )));
+                        return;
+                    }
+                };
+
+                let chunk_text = String::from_utf8_lossy(&chunk).to_string();
+                if !saw_data_event {
+                    raw_text.push_str(&chunk_text);
+                }
+                block_buffer.push_str(&chunk_text);
+
+                while let Some(block) = extract_sse_block(&mut block_buffer) {
+                    sse_text.push_str(&block);
+                    sse_text.push_str("\n\n");
+
+                    let Some(data) = extract_sse_data_payload(&block) else {
+                        continue;
+                    };
+                    let data = data.trim();
+                    if data.is_empty() || data == "[DONE]" {
+                        continue;
+                    }
+
+                    saw_data_event = true;
+                    let event = match serde_json::from_str::<OpenAiResponsesStreamingCompletionChunk>(data) {
+                        Ok(event) => event,
+                        Err(_) => {
+                            let raw_event = match serde_json::from_str::<serde_json::Value>(data) {
+                                Ok(raw_event) => raw_event,
+                                Err(_) => continue,
+                            };
+                            match process_openai_responses_stream_raw_event(&raw_event, &mut pending_tool_calls) {
+                                Ok(events) => {
+                                    for event in events {
+                                        yield Ok(event);
+                                    }
+                                }
+                                Err(error) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                            }
+                            continue;
+                        }
+                    };
+
+                    match process_openai_responses_stream_event(&event, &mut pending_tool_calls) {
+                        Ok(events) => {
+                            for event in events {
+                                yield Ok(event);
+                            }
+                        }
+                        Err(error) => {
+                            yield Err(error);
+                            return;
+                        }
+                    }
+                }
+            }
+
+            if !block_buffer.trim().is_empty() && let Some(data) = extract_sse_data_payload(&block_buffer) {
+                let data = data.trim();
+                if !data.is_empty() && data != "[DONE]" {
+                    saw_data_event = true;
+                    if let Ok(event) = serde_json::from_str::<OpenAiResponsesStreamingCompletionChunk>(data) {
+                        match process_openai_responses_stream_event(&event, &mut pending_tool_calls) {
+                            Ok(events) => {
+                                for event in events {
+                                    yield Ok(event);
+                                }
+                            }
+                            Err(error) => {
+                                yield Err(error);
+                                return;
+                            }
+                        }
+                    } else {
+                        if let Ok(raw_event) = serde_json::from_str::<serde_json::Value>(data) {
+                            match process_openai_responses_stream_raw_event(&raw_event, &mut pending_tool_calls) {
+                                Ok(events) => {
+                                    for event in events {
+                                        yield Ok(event);
+                                    }
+                                }
+                                Err(error) => {
+                                    yield Err(error);
+                                    return;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if saw_data_event {
+                let response_body = match parse_openai_responses_sse_response(&sse_text, &provider_label) {
+                    Ok(body) => body,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+
+                let parsed_response = match parse_openai_responses_response(response_body.clone(), &provider_label) {
+                    Ok(response) => response,
+                    Err(error) => {
+                        yield Err(error);
+                        return;
+                    }
+                };
+
+                yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+                    body: response_body,
+                    usage: Some(parsed_response.usage),
+                }));
+                return;
+            }
+
+            let response_body = match serde_json::from_str::<serde_json::Value>(&raw_text) {
+                Ok(body) => body,
+                Err(error) => {
+                    yield Err(CompletionError::ProviderError(format!(
+                        "{provider_label} response is neither SSE nor JSON: {error}. Body: {}",
+                        truncate_body(&raw_text)
+                    )));
+                    return;
+                }
+            };
+
+            let parsed_response = match parse_openai_responses_response(response_body.clone(), &provider_label) {
+                Ok(response) => response,
+                Err(error) => {
+                    yield Err(error);
+                    return;
+                }
+            };
+
+            for event in completion_choice_to_streaming_choices(&parsed_response.choice) {
+                yield Ok(event);
+            }
+            if let Some(message_id) = parsed_response.message_id {
+                yield Ok(RawStreamingChoice::MessageId(message_id));
+            }
+            yield Ok(RawStreamingChoice::FinalResponse(RawStreamingResponse {
+                body: response_body,
+                usage: Some(parsed_response.usage),
+            }));
+        };
+
+        Ok(StreamingCompletionResponse::stream(Box::pin(stream)))
     }
 
     /// Generic OpenAI-compatible API call.
@@ -2112,6 +2404,268 @@ fn process_openai_chat_stream_event(
         {
             events.extend(flush_openai_streaming_tool_calls(pending_tool_calls)?);
         }
+    }
+
+    Ok(events)
+}
+
+fn process_openai_responses_stream_event(
+    event: &OpenAiResponsesStreamingCompletionChunk,
+    pending_tool_calls: &mut std::collections::HashMap<String, OpenAiStreamingToolCall>,
+) -> Result<Vec<RawStreamingChoice<RawStreamingResponse>>, CompletionError> {
+    let mut events = Vec::new();
+
+    match event {
+        OpenAiResponsesStreamingCompletionChunk::Delta(chunk) => {
+            match &chunk.data {
+                OpenAiResponsesItemChunkKind::OutputItemAdded(message) => {
+                    if let OpenAiResponsesStreamingItemDoneOutput {
+                        item: OpenAiResponsesOutput::FunctionCall(function_call),
+                        ..
+                    } = message
+                    {
+                        let entry = pending_tool_calls
+                            .entry(function_call.id.clone())
+                            .or_insert_with(OpenAiStreamingToolCall::default);
+                        entry.id = function_call.id.clone();
+                        entry.name = function_call.name.clone();
+                        events.push(RawStreamingChoice::ToolCallDelta {
+                            id: function_call.id.clone(),
+                            internal_call_id: entry.internal_call_id.clone(),
+                            content: rig::streaming::ToolCallDeltaContent::Name(
+                                function_call.name.clone(),
+                            ),
+                        });
+                    }
+                }
+                OpenAiResponsesItemChunkKind::OutputItemDone(message) => match message {
+                    OpenAiResponsesStreamingItemDoneOutput {
+                        item: OpenAiResponsesOutput::FunctionCall(function_call),
+                        ..
+                    } => {
+                        let entry = pending_tool_calls
+                            .remove(&function_call.id)
+                            .unwrap_or_default();
+                        events.push(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                            id: function_call.id.clone(),
+                            internal_call_id: entry.internal_call_id,
+                            call_id: Some(function_call.call_id.clone()),
+                            name: function_call.name.clone(),
+                            arguments: function_call.arguments.clone(),
+                            signature: None,
+                            additional_params: None,
+                        }));
+                    }
+                    OpenAiResponsesStreamingItemDoneOutput {
+                        item: OpenAiResponsesOutput::Message(message),
+                        ..
+                    } => {
+                        events.push(RawStreamingChoice::MessageId(message.id.clone()));
+                    }
+                    OpenAiResponsesStreamingItemDoneOutput {
+                        item:
+                            OpenAiResponsesOutput::Reasoning {
+                                summary,
+                                id,
+                                encrypted_content,
+                                ..
+                            },
+                        ..
+                    } => {
+                        for reasoning_summary in summary {
+                            let rig::providers::openai::responses_api::ReasoningSummary::SummaryText { text } = reasoning_summary;
+                            events.push(RawStreamingChoice::Reasoning {
+                                id: Some(id.clone()),
+                                content: ReasoningContent::Summary(text.clone()),
+                            });
+                        }
+                        if let Some(encrypted_content) = encrypted_content {
+                            events.push(RawStreamingChoice::Reasoning {
+                                id: Some(id.clone()),
+                                content: ReasoningContent::Encrypted(encrypted_content.clone()),
+                            });
+                        }
+                    }
+                },
+                OpenAiResponsesItemChunkKind::OutputTextDelta(delta)
+                | OpenAiResponsesItemChunkKind::RefusalDelta(delta) => {
+                    events.push(RawStreamingChoice::Message(delta.delta.clone()));
+                }
+                OpenAiResponsesItemChunkKind::ReasoningSummaryTextDelta(delta) => {
+                    events.push(RawStreamingChoice::ReasoningDelta {
+                        id: None,
+                        reasoning: delta.delta.clone(),
+                    });
+                }
+                OpenAiResponsesItemChunkKind::FunctionCallArgsDelta(delta) => {
+                    let entry = pending_tool_calls
+                        .entry(delta.item_id.clone())
+                        .or_insert_with(OpenAiStreamingToolCall::default);
+                    entry.id = delta.item_id.clone();
+                    entry.arguments.push_str(&delta.delta);
+                    events.push(RawStreamingChoice::ToolCallDelta {
+                        id: delta.item_id.clone(),
+                        internal_call_id: entry.internal_call_id.clone(),
+                        content: rig::streaming::ToolCallDeltaContent::Delta(delta.delta.clone()),
+                    });
+                }
+                _ => {}
+            }
+        }
+        OpenAiResponsesStreamingCompletionChunk::Response(chunk) => {
+            if !matches!(
+                chunk.kind,
+                OpenAiResponsesResponseChunkKind::ResponseCompleted
+            ) {
+                return Ok(events);
+            }
+        }
+    }
+
+    Ok(events)
+}
+
+fn process_openai_responses_stream_raw_event(
+    event: &serde_json::Value,
+    pending_tool_calls: &mut std::collections::HashMap<String, OpenAiStreamingToolCall>,
+) -> Result<Vec<RawStreamingChoice<RawStreamingResponse>>, CompletionError> {
+    let mut events = Vec::new();
+    let Some(kind) = event.get("type").and_then(serde_json::Value::as_str) else {
+        return Ok(events);
+    };
+
+    match kind {
+        "response.output_text.delta" | "response.refusal.delta" => {
+            if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str)
+                && !delta.is_empty()
+            {
+                events.push(RawStreamingChoice::Message(delta.to_string()));
+            }
+        }
+        "response.reasoning_summary_text.delta" => {
+            if let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str)
+                && !delta.is_empty()
+            {
+                events.push(RawStreamingChoice::ReasoningDelta {
+                    id: None,
+                    reasoning: delta.to_string(),
+                });
+            }
+        }
+        "response.output_item.added" => {
+            let Some(item) = event.get("item") else {
+                return Ok(events);
+            };
+            if item.get("type").and_then(serde_json::Value::as_str) == Some("function_call") {
+                let id = item
+                    .get("id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let name = item
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                if !id.is_empty() && !name.is_empty() {
+                    let entry = pending_tool_calls.entry(id.clone()).or_default();
+                    entry.id = id.clone();
+                    entry.name = name.clone();
+                    events.push(RawStreamingChoice::ToolCallDelta {
+                        id,
+                        internal_call_id: entry.internal_call_id.clone(),
+                        content: rig::streaming::ToolCallDeltaContent::Name(name),
+                    });
+                }
+            }
+        }
+        "response.function_call_arguments.delta" => {
+            let Some(item_id) = event.get("item_id").and_then(serde_json::Value::as_str) else {
+                return Ok(events);
+            };
+            let Some(delta) = event.get("delta").and_then(serde_json::Value::as_str) else {
+                return Ok(events);
+            };
+            let entry = pending_tool_calls.entry(item_id.to_string()).or_default();
+            entry.id = item_id.to_string();
+            entry.arguments.push_str(delta);
+            events.push(RawStreamingChoice::ToolCallDelta {
+                id: item_id.to_string(),
+                internal_call_id: entry.internal_call_id.clone(),
+                content: rig::streaming::ToolCallDeltaContent::Delta(delta.to_string()),
+            });
+        }
+        "response.function_call_arguments.done" => {}
+        "response.output_item.done" => {
+            let Some(item) = event.get("item") else {
+                return Ok(events);
+            };
+            match item.get("type").and_then(serde_json::Value::as_str) {
+                Some("function_call") => {
+                    let id = item
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = item
+                        .get("name")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let call_id = item
+                        .get("call_id")
+                        .and_then(serde_json::Value::as_str)
+                        .map(ToOwned::to_owned);
+                    let arguments = parse_openai_tool_arguments(
+                        item.get("arguments").unwrap_or(&serde_json::Value::Null),
+                    );
+                    let entry = pending_tool_calls.remove(&id).unwrap_or_default();
+                    events.push(RawStreamingChoice::ToolCall(RawStreamingToolCall {
+                        id,
+                        internal_call_id: entry.internal_call_id,
+                        call_id,
+                        name,
+                        arguments,
+                        signature: None,
+                        additional_params: None,
+                    }));
+                }
+                Some("message") => {
+                    if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+                        events.push(RawStreamingChoice::MessageId(id.to_string()));
+                    }
+                }
+                Some("reasoning") => {
+                    if let Some(id) = item.get("id").and_then(serde_json::Value::as_str) {
+                        if let Some(summary) =
+                            item.get("summary").and_then(serde_json::Value::as_array)
+                        {
+                            for part in summary {
+                                if let Some(text) =
+                                    part.get("text").and_then(serde_json::Value::as_str)
+                                {
+                                    events.push(RawStreamingChoice::Reasoning {
+                                        id: Some(id.to_string()),
+                                        content: ReasoningContent::Summary(text.to_string()),
+                                    });
+                                }
+                            }
+                        }
+                        if let Some(encrypted) = item
+                            .get("encrypted_content")
+                            .and_then(serde_json::Value::as_str)
+                        {
+                            events.push(RawStreamingChoice::Reasoning {
+                                id: Some(id.to_string()),
+                                content: ReasoningContent::Encrypted(encrypted.to_string()),
+                            });
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        _ => {}
     }
 
     Ok(events)
@@ -3673,6 +4227,86 @@ mod tests {
         assert_eq!(tool_calls[0].name, "file");
         assert_eq!(tool_calls[0].arguments["operation"], "write");
         assert_eq!(tool_calls[0].arguments["content"], "line1\nline2");
+    }
+
+    #[test]
+    fn process_openai_responses_stream_event_emits_text_and_tool_call_deltas() {
+        let mut pending = std::collections::HashMap::new();
+
+        let text_event = OpenAiResponsesStreamingCompletionChunk::Delta(
+            rig::providers::openai::responses_api::streaming::ItemChunk {
+                item_id: Some("msg_1".to_string()),
+                output_index: 0,
+                data: OpenAiResponsesItemChunkKind::OutputTextDelta(
+                    rig::providers::openai::responses_api::streaming::DeltaTextChunk {
+                        content_index: 0,
+                        sequence_number: 1,
+                        delta: "hello".to_string(),
+                    },
+                ),
+            },
+        );
+
+        let tool_name_event = OpenAiResponsesStreamingCompletionChunk::Delta(
+            rig::providers::openai::responses_api::streaming::ItemChunk {
+                item_id: Some("fc_1".to_string()),
+                output_index: 0,
+                data: OpenAiResponsesItemChunkKind::OutputItemAdded(
+                    OpenAiResponsesStreamingItemDoneOutput {
+                        sequence_number: 2,
+                        item: OpenAiResponsesOutput::FunctionCall(
+                            rig::providers::openai::responses_api::OutputFunctionCall {
+                                id: "fc_1".to_string(),
+                                arguments: serde_json::json!({}),
+                                call_id: "call_1".to_string(),
+                                name: "reply".to_string(),
+                                status:
+                                    rig::providers::openai::responses_api::ToolStatus::InProgress,
+                            },
+                        ),
+                    },
+                ),
+            },
+        );
+
+        let tool_args_event = OpenAiResponsesStreamingCompletionChunk::Delta(
+            rig::providers::openai::responses_api::streaming::ItemChunk {
+                item_id: Some("fc_1".to_string()),
+                output_index: 0,
+                data: OpenAiResponsesItemChunkKind::FunctionCallArgsDelta(
+                    rig::providers::openai::responses_api::streaming::DeltaTextChunkWithItemId {
+                        item_id: "fc_1".to_string(),
+                        content_index: 0,
+                        sequence_number: 3,
+                        delta: "{\"content\":\"hi\"}".to_string(),
+                    },
+                ),
+            },
+        );
+
+        let text_events = process_openai_responses_stream_event(&text_event, &mut pending)
+            .expect("text event should parse");
+        assert!(matches!(
+            text_events.first(),
+            Some(RawStreamingChoice::Message(text)) if text == "hello"
+        ));
+
+        let tool_name_events =
+            process_openai_responses_stream_event(&tool_name_event, &mut pending)
+                .expect("tool name event should parse");
+        assert!(matches!(
+            tool_name_events.first(),
+            Some(RawStreamingChoice::ToolCallDelta { id, content, .. })
+                if id == "fc_1" && matches!(content, rig::streaming::ToolCallDeltaContent::Name(name) if name == "reply")
+        ));
+
+        let tool_arg_events = process_openai_responses_stream_event(&tool_args_event, &mut pending)
+            .expect("tool args event should parse");
+        assert!(matches!(
+            tool_arg_events.first(),
+            Some(RawStreamingChoice::ToolCallDelta { id, content, .. })
+                if id == "fc_1" && matches!(content, rig::streaming::ToolCallDeltaContent::Delta(delta) if delta == "{\"content\":\"hi\"}")
+        ));
     }
 
     #[test]

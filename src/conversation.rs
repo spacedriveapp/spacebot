@@ -3,10 +3,12 @@
 pub mod channels;
 pub mod context;
 pub mod history;
+pub mod webchat;
 pub mod worker_transcript;
 
 pub use channels::ChannelStore;
 pub use history::{
     ConversationLogger, ProcessRunLogger, TimelineItem, WorkerDetailRow, WorkerRunRow,
 };
+pub use webchat::{WebChatConversation, WebChatConversationStore, WebChatConversationSummary};
 pub use worker_transcript::{ActionContent, TranscriptStep};

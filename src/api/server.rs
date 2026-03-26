@@ -217,6 +217,10 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         // Webchat routes
         .routes(routes!(webchat::webchat_send))
         .routes(routes!(webchat::webchat_history))
+        .routes(routes!(webchat::list_webchat_conversations))
+        .routes(routes!(webchat::create_webchat_conversation))
+        .routes(routes!(webchat::update_webchat_conversation))
+        .routes(routes!(webchat::delete_webchat_conversation))
         // Link routes
         .routes(routes!(links::list_links, links::create_link))
         .routes(routes!(links::update_link, links::delete_link))
