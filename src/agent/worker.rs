@@ -35,8 +35,9 @@ const MAX_OVERFLOW_RETRIES: usize = 2;
 /// Max consecutive transient provider error retries before giving up.
 /// Transient errors (upstream 500s, timeouts, rate limits that survived
 /// model-level retries) get a backoff-and-retry at the worker level so
-/// the worker survives temporary provider outages.
-const MAX_TRANSIENT_RETRIES: usize = 5;
+/// the worker survives temporary provider outages. Each retry triggers
+/// up to 3 model-level attempts, so 3 worker retries = 9 total attempts.
+const MAX_TRANSIENT_RETRIES: usize = 3;
 
 /// Base delay for worker-level transient error backoff (doubles each retry).
 const TRANSIENT_RETRY_BASE_DELAY: std::time::Duration = std::time::Duration::from_secs(5);
