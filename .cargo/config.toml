@@ -1,2 +1,7 @@
 [alias]
 bump = "run --quiet --bin cargo-bump --"
+
+# Debug builds use larger stack frames (no optimizations) and overflow
+# the default 8 MB stack on deep call chains. Bump to 16 MB.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-args=/STACK:16777216"]

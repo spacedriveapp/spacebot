@@ -264,6 +264,83 @@ fn main() {
                 tracing::warn!("Failed to register voice shortcut: {e}");
             }
 
+            // In debug builds, spawn the backend server and pipe its output
+            // to this console window so developers can see server logs live.
+            #[cfg(debug_assertions)]
+            {
+                // Resolve the backend binary. Try the sidecar location first
+                // (works under `tauri dev`), then fall back to the repo-root
+                // target/debug build (works when running the exe directly).
+                let backend_bin = {
+                    let exe = std::env::current_exe().unwrap_or_default();
+                    let exe_dir = exe.parent().unwrap_or(std::path::Path::new("."));
+
+                    // Sidecar location: next to Tauri exe (set up by tauri dev)
+                    let triple = if cfg!(target_arch = "x86_64") {
+                        "x86_64-pc-windows-msvc"
+                    } else {
+                        "aarch64-pc-windows-msvc"
+                    };
+                    let sidecar = exe_dir.join(format!("binaries/spacebot-{triple}.exe"));
+
+                    if sidecar.exists() {
+                        sidecar
+                    } else {
+                        // Direct exe launch: go from desktop/src-tauri/target/debug/
+                        // up to repo root, then target/debug/spacebot.exe
+                        let repo_root_bin = exe_dir
+                            .join("../../../../target/debug/spacebot.exe");
+                        if repo_root_bin.exists() {
+                            repo_root_bin
+                        } else {
+                            // Last resort: bundled sidecar dir
+                            exe_dir
+                                .join("../../binaries")
+                                .join(format!("spacebot-{triple}.exe"))
+                        }
+                    }
+                };
+
+                tracing::info!(?backend_bin, "starting backend server");
+
+                match std::process::Command::new(&backend_bin)
+                    .args(["start", "--foreground", "--debug"])
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                {
+                    Ok(mut child) => {
+                        // Pipe stderr (where tracing logs go) to this console
+                        if let Some(stderr) = child.stderr.take() {
+                            std::thread::spawn(move || {
+                                use std::io::BufRead;
+                                let reader = std::io::BufReader::new(stderr);
+                                for line in reader.lines() {
+                                    if let Ok(line) = line {
+                                        eprintln!("{line}");
+                                    }
+                                }
+                            });
+                        }
+                        if let Some(stdout) = child.stdout.take() {
+                            std::thread::spawn(move || {
+                                use std::io::BufRead;
+                                let reader = std::io::BufReader::new(stdout);
+                                for line in reader.lines() {
+                                    if let Ok(line) = line {
+                                        println!("{line}");
+                                    }
+                                }
+                            });
+                        }
+                        tracing::info!("backend server started — logs streaming below");
+                    }
+                    Err(e) => {
+                        tracing::error!(%e, ?backend_bin, "failed to start backend server");
+                    }
+                }
+            }
+
             // Show window after setup
             if let Some(window) = app.get_webview_window("main") {
                 #[cfg(debug_assertions)]
