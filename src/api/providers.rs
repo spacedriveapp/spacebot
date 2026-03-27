@@ -1,4 +1,5 @@
 use super::state::ApiState;
+use crate::github_copilot_oauth::DeviceTokenPollResult as CopilotDeviceTokenPollResult;
 use crate::openai_auth::DeviceTokenPollResult;
 
 use anyhow::Context as _;
@@ -21,7 +22,16 @@ const OPENAI_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
 const OPENAI_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
 const OPENAI_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
 
+const COPILOT_DEVICE_OAUTH_SESSION_TTL_SECS: i64 = 30 * 60;
+const COPILOT_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS: u64 = 5;
+/// Per RFC 8628 §3.5, add 5 seconds on `slow_down`.
+const COPILOT_DEVICE_OAUTH_SLOWDOWN_SECS: u64 = 5;
+const COPILOT_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS: u64 = 30;
+
 static OPENAI_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
+    LazyLock::new(|| RwLock::new(HashMap::new()));
+
+static COPILOT_DEVICE_OAUTH_SESSIONS: LazyLock<RwLock<HashMap<String, DeviceOAuthSession>>> =
     LazyLock::new(|| RwLock::new(HashMap::new()));
 
 #[derive(Clone, Debug)]
@@ -62,6 +72,7 @@ pub(super) struct ProviderStatus {
     zai_coding_plan: bool,
     github_copilot: bool,
     azure: bool,
+    github_copilot_oauth: bool,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -134,6 +145,33 @@ pub(super) struct OpenAiOAuthBrowserStatusRequest {
 
 #[derive(Serialize, utoipa::ToSchema)]
 pub(super) struct OpenAiOAuthBrowserStatusResponse {
+    found: bool,
+    done: bool,
+    success: bool,
+    message: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema)]
+pub(super) struct CopilotOAuthBrowserStartRequest {
+    model: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct CopilotOAuthBrowserStartResponse {
+    success: bool,
+    message: String,
+    user_code: Option<String>,
+    verification_url: Option<String>,
+    state: Option<String>,
+}
+
+#[derive(Deserialize, utoipa::ToSchema, utoipa::IntoParams)]
+pub(super) struct CopilotOAuthBrowserStatusRequest {
+    state: String,
+}
+
+#[derive(Serialize, utoipa::ToSchema)]
+pub(super) struct CopilotOAuthBrowserStatusResponse {
     found: bool,
     done: bool,
     success: bool,
@@ -374,6 +412,8 @@ pub(super) async fn get_providers(
     let instance_dir = (**state.instance_dir.load()).clone();
     let secrets_store = state.secrets_store.load();
     let openai_oauth_configured = crate::openai_auth::credentials_path(&instance_dir).exists();
+    let copilot_oauth_configured =
+        crate::github_copilot_oauth::credentials_path(&instance_dir).exists();
     let env_set = |name: &str| {
         std::env::var(name)
             .ok()
@@ -404,6 +444,7 @@ pub(super) async fn get_providers(
         zai_coding_plan,
         github_copilot,
         azure,
+        github_copilot_oauth,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -477,6 +518,7 @@ pub(super) async fn get_providers(
                 .and_then(|azure| azure.get("base_url"))
                 .and_then(|base_url| base_url.as_str())
                 .is_some_and(|url| !url.trim().is_empty()),
+            copilot_oauth_configured,
         )
     } else {
         (
@@ -503,6 +545,7 @@ pub(super) async fn get_providers(
             env_set("ZAI_CODING_PLAN_API_KEY"),
             env_set("GITHUB_COPILOT_API_KEY"),
             false,
+            copilot_oauth_configured,
         )
     };
 
@@ -530,6 +573,7 @@ pub(super) async fn get_providers(
         zai_coding_plan,
         github_copilot,
         azure,
+        github_copilot_oauth,
     };
     let has_any = providers.anthropic
         || providers.openai
@@ -553,7 +597,8 @@ pub(super) async fn get_providers(
         || providers.moonshot
         || providers.zai_coding_plan
         || providers.github_copilot
-        || providers.azure;
+        || providers.azure
+        || providers.github_copilot_oauth;
 
     Ok(Json(ProvidersResponse { providers, has_any }))
 }
@@ -809,6 +854,316 @@ pub(super) async fn openai_browser_oauth_status(
             message: Some(message.clone()),
         },
         DeviceOAuthSessionStatus::Failed(message) => OpenAiOAuthBrowserStatusResponse {
+            found: true,
+            done: true,
+            success: false,
+            message: Some(message.clone()),
+        },
+    };
+    Ok(Json(response))
+}
+
+// ── GitHub Copilot device OAuth ──────────────────────────────────────────────
+
+async fn prune_expired_copilot_device_oauth_sessions() {
+    let cutoff = chrono::Utc::now().timestamp() - COPILOT_DEVICE_OAUTH_SESSION_TTL_SECS;
+    let mut sessions = COPILOT_DEVICE_OAUTH_SESSIONS.write().await;
+    sessions.retain(|_, session| session.expires_at >= cutoff);
+}
+
+async fn is_copilot_device_oauth_session_pending(state_key: &str) -> bool {
+    let sessions = COPILOT_DEVICE_OAUTH_SESSIONS.read().await;
+    sessions
+        .get(state_key)
+        .is_some_and(|session| session.status.is_pending())
+}
+
+async fn update_copilot_device_oauth_status(state_key: &str, status: DeviceOAuthSessionStatus) {
+    if let Some(session) = COPILOT_DEVICE_OAUTH_SESSIONS
+        .write()
+        .await
+        .get_mut(state_key)
+    {
+        session.status = status;
+    }
+}
+
+async fn finalize_copilot_oauth(
+    state: &Arc<ApiState>,
+    credentials: &crate::github_copilot_oauth::OAuthCredentials,
+    model: &str,
+) -> anyhow::Result<()> {
+    let instance_dir = (**state.instance_dir.load()).clone();
+    crate::github_copilot_oauth::save_credentials(&instance_dir, credentials)
+        .context("failed to save GitHub Copilot OAuth credentials")?;
+
+    if let Some(llm_manager) = state.llm_manager.read().await.as_ref() {
+        llm_manager
+            .set_copilot_oauth_credentials(credentials.clone())
+            .await;
+    }
+
+    let config_path = state.config_path.read().await.clone();
+    let content = if config_path.exists() {
+        tokio::fs::read_to_string(&config_path)
+            .await
+            .context("failed to read config.toml")?
+    } else {
+        String::new()
+    };
+
+    let mut doc: toml_edit::DocumentMut = content.parse().context("failed to parse config.toml")?;
+    apply_model_routing(&mut doc, model);
+    tokio::fs::write(&config_path, doc.to_string())
+        .await
+        .context("failed to write config.toml")?;
+
+    refresh_defaults_config(state).await;
+
+    state
+        .provider_setup_tx
+        .try_send(crate::ProviderSetupEvent::ProvidersConfigured)
+        .ok();
+
+    Ok(())
+}
+
+#[utoipa::path(
+    post,
+    path = "/providers/github-copilot/browser-oauth/start",
+    request_body = CopilotOAuthBrowserStartRequest,
+    responses(
+        (status = 200, body = CopilotOAuthBrowserStartResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
+pub(super) async fn start_copilot_browser_oauth(
+    State(state): State<Arc<ApiState>>,
+    Json(request): Json<CopilotOAuthBrowserStartRequest>,
+) -> Result<Json<CopilotOAuthBrowserStartResponse>, StatusCode> {
+    if request.model.trim().is_empty() {
+        return Ok(Json(CopilotOAuthBrowserStartResponse {
+            success: false,
+            message: "Model cannot be empty".to_string(),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    }
+
+    let model = request.model.trim().to_string();
+    if !crate::llm::routing::provider_from_model(&model).eq_ignore_ascii_case("github-copilot") {
+        return Ok(Json(CopilotOAuthBrowserStartResponse {
+            success: false,
+            message: format!(
+                "Model '{}' must use provider 'github-copilot'.",
+                request.model
+            ),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    }
+
+    prune_expired_copilot_device_oauth_sessions().await;
+
+    let device_code = match crate::github_copilot_oauth::request_device_code().await {
+        Ok(device_code) => device_code,
+        Err(error) => {
+            return Ok(Json(CopilotOAuthBrowserStartResponse {
+                success: false,
+                message: format!("Failed to start device authorization: {error}"),
+                user_code: None,
+                verification_url: None,
+                state: None,
+            }));
+        }
+    };
+
+    if device_code.device_code.trim().is_empty() || device_code.user_code.trim().is_empty() {
+        return Ok(Json(CopilotOAuthBrowserStartResponse {
+            success: false,
+            message: "Device authorization response was missing required fields.".to_string(),
+            user_code: None,
+            verification_url: None,
+            state: None,
+        }));
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let expires_at = now + device_code.expires_in as i64;
+    let poll_interval = device_code.interval;
+    let verification_url = crate::github_copilot_oauth::device_verification_url(&device_code);
+    let state_key = Uuid::new_v4().to_string();
+
+    COPILOT_DEVICE_OAUTH_SESSIONS.write().await.insert(
+        state_key.clone(),
+        DeviceOAuthSession {
+            expires_at,
+            status: DeviceOAuthSessionStatus::Pending,
+        },
+    );
+
+    let state_clone = state.clone();
+    let state_key_clone = state_key.clone();
+    let device_code_value = device_code.device_code.clone();
+    tokio::spawn(async move {
+        run_copilot_device_oauth_background(
+            state_clone,
+            state_key_clone,
+            device_code_value,
+            poll_interval,
+            expires_at,
+            model,
+        )
+        .await;
+    });
+
+    Ok(Json(CopilotOAuthBrowserStartResponse {
+        success: true,
+        message: "Device authorization started".to_string(),
+        user_code: Some(device_code.user_code),
+        verification_url: Some(verification_url),
+        state: Some(state_key),
+    }))
+}
+
+async fn run_copilot_device_oauth_background(
+    state: Arc<ApiState>,
+    state_key: String,
+    device_code: String,
+    mut poll_interval_secs: u64,
+    expires_at: i64,
+    model: String,
+) {
+    // GitHub recommends at least 5 seconds; add a 3-second safety margin.
+    poll_interval_secs = poll_interval_secs.max(COPILOT_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS) + 3;
+
+    loop {
+        if !is_copilot_device_oauth_session_pending(&state_key).await {
+            return;
+        }
+
+        let now = chrono::Utc::now().timestamp();
+        if now >= expires_at {
+            update_copilot_device_oauth_status(
+                &state_key,
+                DeviceOAuthSessionStatus::Failed(
+                    "Sign-in expired. Please start again.".to_string(),
+                ),
+            )
+            .await;
+            return;
+        }
+
+        sleep(Duration::from_secs(poll_interval_secs)).await;
+
+        let poll_result = crate::github_copilot_oauth::poll_device_token(&device_code).await;
+        let credentials = match poll_result {
+            Ok(CopilotDeviceTokenPollResult::Pending) => continue,
+            Ok(CopilotDeviceTokenPollResult::SlowDown) => {
+                poll_interval_secs = poll_interval_secs
+                    .saturating_add(COPILOT_DEVICE_OAUTH_SLOWDOWN_SECS)
+                    .min(COPILOT_DEVICE_OAUTH_MAX_POLL_INTERVAL_SECS);
+                continue;
+            }
+            Ok(CopilotDeviceTokenPollResult::Approved(credentials)) => credentials,
+            Err(error) => {
+                let message = format!("Device authorization polling failed: {error}");
+                tracing::warn!(%message, "GitHub Copilot device OAuth polling failed");
+                update_copilot_device_oauth_status(
+                    &state_key,
+                    DeviceOAuthSessionStatus::Failed(message),
+                )
+                .await;
+                return;
+            }
+        };
+
+        match finalize_copilot_oauth(&state, &credentials, &model).await {
+            Ok(()) => {
+                update_copilot_device_oauth_status(
+                    &state_key,
+                    DeviceOAuthSessionStatus::Completed(format!(
+                        "GitHub Copilot configured via device OAuth. Model '{}' applied to defaults and default agent routing.",
+                        model
+                    )),
+                )
+                .await;
+            }
+            Err(error) => {
+                let message =
+                    format!("Device OAuth sign-in completed but finalization failed: {error}");
+                tracing::warn!(%message, "GitHub Copilot device OAuth finalization failed");
+                update_copilot_device_oauth_status(
+                    &state_key,
+                    DeviceOAuthSessionStatus::Failed(message),
+                )
+                .await;
+            }
+        }
+
+        return;
+    }
+}
+
+#[utoipa::path(
+    get,
+    path = "/providers/github-copilot/browser-oauth/status",
+    params(
+        ("state" = String, Query, description = "OAuth state parameter"),
+    ),
+    responses(
+        (status = 200, body = CopilotOAuthBrowserStatusResponse),
+        (status = 400, description = "Invalid request"),
+    ),
+    tag = "providers",
+)]
+pub(super) async fn copilot_browser_oauth_status(
+    Query(request): Query<CopilotOAuthBrowserStatusRequest>,
+) -> Result<Json<CopilotOAuthBrowserStatusResponse>, StatusCode> {
+    prune_expired_copilot_device_oauth_sessions().await;
+    if request.state.trim().is_empty() {
+        return Ok(Json(CopilotOAuthBrowserStatusResponse {
+            found: false,
+            done: false,
+            success: false,
+            message: Some("Missing OAuth state".to_string()),
+        }));
+    }
+
+    let state_key = request.state.trim();
+    let now = chrono::Utc::now().timestamp();
+    let mut sessions = COPILOT_DEVICE_OAUTH_SESSIONS.write().await;
+    let Some(session) = sessions.get_mut(state_key) else {
+        return Ok(Json(CopilotOAuthBrowserStatusResponse {
+            found: false,
+            done: false,
+            success: false,
+            message: None,
+        }));
+    };
+
+    if session.status.is_pending() && session.is_expired(now) {
+        session.status =
+            DeviceOAuthSessionStatus::Failed("Sign-in expired. Please start again.".to_string());
+    }
+
+    let response = match &session.status {
+        DeviceOAuthSessionStatus::Pending => CopilotOAuthBrowserStatusResponse {
+            found: true,
+            done: false,
+            success: false,
+            message: None,
+        },
+        DeviceOAuthSessionStatus::Completed(message) => CopilotOAuthBrowserStatusResponse {
+            found: true,
+            done: true,
+            success: true,
+            message: Some(message.clone()),
+        },
+        DeviceOAuthSessionStatus::Failed(message) => CopilotOAuthBrowserStatusResponse {
             found: true,
             done: true,
             success: false,
@@ -1494,6 +1849,33 @@ pub(super) async fn delete_provider(
         return Ok(Json(ProviderUpdateResponse {
             success: true,
             message: "ChatGPT Plus OAuth credentials removed".into(),
+        }));
+    }
+
+    // GitHub Copilot OAuth credentials are stored as a separate JSON file,
+    // not in the TOML config, so handle removal separately (like openai-chatgpt).
+    if provider == "github-copilot-oauth" {
+        let instance_dir = (**state.instance_dir.load()).clone();
+        let cred_path = crate::github_copilot_oauth::credentials_path(&instance_dir);
+        if cred_path.exists() {
+            tokio::fs::remove_file(&cred_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        // Also clear the cached Copilot API token since it was derived from OAuth.
+        let token_path = crate::github_copilot_auth::credentials_path(&instance_dir);
+        if token_path.exists() {
+            tokio::fs::remove_file(&token_path)
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        }
+        if let Some(manager) = state.llm_manager.read().await.as_ref() {
+            manager.clear_copilot_oauth_credentials().await;
+            manager.clear_copilot_token().await;
+        }
+        return Ok(Json(ProviderUpdateResponse {
+            success: true,
+            message: "GitHub Copilot OAuth credentials removed".into(),
         }));
     }
 
