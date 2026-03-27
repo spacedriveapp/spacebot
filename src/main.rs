@@ -43,6 +43,12 @@ enum Command {
     },
     /// Show status of the running daemon
     Status,
+    /// Start in local mode (foreground + auto-open browser)
+    Local {
+        /// Port to serve on (default: 19898)
+        #[arg(short, long)]
+        port: Option<u16>,
+    },
     /// Manage skills
     #[command(subcommand)]
     Skill(SkillCommand),
@@ -363,13 +369,14 @@ fn main() -> anyhow::Result<()> {
     let command = cli.command.unwrap_or(Command::Start { foreground: false });
 
     match command {
-        Command::Start { foreground } => cmd_start(cli.config, cli.debug, foreground),
+        Command::Start { foreground } => cmd_start(cli.config, cli.debug, foreground, None),
         Command::Stop => cmd_stop(),
         Command::Restart { foreground } => {
             cmd_stop_if_running();
-            cmd_start(cli.config, cli.debug, foreground)
+            cmd_start(cli.config, cli.debug, foreground, None)
         }
         Command::Status => cmd_status(),
+        Command::Local { port } => cmd_start(cli.config, cli.debug, true, port),
         Command::Skill(skill_cmd) => cmd_skill(cli.config, skill_cmd),
         Command::Auth(auth_cmd) => cmd_auth(cli.config, auth_cmd),
         Command::Secrets(secrets_cmd) => cmd_secrets(cli.config, secrets_cmd),
@@ -395,6 +402,7 @@ fn cmd_start(
     config_path: Option<std::path::PathBuf>,
     debug: bool,
     foreground: bool,
+    port_override: Option<u16>,
 ) -> anyhow::Result<()> {
     // Use the config path (if provided) to derive the correct instance dir
     // for the PID check, so it matches the PID file written during daemonize.
@@ -438,7 +446,12 @@ fn cmd_start(
     // we are either in foreground mode (no fork) or in the daemon child process.
     let bootstrapped_store = bootstrap_secrets_store(&resolved_config_path);
 
-    let config = load_config(&resolved_config_path)?;
+    let mut config = load_config(&resolved_config_path)?;
+
+    // Apply port override for `spacebot local --port`
+    if let Some(port) = port_override {
+        config.api.port = port;
+    }
 
     // Build a fresh Tokio runtime in this process (the child after daemonize,
     // or the foreground process). Tracing init — including the OTLP batch
@@ -450,6 +463,10 @@ fn cmd_start(
         .build()
         .context("failed to build Tokio runtime")?;
 
+    // Auto-open browser for `spacebot local` (foreground + port_override set)
+    let open_browser = foreground && port_override.is_some();
+    let browser_url = format!("http://{}:{}", config.api.bind, config.api.port);
+
     runtime.block_on(async {
         let otel_provider = if foreground {
             spacebot::daemon::init_foreground_tracing(debug, &config.telemetry)
@@ -457,6 +474,19 @@ fn cmd_start(
             let paths = spacebot::daemon::DaemonPaths::new(&config.instance_dir);
             spacebot::daemon::init_background_tracing(&paths, debug, &config.telemetry)
         };
+
+        if open_browser {
+            // Delay slightly so the server binds before the browser opens
+            let url = browser_url.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                eprintln!("\n  Opening {} in your browser...\n", url);
+                if let Err(e) = open::that(&url) {
+                    eprintln!("  Could not open browser: {e}");
+                    eprintln!("  Open manually: {url}");
+                }
+            });
+        }
 
         run(config, foreground, otel_provider, bootstrapped_store).await
     })
