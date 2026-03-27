@@ -1038,7 +1038,8 @@ async fn run_copilot_device_oauth_background(
     model: String,
 ) {
     // GitHub recommends at least 5 seconds; add a 3-second safety margin.
-    poll_interval_secs = poll_interval_secs.max(COPILOT_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS) + 3;
+    poll_interval_secs =
+        poll_interval_secs.max(COPILOT_DEVICE_OAUTH_DEFAULT_POLL_INTERVAL_SECS) + 3;
 
     loop {
         if !is_copilot_device_oauth_session_pending(&state_key).await {
