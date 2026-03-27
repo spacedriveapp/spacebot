@@ -591,6 +591,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/workers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List worker runs for an agent, with live status merged from StatusBlocks. */
+        get: operations["list_workers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/workers/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get full detail for a single worker run, including decompressed transcript. */
+        get: operations["worker_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/bindings": {
         parameters: {
             query?: never;
@@ -790,7 +824,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/messages": {
+    "/cortex-chat/messages": {
         parameters: {
             query?: never;
             header?: never;
@@ -811,7 +845,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/send": {
+    "/cortex-chat/send": {
         parameters: {
             query?: never;
             header?: never;
@@ -836,7 +870,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/threads": {
+    "/cortex-chat/thread": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a cortex chat thread and all its messages. */
+        delete: operations["cortex_chat_delete_thread"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cortex-chat/threads": {
         parameters: {
             query?: never;
             header?: never;
@@ -847,8 +898,7 @@ export interface paths {
         get: operations["cortex_chat_threads"];
         put?: never;
         post?: never;
-        /** Delete a cortex chat thread and all its messages. */
-        delete: operations["cortex_chat_delete_thread"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1282,6 +1332,38 @@ export interface paths {
         get: operations["get_providers"];
         put?: never;
         post: operations["update_provider"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/github-copilot/browser-oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["start_copilot_browser_oauth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/github-copilot/browser-oauth/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["copilot_browser_oauth_status"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -1923,40 +2005,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/workers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List worker runs for an agent, with live status merged from StatusBlocks. */
-        get: operations["list_workers"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/workers/detail": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get full detail for a single worker run, including decompressed transcript. */
-        get: operations["worker_detail"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -2204,6 +2252,22 @@ export interface components {
             background_threshold?: number | null;
             /** Format: float */
             emergency_threshold?: number | null;
+        };
+        CopilotOAuthBrowserStartRequest: {
+            model: string;
+        };
+        CopilotOAuthBrowserStartResponse: {
+            message: string;
+            state?: string | null;
+            success: boolean;
+            user_code?: string | null;
+            verification_url?: string | null;
+        };
+        CopilotOAuthBrowserStatusResponse: {
+            done: boolean;
+            found: boolean;
+            message?: string | null;
+            success: boolean;
         };
         CortexChatDeleteThreadRequest: {
             agent_id: string;
@@ -3033,6 +3097,7 @@ export interface components {
             fireworks: boolean;
             gemini: boolean;
             github_copilot: boolean;
+            github_copilot_oauth: boolean;
             groq: boolean;
             kilo: boolean;
             minimax: boolean;
@@ -5272,6 +5337,86 @@ export interface operations {
             };
         };
     };
+    list_workers: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Maximum number of results to return */
+                limit: number;
+                /** @description Number of results to skip */
+                offset: number;
+                /** @description Filter by worker status */
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerListResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worker_detail: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Worker ID */
+                worker_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerDetailResponse"];
+                };
+            };
+            /** @description Agent or worker not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_bindings: {
         parameters: {
             query?: {
@@ -5867,42 +6012,6 @@ export interface operations {
             };
         };
     };
-    cortex_chat_threads: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CortexChatThreadsResponse"];
-                };
-            };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     cortex_chat_delete_thread: {
         parameters: {
             query?: never;
@@ -5924,6 +6033,42 @@ export interface operations {
                 content?: never;
             };
             /** @description Agent or thread not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cortex_chat_threads: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CortexChatThreadsResponse"];
+                };
+            };
+            /** @description Agent not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -6900,6 +7045,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderUpdateResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_copilot_browser_oauth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotOAuthBrowserStartRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotOAuthBrowserStartResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    copilot_browser_oauth_status: {
+        parameters: {
+            query: {
+                /** @description OAuth state parameter */
+                state: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotOAuthBrowserStatusResponse"];
                 };
             };
             /** @description Invalid request */
@@ -8342,86 +8546,6 @@ export interface operations {
             };
             /** @description Messaging manager not available */
             503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_workers: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Maximum number of results to return */
-                limit: number;
-                /** @description Number of results to skip */
-                offset: number;
-                /** @description Filter by worker status */
-                status?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerListResponse"];
-                };
-            };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    worker_detail: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Worker ID */
-                worker_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerDetailResponse"];
-                };
-            };
-            /** @description Agent or worker not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
                 headers: {
                     [name: string]: unknown;
                 };

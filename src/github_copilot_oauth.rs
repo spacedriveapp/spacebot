@@ -90,11 +90,7 @@ pub async fn request_device_code() -> Result<DeviceCodeResponse> {
         .context("failed to read GitHub device code response")?;
 
     if !status.is_success() {
-        anyhow::bail!(
-            "GitHub device code request failed ({}): {}",
-            status,
-            body
-        );
+        anyhow::bail!("GitHub device code request failed ({}): {}", status, body);
     }
 
     serde_json::from_str::<DeviceCodeResponse>(&body)
@@ -141,23 +137,19 @@ pub async fn poll_device_token(device_code: &str) -> Result<DeviceTokenPollResul
         .context("failed to read GitHub device token poll response")?;
 
     if !status.is_success() {
-        anyhow::bail!(
-            "GitHub device token poll failed ({}): {}",
-            status,
-            body
-        );
+        anyhow::bail!("GitHub device token poll failed ({}): {}", status, body);
     }
 
     // GitHub returns 200 for both success and pending/error states.
     // Try parsing as success first.
-    if let Ok(success) = serde_json::from_str::<TokenSuccessResponse>(&body) {
-        if !success.access_token.is_empty() {
-            return Ok(DeviceTokenPollResult::Approved(OAuthCredentials {
-                access_token: success.access_token,
-                token_type: success.token_type,
-                scope: success.scope,
-            }));
-        }
+    if let Ok(success) = serde_json::from_str::<TokenSuccessResponse>(&body)
+        && !success.access_token.is_empty()
+    {
+        return Ok(DeviceTokenPollResult::Approved(OAuthCredentials {
+            access_token: success.access_token,
+            token_type: success.token_type,
+            scope: success.scope,
+        }));
     }
 
     // Parse as error response
@@ -176,7 +168,11 @@ pub async fn poll_device_token(device_code: &str) -> Result<DeviceTokenPollResul
                     .error_description
                     .as_deref()
                     .unwrap_or("no description");
-                anyhow::bail!("GitHub device token poll error: {} — {}", error, description);
+                anyhow::bail!(
+                    "GitHub device token poll error: {} — {}",
+                    error,
+                    description
+                );
             }
             None => {}
         }
@@ -212,8 +208,8 @@ pub fn load_credentials(instance_dir: &Path) -> Result<Option<OAuthCredentials>>
 
     let data = std::fs::read_to_string(&path)
         .with_context(|| format!("failed to read {}", path.display()))?;
-    let creds: OAuthCredentials = serde_json::from_str(&data)
-        .context("failed to parse GitHub Copilot OAuth credentials")?;
+    let creds: OAuthCredentials =
+        serde_json::from_str(&data).context("failed to parse GitHub Copilot OAuth credentials")?;
     Ok(Some(creds))
 }
 
@@ -307,9 +303,6 @@ mod tests {
             interval: 5,
             expires_in: 900,
         };
-        assert_eq!(
-            device_verification_url(&response),
-            DEFAULT_VERIFICATION_URL
-        );
+        assert_eq!(device_verification_url(&response), DEFAULT_VERIFICATION_URL);
     }
 }
