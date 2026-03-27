@@ -217,6 +217,9 @@ export type ProviderModelTestResponse = components["schemas"]["ProviderModelTest
 export type OpenAiOAuthBrowserStartRequest = components["schemas"]["OpenAiOAuthBrowserStartRequest"];
 export type OpenAiOAuthBrowserStartResponse = components["schemas"]["OpenAiOAuthBrowserStartResponse"];
 export type OpenAiOAuthBrowserStatusResponse = components["schemas"]["OpenAiOAuthBrowserStatusResponse"];
+export type CopilotOAuthBrowserStartRequest = components["schemas"]["CopilotOAuthBrowserStartRequest"];
+export type CopilotOAuthBrowserStartResponse = components["schemas"]["CopilotOAuthBrowserStartResponse"];
+export type CopilotOAuthBrowserStatusResponse = components["schemas"]["CopilotOAuthBrowserStatusResponse"];
 
 // Models
 export type ModelInfo = components["schemas"]["ModelInfo"];

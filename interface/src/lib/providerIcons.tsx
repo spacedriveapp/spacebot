@@ -140,6 +140,7 @@ export function ProviderIcon({ provider, className = "text-ink-faint", size = 24
 		"minimax-cn": Minimax,
 		moonshot: Kimi, // Kimi is Moonshot AI's product brand
 		"github-copilot": GithubCopilot,
+		"github-copilot-oauth": GithubCopilot,
 	};
 
 	const IconComponent = iconMap[provider.toLowerCase()];

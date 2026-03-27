@@ -1627,6 +1627,26 @@ export const api = {
 		}
 		return response.json() as Promise<Types.OpenAiOAuthBrowserStatusResponse>;
 	},
+	startCopilotOAuthBrowser: async (params: { model: string }) => {
+		const response = await fetch(`${getApiBase()}/providers/github-copilot/browser-oauth/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ model: params.model }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<Types.CopilotOAuthBrowserStartResponse>;
+	},
+	copilotOAuthBrowserStatus: async (state: string) => {
+		const response = await fetch(
+			`${getApiBase()}/providers/github-copilot/browser-oauth/status?state=${encodeURIComponent(state)}`,
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<Types.CopilotOAuthBrowserStatusResponse>;
+	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${getApiBase()}/providers/${encodeURIComponent(provider)}`, {
 			method: "DELETE",
