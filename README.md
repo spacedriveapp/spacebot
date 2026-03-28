@@ -425,8 +425,8 @@ Read the full vision in the [roadmap](docs/content/docs/(deployment)/roadmap.mdx
 git clone https://github.com/spacedriveapp/spacebot.git
 cd spacebot
 
-# Optional: build the web UI (React + Vite, embedded into the binary)
-cd interface && bun install && cd ..
+# Build the web UI (React + Vite, embedded into the binary)
+cd interface && bun install && npm i && bun build && cd ..
 
 # Optional: build the OpenCode embed (live coding UI in the Workers tab)
 # Requires Node 22+ (use fnm: fnm install v24.14.0 && fnm use v24.14.0)
