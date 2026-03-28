@@ -204,7 +204,10 @@ async fn handle_message_event(
             tracing::debug!(channel_id, "DM dropped: dm_allowed_users is empty");
             return Ok(());
         }
+        // Allow wildcard "*" to permit all users
+        let is_wildcard = perms.dm_allowed_users.iter().any(|u| u == "*");
         if let Some(ref sender_id) = user_id
+            && !is_wildcard
             && !perms.dm_allowed_users.contains(sender_id)
         {
             tracing::debug!(
