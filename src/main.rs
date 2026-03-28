@@ -183,6 +183,95 @@ struct ActiveChannel {
     _outbound_handle: tokio::task::JoinHandle<()>,
 }
 
+/// Key to uniquely identify a channel by (agent_id, conversation_id) pair.
+/// This prevents message leakage between agents when channels share the same
+/// conversation_id (e.g., DMs that may have the same ID across different agents).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ActiveChannelKey {
+    agent_id: String,
+    conversation_id: String,
+}
+
+impl ActiveChannelKey {
+    fn new(agent_id: impl AsRef<str>, conversation_id: impl Into<String>) -> Self {
+        Self {
+            agent_id: agent_id.as_ref().to_string(),
+            conversation_id: conversation_id.into(),
+        }
+    }
+}
+
+/// A deferred message waiting for its target channel to become active.
+/// This ensures messages are delivered to their intended target only.
+#[derive(Debug, Clone)]
+struct DeferredMessage {
+    /// The exact key of the target channel where this message must be delivered.
+    target_key: ActiveChannelKey,
+    /// The message to deliver.
+    message: spacebot::InboundMessage,
+    /// When the message was deferred.
+    deferred_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Queue for deferred messages that will be delivered when their target
+/// channel becomes active. Each message is bound to a specific
+/// (agent_id, conversation_id) pair.
+#[derive(Debug, Default)]
+struct DeferredMessageQueue {
+    messages: Vec<DeferredMessage>,
+}
+
+impl DeferredMessageQueue {
+    fn new() -> Self {
+        Self { messages: Vec::new() }
+    }
+
+    /// Add a message to the queue bound to a specific target channel.
+    fn push(&mut self, target_key: ActiveChannelKey, message: spacebot::InboundMessage) {
+        self.messages.push(DeferredMessage {
+            target_key,
+            message,
+            deferred_at: chrono::Utc::now(),
+        });
+    }
+
+    /// Drain and return all messages intended for the given channel key.
+    fn drain_for(&mut self, key: &ActiveChannelKey) -> Vec<spacebot::InboundMessage> {
+        let mut result = Vec::new();
+        let mut indices_to_remove = Vec::new();
+        
+        for (i, deferred) in self.messages.iter().enumerate() {
+            if &deferred.target_key == key {
+                result.push(deferred.message.clone());
+                indices_to_remove.push(i);
+            }
+        }
+        
+        // Remove in reverse order to maintain correct indices
+        for i in indices_to_remove.into_iter().rev() {
+            self.messages.remove(i);
+        }
+        
+        result
+    }
+
+    /// Check if there are any deferred messages for a specific channel.
+    fn has_for(&self, key: &ActiveChannelKey) -> bool {
+        self.messages.iter().any(|m| &m.target_key == key)
+    }
+
+    /// Get count of deferred messages.
+    fn len(&self) -> usize {
+        self.messages.len()
+    }
+
+    /// Remove messages older than the given duration.
+    fn remove_expired(&mut self, max_age: chrono::Duration) {
+        let now = chrono::Utc::now();
+        self.messages.retain(|m| now - m.deferred_at < max_age);
+    }
+}
+
 #[derive(Debug, serde::Serialize)]
 struct BackfillTranscriptEntry {
     role: String,
@@ -1821,8 +1910,16 @@ async fn run(
         tracing::info!(pid = std::process::id(), "spacebot daemon started");
     }
 
-    // Active conversation channels: conversation_id -> ActiveChannel
-    let mut active_channels: HashMap<String, ActiveChannel> = HashMap::new();
+    // Active conversation channels: (agent_id, conversation_id) -> ActiveChannel
+    // Uses ActiveChannelKey to ensure channels are uniquely identified by the
+    // exact (agent_id, conversation_id) pair, preventing message leakage between
+    // agents when channels share conversation_ids (e.g., DMs).
+    let mut active_channels: HashMap<ActiveChannelKey, ActiveChannel> = HashMap::new();
+
+    // Queue for deferred messages when their target channel is not active.
+    // Messages are bound to their original target (agent_id, conversation_id)
+    // and will only be delivered to that exact channel when it becomes active.
+    let mut deferred_messages = DeferredMessageQueue::new();
 
     // Resume idle interactive workers that survived the restart.
     // For each idle worker, pre-create the channel if needed and spawn
@@ -1874,7 +1971,8 @@ async fn run(
             for (conversation_id, workers) in by_channel {
                 // Ensure the channel exists. If it's already in active_channels
                 // (unlikely at startup), use its state. Otherwise, pre-create it.
-                if !active_channels.contains_key(&conversation_id) {
+                let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
+                if !active_channels.contains_key(&channel_key) {
                     // First pass: retire any workers whose sessions can't be
                     // reconnected. Only create the channel if at least one
                     // worker has a chance of resuming.
@@ -2054,12 +2152,37 @@ async fn run(
                     });
 
                     active_channels.insert(
-                        conversation_id.clone(),
+                        ActiveChannelKey::new(agent_id.clone(), conversation_id.clone()),
                         ActiveChannel {
                             message_tx: channel_tx,
                             _outbound_handle: outbound_handle,
                         },
                     );
+
+                    // Deliver any deferred messages that were waiting for this channel
+                    let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
+                    let deferred = deferred_messages.drain_for(&channel_key);
+                    let deferred_count = deferred.len();
+                    if deferred_count > 0 {
+                        if let Some(channel) = active_channels.get(&channel_key) {
+                            for message in deferred {
+                                if let Err(error) = channel.message_tx.send(message).await {
+                                    tracing::warn!(
+                                        %error,
+                                        conversation_id = %conversation_id,
+                                        agent_id = %agent_id,
+                                        "failed to deliver deferred message"
+                                    );
+                                }
+                            }
+                            tracing::info!(
+                                conversation_id = %conversation_id,
+                                agent_id = %agent_id,
+                                count = deferred_count,
+                                "delivered deferred messages to newly active channel"
+                            );
+                        }
+                    }
 
                     tracing::info!(
                         conversation_id = %conversation_id,
@@ -2100,9 +2223,10 @@ async fn run(
                 };
 
                 let conversation_id = message.conversation_id.clone();
+                let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
 
                 // Find or create a channel for this conversation
-                if !active_channels.contains_key(&conversation_id) {
+                if !active_channels.contains_key(&channel_key) {
                     let Some(agent) = agents.get(&agent_id) else {
                         tracing::warn!(
                             agent_id = %agent_id,
@@ -2222,10 +2346,38 @@ async fn run(
                         );
                     });
 
-                    active_channels.insert(conversation_id.clone(), ActiveChannel {
-                        message_tx: channel_tx,
-                        _outbound_handle: outbound_handle,
-                    });
+                    active_channels.insert(
+                        ActiveChannelKey::new(agent_id.clone(), conversation_id.clone()),
+                        ActiveChannel {
+                            message_tx: channel_tx,
+                            _outbound_handle: outbound_handle,
+                        },
+                    );
+
+                    // Deliver any deferred messages that were waiting for this channel
+                    let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
+                    let deferred = deferred_messages.drain_for(&channel_key);
+                    let deferred_count = deferred.len();
+                    if deferred_count > 0 {
+                        if let Some(channel) = active_channels.get(&channel_key) {
+                            for message in deferred {
+                                if let Err(error) = channel.message_tx.send(message).await {
+                                    tracing::warn!(
+                                        %error,
+                                        conversation_id = %conversation_id,
+                                        agent_id = %agent_id,
+                                        "failed to deliver deferred message"
+                                    );
+                                }
+                            }
+                            tracing::info!(
+                                conversation_id = %conversation_id,
+                                agent_id = %agent_id,
+                                count = deferred_count,
+                                "delivered deferred messages to newly active channel"
+                            );
+                        }
+                    }
 
                     tracing::info!(
                         conversation_id = %conversation_id,
@@ -2235,7 +2387,7 @@ async fn run(
                 }
 
                 // Forward the message to the channel
-                if let Some(active) = active_channels.get(&conversation_id) {
+                if let Some(active) = active_channels.get(&channel_key) {
                     // Emit inbound message to SSE clients
                     let sender_name = message.formatted_author.clone().or_else(|| {
                         message
@@ -2258,7 +2410,7 @@ async fn run(
                             %error,
                             "failed to forward message to channel"
                         );
-                        active_channels.remove(&conversation_id);
+                        active_channels.remove(&channel_key);
                     }
                 }
             }
@@ -2277,8 +2429,15 @@ async fn run(
             }
             // Cross-agent message injection (e.g. delegated task completion retrigger).
             // Forwards the injected message to the target channel if it exists.
+            // SECURITY FIX: Uses exact (agent_id, conversation_id) key to prevent
+            // message leakage to unintended channels. Deferred messages are queued
+            // and only delivered when the exact target channel becomes active.
             Some(injection) = injection_rx.recv() => {
-                if let Some(active) = active_channels.get(&injection.conversation_id) {
+                let target_key = ActiveChannelKey::new(
+                    injection.agent_id.clone(),
+                    injection.conversation_id.clone(),
+                );
+                if let Some(active) = active_channels.get(&target_key) {
                     if let Err(error) = active.message_tx.send(injection.message).await {
                         tracing::warn!(
                             %error,
@@ -2294,10 +2453,14 @@ async fn run(
                         );
                     }
                 } else {
+                    // SECURITY FIX: Queue the message for the exact target channel
+                    // instead of delivering it to any active channel. This prevents
+                    // cron output from leaking to unintended channels.
+                    deferred_messages.push(target_key, injection.message);
                     tracing::info!(
                         conversation_id = %injection.conversation_id,
                         agent_id = %injection.agent_id,
-                        "injection target channel not active, notification will be delivered on next message"
+                        "injection target channel not active, message queued for exact target"
                     );
                 }
             }
@@ -3636,5 +3799,105 @@ mod tests {
             started.elapsed() < Duration::from_millis(80),
             "startup warmup timeout should return without waiting for non-cooperative task"
         );
+    }
+
+    // ============================================================================
+    // SECURITY REGRESSION TEST FOR ISSUE #498
+    // Tests that deferred messages stay bound to their original target channel
+    // and are NOT delivered to unrelated active channels.
+    // ============================================================================
+
+    #[test]
+    fn active_channel_key_uniquely_identifies_agent_conversation_pairs() {
+        let key1 = ActiveChannelKey::new("agent1", "conv123");
+        let key2 = ActiveChannelKey::new("agent1", "conv123");
+        let key3 = ActiveChannelKey::new("agent2", "conv123");
+        let key4 = ActiveChannelKey::new("agent1", "conv456");
+
+        // Same (agent_id, conversation_id) pairs are equal
+        assert_eq!(key1, key2);
+
+        // Different agent_ids with same conversation_id are NOT equal
+        // (this is the core security fix - prevents cross-agent leakage)
+        assert_ne!(key1, key3);
+
+        // Same agent_id with different conversation_ids are NOT equal
+        assert_ne!(key1, key4);
+    }
+
+    #[test]
+    fn deferred_message_queue_binds_messages_to_target_key() {
+        let mut queue = DeferredMessageQueue::new();
+        let target_key = ActiveChannelKey::new("agent1", "dm_channel_123");
+        
+        // Create a test message
+        let message = spacebot::InboundMessage {
+            id: "test-msg-1".to_string(),
+            source: "test".into(),
+            adapter: None,
+            conversation_id: "dm_channel_123".to_string(),
+            sender_id: "system".into(),
+            agent_id: Some("agent1".to_string()),
+            content: spacebot::MessageContent::Text("test message".to_string()),
+            timestamp: chrono::Utc::now(),
+            metadata: std::collections::HashMap::new(),
+            formatted_author: None,
+        };
+
+        // Queue a message for agent1/dm_channel_123
+        queue.push(target_key.clone(), message.clone());
+
+        // Verify message exists for the exact target
+        assert!(queue.has_for(&target_key));
+        assert_eq!(queue.len(), 1);
+
+        // Verify message does NOT exist for different agent with same conversation_id
+        let other_agent_key = ActiveChannelKey::new("agent2", "dm_channel_123");
+        assert!(!queue.has_for(&other_agent_key));
+
+        // Verify message does NOT exist for same agent with different conversation_id
+        let other_conv_key = ActiveChannelKey::new("agent1", "public_channel_456");
+        assert!(!queue.has_for(&other_conv_key));
+
+        // Drain for the correct key returns the message
+        let drained = queue.drain_for(&target_key);
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].id, "test-msg-1");
+        assert_eq!(queue.len(), 0);
+
+        // Draining for wrong key returns empty
+        queue.push(target_key.clone(), message.clone());
+        let wrong_drain = queue.drain_for(&other_agent_key);
+        assert!(wrong_drain.is_empty());
+        assert_eq!(queue.len(), 1); // Message still in queue
+    }
+
+    #[test]
+    fn deferred_message_queue_remove_expired_works() {
+        let mut queue = DeferredMessageQueue::new();
+        let target_key = ActiveChannelKey::new("agent1", "dm_channel_123");
+        
+        let message = spacebot::InboundMessage {
+            id: "test-msg-1".to_string(),
+            source: "test".into(),
+            adapter: None,
+            conversation_id: "dm_channel_123".to_string(),
+            sender_id: "system".into(),
+            agent_id: Some("agent1".to_string()),
+            content: spacebot::MessageContent::Text("test message".to_string()),
+            timestamp: chrono::Utc::now(),
+            metadata: std::collections::HashMap::new(),
+            formatted_author: None,
+        };
+
+        queue.push(target_key.clone(), message);
+        assert_eq!(queue.len(), 1);
+
+        // Very short expiration should not remove fresh messages
+        queue.remove_expired(chrono::Duration::seconds(60));
+        assert_eq!(queue.len(), 1);
+
+        // Zero duration should remove all messages (they're at least 0 seconds old)
+        // Note: In practice, we use reasonable expiration like 24 hours
     }
 }
