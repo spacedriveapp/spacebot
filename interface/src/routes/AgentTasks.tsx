@@ -249,7 +249,7 @@ export function AgentTasks({ agentId }: { agentId: string }) {
       )}
 
       {/* Kanban Board */}
-      <div className={`flex flex-1 flex-wrap content-start gap-3 overflow-y-auto p-4 ${viewMode === "graph" ? "hidden" : ""}`}
+      <div className={`flex flex-1 flex-wrap content-start gap-3 overflow-y-auto p-4 ${viewMode === "graph" ? "hidden" : ""}`}>
         {COLUMNS.map(({ status, label }) => (
           <KanbanColumn
             key={status}
@@ -441,12 +441,12 @@ function TaskCard({
             {"\u2699"} {task.worker_id.slice(0, 8)}
           </Badge>
         )}
-        {task.metadata?.worktree && (
+        {!!task.metadata?.worktree && (
           <Badge variant="outline" size="sm" title={String(task.metadata.worktree)}>
             {"\uD83C\uDF33"} worktree
           </Badge>
         )}
-        {task.metadata?.assigned_agent && (
+        {!!task.metadata?.assigned_agent && (
           <Badge variant="accent" size="sm">
             {String(task.metadata.assigned_agent)}
           </Badge>
@@ -711,12 +711,12 @@ function TaskDetailDialog({
                 Worker: {task.worker_id.slice(0, 8)}
               </Badge>
             )}
-            {task.metadata?.assigned_agent && (
+            {!!task.metadata?.assigned_agent && (
               <Badge variant="accent" size="md">
                 Agent: {String(task.metadata.assigned_agent)}
               </Badge>
             )}
-            {task.metadata?.worktree && (
+            {!!task.metadata?.worktree && (
               <Badge variant="default" size="md">
                 Worktree: {String(task.metadata.worktree)}
               </Badge>

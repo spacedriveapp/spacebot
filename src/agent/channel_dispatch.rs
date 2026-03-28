@@ -687,10 +687,7 @@ pub async fn spawn_or_queue_worker(
     {
         let queue = state.worker_queue.read().await;
         if queue.iter().any(|q| {
-            let q_norm = q
-                .task
-                .strip_prefix("[opencode] ")
-                .unwrap_or(&q.task);
+            let q_norm = q.task.strip_prefix("[opencode] ").unwrap_or(&q.task);
             q_norm == normalized
         }) {
             return Err(AgentError::DuplicateWorkerTask {
@@ -706,7 +703,12 @@ pub async fn spawn_or_queue_worker(
         queued_at: request.queued_at,
     };
     state.worker_queue.write().await.push_back(request);
-    state.status_block.write().await.queued_workers.push(queued_info);
+    state
+        .status_block
+        .write()
+        .await
+        .queued_workers
+        .push(queued_info);
     Ok(None)
 }
 
@@ -729,22 +731,17 @@ async fn do_spawn(
     match request.worker_type {
         QueuedWorkerType::OpenCode => {
             let dir = request.directory.as_deref().ok_or_else(|| {
-                AgentError::Other(anyhow::anyhow!(
-                    "directory required for opencode workers"
-                ))
+                AgentError::Other(anyhow::anyhow!("directory required for opencode workers"))
             })?;
             spawn_opencode_worker_from_state(state, &request.task, dir, true).await
         }
         QueuedWorkerType::Builtin => {
-            let skills: Vec<&str> =
-                request.suggested_skills.iter().map(|s| s.as_str()).collect();
-            spawn_worker_from_state(
-                state,
-                &request.task,
-                request.interactive,
-                &skills,
-            )
-            .await
+            let skills: Vec<&str> = request
+                .suggested_skills
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            spawn_worker_from_state(state, &request.task, request.interactive, &skills).await
         }
     }
 }
@@ -778,8 +775,11 @@ pub async fn drain_worker_queue(state: &ChannelState) -> Option<(WorkerId, Strin
             spawn_opencode_worker_from_state(state, &request.task, dir, true).await
         }
         QueuedWorkerType::Builtin => {
-            let skills: Vec<&str> =
-                request.suggested_skills.iter().map(|s| s.as_str()).collect();
+            let skills: Vec<&str> = request
+                .suggested_skills
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
             spawn_worker_from_state(state, &request.task, request.interactive, &skills).await
         }
     };

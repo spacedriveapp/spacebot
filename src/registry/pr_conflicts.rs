@@ -150,8 +150,7 @@ pub async fn pr_conflict_check_loop(
 
     // Track which PRs we've already sent a conflict message for,
     // so we don't spam the channel on every check pass.
-    let mut notified: std::collections::HashSet<(String, u64)> =
-        std::collections::HashSet::new();
+    let mut notified: std::collections::HashSet<(String, u64)> = std::collections::HashSet::new();
 
     loop {
         let current_config = runtime_config.registry.load();

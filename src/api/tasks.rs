@@ -510,7 +510,9 @@ pub(super) async fn create_worktree(
             tracing::warn!(%e, "failed to find git root");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
-    let root = String::from_utf8_lossy(&repo_root.stdout).trim().to_string();
+    let root = String::from_utf8_lossy(&repo_root.stdout)
+        .trim()
+        .to_string();
     let worktree_dir = format!("{}/../.spacebot-worktrees/task-{number}", root);
 
     // Create branch from base

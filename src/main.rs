@@ -644,7 +644,11 @@ fn cmd_upgrade(
     }
 
     eprintln!();
-    eprintln!("upgrade complete: {} → {}", &check.local_head[..8], &check.remote_head[..8]);
+    eprintln!(
+        "upgrade complete: {} → {}",
+        &check.local_head[..8],
+        &check.remote_head[..8]
+    );
 
     Ok(())
 }
