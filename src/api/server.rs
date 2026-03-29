@@ -162,6 +162,11 @@ pub async fn start_http_server(
         )
         .route("/agents/tasks/{number}/approve", post(tasks::approve_task))
         .route("/agents/tasks/{number}/execute", post(tasks::execute_task))
+        .route("/agents/tasks/{number}/diff", get(tasks::task_diff))
+        .route(
+            "/agents/tasks/{number}/worktree",
+            post(tasks::create_worktree).delete(tasks::delete_worktree),
+        )
         .route(
             "/agents/projects",
             get(projects::list_projects).post(projects::create_project),
@@ -204,6 +209,7 @@ pub async fn start_http_server(
         .route("/agents/tools", get(tools::list_tools))
         // Registry: dynamic project discovery
         .route("/registry/repos", get(registry::list_registry_repos))
+        .route("/registry/issues", get(registry::list_registry_issues))
         .route("/registry/repos/detail", get(registry::get_registry_repo))
         .route(
             "/registry/repos/overrides",

@@ -196,3 +196,56 @@
 	--color-menu-selected: 0, 0%, 18%;
 	--color-menu-shade: 0, 0%, 0%;
 }
+
+.ember-theme {
+	--dark-hue: 8;
+	--color-black: 0, 0%, 0%;
+	--color-white: 0, 0%, 100%;
+	// dark red primary, warm orange secondary
+	--color-accent: 4, 72%, 40%;
+	--color-accent-faint: 14, 75%, 50%;
+	--color-accent-deep: 0, 78%, 30%;
+	// warm-tinted text
+	--color-ink: 15, 12%, 92%;
+	--color-ink-dull: 10, 8%, 62%;
+	--color-ink-faint: 8, 5%, 44%;
+	// sidebar — deep warm black
+	--color-sidebar: 8, 15%, 3%;
+	--color-sidebar-box: 8, 12%, 7%;
+	--color-sidebar-line: 8, 10%, 14%;
+	--color-sidebar-ink: 15, 12%, 92%;
+	--color-sidebar-ink-dull: 10, 8%, 62%;
+	--color-sidebar-ink-faint: 8, 5%, 44%;
+	--color-sidebar-divider: 8, 12%, 6%;
+	--color-sidebar-button: 8, 12%, 11%;
+	--color-sidebar-selected: 4, 18%, 16%;
+	--color-sidebar-shade: 8, 15%, 10%;
+	// main — warm dark surfaces
+	--color-app: 8, 12%, 5%;
+	--color-app-box: 8, 10%, 9%;
+	--color-app-dark-box: 8, 12%, 7%;
+	--color-app-darker-box: 8, 14%, 4%;
+	--color-app-light-box: 8, 10%, 14%;
+	--color-app-overlay: 8, 12%, 8%;
+	--color-app-input: 8, 10%, 11%;
+	--color-app-focus: 8, 14%, 4%;
+	--color-app-line: 8, 10%, 15%;
+	--color-app-divider: 8, 15%, 3%;
+	--color-app-button: 4, 14%, 13%;
+	--color-app-hover: 4, 12%, 17%;
+	--color-app-selected: 4, 16%, 19%;
+	--color-app-selected-item: 4, 12%, 10%;
+	--color-app-active: 4, 18%, 22%;
+	--color-app-shade: 8, 15%, 0%;
+	--color-app-frame: 8, 10%, 16%;
+	--color-app-slider: 8, 10%, 11%;
+	--color-app-explorer-scrollbar: 4, 14%, 20%;
+	// menu
+	--color-menu: 8, 14%, 4%;
+	--color-menu-line: 8, 10%, 9%;
+	--color-menu-ink: 15, 12%, 92%;
+	--color-menu-faint: 10, 5%, 68%;
+	--color-menu-hover: 4, 14%, 18%;
+	--color-menu-selected: 4, 12%, 20%;
+	--color-menu-shade: 8, 10%, 0%;
+}

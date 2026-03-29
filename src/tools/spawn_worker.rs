@@ -234,12 +234,10 @@ impl Tool for SpawnWorkerTool {
             queued_at: chrono::Utc::now(),
         };
 
-        let spawn_result = crate::agent::channel_dispatch::spawn_or_queue_worker(
-            &self.state,
-            request,
-        )
-        .await
-        .map_err(|e| SpawnWorkerError(format!("{e}")))?;
+        let spawn_result =
+            crate::agent::channel_dispatch::spawn_or_queue_worker(&self.state, request)
+                .await
+                .map_err(|e| SpawnWorkerError(format!("{e}")))?;
 
         match spawn_result {
             Some(worker_id) => {

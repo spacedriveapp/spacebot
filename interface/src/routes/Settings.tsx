@@ -861,11 +861,12 @@ function AppearanceSection() {
 }
 
 function ThemePreview({ themeId }: { themeId: ThemeId }) {
-	const colors = {
+	const colors: Record<ThemeId, { bg: string; sidebar: string; accent: string }> = {
 		default: { bg: "#0d0d0f", sidebar: "#0a0a0b", accent: "#a855f7" },
 		vanilla: { bg: "#ffffff", sidebar: "#f5f5f6", accent: "#3b82f6" },
 		midnight: { bg: "#14162b", sidebar: "#0c0e1a", accent: "#3b82f6" },
 		noir: { bg: "#080808", sidebar: "#000000", accent: "#3b82f6" },
+		ember: { bg: "#140e0c", sidebar: "#0d0806", accent: "#b52a1a" },
 	};
 	const c = colors[themeId];
 

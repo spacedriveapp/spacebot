@@ -31,15 +31,16 @@ pub fn resolve_source_dir(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
         return validate_source_dir(&p);
     }
 
-    let home = dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
+    let home =
+        dirs::home_dir().ok_or_else(|| anyhow::anyhow!("cannot determine home directory"))?;
     let default = home.join(".spacebot-src");
     validate_source_dir(&default)
 }
 
 fn validate_source_dir(dir: &Path) -> anyhow::Result<PathBuf> {
-    let dir = dir.canonicalize().map_err(|e| {
-        anyhow::anyhow!("source directory '{}' not found: {e}", dir.display())
-    })?;
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| anyhow::anyhow!("source directory '{}' not found: {e}", dir.display()))?;
 
     if !dir.join("Cargo.toml").exists() {
         anyhow::bail!(
@@ -48,10 +49,7 @@ fn validate_source_dir(dir: &Path) -> anyhow::Result<PathBuf> {
         );
     }
     if !dir.join(".git").exists() {
-        anyhow::bail!(
-            "'{}' is not a git repository",
-            dir.display()
-        );
+        anyhow::bail!("'{}' is not a git repository", dir.display());
     }
 
     Ok(dir)
@@ -128,10 +126,7 @@ pub fn pull(source_dir: &Path) -> anyhow::Result<String> {
 }
 
 /// Build the release binary, streaming cargo output to the callback.
-pub fn build_release(
-    source_dir: &Path,
-    on_line: impl Fn(&str),
-) -> anyhow::Result<PathBuf> {
+pub fn build_release(source_dir: &Path, on_line: impl Fn(&str)) -> anyhow::Result<PathBuf> {
     let mut child = Command::new("cargo")
         .args(["build", "--release"])
         .current_dir(source_dir)
@@ -169,12 +164,8 @@ pub fn install_binary(built: &Path, install_path: &Path) -> anyhow::Result<()> {
 
     let tmp_path = parent.join(".spacebot.upgrade.tmp");
 
-    std::fs::copy(built, &tmp_path).map_err(|e| {
-        anyhow::anyhow!(
-            "failed to copy binary to {}: {e}",
-            tmp_path.display()
-        )
-    })?;
+    std::fs::copy(built, &tmp_path)
+        .map_err(|e| anyhow::anyhow!("failed to copy binary to {}: {e}", tmp_path.display()))?;
 
     // Preserve executable permissions
     #[cfg(unix)]

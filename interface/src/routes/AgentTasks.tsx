@@ -18,6 +18,9 @@ import {
   DialogFooter,
 } from "@/ui/Dialog";
 import { Markdown } from "@/components/Markdown";
+import { TaskDependencyGraph } from "@/components/TaskDependencyGraph";
+import { DiffViewer } from "@/components/DiffViewer";
+import { useSpacebotConfig } from "@/hooks/useSpacebotConfig";
 import { formatTimeAgo } from "@/lib/format";
 import { AnimatePresence, motion } from "framer-motion";
 
@@ -57,9 +60,45 @@ const PRIORITY_COLORS: Record<
   low: "outline",
 };
 
+/** Extract dependency task numbers from metadata */
+function getDependencies(task: TaskItem): number[] {
+  const deps = task.metadata?.depends_on;
+  if (Array.isArray(deps)) return deps.filter((n): n is number => typeof n === "number");
+  return [];
+}
+
+/** Check if a task is blocked (has incomplete dependencies) */
+function isBlocked(task: TaskItem, allTasks: TaskItem[]): boolean {
+  const deps = getDependencies(task);
+  if (deps.length === 0) return false;
+  return deps.some((depNum) => {
+    const depTask = allTasks.find((t) => t.task_number === depNum);
+    return depTask && depTask.status !== "done";
+  });
+}
+
+// -- GitHub Issue type (from registry API) --
+interface GitHubIssue {
+  number: number;
+  title: string;
+  state: string;
+  url: string;
+  repository: string;
+  labels: string[];
+  assignees: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssuesResponse {
+  issues: GitHubIssue[];
+  repos: string[];
+}
+
 export function AgentTasks({ agentId }: { agentId: string }) {
   const queryClient = useQueryClient();
   const { taskEventVersion } = useLiveContext();
+  const config = useSpacebotConfig(agentId);
 
   // Invalidate on SSE task events
   const prevVersion = useRef(taskEventVersion);
@@ -76,9 +115,44 @@ export function AgentTasks({ agentId }: { agentId: string }) {
     refetchInterval: 15_000,
   });
 
+  // Fetch GitHub issues from registry
+  const { data: issuesData } = useQuery({
+    queryKey: ["registry-issues", agentId],
+    queryFn: async () => {
+      const resp = await fetch(
+        `/api/registry/issues?agent_id=${agentId}&limit=100`
+      );
+      if (!resp.ok) return { issues: [], repos: [] } as IssuesResponse;
+      return resp.json() as Promise<IssuesResponse>;
+    },
+    refetchInterval: 60_000,
+    staleTime: 30_000,
+  });
+
+  const githubIssues = issuesData?.issues ?? [];
+  const availableRepos = issuesData?.repos ?? [];
+
   const tasks = data?.tasks ?? [];
 
-  // Group tasks by status
+  // Project filter
+  const [projectFilter, setProjectFilter] = useState<string>("all");
+  // Show/hide GitHub issues
+  const [showIssues, setShowIssues] = useState(true);
+
+  // Filter GitHub issues by project
+  const filteredIssues = projectFilter === "all"
+    ? githubIssues
+    : githubIssues.filter((i) => i.repository === projectFilter);
+
+  // Filter tasks by project (if a project filter is active)
+  const filteredTasks = projectFilter === "all"
+    ? tasks
+    : tasks.filter((t) => {
+        const repo = t.metadata?.github_repository as string | undefined;
+        return repo === projectFilter;
+      });
+
+  // Group filtered tasks by status
   const tasksByStatus: Record<TaskStatus, TaskItem[]> = {
     pending_approval: [],
     backlog: [],
@@ -86,10 +160,12 @@ export function AgentTasks({ agentId }: { agentId: string }) {
     in_progress: [],
     done: [],
   };
-  for (const task of tasks) {
+  for (const task of filteredTasks) {
     tasksByStatus[task.status]?.push(task);
   }
 
+  // View mode: "board" (kanban) or "graph" (dependency graph)
+  const [viewMode, setViewMode] = useState<"board" | "graph">("board");
   // Create task dialog
   const [createOpen, setCreateOpen] = useState(false);
   // Detail dialog — store task number and derive from live list to stay current.
@@ -147,6 +223,31 @@ export function AgentTasks({ agentId }: { agentId: string }) {
     },
   });
 
+  const importIssueMutation = useMutation({
+    mutationFn: (issue: GitHubIssue) =>
+      api.createTask(agentId, {
+        title: `[${issue.repository.split("/").pop()}#${issue.number}] ${issue.title}`,
+        description: `GitHub: ${issue.url}`,
+        status: "backlog",
+        priority: "medium",
+        metadata: {
+          github_issue_url: issue.url,
+          github_issue_number: issue.number,
+          github_repository: issue.repository,
+        },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["tasks", agentId] });
+    },
+  });
+
+  // Track which issues are already imported as tasks
+  const importedIssueUrls = new Set(
+    tasks
+      .map((t) => t.metadata?.github_issue_url as string | undefined)
+      .filter(Boolean)
+  );
+
   if (isLoading) {
     return (
       <div className="flex h-full items-center justify-center text-ink-faint">
@@ -165,28 +266,147 @@ export function AgentTasks({ agentId }: { agentId: string }) {
           </span>
           {tasksByStatus.pending_approval.length > 0 && (
             <Badge variant="amber" size="sm">
-              {tasksByStatus.pending_approval.length} pending approval
+              {tasksByStatus.pending_approval.length} pending
             </Badge>
           )}
           {tasksByStatus.in_progress.length > 0 && (
             <Badge variant="violet" size="sm">
-              {tasksByStatus.in_progress.length} in progress
+              {tasksByStatus.in_progress.length} active
+            </Badge>
+          )}
+          {(() => {
+            const blockedCount = tasks.filter((t) => isBlocked(t, tasks)).length;
+            return blockedCount > 0 ? (
+              <Badge variant="red" size="sm">
+                {blockedCount} blocked
+              </Badge>
+            ) : null;
+          })()}
+          {tasksByStatus.done.length > 0 && (
+            <Badge variant="green" size="sm">
+              {tasksByStatus.done.length} done
             </Badge>
           )}
         </div>
-        <Button size="sm" onClick={() => setCreateOpen(true)}>
-          Create Task
-        </Button>
+        <div className="flex items-center gap-2">
+          {/* View Toggle */}
+          <div className="flex rounded-md border border-app-line">
+            <button
+              className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                viewMode === "board"
+                  ? "bg-app-selected text-ink"
+                  : "text-ink-faint hover:text-ink"
+              }`}
+              onClick={() => setViewMode("board")}
+            >
+              Board
+            </button>
+            <button
+              className={`px-2.5 py-1 text-xs font-medium transition-colors ${
+                viewMode === "graph"
+                  ? "bg-app-selected text-ink"
+                  : "text-ink-faint hover:text-ink"
+              }`}
+              onClick={() => setViewMode("graph")}
+            >
+              Graph
+            </button>
+          </div>
+          {/* Project Filter */}
+          {availableRepos.length > 0 && (
+            <select
+              className="rounded-md border border-app-line bg-app-darkBox px-2 py-1 text-xs text-ink focus:border-accent focus:outline-none"
+              value={projectFilter}
+              onChange={(e) => setProjectFilter(e.target.value)}
+            >
+              <option value="all">All Projects</option>
+              {availableRepos.map((repo) => (
+                <option key={repo} value={repo}>
+                  {repo.split("/").pop()}
+                </option>
+              ))}
+            </select>
+          )}
+          {/* Issues Toggle */}
+          <button
+            className={`rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+              showIssues
+                ? "border-accent/50 bg-accent/10 text-accent"
+                : "border-app-line text-ink-faint hover:text-ink"
+            }`}
+            onClick={() => setShowIssues(!showIssues)}
+            title="Show/hide GitHub issues"
+          >
+            Issues {showIssues && filteredIssues.length > 0 ? `(${filteredIssues.length})` : ""}
+          </button>
+          <Button size="sm" onClick={() => setCreateOpen(true)}>
+            Create Task
+          </Button>
+        </div>
       </div>
 
+      {/* Config Status Bar */}
+      {config.isReady && (
+        <div className="flex items-center gap-2 border-b border-app-line/50 bg-app-darkBox/20 px-4 py-1.5">
+          {/* Worker Model */}
+          <span className="rounded bg-app-line/30 px-1.5 py-0.5 text-tiny text-ink-faint" title="Worker model">
+            {config.workerModel.split("/").pop() ?? "no model"}
+          </span>
+          {/* Concurrency */}
+          <span
+            className={`rounded px-1.5 py-0.5 text-tiny ${
+              tasksByStatus.in_progress.length >= config.maxConcurrentWorkers
+                ? "bg-amber-500/10 text-amber-400"
+                : "bg-app-line/30 text-ink-faint"
+            }`}
+            title="Active / max concurrent workers"
+          >
+            {tasksByStatus.in_progress.length}/{config.maxConcurrentWorkers} workers
+          </span>
+          {/* Worktrees */}
+          <span
+            className={`rounded px-1.5 py-0.5 text-tiny ${
+              config.useWorktrees
+                ? "bg-emerald-500/10 text-emerald-400"
+                : "bg-app-line/30 text-ink-faint"
+            }`}
+          >
+            Worktrees {config.useWorktrees ? "ON" : "OFF"}
+          </span>
+          {/* Platforms */}
+          {config.enabledPlatforms.map((p) => (
+            <span key={p} className="rounded bg-app-line/30 px-1.5 py-0.5 text-tiny text-ink-faint capitalize">
+              {p}
+            </span>
+          ))}
+          {/* Auth */}
+          {config.isAnthropic && (
+            <span className="rounded bg-accent/10 px-1.5 py-0.5 text-tiny text-accent">
+              Claude Max
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Dependency Graph View */}
+      {viewMode === "graph" && (
+        <div className="flex-1 overflow-hidden">
+          <TaskDependencyGraph
+            tasks={tasks}
+            onSelectTask={(num) => setSelectedTaskNumber(num)}
+          />
+        </div>
+      )}
+
       {/* Kanban Board */}
-      <div className="flex flex-1 flex-wrap content-start gap-3 overflow-y-auto p-4">
+      <div className={`flex flex-1 flex-wrap content-start gap-3 overflow-y-auto p-4 ${viewMode === "graph" ? "hidden" : ""}`}>
         {COLUMNS.map(({ status, label }) => (
           <KanbanColumn
             key={status}
             status={status}
             label={label}
             tasks={tasksByStatus[status]}
+            allTasks={tasks}
             onSelect={(task) => setSelectedTaskNumber(task.task_number)}
             onApprove={(task) => approveMutation.mutate(task.task_number)}
             onExecute={(task) => executeMutation.mutate(task.task_number)}
@@ -198,6 +418,77 @@ export function AgentTasks({ agentId }: { agentId: string }) {
             }
           />
         ))}
+
+        {/* GitHub Issues Column */}
+        {showIssues && filteredIssues.length > 0 && (
+          <div className="flex min-h-0 min-w-[14rem] flex-1 basis-[14rem] flex-col rounded-lg border border-accent/20 bg-accent/5">
+            <div className="flex items-center gap-2 border-b border-accent/10 px-3 py-2">
+              <Badge variant="accent" size="sm">
+                GitHub Issues
+              </Badge>
+              <span className="text-tiny text-ink-faint">{filteredIssues.length}</span>
+            </div>
+            <div className="flex-1 space-y-2 overflow-y-auto p-2">
+              {filteredIssues.map((issue) => {
+                const isImported = importedIssueUrls.has(issue.url);
+                return (
+                  <div
+                    key={`${issue.repository}-${issue.number}`}
+                    className="rounded-md border border-app-line/30 bg-app p-3 transition-colors hover:border-accent/50"
+                  >
+                    <a
+                      href={issue.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="block"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <span className="text-sm font-medium text-ink leading-tight">
+                          #{issue.number} {issue.title}
+                        </span>
+                      </div>
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1">
+                        <span className="rounded bg-accent/10 px-1 py-0.5 text-tiny text-accent">
+                          {issue.repository.split("/").pop()}
+                        </span>
+                        {issue.labels.slice(0, 3).map((label) => (
+                          <span
+                            key={label}
+                            className="rounded bg-app-line/50 px-1 py-0.5 text-tiny text-ink-faint"
+                          >
+                            {label}
+                          </span>
+                        ))}
+                      </div>
+                      {issue.assignees.length > 0 && (
+                        <div className="mt-1 text-tiny text-ink-faint">
+                          {issue.assignees.join(", ")}
+                        </div>
+                      )}
+                    </a>
+                    <div className="mt-1.5 flex items-center justify-between">
+                      <span className="text-tiny text-ink-faint">
+                        {formatTimeAgo(issue.updated_at)}
+                      </span>
+                      {isImported ? (
+                        <span className="rounded bg-emerald-500/10 px-1.5 py-0.5 text-tiny text-emerald-400">
+                          Imported
+                        </span>
+                      ) : (
+                        <button
+                          className="rounded bg-accent/10 px-1.5 py-0.5 text-tiny text-accent hover:bg-accent/20"
+                          onClick={() => importIssueMutation.mutate(issue)}
+                        >
+                          Import
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Create Dialog */}
@@ -212,6 +503,8 @@ export function AgentTasks({ agentId }: { agentId: string }) {
       {selectedTask && (
         <TaskDetailDialog
           task={selectedTask}
+          allTasks={tasks}
+          agentId={agentId}
           onClose={() => setSelectedTaskNumber(null)}
           onApprove={() => approveMutation.mutate(selectedTask.task_number)}
           onExecute={() => executeMutation.mutate(selectedTask.task_number)}
@@ -234,6 +527,7 @@ function KanbanColumn({
   status,
   label,
   tasks,
+  allTasks,
   onSelect,
   onApprove,
   onExecute,
@@ -242,6 +536,7 @@ function KanbanColumn({
   status: TaskStatus;
   label: string;
   tasks: TaskItem[];
+  allTasks: TaskItem[];
   onSelect: (task: TaskItem) => void;
   onApprove: (task: TaskItem) => void;
   onExecute: (task: TaskItem) => void;
@@ -264,6 +559,7 @@ function KanbanColumn({
             <TaskCard
               key={task.id}
               task={task}
+              allTasks={allTasks}
               onSelect={() => onSelect(task)}
               onApprove={() => onApprove(task)}
               onExecute={() => onExecute(task)}
@@ -285,12 +581,14 @@ function KanbanColumn({
 
 function TaskCard({
   task,
+  allTasks,
   onSelect,
   onApprove,
   onExecute,
   onStatusChange,
 }: {
   task: TaskItem;
+  allTasks: TaskItem[];
   onSelect: () => void;
   onApprove: () => void;
   onExecute: () => void;
@@ -298,6 +596,8 @@ function TaskCard({
 }) {
   const subtasksDone = task.subtasks.filter((s) => s.completed).length;
   const subtasksTotal = task.subtasks.length;
+  const deps = getDependencies(task);
+  const blocked = isBlocked(task, allTasks);
 
   return (
     <motion.div
@@ -306,7 +606,11 @@ function TaskCard({
       animate={{ opacity: 1, scale: 1 }}
       exit={{ opacity: 0, scale: 0.95 }}
       transition={{ duration: 0.15 }}
-      className="cursor-pointer rounded-md border border-app-line/30 bg-app p-3 transition-colors hover:border-app-line"
+      className={`cursor-pointer rounded-md border p-3 transition-colors hover:border-app-line ${
+        blocked
+          ? "border-red-500/30 bg-red-950/10"
+          : "border-app-line/30 bg-app"
+      }`}
       onClick={onSelect}
     >
       {/* Title row */}
@@ -314,7 +618,34 @@ function TaskCard({
         <span className="text-sm font-medium text-ink leading-tight">
           #{task.task_number} {task.title}
         </span>
+        {blocked && (
+          <span className="shrink-0 text-tiny text-red-400" title="Blocked by dependencies">
+            Blocked
+          </span>
+        )}
       </div>
+
+      {/* Dependencies */}
+      {deps.length > 0 && (
+        <div className="mt-1.5 flex flex-wrap gap-1">
+          {deps.map((depNum) => {
+            const depTask = allTasks.find((t) => t.task_number === depNum);
+            const depDone = depTask?.status === "done";
+            return (
+              <span
+                key={depNum}
+                className={`inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-tiny ${
+                  depDone
+                    ? "bg-emerald-500/10 text-emerald-400"
+                    : "bg-amber-500/10 text-amber-400"
+                }`}
+              >
+                {depDone ? "\u2713" : "\u23F3"} #{depNum}
+              </span>
+            );
+          })}
+        </div>
+      )}
 
       {/* Meta row */}
       <div className="mt-2 flex flex-wrap items-center gap-1.5">
@@ -327,8 +658,18 @@ function TaskCard({
           </span>
         )}
         {task.worker_id && (
-          <Badge variant="violet" size="sm">
-            Worker
+          <Badge variant="violet" size="sm" title={task.worker_id}>
+            {"\u2699"} {task.worker_id.slice(0, 8)}
+          </Badge>
+        )}
+        {!!task.metadata?.worktree && (
+          <Badge variant="outline" size="sm" title={String(task.metadata.worktree)}>
+            {"\uD83C\uDF33"} worktree
+          </Badge>
+        )}
+        {!!task.metadata?.assigned_agent && (
+          <Badge variant="accent" size="sm">
+            {String(task.metadata.assigned_agent)}
           </Badge>
         )}
       </div>
@@ -396,20 +737,32 @@ function CreateTaskDialog({
   const [description, setDescription] = useState("");
   const [priority, setPriority] = useState<TaskPriority>("medium");
   const [status, setStatus] = useState<TaskStatus>("backlog");
+  const [dependsOn, setDependsOn] = useState("");
+  const [assignedAgent, setAssignedAgent] = useState("");
 
   const handleSubmit = useCallback(() => {
     if (!title.trim()) return;
+    const deps = dependsOn
+      .split(",")
+      .map((s) => parseInt(s.trim().replace("#", ""), 10))
+      .filter((n) => !isNaN(n));
+    const metadata: Record<string, unknown> = {};
+    if (deps.length > 0) metadata.depends_on = deps;
+    if (assignedAgent.trim()) metadata.assigned_agent = assignedAgent.trim();
     onCreate({
       title: title.trim(),
       description: description.trim() || undefined,
       priority,
       status,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
     });
     setTitle("");
     setDescription("");
     setPriority("medium");
     setStatus("backlog");
-  }, [title, description, priority, status, onCreate]);
+    setDependsOn("");
+    setAssignedAgent("");
+  }, [title, description, priority, status, dependsOn, assignedAgent, onCreate]);
 
   return (
     <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
@@ -440,6 +793,30 @@ function CreateTaskDialog({
               onChange={(e) => setDescription(e.target.value)}
               rows={3}
             />
+          </div>
+          <div className="flex gap-4">
+            <div className="flex-1">
+              <label className="mb-1 block text-xs text-ink-dull">
+                Depends On
+              </label>
+              <input
+                className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                placeholder="#1, #3"
+                value={dependsOn}
+                onChange={(e) => setDependsOn(e.target.value)}
+              />
+            </div>
+            <div className="flex-1">
+              <label className="mb-1 block text-xs text-ink-dull">
+                Assign Agent
+              </label>
+              <input
+                className="w-full rounded-md border border-app-line bg-app-darkBox px-3 py-2 text-sm text-ink placeholder:text-ink-faint focus:border-accent focus:outline-none"
+                placeholder="e.g. claude-code, codex"
+                value={assignedAgent}
+                onChange={(e) => setAssignedAgent(e.target.value)}
+              />
+            </div>
           </div>
           <div className="flex gap-4">
             <div className="flex-1">
@@ -494,6 +871,8 @@ function CreateTaskDialog({
 
 function TaskDetailDialog({
   task,
+  allTasks,
+  agentId,
   onClose,
   onApprove,
   onExecute,
@@ -501,12 +880,36 @@ function TaskDetailDialog({
   onStatusChange,
 }: {
   task: TaskItem;
+  allTasks: TaskItem[];
+  agentId: string;
   onClose: () => void;
   onApprove: () => void;
   onExecute: () => void;
   onDelete: () => void;
   onStatusChange: (status: TaskStatus) => void;
 }) {
+  const deps = getDependencies(task);
+  const blocked = isBlocked(task, allTasks);
+
+  // Fetch diff if task has worktree or branch metadata
+  const hasDiffSource = task.metadata?.worktree || task.metadata?.branch;
+  const { data: diffData } = useQuery({
+    queryKey: ["task-diff", agentId, task.task_number],
+    queryFn: async () => {
+      const resp = await fetch(
+        `/api/agents/tasks/${task.task_number}/diff?agent_id=${agentId}`
+      );
+      if (!resp.ok) return { diff: "", branch: null, worktree: null };
+      return resp.json() as Promise<{
+        diff: string;
+        branch: string | null;
+        worktree: string | null;
+      }>;
+    },
+    enabled: !!hasDiffSource,
+    staleTime: 10_000,
+  });
+
   return (
     <Dialog open={true} onOpenChange={(v) => !v && onClose()}>
       <DialogContent className="!flex max-h-[85vh] max-w-lg !flex-col overflow-hidden">
@@ -529,7 +932,47 @@ function TaskDetailDialog({
                 Worker: {task.worker_id.slice(0, 8)}
               </Badge>
             )}
+            {!!task.metadata?.assigned_agent && (
+              <Badge variant="accent" size="md">
+                Agent: {String(task.metadata.assigned_agent)}
+              </Badge>
+            )}
+            {!!task.metadata?.worktree && (
+              <Badge variant="default" size="md">
+                Worktree: {String(task.metadata.worktree)}
+              </Badge>
+            )}
           </div>
+
+          {/* Dependencies */}
+          {deps.length > 0 && (
+            <div>
+              <label className="mb-1 block text-xs text-ink-dull">
+                Dependencies {blocked && <span className="text-red-400">(blocked)</span>}
+              </label>
+              <div className="flex flex-wrap gap-1.5">
+                {deps.map((depNum) => {
+                  const depTask = allTasks.find((t) => t.task_number === depNum);
+                  const depDone = depTask?.status === "done";
+                  return (
+                    <span
+                      key={depNum}
+                      className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-xs ${
+                        depDone
+                          ? "bg-emerald-500/10 text-emerald-400"
+                          : "bg-amber-500/10 text-amber-400"
+                      }`}
+                    >
+                      {depDone ? "\u2713" : "\u23F3"} #{depNum}
+                      {depTask && (
+                        <span className="text-ink-faint"> {depTask.title.slice(0, 30)}{depTask.title.length > 30 ? "..." : ""}</span>
+                      )}
+                    </span>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Description */}
           {task.description && (
@@ -574,6 +1017,40 @@ function TaskDetailDialog({
                   </li>
                 ))}
               </ul>
+            </div>
+          )}
+
+          {/* Worktree Actions */}
+          {!task.metadata?.worktree && task.status !== "done" && (
+            <button
+              className="w-full rounded-md border border-dashed border-app-line px-3 py-2 text-xs text-ink-faint hover:border-accent hover:text-accent transition-colors"
+              onClick={async () => {
+                const resp = await fetch(
+                  `/api/agents/tasks/${task.task_number}/worktree`,
+                  {
+                    method: "POST",
+                    headers: { "Content-Type": "application/json" },
+                    body: JSON.stringify({ agent_id: agentId }),
+                  }
+                );
+                if (resp.ok) {
+                  // Invalidate to refresh task with new metadata
+                  window.location.reload();
+                }
+              }}
+            >
+              Create Worktree for Task #{task.task_number}
+            </button>
+          )}
+
+          {/* Inline Diff Review */}
+          {diffData?.diff && (
+            <div>
+              <label className="mb-1 block text-xs text-ink-dull">
+                Changes {diffData.branch && `(branch: ${diffData.branch})`}
+                {diffData.worktree && `(worktree)`}
+              </label>
+              <DiffViewer diff={diffData.diff} maxHeight="300px" />
             </div>
           )}
 

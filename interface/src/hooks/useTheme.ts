@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 
-export type ThemeId = "default" | "vanilla" | "midnight" | "noir";
+export type ThemeId = "default" | "vanilla" | "midnight" | "noir" | "ember";
 
 export interface ThemeOption {
 	id: ThemeId;
@@ -33,6 +33,12 @@ export const THEMES: ThemeOption[] = [
 		name: "Noir",
 		description: "Pure black and white theme",
 		className: "noir-theme",
+	},
+	{
+		id: "ember",
+		name: "Ember",
+		description: "Dark red and orange accent theme",
+		className: "ember-theme",
 	},
 ];
 

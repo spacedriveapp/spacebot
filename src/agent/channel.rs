@@ -106,7 +106,8 @@ pub struct ChannelState {
     pub reserved_tasks: Arc<RwLock<HashSet<String>>>,
     /// Spawn requests queued because the worker limit was reached. Drained
     /// automatically when a worker completes and a slot opens.
-    pub worker_queue: Arc<RwLock<std::collections::VecDeque<crate::agent::channel_dispatch::QueuedWorkerSpawn>>>,
+    pub worker_queue:
+        Arc<RwLock<std::collections::VecDeque<crate::agent::channel_dispatch::QueuedWorkerSpawn>>>,
     pub status_block: Arc<RwLock<StatusBlock>>,
     pub deps: AgentDeps,
     pub conversation_logger: ConversationLogger,

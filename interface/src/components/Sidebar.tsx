@@ -21,7 +21,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { api } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { DashboardSquare01Icon, Settings01Icon } from "@hugeicons/core-free-icons";
+import { DashboardSquare01Icon, Settings01Icon, Dollar02Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
@@ -112,6 +112,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	const matchRoute = useMatchRoute();
 	const isOverview = matchRoute({ to: "/" });
 	const isSettings = matchRoute({ to: "/settings" });
+	const isPricing = matchRoute({ to: "/pricing" });
 
 	const sensors = useSensors(
 		useSensor(PointerSensor, {
@@ -155,6 +156,15 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 					title="Settings"
 				>
 					<HugeiconsIcon icon={Settings01Icon} className="h-4 w-4" />
+				</Link>
+				<Link
+					to="/pricing"
+					className={`flex h-8 w-8 items-center justify-center rounded-md ${
+						isPricing ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					title="Pricing"
+				>
+					<HugeiconsIcon icon={Dollar02Icon} className="h-4 w-4" />
 				</Link>
 				<div className="my-1 h-px w-5 bg-sidebar-line" />
 				<DndContext

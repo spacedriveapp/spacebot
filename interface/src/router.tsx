@@ -24,6 +24,8 @@ import {AgentProjects} from "@/routes/AgentProjects";
 import {AgentTasks} from "@/routes/AgentTasks";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
+import {Pricing} from "@/routes/Pricing";
+import {Welcome} from "@/routes/Welcome";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
 
@@ -107,6 +109,22 @@ const settingsRoute = createRoute({
 	},
 });
 
+const welcomeRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/welcome",
+	component: function WelcomePage() {
+		return <Welcome />;
+	},
+});
+
+const pricingRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/pricing",
+	component: function PricingPage() {
+		return <Pricing />;
+	},
+});
+
 const logsRoute = createRoute({
 	getParentRoute: () => rootRoute,
 	path: "/logs",
@@ -129,6 +147,22 @@ const agentRoute = createRoute({
 	path: "/agents/$agentId",
 	component: function AgentPage() {
 		const {agentId} = agentRoute.useParams();
+		return (
+			<div className="flex h-full flex-col">
+				<AgentTopBar agentId={agentId} />
+				<div className="flex-1 overflow-hidden">
+					<AgentTasks agentId={agentId} />
+				</div>
+			</div>
+		);
+	},
+});
+
+const agentOverviewRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/agents/$agentId/overview",
+	component: function AgentOverviewPage() {
+		const {agentId} = agentOverviewRoute.useParams();
 		const {liveStates} = useLiveContext();
 		return (
 			<div className="flex h-full flex-col">
@@ -353,8 +387,11 @@ const channelRoute = createRoute({
 const routeTree = rootRoute.addChildren([
 	indexRoute,
 	settingsRoute,
+	welcomeRoute,
+	pricingRoute,
 	logsRoute,
 	agentRoute,
+	agentOverviewRoute,
 	agentChatRoute,
 	agentChannelsRoute,
 	agentMemoriesRoute,

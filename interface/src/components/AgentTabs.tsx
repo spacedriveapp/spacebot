@@ -2,14 +2,13 @@ import { Link, useMatchRoute } from "@tanstack/react-router";
 import { motion } from "framer-motion";
 
 const tabs = [
-	{ label: "Overview", to: "/agents/$agentId" as const, exact: true },
+	{ label: "Board", to: "/agents/$agentId" as const, exact: true },
+	{ label: "Overview", to: "/agents/$agentId/overview" as const, exact: false },
 	{ label: "Chat", to: "/agents/$agentId/chat" as const, exact: false },
 	{ label: "Channels", to: "/agents/$agentId/channels" as const, exact: false },
 	{ label: "Memories", to: "/agents/$agentId/memories" as const, exact: false },
-	{ label: "Ingest", to: "/agents/$agentId/ingest" as const, exact: false },
 	{ label: "Workers", to: "/agents/$agentId/workers" as const, exact: false },
 	{ label: "Projects", to: "/agents/$agentId/projects" as const, exact: false },
-	{ label: "Tasks", to: "/agents/$agentId/tasks" as const, exact: false },
 	{ label: "Cortex", to: "/agents/$agentId/cortex" as const, exact: false },
 	{ label: "Skills", to: "/agents/$agentId/skills" as const, exact: false },
 	{ label: "Cron", to: "/agents/$agentId/cron" as const, exact: false },
