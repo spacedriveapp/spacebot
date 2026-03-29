@@ -2937,6 +2937,13 @@ fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
             .strip_prefix("zai/")
             .unwrap_or(model_name)
             .to_string()
+    } else if provider == "litellm" {
+        // LiteLLM proxy expects plain model ids without provider prefix.
+        // Spacebot uses "litellm/model-name" but LiteLLM expects "model-name".
+        model_name
+            .strip_prefix("litellm/")
+            .unwrap_or(model_name)
+            .to_string()
     } else {
         model_name.to_string()
     }
