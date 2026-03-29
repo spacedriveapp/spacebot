@@ -207,6 +207,14 @@ fn build_test_llm_config(provider: &str, credential: &str) -> crate::config::Llm
     let mut providers = HashMap::new();
     if let Some(provider_config) = crate::config::default_provider_config(provider, credential) {
         providers.insert(provider.to_string(), provider_config);
+    } else if provider == "github-copilot" {
+        // GitHub Copilot uses token exchange, so default_provider_config returns None.
+        // For testing, add a provider entry with the PAT as the api_key —
+        // LlmManager::get_copilot_token() will exchange it for a real Copilot token.
+        providers.insert(
+            provider.to_string(),
+            crate::config::copilot_default_provider_config(credential),
+        );
     }
 
     crate::config::LlmConfig {
@@ -1591,6 +1599,66 @@ pub(super) async fn delete_provider(
         StatusCode::INTERNAL_SERVER_ERROR
     })?;
 
+    let doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
+        tracing::error!(%error, "failed to parse config.toml for provider removal");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+
+    // Check if the provider has a key in TOML
+    let has_toml_key = doc
+        .get("llm")
+        .and_then(|llm| llm.get(key_name))
+        .and_then(|val| val.as_str())
+        .is_some_and(|s| {
+            if let Some(alias) = s.strip_prefix("secret:") {
+                // Check if secret exists in secrets store
+                state
+                    .secrets_store
+                    .load()
+                    .as_ref()
+                    .as_ref()
+                    .and_then(|store| store.get(alias).ok())
+                    .is_some()
+            } else if let Some(var_name) = s.strip_prefix("env:") {
+                // Check if env var exists and is non-empty
+                std::env::var(var_name)
+                    .ok()
+                    .is_some_and(|v| !v.trim().is_empty())
+            } else {
+                // Direct value
+                !s.trim().is_empty()
+            }
+        });
+
+    // If no TOML key exists, check if configured via env var
+    if !has_toml_key {
+        let env_vars: Vec<String> = match provider.as_str() {
+            "ollama" => vec!["OLLAMA_BASE_URL".to_string(), "OLLAMA_API_KEY".to_string()],
+            _ => vec![format!(
+                "{}_API_KEY",
+                provider.to_uppercase().replace("-", "_")
+            )],
+        };
+
+        let configured_env_var = env_vars.iter().find(|name| {
+            std::env::var(name.as_str())
+                .ok()
+                .is_some_and(|v| !v.trim().is_empty())
+        });
+
+        if let Some(env_var) = configured_env_var {
+            return Ok(Json(ProviderUpdateResponse {
+                success: false,
+                message: format!(
+                    "Provider '{}' is configured via the {} environment variable. \
+                     To remove this provider, unset the environment variable and restart Spacebot.",
+                    provider, env_var
+                ),
+            }));
+        }
+    }
+
+    // Now remove from TOML
     let mut doc: toml_edit::DocumentMut = content.parse().map_err(|error| {
         tracing::error!(%error, "failed to parse config.toml for provider removal");
         StatusCode::INTERNAL_SERVER_ERROR
@@ -1629,5 +1697,25 @@ mod tests {
 
         assert_eq!(provider.base_url, "http://remote-ollama.local:11434");
         assert_eq!(provider.api_key, "");
+    }
+
+    #[test]
+    fn build_test_llm_config_registers_github_copilot_provider() {
+        let config = build_test_llm_config("github-copilot", "ghp_test_pat_token");
+        let provider = config
+            .providers
+            .get("github-copilot")
+            .expect("github-copilot provider should be registered");
+
+        assert_eq!(
+            provider.base_url,
+            crate::config::GITHUB_COPILOT_DEFAULT_BASE_URL
+        );
+        assert_eq!(provider.api_key, "ghp_test_pat_token");
+        assert!(provider.use_bearer_auth);
+        assert_eq!(
+            config.github_copilot_key.as_deref(),
+            Some("ghp_test_pat_token")
+        );
     }
 }
