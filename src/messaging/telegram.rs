@@ -848,13 +848,13 @@ fn build_metadata(
     );
 
     // Store forum topic thread ID so it can be used when sending replies.
-    if message.is_topic_message {
-        if let Some(ThreadId(MessageId(tid))) = message.thread_id {
-            metadata.insert(
-                "telegram_thread_id".into(),
-                serde_json::Value::Number(tid.into()),
-            );
-        }
+    if message.is_topic_message
+        && let Some(ThreadId(MessageId(tid))) = message.thread_id
+    {
+        metadata.insert(
+            "telegram_thread_id".into(),
+            serde_json::Value::Number(tid.into()),
+        );
     }
 
     let chat_type = if message.chat.is_private() {
