@@ -414,7 +414,7 @@ impl Messaging for DiscordAdapter {
         let http = self
             .get_http()
             .await
-            .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+            .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
         // Support "dm:{user_id}" targets for opening DM channels
         let channel_id = if let Some(user_id_str) = target.strip_prefix("dm:") {

@@ -468,7 +468,7 @@ impl Messaging for TwitchAdapter {
         let client = client_guard
             .as_ref()
             .context("twitch client not connected")
-            .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+            .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
         if let OutboundResponse::Text(text) = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
