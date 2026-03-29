@@ -26,7 +26,9 @@ export function Welcome() {
 
 	const hasProvider = providersData?.has_any ?? false;
 	const isAnthropic = providersData?.providers?.anthropic ?? false;
-	const hasAgent = (agentsData?.agents?.length ?? 0) > 0;
+	const agents = agentsData?.agents ?? [];
+	const hasAgent = agents.length > 0;
+	const firstAgentId = hasAgent ? agents[0].id : "";
 
 	// Detect auth method
 	const providerLabel = isAnthropic
@@ -102,22 +104,17 @@ export function Welcome() {
 							<div className="flex-1">
 								<p className={`text-sm ${hasAgent ? "text-ink" : "text-ink-dull"}`}>
 									{hasAgent
-										? `Agent active (${agentsData!.agents[0].id})`
+										? `Agent active (${firstAgentId})`
 										: "Create your first agent"}
 								</p>
 							</div>
 							{hasProvider && hasAgent && (
-								<button
+								<a
+									href={`/agents/${firstAgentId}`}
 									className="rounded-md bg-app-button px-3 py-1 text-xs text-ink hover:bg-app-hover"
-									onClick={() =>
-										navigate({
-											to: "/agents/$agentId",
-											params: { agentId: agentsData!.agents[0].id },
-										})
-									}
 								>
 									View
-								</button>
+								</a>
 							)}
 						</div>
 
@@ -136,17 +133,12 @@ export function Welcome() {
 				{/* Quick Links */}
 				<div className="mt-6 flex items-center justify-center gap-4">
 					{hasAgent && (
-						<button
+						<a
+							href={`/agents/${firstAgentId}/tasks`}
 							className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-deep"
-							onClick={() =>
-								navigate({
-									to: "/agents/$agentId/tasks",
-									params: { agentId: agentsData!.agents[0].id },
-								})
-							}
 						>
 							Kanban Board
-						</button>
+						</a>
 					)}
 					<button
 						className="rounded-md bg-app-button px-4 py-2 text-sm text-ink hover:bg-app-hover"
