@@ -544,19 +544,37 @@ impl Messaging for TelegramAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        crate::messaging::traits::ensure_supported_broadcast_response(
+            "telegram",
+            &response,
+            |response| {
+                matches!(
+                    response,
+                    OutboundResponse::Text(_) | OutboundResponse::RichMessage { .. }
+                )
+            },
+        )?;
+
         let chat_id = ChatId(
             target
                 .parse::<i64>()
-                .context("invalid telegram chat id for broadcast target")?,
+                .context("invalid telegram chat id for broadcast target")
+                .map_err(crate::messaging::traits::mark_permanent_broadcast)?,
         );
 
         if let OutboundResponse::Text(text) = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
+            send_formatted(&self.bot, chat_id, &text, None)
+                .await
+                .map_err(crate::messaging::traits::mark_classified_broadcast)?;
         } else if let OutboundResponse::RichMessage { text, poll, .. } = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
+            send_formatted(&self.bot, chat_id, &text, None)
+                .await
+                .map_err(crate::messaging::traits::mark_classified_broadcast)?;
 
             if let Some(poll_data) = poll {
-                send_poll(&self.bot, chat_id, &poll_data).await?;
+                send_poll(&self.bot, chat_id, &poll_data)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
         }
 

@@ -999,10 +999,19 @@ impl Messaging for MattermostAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        crate::messaging::traits::ensure_supported_broadcast_response(
+            "mattermost",
+            &response,
+            supports_mattermost_broadcast_response,
+        )?;
+
         // Resolve DM targets (dm:{user_id}) to a real Mattermost channel ID.
         let resolved_target;
         let target = if let Some(user_id) = target.strip_prefix("dm:") {
-            resolved_target = self.get_or_create_dm_channel(user_id).await?;
+            resolved_target = self
+                .get_or_create_dm_channel(user_id)
+                .await
+                .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             resolved_target.as_str()
         } else {
             target
@@ -1011,7 +1020,9 @@ impl Messaging for MattermostAdapter {
         match response {
             OutboundResponse::Text(text) => {
                 for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    self.create_post(target, &chunk, None).await?;
+                    self.create_post(target, &chunk, None)
+                        .await
+                        .map_err(crate::messaging::traits::mark_classified_broadcast)?;
                 }
             }
             OutboundResponse::File {
@@ -1021,17 +1032,19 @@ impl Messaging for MattermostAdapter {
                 caption,
             } => {
                 if data.len() > self.max_attachment_bytes {
-                    return Err(anyhow::anyhow!(
-                        "file too large: {} bytes (max: {})",
-                        data.len(),
-                        self.max_attachment_bytes
-                    )
-                    .into());
+                    return Err(crate::messaging::traits::mark_permanent_broadcast(
+                        anyhow::anyhow!(
+                            "file too large: {} bytes (max: {})",
+                            data.len(),
+                            self.max_attachment_bytes
+                        ),
+                    ));
                 }
                 let part = reqwest::multipart::Part::bytes(data)
                     .file_name(filename)
                     .mime_str(&mime_type)
-                    .context("invalid mime type")?;
+                    .context("invalid mime type")
+                    .map_err(crate::messaging::traits::mark_permanent_broadcast)?;
                 let form = reqwest::multipart::Form::new()
                     .part("files", part)
                     .text("channel_id", target.to_string());
@@ -1042,20 +1055,23 @@ impl Messaging for MattermostAdapter {
                     .multipart(form)
                     .send()
                     .await
-                    .context("failed to upload file")?;
+                    .context("failed to upload file")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
                 let upload_status = upload_response.status();
                 if !upload_status.is_success() {
                     let body = upload_response.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "mattermost file upload failed with status {}: {body}",
-                        upload_status.as_u16()
-                    )
-                    .into());
+                    return Err(crate::messaging::traits::mark_classified_broadcast(
+                        anyhow::anyhow!(
+                            "mattermost file upload failed with status {}: {body}",
+                            upload_status.as_u16()
+                        ),
+                    ));
                 }
                 let upload: MattermostFileUpload = upload_response
                     .json()
                     .await
-                    .context("failed to parse file upload response")?;
+                    .context("failed to parse file upload response")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
                 let file_ids: Vec<_> = upload.file_infos.iter().map(|f| f.id.as_str()).collect();
                 let post_response = self
                     .client
@@ -1068,26 +1084,30 @@ impl Messaging for MattermostAdapter {
                     }))
                     .send()
                     .await
-                    .context("failed to create post with file")?;
+                    .context("failed to create post with file")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
                 let post_status = post_response.status();
                 if !post_status.is_success() {
                     let body = post_response.text().await.unwrap_or_default();
-                    return Err(anyhow::anyhow!(
-                        "mattermost create post with file failed with status {}: {body}",
-                        post_status.as_u16()
-                    )
-                    .into());
+                    return Err(crate::messaging::traits::mark_classified_broadcast(
+                        anyhow::anyhow!(
+                            "mattermost create post with file failed with status {}: {body}",
+                            post_status.as_u16()
+                        ),
+                    ));
                 }
             }
-            other => {
-                tracing::debug!(
-                    ?other,
-                    "mattermost broadcast does not support this response type"
-                );
-            }
+            _ => unreachable!("unsupported broadcast responses are rejected up front"),
         }
         Ok(())
     }
+}
+
+fn supports_mattermost_broadcast_response(response: &OutboundResponse) -> bool {
+    matches!(
+        response,
+        OutboundResponse::Text(_) | OutboundResponse::File { .. }
+    )
 }
 
 /// Convert a [`MattermostPost`] from a WebSocket event into an [`InboundMessage`],
@@ -1525,6 +1545,8 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OutboundResponse;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
 
     // --- helpers ---
 
@@ -1921,5 +1943,41 @@ mod tests {
         let text = "abcdefghijklmnopqrstuvwxyz";
         let result = split_message(text, 10);
         assert_eq!(result, vec!["abcdefghij", "klmnopqrst", "uvwxyz"]);
+    }
+
+    #[test]
+    fn mattermost_supported_broadcast_variants_are_explicit() {
+        assert!(supports_mattermost_broadcast_response(
+            &OutboundResponse::Text("hello".to_string())
+        ));
+        assert!(supports_mattermost_broadcast_response(
+            &OutboundResponse::File {
+                filename: "note.txt".to_string(),
+                data: vec![1, 2, 3],
+                mime_type: "text/plain".to_string(),
+                caption: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn mattermost_unsupported_broadcast_variants_are_permanent_failures() {
+        let error = crate::messaging::traits::ensure_supported_broadcast_response(
+            "mattermost",
+            &OutboundResponse::RichMessage {
+                text: "hello".to_string(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            },
+            supports_mattermost_broadcast_response,
+        )
+        .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
     }
 }

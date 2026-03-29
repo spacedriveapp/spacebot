@@ -74,30 +74,32 @@ impl Messaging for PortalAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
-        let text = match &response {
-            OutboundResponse::Text(text) => text.clone(),
-            OutboundResponse::RichMessage { text, .. } => text.clone(),
-            _ => return Ok(()),
-        };
+        let text = extract_portal_broadcast_text(response)?;
 
         // Target format is the full conversation_id: "portal:chat:{agent_id}"
         let agent_id = target
             .strip_prefix("portal:chat:")
-            .context("portal broadcast target must be in 'portal:chat:{agent_id}' format")?;
+            .context("portal broadcast target must be in 'portal:chat:{agent_id}' format")
+            .map_err(crate::messaging::traits::mark_permanent_broadcast)?;
 
         let tx = self
             .event_tx
             .read()
             .unwrap()
             .clone()
-            .context("portal event_tx not configured")?;
+            .context("portal event_tx not configured")
+            .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
         tx.send(ApiEvent::OutboundMessage {
             agent_id: agent_id.to_string(),
             channel_id: target.to_string(),
             text,
         })
-        .ok();
+        .map_err(|_| {
+            crate::messaging::traits::mark_retryable_broadcast(anyhow::anyhow!(
+                "portal broadcast dropped: no active event subscribers"
+            ))
+        })?;
 
         Ok(())
     }
@@ -167,10 +169,21 @@ impl Messaging for PortalAdapter {
     }
 }
 
+fn extract_portal_broadcast_text(response: OutboundResponse) -> crate::Result<String> {
+    match response {
+        OutboundResponse::Text(text) => Ok(text),
+        OutboundResponse::RichMessage { text, .. } => Ok(text),
+        other => {
+            Err(crate::messaging::traits::unsupported_broadcast_variant_error("portal", &other))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::MessageContent;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
     use chrono::Utc;
 
     #[tokio::test]
@@ -257,5 +270,48 @@ mod tests {
         assert_eq!(history[1].author, "assistant");
         assert_eq!(history[1].content, "hello Alice");
         assert!(history[1].is_bot);
+    }
+
+    #[test]
+    fn unsupported_webchat_broadcast_variants_are_permanent_failures() {
+        let error =
+            extract_webchat_broadcast_text(OutboundResponse::Reaction("thumbsup".to_string()))
+                .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported webchat broadcast response variant: Reaction")
+        );
+    }
+
+    #[tokio::test]
+    async fn webchat_broadcast_fails_when_event_subscribers_are_gone() {
+        let adapter = WebChatAdapter::new(HashMap::new());
+        let (event_tx, event_rx) = broadcast::channel(4);
+        drop(event_rx);
+        adapter.set_event_tx(event_tx);
+
+        let error = adapter
+            .broadcast(
+                "portal:chat:agent-a",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect_err("dropped send must surface as an error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Transient
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("webchat broadcast dropped: no active event subscribers")
+        );
     }
 }

@@ -365,7 +365,8 @@ impl Messaging for TwitchAdapter {
         let client_guard = self.client.read().await;
         let client = client_guard
             .as_ref()
-            .context("twitch client not connected")?;
+            .context("twitch client not connected")
+            .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
         let channel = message
             .metadata
@@ -457,10 +458,17 @@ impl Messaging for TwitchAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        crate::messaging::traits::ensure_supported_broadcast_response(
+            "twitch",
+            &response,
+            supports_twitch_broadcast_response,
+        )?;
+
         let client_guard = self.client.read().await;
         let client = client_guard
             .as_ref()
-            .context("twitch client not connected")?;
+            .context("twitch client not connected")
+            .map_err(crate::messaging::traits::mark_classified_broadcast)?;
 
         if let OutboundResponse::Text(text) = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
@@ -468,7 +476,8 @@ impl Messaging for TwitchAdapter {
                 client
                     .say(channel.to_owned(), chunk)
                     .await
-                    .context("failed to broadcast twitch message")?;
+                    .context("failed to broadcast twitch message")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
         } else if let OutboundResponse::RichMessage { text, .. } = response {
             let channel = target.strip_prefix('#').unwrap_or(target);
@@ -476,7 +485,8 @@ impl Messaging for TwitchAdapter {
                 client
                     .say(channel.to_owned(), chunk)
                     .await
-                    .context("failed to broadcast twitch message")?;
+                    .context("failed to broadcast twitch message")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
         }
 
@@ -505,6 +515,13 @@ impl Messaging for TwitchAdapter {
     }
 }
 
+fn supports_twitch_broadcast_response(response: &OutboundResponse) -> bool {
+    matches!(
+        response,
+        OutboundResponse::Text(_) | OutboundResponse::RichMessage { .. }
+    )
+}
+
 /// Split a message into chunks that fit within Twitch's character limit.
 /// Tries to split at newlines, then spaces, then hard-cuts.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
@@ -531,4 +548,42 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+#[cfg(test)]
+mod tests {
+    use super::supports_twitch_broadcast_response;
+    use crate::OutboundResponse;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
+
+    #[test]
+    fn twitch_supported_broadcast_variants_are_explicit() {
+        assert!(supports_twitch_broadcast_response(&OutboundResponse::Text(
+            "hello".to_string()
+        )));
+        assert!(supports_twitch_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: "hello".to_string(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn twitch_unsupported_broadcast_variants_are_permanent_failures() {
+        let error = crate::messaging::traits::ensure_supported_broadcast_response(
+            "twitch",
+            &OutboundResponse::Reaction("thumbsup".to_string()),
+            supports_twitch_broadcast_response,
+        )
+        .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+    }
 }

@@ -935,6 +935,12 @@ impl Messaging for SignalAdapter {
         target: &str,
         response: crate::OutboundResponse,
     ) -> crate::Result<()> {
+        crate::messaging::traits::ensure_supported_broadcast_response(
+            "signal",
+            &response,
+            supports_signal_broadcast_response,
+        )?;
+
         // Parse target into RecipientTarget
         // Format: uuid:xxx, group:xxx, or +xxx
         let recipient = if let Some(uuid) = target.strip_prefix("uuid:") {
@@ -944,18 +950,22 @@ impl Messaging for SignalAdapter {
         } else if target.starts_with('+') {
             RecipientTarget::Direct(target.to_string())
         } else {
-            return Err(crate::Error::Other(anyhow::anyhow!(
-                "invalid signal broadcast target format: {target}"
-            )));
+            return Err(crate::messaging::traits::mark_permanent_broadcast(
+                anyhow::anyhow!("invalid signal broadcast target format: {target}"),
+            ));
         };
 
         match response {
             crate::OutboundResponse::Text(text) => {
-                self.send_text(&recipient, &text).await?;
+                self.send_text(&recipient, &text)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
             crate::OutboundResponse::RichMessage { text, .. } => {
                 // Signal has no rich formatting — send plain text
-                self.send_text(&recipient, &text).await?;
+                self.send_text(&recipient, &text)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
             crate::OutboundResponse::File {
                 filename,
@@ -964,27 +974,28 @@ impl Messaging for SignalAdapter {
                 ..
             } => {
                 self.send_file(&recipient, &filename, &data, caption.as_deref())
-                    .await?;
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
             crate::OutboundResponse::ThreadReply { text, .. } => {
                 // Signal has no threads — send as regular message
-                self.send_text(&recipient, &text).await?;
+                self.send_text(&recipient, &text)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
             crate::OutboundResponse::Ephemeral { text, .. } => {
                 // Signal has no ephemeral messages — send as regular text
-                self.send_text(&recipient, &text).await?;
+                self.send_text(&recipient, &text)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
             crate::OutboundResponse::ScheduledMessage { text, .. } => {
                 // Signal has no scheduled messages — send immediately
-                self.send_text(&recipient, &text).await?;
+                self.send_text(&recipient, &text)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
-            _ => {
-                // Other response types are not supported for broadcast
-                tracing::debug!(
-                    target = %redact_identifier(target),
-                    "signal: unsupported broadcast response type, dropping"
-                );
-            }
+            _ => unreachable!("unsupported broadcast responses are rejected up front"),
         }
 
         Ok(())
@@ -1028,6 +1039,18 @@ impl Messaging for SignalAdapter {
         tracing::info!(adapter = %self.runtime_key, "signal adapter shut down");
         Ok(())
     }
+}
+
+fn supports_signal_broadcast_response(response: &crate::OutboundResponse) -> bool {
+    matches!(
+        response,
+        crate::OutboundResponse::Text(_)
+            | crate::OutboundResponse::RichMessage { .. }
+            | crate::OutboundResponse::File { .. }
+            | crate::OutboundResponse::ThreadReply { .. }
+            | crate::OutboundResponse::Ephemeral { .. }
+            | crate::OutboundResponse::ScheduledMessage { .. }
+    )
 }
 
 // ── SSE listener ────────────────────────────────────────────────
@@ -1450,6 +1473,8 @@ fn parse_recipient_target(target: &str) -> RecipientTarget {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::OutboundResponse;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
 
     #[test]
     fn parse_recipient_target_dm() {
@@ -1993,6 +2018,42 @@ mod tests {
         assert!(
             result.is_none(),
             "Group message should be rejected when sender not in allowed users"
+        );
+    }
+
+    #[test]
+    fn signal_supported_broadcast_variants_include_textual_fallbacks() {
+        assert!(supports_signal_broadcast_response(&OutboundResponse::Text(
+            "hello".to_string()
+        )));
+        assert!(supports_signal_broadcast_response(
+            &OutboundResponse::ScheduledMessage {
+                text: "hello".to_string(),
+                post_at: 123,
+            }
+        ));
+        assert!(supports_signal_broadcast_response(
+            &OutboundResponse::File {
+                filename: "note.txt".to_string(),
+                data: vec![1, 2, 3],
+                mime_type: "text/plain".to_string(),
+                caption: Some("note".to_string()),
+            }
+        ));
+    }
+
+    #[test]
+    fn signal_unsupported_broadcast_variants_are_permanent_failures() {
+        let error = crate::messaging::traits::ensure_supported_broadcast_response(
+            "signal",
+            &OutboundResponse::Reaction("thumbsup".to_string()),
+            supports_signal_broadcast_response,
+        )
+        .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
         );
     }
 }
