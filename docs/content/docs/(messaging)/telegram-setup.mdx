@@ -225,7 +225,7 @@ To use topics:
 Spacebot reads messages from all topics the bot can see. Each topic maintains its own conversation context, so the bot won't mix up discussions between topics. In logs and tooling, topic messages appear with conversation IDs in the format `telegram:<chat_id>:<thread_id>` (e.g. `telegram:-100123456789:4`).
 
 <Callout type="info">
-Telegram doesn't support creating named threads via the Bot API. Spacebot replies within the same topic where the message was sent, keeping replies in context.
+Spacebot does not create or manage forum topics. It replies within the same topic where the message was sent, keeping replies in context.
 </Callout>
 
 ## Troubleshooting

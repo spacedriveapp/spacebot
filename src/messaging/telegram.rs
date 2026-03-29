@@ -45,7 +45,7 @@ struct ActiveStream {
     chat_id: ChatId,
     message_id: MessageId,
     /// Forum topic thread ID, if the stream started inside a topic.
-    thread_id: Option<ThreadId>,
+    _thread_id: Option<ThreadId>,
     last_edit: Instant,
 }
 
@@ -358,7 +358,8 @@ impl Messaging for TelegramAdapter {
                     let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
                     let sent = if let Some(ref caption_text) = caption {
                         let html_caption = markdown_to_telegram_html(caption_text);
-                        let mut request = self.bot
+                        let mut request = self
+                            .bot
                             .send_audio(chat_id, input_file)
                             .caption(&html_caption)
                             .parse_mode(ParseMode::Html);
@@ -401,7 +402,8 @@ impl Messaging for TelegramAdapter {
                     let input_file = InputFile::memory(data.clone()).file_name(filename.clone());
                     let sent = if let Some(ref caption_text) = caption {
                         let html_caption = markdown_to_telegram_html(caption_text);
-                        let mut request = self.bot
+                        let mut request = self
+                            .bot
                             .send_document(chat_id, input_file)
                             .caption(&html_caption)
                             .parse_mode(ParseMode::Html);
@@ -481,7 +483,7 @@ impl Messaging for TelegramAdapter {
                     ActiveStream {
                         chat_id,
                         message_id: placeholder.id,
-                        thread_id,
+                        _thread_id: thread_id,
                         last_edit: Instant::now(),
                     },
                 );
