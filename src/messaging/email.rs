@@ -533,8 +533,12 @@ impl Messaging for EmailAdapter {
                     .await
                     .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
-            OutboundResponse::RichMessage { text, .. } => {
-                self.send_email(&recipient, "Spacebot message", text, None, Vec::new(), None)
+            OutboundResponse::RichMessage {
+                text, cards, poll, ..
+            } => {
+                let body = rich_message_plaintext_fallback(&text, &cards, poll.as_ref())
+                    .expect("supported rich email broadcasts must produce plaintext");
+                self.send_email(&recipient, "Spacebot message", body, None, Vec::new(), None)
                     .await
                     .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
@@ -683,15 +687,53 @@ impl Messaging for EmailAdapter {
 }
 
 fn supports_email_broadcast_response(response: &OutboundResponse) -> bool {
-    matches!(
-        response,
+    match response {
         OutboundResponse::Text(_)
-            | OutboundResponse::RichMessage { .. }
-            | OutboundResponse::File { .. }
-            | OutboundResponse::ThreadReply { .. }
-            | OutboundResponse::Ephemeral { .. }
-            | OutboundResponse::ScheduledMessage { .. }
-    )
+        | OutboundResponse::File { .. }
+        | OutboundResponse::ThreadReply { .. }
+        | OutboundResponse::Ephemeral { .. }
+        | OutboundResponse::ScheduledMessage { .. } => true,
+        OutboundResponse::RichMessage {
+            text, cards, poll, ..
+        } => rich_message_plaintext_fallback(text, cards, poll.as_ref()).is_some(),
+        _ => false,
+    }
+}
+
+fn rich_message_plaintext_fallback(
+    text: &str,
+    cards: &[crate::Card],
+    poll: Option<&crate::Poll>,
+) -> Option<String> {
+    let mut sections = Vec::new();
+    let text = text.trim();
+    if !text.is_empty() {
+        sections.push(text.to_string());
+    } else {
+        let card_text = OutboundResponse::text_from_cards(cards);
+        if !card_text.trim().is_empty() {
+            sections.push(card_text);
+        }
+    }
+
+    if let Some(poll) = poll {
+        let question = poll.question.trim();
+        if !question.is_empty() {
+            let answers = poll
+                .answers
+                .iter()
+                .map(|answer| answer.trim())
+                .filter(|answer| !answer.is_empty())
+                .map(|answer| format!("- {answer}"))
+                .collect::<Vec<_>>();
+            let mut poll_lines = vec![question.to_string()];
+            poll_lines.extend(answers);
+            sections.push(poll_lines.join("\n"));
+        }
+    }
+
+    let combined = sections.join("\n\n");
+    (!combined.trim().is_empty()).then_some(combined)
 }
 
 fn build_smtp_transport(config: &EmailConfig) -> crate::Result<AsyncSmtpTransport<Tokio1Executor>> {
@@ -1946,6 +1988,26 @@ mod tests {
             "hello".to_string()
         )));
         assert!(supports_email_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: String::new(),
+                blocks: Vec::new(),
+                cards: vec![crate::Card {
+                    title: Some("Digest".to_string()),
+                    description: Some("One item needs attention".to_string()),
+                    color: None,
+                    url: None,
+                    fields: Vec::new(),
+                    footer: None,
+                    thumbnail: None,
+                    image: None,
+                    author: None,
+                    timestamp: None,
+                }],
+                interactive_elements: Vec::new(),
+                poll: None,
+            }
+        ));
+        assert!(supports_email_broadcast_response(
             &OutboundResponse::ScheduledMessage {
                 text: "hello".to_string(),
                 post_at: 123,
@@ -1972,5 +2034,18 @@ mod tests {
             broadcast_failure_kind(&error),
             BroadcastFailureKind::Permanent
         );
+    }
+
+    #[test]
+    fn email_rejects_rich_message_without_plaintext_fallback() {
+        assert!(!supports_email_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: String::new(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            }
+        ));
     }
 }

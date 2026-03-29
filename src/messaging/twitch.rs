@@ -470,23 +470,22 @@ impl Messaging for TwitchAdapter {
             .context("twitch client not connected")
             .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
-        if let OutboundResponse::Text(text) = response {
-            let channel = target.strip_prefix('#').unwrap_or(target);
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                client
-                    .say(channel.to_owned(), chunk)
-                    .await
-                    .context("failed to broadcast twitch message")
-                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
-            }
-        } else if let OutboundResponse::RichMessage { text, .. } = response {
-            let channel = target.strip_prefix('#').unwrap_or(target);
-            for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                client
-                    .say(channel.to_owned(), chunk)
-                    .await
-                    .context("failed to broadcast twitch message")
-                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+        let text = match response {
+            OutboundResponse::Text(text) | OutboundResponse::RichMessage { text, .. } => text,
+            _ => unreachable!("unsupported broadcast responses are rejected up front"),
+        };
+        let channel = target.strip_prefix('#').unwrap_or(target);
+        let mut sent_any = false;
+        for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
+            match client
+                .say(channel.to_owned(), chunk)
+                .await
+                .context("failed to broadcast twitch message")
+            {
+                Ok(()) => sent_any = true,
+                Err(error) => {
+                    return Err(classify_twitch_broadcast_error(error, sent_any));
+                }
             }
         }
 
@@ -522,6 +521,16 @@ fn supports_twitch_broadcast_response(response: &OutboundResponse) -> bool {
     )
 }
 
+fn classify_twitch_broadcast_error(error: anyhow::Error, sent_any: bool) -> crate::Error {
+    if sent_any {
+        crate::messaging::traits::mark_permanent_broadcast(
+            error.context("twitch broadcast partially delivered before failure"),
+        )
+    } else {
+        crate::messaging::traits::mark_classified_broadcast(error)
+    }
+}
+
 /// Split a message into chunks that fit within Twitch's character limit.
 /// Tries to split at newlines, then spaces, then hard-cuts.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
@@ -552,7 +561,7 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::supports_twitch_broadcast_response;
+    use super::{classify_twitch_broadcast_error, supports_twitch_broadcast_response};
     use crate::OutboundResponse;
     use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
 
@@ -581,6 +590,15 @@ mod tests {
         )
         .expect_err("unsupported variants should error");
 
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn twitch_partial_delivery_failures_become_permanent() {
+        let error = classify_twitch_broadcast_error(anyhow::anyhow!("timeout"), true);
         assert_eq!(
             broadcast_failure_kind(&error),
             BroadcastFailureKind::Permanent

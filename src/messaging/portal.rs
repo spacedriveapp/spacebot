@@ -172,18 +172,69 @@ impl Messaging for PortalAdapter {
 fn extract_portal_broadcast_text(response: OutboundResponse) -> crate::Result<String> {
     match response {
         OutboundResponse::Text(text) => Ok(text),
-        OutboundResponse::RichMessage { text, .. } => Ok(text),
+        OutboundResponse::RichMessage {
+            text, cards, poll, ..
+        } => {
+            let text =
+                rich_message_plaintext_fallback(&text, &cards, poll.as_ref()).ok_or_else(|| {
+                    crate::messaging::traits::unsupported_broadcast_variant_error(
+                        "webchat",
+                        &OutboundResponse::RichMessage {
+                            text,
+                            blocks: Vec::new(),
+                            cards,
+                            interactive_elements: Vec::new(),
+                            poll,
+                        },
+                    )
+                })?;
+            Ok(text)
+        }
         other => {
             Err(crate::messaging::traits::unsupported_broadcast_variant_error("portal", &other))
         }
     }
 }
 
+fn rich_message_plaintext_fallback(
+    text: &str,
+    cards: &[crate::Card],
+    poll: Option<&crate::Poll>,
+) -> Option<String> {
+    let text = text.trim();
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+
+    let card_text = OutboundResponse::text_from_cards(cards);
+    if !card_text.trim().is_empty() {
+        return Some(card_text);
+    }
+
+    poll.and_then(|poll| {
+        let question = poll.question.trim();
+        if question.is_empty() {
+            return None;
+        }
+
+        let answers = poll
+            .answers
+            .iter()
+            .map(|answer| answer.trim())
+            .filter(|answer| !answer.is_empty())
+            .map(|answer| format!("- {answer}"))
+            .collect::<Vec<_>>();
+        let mut lines = vec![question.to_string()];
+        lines.extend(answers);
+        Some(lines.join("\n"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MessageContent;
     use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
+    use crate::{Card, MessageContent, OutboundResponse, Poll};
     use chrono::Utc;
 
     #[tokio::test]
@@ -286,6 +337,69 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported webchat broadcast response variant: Reaction")
+        );
+    }
+
+    #[test]
+    fn webchat_extracts_card_text_fallback_for_rich_broadcasts() {
+        let text = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: vec![Card {
+                title: Some("Digest".to_string()),
+                description: Some("One item needs attention".to_string()),
+                color: None,
+                url: None,
+                fields: Vec::new(),
+                footer: None,
+                thumbnail: None,
+                image: None,
+                author: None,
+                timestamp: None,
+            }],
+            interactive_elements: Vec::new(),
+            poll: None,
+        })
+        .expect("card-only webchat broadcasts should derive plaintext");
+
+        assert!(text.contains("Digest"));
+        assert!(text.contains("One item needs attention"));
+    }
+
+    #[test]
+    fn webchat_extracts_poll_text_fallback_for_rich_broadcasts() {
+        let text = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: Vec::new(),
+            interactive_elements: Vec::new(),
+            poll: Some(Poll {
+                question: "Ship it?".to_string(),
+                answers: vec!["Yes".to_string(), "No".to_string()],
+                allow_multiselect: false,
+                duration_hours: 24,
+            }),
+        })
+        .expect("poll-only webchat broadcasts should derive plaintext");
+
+        assert!(text.contains("Ship it?"));
+        assert!(text.contains("- Yes"));
+    }
+
+    #[test]
+    fn webchat_rejects_empty_rich_broadcasts() {
+        let error = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: Vec::new(),
+            interactive_elements: Vec::new(),
+            poll: None,
+        })
+        .expect_err("empty rich broadcasts should be rejected");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
         );
     }
 

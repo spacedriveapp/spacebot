@@ -951,7 +951,7 @@ impl Messaging for SignalAdapter {
             RecipientTarget::Direct(target.to_string())
         } else {
             return Err(crate::messaging::traits::mark_permanent_broadcast(
-                anyhow::anyhow!("invalid signal broadcast target format: {target}"),
+                anyhow::anyhow!("invalid signal broadcast target format"),
             ));
         };
 
