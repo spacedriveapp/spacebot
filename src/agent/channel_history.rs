@@ -172,7 +172,25 @@ fn extract_reply_content_from_cancelled_history(
                     if let Some(content_value) = tool_call.function.arguments.get("content")
                         && let Some(text) = content_value.as_str()
                     {
-                        return Some(text.to_string());
+                        // Also extract card descriptions so the full response
+                        // (not just the short content text) is preserved in
+                        // conversation history for subsequent LLM turns.
+                        let cards = match tool_call.function.arguments.get("cards") {
+                            Some(v) => {
+                                serde_json::from_value::<Vec<crate::Card>>(v.clone())
+                                    .unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            error = %e,
+                                            "failed to deserialize cards from cancelled reply tool call; \
+                                             card content will be omitted from history"
+                                        );
+                                        Vec::new()
+                                    })
+                            }
+                            None => Vec::new(),
+                        };
+
+                        return Some(crate::OutboundResponse::text_with_cards(text, &cards));
                     }
                 }
             }

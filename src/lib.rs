@@ -765,6 +765,22 @@ impl OutboundResponse {
         }
         sections.join("\n\n")
     }
+
+    /// Merge `text` with a plaintext representation of `cards`.
+    ///
+    /// Returns `text` unchanged when cards produce no text content,
+    /// the card text alone when `text` is whitespace-only, or both
+    /// joined with a blank line.
+    pub fn text_with_cards(text: &str, cards: &[Card]) -> String {
+        let card_text = Self::text_from_cards(cards);
+        if card_text.is_empty() {
+            text.to_string()
+        } else if text.trim().is_empty() {
+            card_text
+        } else {
+            format!("{}\n\n{}", text, card_text)
+        }
+    }
 }
 
 /// A generic rich-formatted card (maps to Embeds in Discord).
