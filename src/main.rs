@@ -2634,9 +2634,9 @@ async fn initialize_agents(
                 format!("failed to init embeddings for agent '{}'", agent_config.id)
             })?;
 
-        // Ensure FTS index exists for full-text search queries
-        if let Err(error) = embedding_table.ensure_fts_index().await {
-            tracing::warn!(%error, agent = %agent_config.id, "failed to create FTS index");
+        // Ensure vector and FTS indexes exist (prevents 30-minute rebuild loop)
+        if let Err(error) = embedding_table.ensure_indexes_exist().await {
+            tracing::warn!(%error, agent = %agent_config.id, "failed to ensure indexes exist");
         }
 
         let memory_search = Arc::new(spacebot::memory::MemorySearch::new(

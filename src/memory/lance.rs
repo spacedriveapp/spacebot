@@ -295,48 +295,84 @@ impl EmbeddingTable {
         Ok(matches)
     }
 
-    /// Create HNSW vector index and FTS index for better performance.
-    /// Should be called after enough data accumulates.
-    pub async fn create_indexes(&self) -> Result<()> {
-        // Create HNSW vector index on embedding column
-        self.table
-            .create_index(&["embedding"], lancedb::index::Index::Auto)
-            .execute()
-            .await
-            .map_err(|e| DbError::LanceDb(format!("Failed to create vector index: {}", e)))?;
+    /// Ensure vector and FTS indexes exist, creating them only if they don't already exist.
+    ///
+    /// This prevents the expensive HNSW index training from running on every startup.
+    /// Uses `list_indices()` to check for existing indexes BEFORE attempting creation.
+    ///
+    /// # Problem this solves
+    ///
+    /// LanceDB's `create_index()` unconditionally triggers a full rebuild when called,
+    /// regardless of whether an index already exists on disk. The previous approach of
+    /// catching errors after the fact was too late — the expensive KMeans training had
+    /// already completed.
+    ///
+    /// # Solution
+    ///
+    /// Check for existing indexes using `list_indices()` before calling `create_index()`.
+    /// Only create if no index exists on the target column.
+    pub async fn ensure_indexes_exist(&self) -> Result<()> {
+        use lancedb::index::Index;
 
-        self.ensure_fts_index().await?;
+        // Check for existing indexes
+        let indices = self
+            .table
+            .list_indices()
+            .await
+            .map_err(|e| DbError::LanceDb(e.to_string()))?;
+
+        // Check vector index on embedding column
+        let has_vector_index = indices
+            .iter()
+            .any(|idx| idx.columns.iter().any(|col| col == "embedding"));
+
+        if !has_vector_index {
+            tracing::info!("Creating HNSW vector index on embedding column");
+            self.table
+                .create_index(&["embedding"], Index::Auto)
+                .execute()
+                .await
+                .map_err(|e| DbError::LanceDb(format!("Failed to create vector index: {}", e)))?;
+            tracing::info!("Vector index created successfully");
+        } else {
+            tracing::debug!("Vector index already exists, skipping creation");
+        }
+
+        // Check FTS index on content column
+        let has_fts_index = indices
+            .iter()
+            .any(|idx| idx.columns.iter().any(|col| col == "content"));
+
+        if !has_fts_index {
+            tracing::info!("Creating FTS index on content column");
+            self.table
+                .create_index(&["content"], Index::FTS(Default::default()))
+                .execute()
+                .await
+                .map_err(|e| DbError::LanceDb(format!("Failed to create FTS index: {}", e)))?;
+            tracing::info!("FTS index created successfully");
+        } else {
+            tracing::debug!("FTS index already exists, skipping creation");
+        }
 
         Ok(())
     }
 
-    /// Ensure the FTS index exists on the content column.
+    /// Optimize indexes for incremental updates after data insertion.
     ///
-    /// LanceDB requires an inverted index for `full_text_search()` queries.
-    /// This is safe to call multiple times — if the index already exists, the
-    /// error is silently ignored.
-    pub async fn ensure_fts_index(&self) -> Result<()> {
-        match self
-            .table
-            .create_index(&["content"], lancedb::index::Index::FTS(Default::default()))
-            .execute()
+    /// This is much faster than a full rebuild and should be called after
+    /// significant data changes to maintain query performance.
+    pub async fn optimize_indexes(&self) -> Result<()> {
+        use lancedb::table::{OptimizeAction, OptimizeOptions};
+
+        tracing::debug!("Optimizing indexes (incremental update)");
+        self.table
+            .optimize(OptimizeAction::Index(OptimizeOptions::default()))
             .await
-        {
-            Ok(()) => {
-                tracing::debug!("FTS index created on content column");
-                Ok(())
-            }
-            Err(error) => {
-                let message = error.to_string();
-                // LanceDB returns an error if the index already exists
-                if message.contains("already") || message.contains("index") {
-                    tracing::trace!("FTS index already exists");
-                    Ok(())
-                } else {
-                    Err(DbError::LanceDb(format!("Failed to create FTS index: {}", message)).into())
-                }
-            }
-        }
+            .map_err(|e| DbError::LanceDb(format!("Failed to optimize indexes: {}", e)))?;
+        tracing::debug!("Index optimization complete");
+
+        Ok(())
     }
 
     /// Get the Arrow schema for the embeddings table.

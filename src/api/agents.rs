@@ -774,8 +774,9 @@ pub async fn create_agent_internal(
             format!("failed to init embeddings: {error}")
         })?;
 
-    if let Err(error) = embedding_table.ensure_fts_index().await {
-        tracing::warn!(%error, agent_id = %agent_id, "failed to create FTS index");
+    // Ensure vector and FTS indexes exist (prevents 30-minute rebuild loop)
+    if let Err(error) = embedding_table.ensure_indexes_exist().await {
+        tracing::warn!(%error, agent_id = %agent_id, "failed to ensure indexes exist");
     }
 
     let memory_search = std::sync::Arc::new(crate::memory::MemorySearch::new(

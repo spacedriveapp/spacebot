@@ -379,15 +379,15 @@ impl Tool for MemorySaveTool {
             }
         }
 
-        // Ensure the FTS index exists so full_text_search queries work.
-        // Safe to call repeatedly — no-ops if the index already exists.
+        // Ensure vector and FTS indexes exist (prevents 30-minute rebuild loop)
+        // Safe to call repeatedly — skips creation if indexes already exist.
         if let Err(error) = self
             .memory_search
             .embedding_table()
-            .ensure_fts_index()
+            .ensure_indexes_exist()
             .await
         {
-            tracing::warn!(%error, "failed to ensure FTS index after memory save");
+            tracing::warn!(%error, "failed to ensure indexes after memory save");
         }
 
         if let Some(event_context) = &self.event_context
