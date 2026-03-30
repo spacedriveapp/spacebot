@@ -76,7 +76,18 @@ impl Messaging for WebChatAdapter {
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
         let text = match &response {
             OutboundResponse::Text(text) => text.clone(),
-            OutboundResponse::RichMessage { text, .. } => text.clone(),
+            OutboundResponse::RichMessage { text, cards, .. } => {
+                // Flatten card content into the text so the webchat frontend
+                // (which doesn't support rich embeds) shows the full response.
+                let card_text = OutboundResponse::text_from_cards(cards);
+                if card_text.is_empty() {
+                    text.clone()
+                } else if text.trim().is_empty() {
+                    card_text
+                } else {
+                    format!("{}\n\n{}", text, card_text)
+                }
+            }
             _ => return Ok(()),
         };
 

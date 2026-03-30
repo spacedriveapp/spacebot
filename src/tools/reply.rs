@@ -460,15 +460,33 @@ impl Tool for ReplyTool {
                 text: converted_content.clone(),
             }
         } else if args.cards.is_some() || args.interactive_elements.is_some() || poll.is_some() {
+            let cards = args.cards.unwrap_or_default();
+            let interactive_elements = args.interactive_elements.unwrap_or_default();
             OutboundResponse::RichMessage {
                 text: converted_content.clone(),
                 blocks: vec![],
-                cards: args.cards.unwrap_or_default(),
-                interactive_elements: args.interactive_elements.unwrap_or_default(),
+                cards,
+                interactive_elements,
                 poll,
             }
         } else {
             OutboundResponse::Text(converted_content.clone())
+        };
+
+        // For the conversation log, include flattened card content so that
+        // the webchat history (which doesn't support rich embeds) shows the
+        // full response when messages are loaded from the database.
+        let logged_content = if let OutboundResponse::RichMessage { cards, .. } = &response {
+            let card_text = OutboundResponse::text_from_cards(cards);
+            if card_text.is_empty() {
+                converted_content.clone()
+            } else if converted_content.trim().is_empty() {
+                card_text
+            } else {
+                format!("{}\n\n{}", converted_content, card_text)
+            }
+        } else {
+            converted_content.clone()
         };
 
         self.response_tx
@@ -478,7 +496,7 @@ impl Tool for ReplyTool {
 
         self.conversation_logger.log_bot_message_with_name(
             &self.channel_id,
-            &converted_content,
+            &logged_content,
             Some(&self.agent_display_name),
         );
 

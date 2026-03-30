@@ -172,7 +172,24 @@ fn extract_reply_content_from_cancelled_history(
                     if let Some(content_value) = tool_call.function.arguments.get("content")
                         && let Some(text) = content_value.as_str()
                     {
-                        return Some(text.to_string());
+                        // Also extract card descriptions so the full response
+                        // (not just the short content text) is preserved in
+                        // conversation history for the webchat frontend.
+                        let card_text = tool_call
+                            .function
+                            .arguments
+                            .get("cards")
+                            .and_then(|v| serde_json::from_value::<Vec<crate::Card>>(v.clone()).ok())
+                            .map(|cards| crate::OutboundResponse::text_from_cards(&cards))
+                            .unwrap_or_default();
+
+                        if card_text.is_empty() {
+                            return Some(text.to_string());
+                        } else if text.trim().is_empty() {
+                            return Some(card_text);
+                        } else {
+                            return Some(format!("{}\n\n{}", text, card_text));
+                        }
                     }
                 }
             }

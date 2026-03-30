@@ -275,13 +275,31 @@ fn forward_sse_event(
 ) {
     match response {
         spacebot::OutboundResponse::Text(text)
-        | spacebot::OutboundResponse::RichMessage { text, .. }
         | spacebot::OutboundResponse::ThreadReply { text, .. } => {
             api_event_tx
                 .send(spacebot::api::ApiEvent::OutboundMessage {
                     agent_id: agent_id.to_string(),
                     channel_id: channel_id.to_string(),
                     text: text.clone(),
+                })
+                .ok();
+        }
+        spacebot::OutboundResponse::RichMessage { text, cards, .. } => {
+            // Flatten card content into the text so the webchat frontend
+            // (which doesn't support rich embeds) shows the full response.
+            let card_text = spacebot::OutboundResponse::text_from_cards(cards);
+            let full_text = if card_text.is_empty() {
+                text.clone()
+            } else if text.trim().is_empty() {
+                card_text
+            } else {
+                format!("{}\n\n{}", text, card_text)
+            };
+            api_event_tx
+                .send(spacebot::api::ApiEvent::OutboundMessage {
+                    agent_id: agent_id.to_string(),
+                    channel_id: channel_id.to_string(),
+                    text: full_text,
                 })
                 .ok();
         }
