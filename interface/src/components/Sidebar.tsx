@@ -21,7 +21,7 @@ import { CSS } from "@dnd-kit/utilities";
 import { api } from "@/api/client";
 import type { ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { useAgentOrder } from "@/hooks/useAgentOrder";
-import { DashboardSquare01Icon, Settings01Icon, LeftToRightListBulletIcon } from "@hugeicons/core-free-icons";
+import { DashboardSquare01Icon, Settings01Icon, LeftToRightListBulletIcon, Folder01Icon } from "@hugeicons/core-free-icons";
 import { HugeiconsIcon } from "@hugeicons/react";
 import { CreateAgentDialog } from "@/components/CreateAgentDialog";
 import { ProfileAvatar } from "@/components/ProfileAvatar";
@@ -113,6 +113,7 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 	const isOverview = matchRoute({ to: "/" });
 	const isTasks = matchRoute({ to: "/tasks" });
 	const isSettings = matchRoute({ to: "/settings" });
+	const isProjects = matchRoute({ to: "/projects" });
 	const isOrchestrate = matchRoute({ to: "/orchestrate" });
 
 	const sensors = useSensors(
@@ -170,6 +171,15 @@ export function Sidebar({ liveStates: _liveStates }: SidebarProps) {
 					title="Tasks"
 				>
 					<HugeiconsIcon icon={LeftToRightListBulletIcon} className="h-4 w-4" />
+				</Link>
+				<Link
+					to="/projects"
+					className={`flex h-8 w-8 items-center justify-center rounded-md ${
+						isProjects ? "bg-sidebar-selected text-sidebar-ink" : "text-sidebar-inkDull hover:bg-sidebar-selected/50"
+					}`}
+					title="Projects"
+				>
+					<HugeiconsIcon icon={Folder01Icon} className="h-4 w-4" />
 				</Link>
 				<Link
 					to="/settings"

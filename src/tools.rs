@@ -33,6 +33,7 @@ pub mod branch_tool;
 pub mod browser;
 pub mod cancel;
 pub mod channel_recall;
+pub mod codegraph;
 pub mod config_inspect;
 pub mod cron;
 pub mod email_search;
@@ -80,6 +81,9 @@ pub use browser::{
     register_browser_tools,
 };
 pub use cancel::{CancelArgs, CancelError, CancelOutput, CancelTool};
+pub use codegraph::{
+    CodeGraphGetFilesForTaskTool, CodeGraphListProjectsTool, CodeGraphQueryTool,
+};
 pub use channel_recall::{
     ChannelRecallArgs, ChannelRecallError, ChannelRecallOutput, ChannelRecallTool,
 };
@@ -413,6 +417,18 @@ pub async fn add_channel_tools(
             state.deps.agent_id.to_string(),
         ))
         .await?;
+    // Add codegraph tools when the manager is available
+    if let Some(ref cg_manager) = state.deps.codegraph_manager {
+        handle
+            .add_tool(CodeGraphQueryTool::new(cg_manager.clone()))
+            .await?;
+        handle
+            .add_tool(CodeGraphListProjectsTool::new(cg_manager.clone()))
+            .await?;
+        handle
+            .add_tool(CodeGraphGetFilesForTaskTool::new(cg_manager.clone()))
+            .await?;
+    }
     // Add attachment recall tool when save_attachments is enabled
     if state
         .deps

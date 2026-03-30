@@ -3,6 +3,7 @@
 pub mod agent;
 pub mod api;
 pub mod auth;
+pub mod codegraph;
 pub mod config;
 pub mod conversation;
 pub mod cron;
@@ -316,6 +317,28 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         text: String,
     },
+    /// Code graph indexing progress update.
+    CodeGraphIndexing {
+        project_id: String,
+        phase: codegraph::PipelinePhase,
+        phase_progress: f32,
+        message: String,
+    },
+    /// Code graph indexing completed.
+    CodeGraphIndexed {
+        project_id: String,
+        stats: codegraph::PipelineStats,
+    },
+    /// Code graph changed (incremental update).
+    CodeGraphChanged {
+        project_id: String,
+        files_changed: Vec<String>,
+    },
+    /// Code graph error.
+    CodeGraphError {
+        project_id: String,
+        error: String,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.
@@ -413,6 +436,8 @@ pub struct AgentDeps {
     pub injection_tx: tokio::sync::mpsc::Sender<ChannelInjection>,
     /// Working memory event log for temporal situational awareness.
     pub working_memory: Arc<memory::WorkingMemoryStore>,
+    /// Shared code graph manager (None if not initialized).
+    pub codegraph_manager: Option<Arc<codegraph::CodeGraphManager>>,
 }
 
 impl AgentDeps {

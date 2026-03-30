@@ -1341,6 +1341,138 @@ export interface MigrateResponse {
 	message: string;
 }
 
+// ---------------------------------------------------------------------------
+// Code Graph types
+// ---------------------------------------------------------------------------
+
+export type CodeGraphIndexStatus = "pending" | "indexing" | "indexed" | "stale" | "error";
+
+export interface CodeGraphProject {
+	project_id: string;
+	name: string;
+	root_path: string;
+	status: CodeGraphIndexStatus;
+	progress?: {
+		phase: string;
+		phase_progress: number;
+		message: string;
+		stats: CodeGraphPipelineStats;
+	};
+	last_index_stats?: CodeGraphPipelineStats;
+	last_indexed_at?: string;
+	primary_language?: string;
+	schema_version: number;
+	created_at: string;
+	updated_at: string;
+}
+
+export interface CodeGraphPipelineStats {
+	files_found: number;
+	files_parsed: number;
+	nodes_created: number;
+	edges_created: number;
+	communities_detected: number;
+	processes_traced: number;
+	errors: number;
+}
+
+export interface CodeGraphProjectListResponse {
+	projects: CodeGraphProject[];
+}
+
+export interface CodeGraphProjectDetailResponse {
+	project: CodeGraphProject;
+}
+
+export interface CodeGraphCommunity {
+	id: string;
+	name: string;
+	description?: string;
+	node_count: number;
+	file_count: number;
+	function_count: number;
+	key_symbols: string[];
+}
+
+export interface CodeGraphCommunitiesResponse {
+	communities: CodeGraphCommunity[];
+	total: number;
+}
+
+export interface CodeGraphProcess {
+	id: string;
+	entry_function: string;
+	source_file: string;
+	call_depth: number;
+	community?: string;
+	steps: string[];
+}
+
+export interface CodeGraphProcessesResponse {
+	processes: CodeGraphProcess[];
+	total: number;
+}
+
+export interface CodeGraphSearchResult {
+	node_id: number;
+	qualified_name: string;
+	name: string;
+	label: string;
+	source_file?: string;
+	line_start?: number;
+	score: number;
+	community?: string;
+	snippet?: string;
+}
+
+export interface CodeGraphSearchResponse {
+	results: CodeGraphSearchResult[];
+	total: number;
+}
+
+export interface CodeGraphIndexLogEntry {
+	run_id: string;
+	status: CodeGraphIndexStatus;
+	started_at: string;
+	completed_at?: string;
+	current_phase?: string;
+	progress?: { phase: string; phase_progress: number; message: string };
+	stats?: CodeGraphPipelineStats;
+	error?: string;
+}
+
+export interface CodeGraphIndexLogResponse {
+	entries: CodeGraphIndexLogEntry[];
+}
+
+export interface CodeGraphProjectMemory {
+	id: string;
+	project_id: string;
+	memory_type: string;
+	content: string;
+	tags: string[];
+	created_at: string;
+	last_verified_at: string;
+	relevance_score: number;
+	source: string;
+}
+
+export interface CodeGraphProjectMemoriesResponse {
+	memories: CodeGraphProjectMemory[];
+	total: number;
+}
+
+export interface CodeGraphRemoveInfoResponse {
+	node_count: number;
+	edge_count: number;
+	memory_count: number;
+}
+
+export interface CodeGraphActionResponse {
+	success: boolean;
+	message: string;
+}
+
 export const api = {
 	status: () => fetchJson<Types.StatusResponse>("/status"),
 	overview: () => fetchJson<Types.InstanceOverviewResponse>("/agents/instance"),
@@ -2338,4 +2470,62 @@ export const api = {
 		if (!response.ok) throw new Error(`API error: ${response.status}`);
 		return response.json() as Promise<ListDirResponse>;
 	},
+
+	// ── Code Graph API ────────────────────────────────────────────────────
+
+	codegraphProjects: (status?: CodeGraphIndexStatus) => {
+		const params = status ? `?status=${encodeURIComponent(status)}` : "";
+		return fetchJson<CodeGraphProjectListResponse>(`/codegraph/projects${params}`);
+	},
+
+	codegraphProject: (projectId: string) =>
+		fetchJson<CodeGraphProjectDetailResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}`),
+
+	codegraphCreateProject: async (name: string, rootPath: string): Promise<CodeGraphProjectDetailResponse> => {
+		const response = await fetch(`${getApiBase()}/codegraph/projects`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ name, root_path: rootPath }),
+		});
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<CodeGraphProjectDetailResponse>;
+	},
+
+	codegraphDeleteProject: async (projectId: string): Promise<CodeGraphActionResponse> => {
+		const response = await fetch(
+			`${getApiBase()}/codegraph/projects/${encodeURIComponent(projectId)}`,
+			{ method: "DELETE" },
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<CodeGraphActionResponse>;
+	},
+
+	codegraphReindex: async (projectId: string): Promise<CodeGraphActionResponse> => {
+		const response = await fetch(
+			`${getApiBase()}/codegraph/projects/${encodeURIComponent(projectId)}/reindex`,
+			{ method: "POST" },
+		);
+		if (!response.ok) throw new Error(`API error: ${response.status}`);
+		return response.json() as Promise<CodeGraphActionResponse>;
+	},
+
+	codegraphCommunities: (projectId: string) =>
+		fetchJson<CodeGraphCommunitiesResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/communities`),
+
+	codegraphProcesses: (projectId: string) =>
+		fetchJson<CodeGraphProcessesResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/processes`),
+
+	codegraphSearch: (projectId: string, query: string, limit = 20) =>
+		fetchJson<CodeGraphSearchResponse>(
+			`/codegraph/projects/${encodeURIComponent(projectId)}/graph/search?q=${encodeURIComponent(query)}&limit=${limit}`,
+		),
+
+	codegraphIndexLog: (projectId: string) =>
+		fetchJson<CodeGraphIndexLogResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/graph/index-log`),
+
+	codegraphMemories: (projectId: string) =>
+		fetchJson<CodeGraphProjectMemoriesResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/memories`),
+
+	codegraphRemoveInfo: (projectId: string) =>
+		fetchJson<CodeGraphRemoveInfoResponse>(`/codegraph/projects/${encodeURIComponent(projectId)}/remove-info`),
 };

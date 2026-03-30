@@ -467,6 +467,7 @@ pub(super) async fn trigger_warmup(
         let agent_id = agent_id.clone();
         let injection_tx = state.injection_tx.clone();
         let humans = (**state.agent_humans.load()).clone();
+        let codegraph_manager = state.codegraph_manager.load().as_ref().clone();
         tokio::spawn(async move {
             let (event_tx, memory_event_tx) = crate::create_process_event_buses();
             let project_store =
@@ -502,6 +503,7 @@ pub(super) async fn trigger_warmup(
                 ),
                 injection_tx,
                 working_memory,
+                codegraph_manager,
             };
             let logger = CortexLogger::new(sqlite_pool);
             crate::agent::cortex::run_warmup_once(&deps, &logger, "api_trigger", force).await;
@@ -922,6 +924,11 @@ pub async fn create_agent_internal(
                 .unwrap_or(chrono_tz::Tz::UTC);
             crate::memory::WorkingMemoryStore::new(db.sqlite.clone(), tz)
         },
+        codegraph_manager: state
+            .codegraph_manager
+            .load()
+            .as_ref()
+            .clone(),
     };
 
     let event_rx = event_tx.subscribe();

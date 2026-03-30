@@ -2765,6 +2765,7 @@ async fn initialize_agents(
             ),
             injection_tx: injection_tx.clone(),
             working_memory,
+            codegraph_manager: None, // Initialized after the agent loop if needed.
         };
 
         let agent = spacebot::Agent {

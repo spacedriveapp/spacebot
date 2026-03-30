@@ -7,6 +7,7 @@
 pub mod agents;
 mod bindings;
 mod channels;
+mod codegraph;
 mod config;
 mod cortex;
 mod cron;

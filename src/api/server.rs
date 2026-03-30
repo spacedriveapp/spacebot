@@ -2,9 +2,9 @@
 
 use super::state::ApiState;
 use super::{
-    agents, bindings, channels, config, cortex, cron, factory, fs, ingest, links, mcp, memories,
-    messaging, models, opencode_proxy, projects, providers, secrets, settings, skills, ssh, system,
-    tasks, tools, webchat, workers,
+    agents, bindings, channels, codegraph, config, cortex, cron, factory, fs, ingest, links, mcp,
+    memories, messaging, models, opencode_proxy, projects, providers, secrets, settings, skills,
+    ssh, system, tasks, tools, webchat, workers,
 };
 
 use axum::Json;
@@ -226,6 +226,22 @@ pub fn api_router() -> OpenApiRouter<Arc<ApiState>> {
         .routes(routes!(links::update_group, links::delete_group))
         .routes(routes!(links::list_humans, links::create_human))
         .routes(routes!(links::update_human, links::delete_human))
+        // Code Graph routes
+        .routes(routes!(
+            codegraph::list_projects,
+            codegraph::create_project
+        ))
+        .routes(routes!(
+            codegraph::get_project,
+            codegraph::delete_project
+        ))
+        .routes(routes!(codegraph::reindex_project))
+        .routes(routes!(codegraph::get_communities))
+        .routes(routes!(codegraph::get_processes))
+        .routes(routes!(codegraph::search_graph))
+        .routes(routes!(codegraph::get_index_log))
+        .routes(routes!(codegraph::get_project_memories))
+        .routes(routes!(codegraph::get_remove_info))
         // Factory routes
         .routes(routes!(factory::list_presets))
         .routes(routes!(factory::get_preset))

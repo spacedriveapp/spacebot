@@ -26,6 +26,8 @@ import {GlobalTasks} from "@/routes/GlobalTasks";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Orchestrate} from "@/routes/Orchestrate";
+import {GlobalProjects} from "@/routes/GlobalProjects";
+import {ProjectDetail} from "@/routes/ProjectDetail";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {AgentTabs} from "@/components/AgentTabs";
 
@@ -153,6 +155,33 @@ const tasksRoute = createRoute({
 			</div>,
 		);
 		return <GlobalTasks />;
+	},
+});
+
+const projectsRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/projects",
+	component: function ProjectsPage() {
+		useSetTopBar(
+			<div className="flex h-full items-center gap-4 px-6">
+				<h1 className="font-plex text-sm font-medium text-ink">Projects</h1>
+				<span className="text-xs text-ink-faint">All projects across agents</span>
+			</div>,
+		);
+		return <GlobalProjects />;
+	},
+});
+
+const projectDetailRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/projects/$projectId",
+	validateSearch: (search: Record<string, unknown>): {tab?: string} => ({
+		tab: typeof search.tab === "string" ? search.tab : undefined,
+	}),
+	component: function ProjectDetailPage() {
+		const {projectId} = projectDetailRoute.useParams();
+		const {tab} = projectDetailRoute.useSearch();
+		return <ProjectDetail projectId={projectId} initialTab={tab} />;
 	},
 });
 
@@ -388,6 +417,8 @@ const routeTree = rootRoute.addChildren([
 	logsRoute,
 	orchestrateRoute,
 	tasksRoute,
+	projectsRoute,
+	projectDetailRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,

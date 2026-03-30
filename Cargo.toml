@@ -167,8 +167,42 @@ libc = "0.2"
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "0.3", features = ["processthreadsapi", "handleapi", "fileapi", "winbase", "errhandlingapi", "namedpipeapi", "synchapi", "winerror"] }
 
+# Tree-sitter (code graph indexing)
+tree-sitter = { version = "0.24", optional = true }
+tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-javascript = { version = "0.25", optional = true }
+tree-sitter-python = { version = "0.25", optional = true }
+tree-sitter-rust = { version = "0.24", optional = true }
+tree-sitter-go = { version = "0.25", optional = true }
+tree-sitter-java = { version = "0.23", optional = true }
+tree-sitter-c = { version = "0.24", optional = true }
+tree-sitter-cpp = { version = "0.23", optional = true }
+tree-sitter-c-sharp = { version = "0.23", optional = true }
+tree-sitter-ruby = { version = "0.23", optional = true }
+tree-sitter-php = { version = "0.24", optional = true }
+tree-sitter-kotlin = { version = "0.3", optional = true }
+tree-sitter-swift = { version = "0.7", optional = true }
+tree-sitter-md = { version = "0.5", optional = true }
+
 [features]
 metrics = ["dep:prometheus"]
+codegraph = [
+    "dep:tree-sitter",
+    "dep:tree-sitter-typescript",
+    "dep:tree-sitter-javascript",
+    "dep:tree-sitter-python",
+    "dep:tree-sitter-rust",
+    "dep:tree-sitter-go",
+    "dep:tree-sitter-java",
+    "dep:tree-sitter-c",
+    "dep:tree-sitter-cpp",
+    "dep:tree-sitter-c-sharp",
+    "dep:tree-sitter-ruby",
+    "dep:tree-sitter-php",
+    "dep:tree-sitter-kotlin",
+    "dep:tree-sitter-swift",
+    "dep:tree-sitter-md",
+]
 
 [patch.crates-io]
 imap-proto = { path = "vendor/imap-proto-0.10.2" }
