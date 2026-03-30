@@ -1,5 +1,8 @@
 import * as React from "react";
-import { cx } from "./utils";
+import {ToggleGroup as SpaceUIToggleGroup} from "@spaceui/primitives";
+import {cx} from "./utils";
+
+const SpaceUIToggleGroupCompat = SpaceUIToggleGroup as unknown as React.ComponentType<any>;
 
 export interface ToggleGroupOption<T extends string> {
 	value: T;
@@ -21,31 +24,12 @@ export function ToggleGroup<T extends string>({
 	className,
 }: ToggleGroupProps<T>) {
 	return (
-		<div
-			className={cx(
-				"flex overflow-hidden rounded-md border border-app-line bg-app-darkBox",
-				className
-			)}
-		>
-			{options.map((option) => {
-				const isActive = option.value === value;
-
-				return (
-					<button
-						key={option.value}
-						onClick={() => onChange(option.value)}
-						title={option.title}
-						className={cx(
-							"inline-flex h-8 w-8 items-center justify-center transition-colors",
-							isActive
-								? "bg-app-selected text-ink"
-								: "text-ink-faint hover:bg-app-hover/40 hover:text-ink-dull"
-						)}
-					>
-						{option.label}
-					</button>
-				);
-			})}
-		</div>
+		<SpaceUIToggleGroupCompat
+			options={options}
+			value={value}
+			onChange={onChange}
+			className={cx("bg-app-darkBox", className)}
+			itemClassName="h-8 w-8 justify-center px-0"
+		/>
 	);
 }

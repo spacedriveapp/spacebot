@@ -1,5 +1,5 @@
 import * as React from "react";
-import { cx } from "./utils";
+import {FilterButton as SpaceUIFilterButton} from "@spaceui/primitives";
 
 export interface FilterButtonProps
 	extends React.ButtonHTMLAttributes<HTMLButtonElement> {
@@ -11,20 +11,16 @@ export interface FilterButtonProps
 export const FilterButton = React.forwardRef<
 	HTMLButtonElement,
 	FilterButtonProps
->(({ active, colorClass, className, children, ...props }, ref) => (
-	<button
+>(({active, colorClass, className, children, ...props}, ref) => (
+	<SpaceUIFilterButton
 		ref={ref}
-		className={cx(
-			"h-6 rounded-md px-2 text-tiny font-medium transition-colors",
-			active
-				? colorClass || "bg-app-selected text-ink"
-				: "text-ink-faint hover:text-ink-dull",
-			className
-		)}
+		active={active}
+		label={typeof children === "string" ? children : ""}
+		className={active && colorClass ? `${colorClass} ${className ?? ""}` : className}
 		{...props}
 	>
-		{children}
-	</button>
+		{typeof children === "string" ? undefined : children}
+	</SpaceUIFilterButton>
 ));
 
 FilterButton.displayName = "FilterButton";

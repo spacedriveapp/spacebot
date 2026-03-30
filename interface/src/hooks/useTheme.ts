@@ -13,25 +13,25 @@ export const THEMES: ThemeOption[] = [
 	{
 		id: "default",
 		name: "Default",
-		description: "Dark theme with purple accent",
+		description: "SpaceUI dark theme with blue accent",
 		className: "",
 	},
 	{
 		id: "vanilla",
 		name: "Vanilla",
-		description: "Light theme with blue accent",
+		description: "SpaceUI light theme",
 		className: "vanilla-theme",
 	},
 	{
 		id: "midnight",
 		name: "Midnight",
-		description: "Deep blue dark theme",
+		description: "SpaceUI midnight dark theme",
 		className: "midnight-theme",
 	},
 	{
 		id: "noir",
 		name: "Noir",
-		description: "Pure black and white theme",
+		description: "SpaceUI high-contrast noir theme",
 		className: "noir-theme",
 	},
 ];

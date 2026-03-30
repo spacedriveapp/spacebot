@@ -2,7 +2,7 @@ import defaultTheme from "tailwindcss/defaultTheme";
 import type { Config } from "tailwindcss";
 
 function alpha(variableName: string) {
-	return `hsla(var(${variableName}), <alpha-value>)`;
+	return `color-mix(in srgb, var(${variableName}) calc(<alpha-value> * 100%), transparent)`;
 }
 
 export default {
@@ -88,6 +88,12 @@ export default {
 					shade: alpha("--color-menu-shade"),
 					ink: alpha("--color-menu-ink"),
 					faint: alpha("--color-menu-faint"),
+				},
+				status: {
+					success: alpha("--color-status-success"),
+					warning: alpha("--color-status-warning"),
+					error: alpha("--color-status-error"),
+					info: alpha("--color-status-info"),
 				},
 			},
 			transitionTimingFunction: {

@@ -1,95 +1,65 @@
 import * as React from "react";
-import {cva, type VariantProps} from "class-variance-authority";
+import {
+	Input as SpaceUIInput,
+	PasswordInput as SpaceUIPasswordInput,
+	SearchInput as SpaceUISearchInput,
+	TextArea as SpaceUITextArea,
+} from "@spaceui/primitives";
 import {cx} from "./utils";
-import {Search01Icon} from "@hugeicons/core-free-icons";
-import {HugeiconsIcon} from "@hugeicons/react";
+
+const SpaceUIInputCompat = SpaceUIInput as unknown as React.ComponentType<any>;
+const SpaceUITextAreaCompat = SpaceUITextArea as unknown as React.ComponentType<any>;
+const SpaceUISearchInputCompat = SpaceUISearchInput as unknown as React.ComponentType<any>;
+const SpaceUIPasswordInputCompat = SpaceUIPasswordInput as unknown as React.ComponentType<any>;
 
 export const inputSizes = {
-	sm: "h-8 text-sm px-3 py-1.5",
-	md: "h-9 text-sm px-3",
-	lg: "h-10 text-base px-3.5",
+	sm: "sm",
+	md: "md",
+	lg: "lg",
 } as const;
 
-export const inputStyles = cva(
-	[
-		"rounded-md border text-sm leading-4",
-		"outline-none transition-colors",
-		"text-ink",
-	],
-	{
-		variants: {
-			variant: {
-				default: ["border-app-line bg-app-darkBox", "focus-within:border-accent/50"],
-				transparent: [
-					"border-transparent bg-app-box",
-					"focus-within:border-app-line",
-				],
-			},
-			error: {
-				true: "border-red-500/50 focus-within:border-red-500",
-			},
-			size: inputSizes,
-		},
-		defaultVariants: {
-			variant: "default",
-			size: "sm",
-		},
-	},
-);
-
-type InputVariants = VariantProps<typeof inputStyles>;
+type LocalSize = keyof typeof inputSizes;
 
 export interface InputProps
-	extends
-		Omit<React.InputHTMLAttributes<HTMLInputElement>, "size">,
-		InputVariants {
+	extends Omit<React.InputHTMLAttributes<HTMLInputElement>, "size"> {
+	size?: LocalSize;
+	error?: boolean;
 	icon?: React.ReactNode;
 	right?: React.ReactNode;
+	variant?: "default" | "transparent";
+	inputElementClassName?: string;
 }
 
 export const Input = React.forwardRef<HTMLInputElement, InputProps>(
-	({className, variant, size, error, icon, right, ...props}, ref) => {
-		return (
-			<div
-				className={cx(
-					inputStyles({variant, size, error}),
-					"flex items-center gap-2",
-					className,
-				)}
-			>
-				{icon && <span className="text-ink-faint shrink-0">{icon}</span>}
-				<input
-					ref={ref}
-					className="bg-transparent w-full outline-none placeholder:text-ink-faint"
-					{...props}
-				/>
-				{right && <span className="shrink-0">{right}</span>}
-			</div>
-		);
-	},
+	({className, size = "sm", variant = "default", ...props}, ref) => (
+		<SpaceUIInputCompat
+			ref={ref}
+			size={inputSizes[size]}
+			variant={variant}
+			className={className}
+			{...props}
+		/>
+	),
 );
 
 Input.displayName = "Input";
 
 export interface TextAreaProps
-	extends
-		React.TextareaHTMLAttributes<HTMLTextAreaElement>,
-		Pick<InputVariants, "variant" | "error"> {}
+	extends React.TextareaHTMLAttributes<HTMLTextAreaElement> {
+	variant?: "default" | "transparent";
+	error?: boolean;
+}
 
 export const TextArea = React.forwardRef<HTMLTextAreaElement, TextAreaProps>(
-	({className, variant = "default", error, ...props}, ref) => {
-		return (
-			<textarea
-				ref={ref}
-				className={cx(
-					inputStyles({variant, error}),
-					"w-full min-h-[80px] resize-y py-2 placeholder:text-ink-faint [&::-webkit-resizer]:bg-transparent",
-					className,
-				)}
-				{...props}
-			/>
-		);
-	},
+	({className, variant = "default", error, ...props}, ref) => (
+		<SpaceUITextAreaCompat
+			ref={ref}
+			variant={variant}
+			error={error}
+			className={className}
+			{...props}
+		/>
+	),
 );
 
 TextArea.displayName = "TextArea";
@@ -98,17 +68,7 @@ export const SearchInput = React.forwardRef<
 	HTMLInputElement,
 	Omit<InputProps, "icon">
 >(({size = "sm", ...props}, ref) => (
-	<Input
-		ref={ref}
-		icon={
-			<HugeiconsIcon
-				icon={Search01Icon}
-				size={size === "sm" ? 14 : size === "md" ? 16 : 18}
-			/>
-		}
-		size={size}
-		{...props}
-	/>
+	<SpaceUISearchInputCompat ref={ref} size={inputSizes[size]} {...props} />
 ));
 
 SearchInput.displayName = "SearchInput";
@@ -119,7 +79,7 @@ export const Label = React.forwardRef<
 >(({className, ...props}, ref) => (
 	<label
 		ref={ref}
-		className={cx("block text-xs font-medium text-ink-dull mb-1.5", className)}
+		className={cx("mb-1.5 block text-xs font-medium text-ink-dull", className)}
 		{...props}
 	/>
 ));
@@ -128,26 +88,9 @@ Label.displayName = "Label";
 
 export const PasswordInput = React.forwardRef<
 	HTMLInputElement,
-	Omit<InputProps, "type" | "right">
->(({...props}, ref) => {
-	const [show, setShow] = React.useState(false);
-
-	return (
-		<Input
-			ref={ref}
-			type={show ? "text" : "password"}
-			right={
-				<button
-					type="button"
-					onClick={() => setShow(!show)}
-					className="text-xs text-ink-dull hover:text-ink transition-colors"
-				>
-					{show ? "Hide" : "Show"}
-				</button>
-			}
-			{...props}
-		/>
-	);
-});
+	Omit<InputProps, "type">
+>(({size = "sm", ...props}, ref) => (
+	<SpaceUIPasswordInputCompat ref={ref} size={inputSizes[size]} {...props} />
+));
 
 PasswordInput.displayName = "PasswordInput";

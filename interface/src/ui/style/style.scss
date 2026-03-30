@@ -1,4 +1,7 @@
-@use './colors.scss';
+@import url('@spaceui/tokens/css');
+@import url('@spaceui/tokens/css/themes/light');
+@import url('@spaceui/tokens/css/themes/midnight');
+@import url('@spaceui/tokens/css/themes/noir');
 
 @tailwind base;
 @tailwind components;
@@ -23,7 +26,7 @@ html, body {
 
 html {
 	font-size: 106.25%;
-	background: hsla(var(--color-app), 1);
+	background: var(--color-app);
 }
 
 body {

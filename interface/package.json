@@ -36,6 +36,8 @@
 		"@radix-ui/react-switch": "^1.2.6",
 		"@radix-ui/react-tabs": "^1.1.13",
 		"@radix-ui/react-tooltip": "^1.2.8",
+		"@spaceui/primitives": "file:../../spaceui/packages/primitives",
+		"@spaceui/tokens": "file:../../spaceui/packages/tokens",
 		"@react-sigma/core": "^5.0.6",
 		"@tanstack/react-query": "^5.62.0",
 		"@tanstack/react-query-devtools": "^5.91.3",

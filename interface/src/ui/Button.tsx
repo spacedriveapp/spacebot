@@ -1,46 +1,30 @@
 import * as React from "react";
 import {cva, type VariantProps} from "class-variance-authority";
+import {Button as SpaceUIButton, Loader} from "@spaceui/primitives";
 import {cx} from "./utils";
-import {Loader} from "./Loader";
 
-export const buttonStyles = cva(
-	[
-		"inline-flex items-center justify-center rounded-lg font-medium transition-colors",
-		"disabled:pointer-events-none disabled:opacity-50",
-		"focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2",
-	],
-	{
-		variants: {
-			size: {
-				default: "h-9 px-4 py-2 text-sm",
-				sm: "h-8 rounded-md px-3 text-xs",
-				lg: "h-10 rounded-md px-8 text-sm",
-				icon: "h-8 w-8 rounded-md p-0",
-			},
-			variant: {
-				default: ["bg-accent text-white shadow", "hover:bg-accent/90"],
-				destructive: [
-				"border border-app-line bg-transparent text-ink-dull",
-				"hover:bg-red-600 hover:text-white hover:border-red-600",
-			],
-				outline: [
-					"border border-app-line bg-transparent",
-					"hover:bg-app-hover/40 hover:text-ink",
-				],
-				secondary: [
-					"bg-app-darkBox text-ink-dull",
-					"hover:bg-app-lightBox hover:text-ink",
-				],
-				ghost: ["hover:bg-app-darkBox hover:text-ink-dull", "text-ink-faint"],
-				link: ["text-accent underline-offset-4", "hover:underline"],
-			},
+export const buttonStyles = cva("", {
+	variants: {
+		size: {
+			default: "",
+			sm: "",
+			lg: "",
+			icon: "",
 		},
-		defaultVariants: {
-			variant: "default",
-			size: "default",
+		variant: {
+			default: "",
+			destructive: "",
+			outline: "",
+			secondary: "",
+			ghost: "",
+			link: "",
 		},
 	},
-);
+	defaultVariants: {
+		variant: "default",
+		size: "default",
+	},
+});
 
 export type ButtonBaseProps = VariantProps<typeof buttonStyles>;
 
@@ -52,28 +36,64 @@ export interface ButtonProps
 	children?: React.ReactNode;
 }
 
+const sizeMap: Record<NonNullable<ButtonProps["size"]>, "icon" | "sm" | "md" | "lg"> = {
+	default: "md",
+	sm: "sm",
+	lg: "lg",
+	icon: "icon",
+};
+
+const variantMap: Record<NonNullable<ButtonProps["variant"]>, "accent" | "gray" | "default" | "bare"> = {
+	default: "accent",
+	destructive: "gray",
+	outline: "default",
+	secondary: "gray",
+	ghost: "bare",
+	link: "bare",
+};
+
+const variantClassMap: Record<NonNullable<ButtonProps["variant"]>, string> = {
+	default: "",
+	destructive:
+		"text-ink-dull hover:border-red-600 hover:bg-red-600 hover:text-white",
+	outline: "",
+	secondary: "",
+	ghost: "text-ink-faint hover:bg-app-darkBox hover:text-ink-dull",
+	link: "h-auto border-none p-0 text-accent underline-offset-4 hover:underline",
+};
+
 export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 	(
 		{
 			className,
-			variant,
-			size,
+			variant: variantProp = "default",
+			size: sizeProp = "default",
 			loading,
 			leftIcon,
 			rightIcon,
 			children,
 			disabled,
+			type = "button",
 			...props
 		},
 		ref,
 	) => {
+		const variant = variantProp ?? "default";
+		const size = sizeProp ?? "default";
 		const isDisabled = disabled || loading;
 
 		return (
-			<button
-				className={cx(buttonStyles({variant, size}), className)}
+			<SpaceUIButton
 				ref={ref}
+				type={type}
 				disabled={isDisabled}
+				variant={variantMap[variant]}
+				size={sizeMap[size]}
+				className={cx(
+					"inline-flex items-center justify-center",
+					variantClassMap[variant],
+					className,
+				)}
 				{...props}
 			>
 				{loading && <Loader className="mr-2 h-4 w-4 animate-spin" />}
@@ -84,7 +104,7 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
 				{!loading && rightIcon && (
 					<span className="ml-2 inline-flex items-center">{rightIcon}</span>
 				)}
-			</button>
+			</SpaceUIButton>
 		);
 	},
 );
