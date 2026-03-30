@@ -95,7 +95,7 @@ taskkill /f /im Spacebot.exe 2>&1 | Out-Null
 & $BackendBin stop 2>&1 | Out-Null
 $ErrorActionPreference = "Stop"
 
-cargo build --manifest-path "$RepoRoot\desktop\src-tauri\Cargo.toml"
+cargo build --manifest-path "$RepoRoot\desktop\src-tauri\Cargo.toml" --features tauri/custom-protocol
 
 if ($LASTEXITCODE -ne 0) { Fail "Tauri desktop build failed" }
 Log "desktop ready -> $TauriBin"

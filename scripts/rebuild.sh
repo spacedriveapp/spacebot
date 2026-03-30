@@ -130,7 +130,7 @@ case "$(uname -s)" in
 esac
 "$BACKEND_BIN" stop 2>/dev/null || true
 
-cargo build --manifest-path "$REPO_ROOT/desktop/src-tauri/Cargo.toml"
+cargo build --manifest-path "$REPO_ROOT/desktop/src-tauri/Cargo.toml" --features tauri/custom-protocol
 
 log "desktop ready -> $TAURI_BIN"
 
