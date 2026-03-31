@@ -117,6 +117,54 @@ fn emit_cron_error(context: &CronContext, job_id: &str, error: &crate::error::Er
     tracing::error!(cron_id = %job_id, %error, "cron job execution failed");
 }
 
+#[derive(Debug)]
+enum CronRunError {
+    Execution(crate::error::Error),
+    Delivery(crate::error::Error),
+}
+
+impl CronRunError {
+    fn as_error(&self) -> &crate::error::Error {
+        match self {
+            Self::Execution(error) | Self::Delivery(error) => error,
+        }
+    }
+
+    fn into_error(self) -> crate::error::Error {
+        match self {
+            Self::Execution(error) | Self::Delivery(error) => error,
+        }
+    }
+
+    fn failure_class(&self) -> &'static str {
+        match self {
+            Self::Execution(_) => "execution_error",
+            Self::Delivery(_) => "delivery_error",
+        }
+    }
+}
+
+impl From<crate::error::Error> for CronRunError {
+    fn from(error: crate::error::Error) -> Self {
+        Self::Execution(error)
+    }
+}
+
+async fn set_job_enabled_state(
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+    enabled: bool,
+) -> Result<()> {
+    let mut jobs = jobs.write().await;
+    let Some(job) = jobs.get_mut(job_id) else {
+        return Err(crate::error::Error::Other(anyhow::anyhow!(
+            "cron job not found"
+        )));
+    };
+    job.enabled = enabled;
+    Ok(())
+}
+
 const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
@@ -515,7 +563,7 @@ impl Scheduler {
                             }
                         }
                         Err(error) => {
-                            emit_cron_error(&exec_context, &exec_job_id, &error);
+                            emit_cron_error(&exec_context, &exec_job_id, error.as_error());
 
                             let should_disable = {
                                 let mut j = exec_jobs.write().await;
@@ -644,7 +692,9 @@ impl Scheduler {
             }
 
             tracing::info!(cron_id = %job_id, "cron job triggered manually");
-            run_cron_job(&job, &self.context).await
+            run_cron_job(&job, &self.context)
+                .await
+                .map_err(CronRunError::into_error)
         } else {
             Err(crate::error::Error::Other(anyhow::anyhow!(
                 "cron job not found"
@@ -688,22 +738,15 @@ impl Scheduler {
                 jobs.insert(job_id.to_string(), job);
             }
 
-            // Initialize cursor and start timer before marking enabled
+            // Initialize cursor, make the enabled state visible, then start the timer.
             if let Err(error) = self.ensure_job_next_run_at(job_id, None).await {
                 // Clean up on failure - remove the partially inserted job
                 let mut jobs = self.jobs.write().await;
                 jobs.remove(job_id);
                 return Err(error);
             }
+            set_job_enabled_state(&self.jobs, job_id, true).await?;
             self.start_timer(job_id, None).await;
-
-            // Atomically enable the job after initialization succeeded
-            {
-                let mut jobs = self.jobs.write().await;
-                if let Some(j) = jobs.get_mut(job_id) {
-                    j.enabled = true;
-                }
-            }
             tracing::info!(cron_id = %job_id, "cron job cold-re-enabled and timer started");
             return Ok(());
         }
@@ -716,28 +759,16 @@ impl Scheduler {
         };
 
         if enabled && !was_enabled {
-            // Initialize and start timer BEFORE enabling atomically
+            // Initialize the cursor, make the enabled state visible, then start the timer.
             self.ensure_job_next_run_at(job_id, None).await?;
+            set_job_enabled_state(&self.jobs, job_id, true).await?;
             self.start_timer(job_id, None).await;
-
-            // Atomically enable the job after timer started successfully
-            {
-                let mut jobs = self.jobs.write().await;
-                if let Some(j) = jobs.get_mut(job_id) {
-                    j.enabled = true;
-                }
-            }
             tracing::info!(cron_id = %job_id, "cron job enabled and timer started");
         }
 
         if !enabled && was_enabled {
             // Atomically disable first, then abort timer
-            {
-                let mut jobs = self.jobs.write().await;
-                if let Some(j) = jobs.get_mut(job_id) {
-                    j.enabled = false;
-                }
-            }
+            set_job_enabled_state(&self.jobs, job_id, false).await?;
 
             // Abort the timer immediately rather than waiting up to one full interval.
             let handle = {
@@ -1221,7 +1252,7 @@ fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
 
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
-async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
+async fn run_cron_job(job: &CronJob, context: &CronContext) -> std::result::Result<(), CronRunError> {
     ensure_cron_dispatch_readiness(context, &job.id);
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
@@ -1283,7 +1314,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                 delivery_error: None,
             },
         );
-        return Err(anyhow::anyhow!(error_message).into());
+        return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
     }
 
     let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(120));
@@ -1328,7 +1359,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                         delivery_error: None,
                     },
                 );
-                return Err(anyhow::anyhow!(error_message).into());
+                return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
             }
             Err(join_error) => {
                 let error_message = format!("cron channel join failed: {join_error}");
@@ -1344,7 +1375,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                         delivery_error: None,
                     },
                 );
-                return Err(anyhow::anyhow!(error_message).into());
+                return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
             }
         },
         CronResponseWaitOutcome::TimedOut => {
@@ -1385,7 +1416,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                 },
             );
 
-            return Err(anyhow::anyhow!(error_message).into());
+            return Err(CronRunError::Execution(anyhow::anyhow!(error_message).into()));
         }
     };
 
@@ -1419,9 +1450,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                     delivery_error: Some(error.to_string()),
                 },
             );
-            // Return Ok because execution succeeded; delivery failure is recorded
-            // separately and should not increment consecutive_failures
-            return Ok(());
+            return Err(CronRunError::Delivery(error));
         }
 
         tracing::info!(
@@ -1641,8 +1670,8 @@ fn cron_response_summary(response: &OutboundResponse) -> Option<String> {
 mod tests {
     use super::{
         CronConfig, CronJob, CronResponseWaitOutcome, await_cron_delivery_response,
-        cron_response_summary, hour_in_active_window, normalize_active_hours,
-        normalize_cron_delivery_response, sync_job_from_store,
+        CronRunError, cron_response_summary, hour_in_active_window, normalize_active_hours,
+        normalize_cron_delivery_response, set_job_enabled_state, sync_job_from_store,
     };
     use crate::cron::store::CronStore;
     use crate::messaging::target::parse_delivery_target;
@@ -1892,5 +1921,40 @@ mod tests {
         let job = guard.get("daily-digest").expect("job remains registered");
         assert_eq!(job.next_run_at, Some(advanced_next_run_at));
         assert_eq!(job.consecutive_failures, 2);
+    }
+
+    #[test]
+    fn cron_run_error_distinguishes_delivery_failures() {
+        let delivery_error = CronRunError::Delivery(crate::error::Error::Other(anyhow::anyhow!(
+            "adapter offline"
+        )));
+        let execution_error = CronRunError::Execution(crate::error::Error::Other(anyhow::anyhow!(
+            "channel failed"
+        )));
+
+        assert_eq!(delivery_error.as_error().to_string(), "adapter offline");
+        assert_eq!(delivery_error.failure_class(), "delivery_error");
+        assert_eq!(execution_error.failure_class(), "execution_error");
+    }
+
+    #[tokio::test]
+    async fn set_job_enabled_state_updates_in_memory_flag() {
+        let jobs = Arc::new(RwLock::new(HashMap::from([(
+            "daily-digest".to_string(),
+            CronJob {
+                enabled: false,
+                ..sample_cron_job("daily-digest", None, 1)
+            },
+        )])));
+
+        set_job_enabled_state(&jobs, "daily-digest", true)
+            .await
+            .expect("enable in-memory job");
+
+        let guard = jobs.read().await;
+        let job = guard.get("daily-digest").expect("job remains registered");
+        assert!(job.enabled);
+        assert_eq!(job.consecutive_failures, 1);
+        assert_eq!(job.next_run_at, None);
     }
 }
