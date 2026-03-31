@@ -1,9 +1,17 @@
 import {useEffect, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
-import {useWebChat} from "@/hooks/useWebChat";
+import {usePortal, getPortalSessionId} from "@/hooks/usePortal";
 import {isOpenCodeWorker, type ActiveWorker} from "@/hooks/useChannelLiveState";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
+import {ConversationSettingsPanel} from "@/components/ConversationSettingsPanel";
+import {ConversationsSidebar} from "@/components/ConversationsSidebar";
+import {Button} from "@/ui/Button";
+import {Popover, PopoverTrigger, PopoverContent} from "@/ui/Popover";
+import {api, type ConversationDefaultsResponse, type ConversationSettings} from "@/api/client";
+import {useQuery, useMutation, useQueryClient} from "@tanstack/react-query";
+import {Settings02Icon} from "@hugeicons/core-free-icons";
+import {HugeiconsIcon} from "@hugeicons/react";
 
 interface WebChatPanelProps {
 	agentId: string;
@@ -176,21 +184,105 @@ function FloatingChatInput({
 }
 
 export function WebChatPanel({agentId}: WebChatPanelProps) {
-	const {sessionId, isSending, error, sendMessage} = useWebChat(agentId);
+	const queryClient = useQueryClient();
+	const [activeConversationId, setActiveConversationId] = useState<string>(getPortalSessionId(agentId));
+	const {isSending, error, sendMessage} = usePortal(agentId, activeConversationId);
 	const {liveStates} = useLiveContext();
 	const [input, setInput] = useState("");
 	const scrollRef = useRef<HTMLDivElement>(null);
+	const [showSettings, setShowSettings] = useState(false);
+	const [settings, setSettings] = useState<ConversationSettings>({});
 
-	const liveState = liveStates[sessionId];
+	// Fetch conversations list
+	const { data: conversationsData, isLoading: conversationsLoading } = useQuery({
+		queryKey: ["portal-conversations", agentId],
+		queryFn: async () => {
+			const response = await api.listPortalConversations(agentId);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+	});
+
+	const conversations = conversationsData?.conversations ?? [];
+
+	// Reset settings when switching conversations, hydrating from cached data if available
+	useEffect(() => {
+		const activeConv = conversations.find(
+			(c: any) => c.id === activeConversationId
+		);
+		setSettings(activeConv?.settings ?? {});
+		setShowSettings(false);
+	}, [activeConversationId, agentId, conversationsData]);
+
+	// Fetch conversation defaults
+	const {data: defaults, isLoading: defaultsLoading, error: defaultsError} = useQuery<ConversationDefaultsResponse>({
+		queryKey: ["conversation-defaults", agentId],
+		queryFn: () => api.getConversationDefaults(agentId),
+	});
+
+	const agentsQuery = useQuery({
+		queryKey: ["agents"],
+		queryFn: () => api.agents(),
+		staleTime: 10_000,
+	});
+	const agentDisplayName = agentsQuery.data?.agents.find((a) => a.id === agentId)?.display_name;
+
+	const liveState = liveStates[activeConversationId];
 	const timeline = liveState?.timeline ?? [];
 	const isTyping = liveState?.isTyping ?? false;
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
 
+	// Mutations
+	const createConversationMutation = useMutation({
+		mutationFn: async () => {
+			const response = await api.createPortalConversation(agentId);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+		onSuccess: (data) => {
+			setActiveConversationId(data.conversation.id);
+			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
+		},
+	});
+
+	const deleteConversationMutation = useMutation({
+		mutationFn: async (id: string) => {
+			const response = await api.deletePortalConversation(agentId, id);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+		onSuccess: (_, deletedId) => {
+			if (activeConversationId === deletedId) {
+				setActiveConversationId(getPortalSessionId(agentId));
+			}
+			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
+		},
+	});
+
+	const renameConversationMutation = useMutation({
+		mutationFn: async ({ id, title }: { id: string; title: string }) => {
+			const response = await api.updatePortalConversation(agentId, id, title);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
+		},
+	});
+
+	const archiveConversationMutation = useMutation({
+		mutationFn: async ({ id, archived }: { id: string; archived: boolean }) => {
+			const response = await api.updatePortalConversation(agentId, id, undefined, archived);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
+		},
+	});
+
 	// Auto-scroll on new messages or typing state changes.
-	// Use direct scrollTo on the container instead of scrollIntoView,
-	// which can propagate scroll to ancestor overflow-hidden containers
-	// and shift the entire layout (hiding the top navbar).
 	useEffect(() => {
 		const el = scrollRef.current;
 		if (el) {
@@ -205,65 +297,141 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 		sendMessage(trimmed);
 	};
 
+	const saveSettingsMutation = useMutation({
+		mutationFn: async () => {
+			if (!activeConversationId) return;
+			const response = await api.updatePortalConversation(agentId, activeConversationId, undefined, undefined, settings);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+			return response.json();
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["portal-conversations", agentId] });
+			setShowSettings(false);
+		},
+	});
+
 	return (
-		<div className="relative flex h-full w-full flex-col">
-			{/* Messages */}
-			<div ref={scrollRef} className="flex-1 overflow-x-hidden overflow-y-auto">
-				<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
-					{hasActiveWorkers && (
-						<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
-							<ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />
-						</div>
-					)}
-
-					{timeline.length === 0 && !isTyping && (
-						<div className="flex flex-col items-center justify-center py-24">
-							<p className="text-sm text-ink-faint">
-								Start a conversation with {agentId}
-							</p>
-						</div>
-					)}
-
-					{timeline.map((item) => {
-						if (item.type !== "message") return null;
-						return (
-							<div key={item.id}>
-								{item.role === "user" ? (
-									<div className="flex justify-end">
-										<div className="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-br-md bg-app-hover/30 px-4 py-2.5">
-											<p className="text-sm text-ink break-all whitespace-pre-wrap">
-												{item.content}
-											</p>
-										</div>
-									</div>
-								) : (
-									<div className="text-sm text-ink-dull">
-										<Markdown>{item.content}</Markdown>
-									</div>
-								)}
-							</div>
-						);
-					})}
-
-					{/* Typing indicator */}
-					{isTyping && <ThinkingIndicator />}
-
-					{error && (
-						<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
-							{error}
-						</div>
-					)}
-				</div>
-			</div>
-
-			{/* Floating input */}
-			<FloatingChatInput
-				value={input}
-				onChange={setInput}
-				onSubmit={handleSubmit}
-				disabled={isSending || isTyping}
-				agentId={agentId}
+		<div className="flex h-full w-full">
+			{/* Sidebar */}
+			<ConversationsSidebar
+				conversations={conversations}
+				activeConversationId={activeConversationId}
+				onSelectConversation={setActiveConversationId}
+				onCreateConversation={() => createConversationMutation.mutate()}
+				onDeleteConversation={(id) => deleteConversationMutation.mutate(id)}
+				onRenameConversation={(id, title) => renameConversationMutation.mutate({ id, title })}
+				onArchiveConversation={(id, archived) => archiveConversationMutation.mutate({ id, archived })}
+				isLoading={conversationsLoading}
 			/>
+
+			{/* Main Chat Area */}
+			<div className="relative flex flex-1 flex-col">
+				{/* Header */}
+				<div className="flex items-center justify-between border-b border-app-line px-4 py-2">
+					<div className="flex items-center gap-2">
+						<h2 className="text-sm font-medium">{agentDisplayName || agentId}</h2>
+						{defaults && (
+							<span className="text-xs text-ink-faint">
+								{defaults.available_models.find((m) => m.id === (settings.model || defaults.model))?.name
+									?? settings.model ?? defaults.model}
+							</span>
+						)}
+						{settings.response_mode === "quiet" && (
+							<span className="rounded-md bg-amber-500/10 px-1.5 py-0.5 text-[10px] font-medium text-amber-400">
+								Quiet
+							</span>
+						)}
+						{settings.response_mode === "mention_only" && (
+							<span className="rounded-md bg-red-500/10 px-1.5 py-0.5 text-[10px] font-medium text-red-400">
+								Mention Only
+							</span>
+						)}
+					</div>
+					<Popover open={showSettings} onOpenChange={setShowSettings}>
+						<PopoverTrigger asChild>
+							<Button variant="ghost" size="icon" className="h-7 w-7">
+								<HugeiconsIcon icon={Settings02Icon} className="h-3.5 w-3.5" />
+							</Button>
+						</PopoverTrigger>
+						<PopoverContent align="end" sideOffset={4} collisionPadding={16} className="max-h-[80vh] w-96 overflow-y-auto p-3">
+							{defaultsLoading ? (
+								<div className="py-4 text-center text-xs text-ink-faint">Loading...</div>
+							) : defaults ? (
+								<ConversationSettingsPanel
+									defaults={defaults}
+									currentSettings={settings}
+									onChange={setSettings}
+									onSave={() => saveSettingsMutation.mutate()}
+									onCancel={() => setShowSettings(false)}
+									saving={saveSettingsMutation.isPending}
+								/>
+							) : (
+								<div className="py-4 text-center text-xs text-red-400">
+									{defaultsError instanceof Error ? defaultsError.message : "Failed to load settings"}
+								</div>
+							)}
+						</PopoverContent>
+					</Popover>
+				</div>
+
+				{/* Messages */}
+				<div ref={scrollRef} className="flex-1 overflow-x-hidden overflow-y-auto">
+					<div className="mx-auto flex max-w-2xl flex-col gap-6 px-4 py-6 pb-32">
+						{hasActiveWorkers && (
+							<div className="sticky top-0 z-10 bg-app/90 pb-2 pt-2 backdrop-blur-sm">
+								<ActiveWorkersPanel workers={activeWorkers} agentId={agentId} />
+							</div>
+						)}
+
+						{timeline.length === 0 && !isTyping && (
+							<div className="flex flex-col items-center justify-center py-24">
+								<p className="text-sm text-ink-faint">
+									Start a conversation with {agentDisplayName || agentId}
+								</p>
+							</div>
+						)}
+
+						{timeline.map((item) => {
+							if (item.type !== "message") return null;
+							return (
+								<div key={item.id}>
+									{item.role === "user" ? (
+										<div className="flex justify-end">
+											<div className="max-w-[85%] min-w-0 overflow-hidden rounded-2xl rounded-br-md bg-app-hover/30 px-4 py-2.5">
+												<p className="text-sm text-ink break-all whitespace-pre-wrap">
+													{item.content}
+												</p>
+											</div>
+										</div>
+									) : (
+										<div className="text-sm text-ink-dull">
+											<Markdown>{item.content}</Markdown>
+										</div>
+									)}
+								</div>
+							);
+						})}
+
+						{/* Typing indicator */}
+						{isTyping && <ThinkingIndicator />}
+
+						{error && (
+							<div className="rounded-lg border border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-400">
+								{error}
+							</div>
+						)}
+					</div>
+				</div>
+
+				{/* Floating input */}
+				<FloatingChatInput
+					value={input}
+					onChange={setInput}
+					onSubmit={handleSubmit}
+					disabled={isSending || isTyping}
+					agentId={agentId}
+				/>
+			</div>
 		</div>
 	);
 }

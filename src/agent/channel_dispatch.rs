@@ -8,6 +8,7 @@ use crate::agent::branch::{Branch, BranchExecutionConfig};
 use crate::agent::channel::ChannelState;
 use crate::agent::channel_prompt::TemporalContext;
 use crate::agent::worker::Worker;
+use crate::conversation::settings::{WorkerContextMode, WorkerHistoryMode};
 use crate::error::{AgentError, Error as SpacebotError};
 use crate::tools::{BranchToolProfile, MemoryPersistenceContractState};
 use crate::{AgentDeps, BranchId, ChannelId, ProcessEvent, WorkerId};
@@ -283,6 +284,10 @@ async fn spawn_branch(
             max_turns: branch_max_turns,
             memory_persistence_contract,
         },
+        state
+            .model_overrides
+            .resolve_model("branch")
+            .map(String::from),
     );
 
     let branch_id = branch.id;
@@ -433,13 +438,15 @@ pub async fn spawn_worker_from_state(
     task: impl Into<String>,
     interactive: bool,
     suggested_skills: &[&str],
+    worker_context: &WorkerContextMode,
 ) -> std::result::Result<WorkerId, AgentError> {
     check_worker_limit(state).await?;
     let task = task.into();
     reserve_task_if_unique(state, &task).await?;
     ensure_dispatch_readiness(state, "worker");
 
-    let result = spawn_worker_inner(state, &task, interactive, suggested_skills).await;
+    let result =
+        spawn_worker_inner(state, &task, interactive, suggested_skills, worker_context).await;
 
     // Release the reservation regardless of success or failure.
     // On success the task is now in the status block; on failure it needs cleanup.
@@ -455,6 +462,7 @@ async fn spawn_worker_inner(
     task: &str,
     interactive: bool,
     suggested_skills: &[&str],
+    worker_context: &WorkerContextMode,
 ) -> std::result::Result<WorkerId, AgentError> {
     let rc = &state.deps.runtime_config;
     let prompt_engine = rc.prompts.load();
@@ -492,7 +500,7 @@ async fn spawn_worker_inner(
     // Append skills listing to worker system prompt. Suggested skills are
     // flagged so the worker knows the channel's intent, but it can read any
     // skill it decides is relevant via the read_skill tool.
-    let system_prompt = match skills.render_worker_skills(suggested_skills, &prompt_engine) {
+    let mut system_prompt = match skills.render_worker_skills(suggested_skills, &prompt_engine) {
         Ok(skills_prompt) if !skills_prompt.is_empty() => {
             format!("{worker_system_prompt}\n\n{skills_prompt}")
         }
@@ -502,6 +510,61 @@ async fn spawn_worker_inner(
             worker_system_prompt
         }
     };
+
+    // Inject memory context based on worker_context settings
+    if worker_context.memory.ambient_enabled() {
+        // Get knowledge synthesis and working memory
+        let knowledge_synthesis = state.deps.runtime_config.knowledge_synthesis.load();
+        let wm_config = **state.deps.runtime_config.working_memory.load();
+        let timezone = state.deps.working_memory.timezone();
+
+        if let Ok(working_memory) = crate::memory::working::render_working_memory(
+            &state.deps.working_memory,
+            state.channel_id.as_ref(),
+            &wm_config,
+            timezone,
+        )
+        .await
+        {
+            system_prompt.push_str("\n\n## Agent's Knowledge\n");
+            system_prompt.push_str(&knowledge_synthesis.to_string());
+            if !working_memory.is_empty() {
+                system_prompt.push_str("\n\n## Recent Activity\n");
+                system_prompt.push_str(&working_memory);
+            }
+        }
+    }
+
+    // Inject conversation history if needed
+    let initial_history: Vec<rig::message::Message> = match worker_context.history {
+        WorkerHistoryMode::None => Vec::new(),
+        WorkerHistoryMode::Summary => {
+            // TODO: Generate an LLM-based summary of conversation history.
+            tracing::warn!(
+                "WorkerHistoryMode::Summary is not yet implemented, worker will receive no history"
+            );
+            Vec::new()
+        }
+        WorkerHistoryMode::Recent(n) => {
+            let history = state.history.read().await;
+            history
+                .iter()
+                .rev()
+                .take(n as usize)
+                .rev()
+                .cloned()
+                .collect()
+        }
+        WorkerHistoryMode::Full => {
+            let history = state.history.read().await;
+            history.clone()
+        }
+    };
+
+    let worker_model_override = state
+        .model_overrides
+        .resolve_model("worker")
+        .map(String::from);
 
     let worker = if interactive {
         let (worker, input_tx, inject_tx) = Worker::new_interactive(
@@ -513,6 +576,9 @@ async fn spawn_worker_inner(
             state.screenshot_dir.clone(),
             brave_search_key.clone(),
             state.logs_dir.clone(),
+            initial_history,
+            worker_context.memory,
+            worker_model_override,
         );
         let worker_id = worker.id;
         state
@@ -536,6 +602,9 @@ async fn spawn_worker_inner(
             state.screenshot_dir.clone(),
             brave_search_key,
             state.logs_dir.clone(),
+            initial_history,
+            worker_context.memory,
+            worker_model_override,
         );
         state
             .worker_injections

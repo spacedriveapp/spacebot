@@ -1,0 +1,13 @@
+{
+  "name": "@spacebot/api-client",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./client": "./src/client.ts",
+    "./types": "./src/types.ts",
+    "./schema": "./src/schema.d.ts",
+    "./events": "./src/events.ts"
+  }
+}

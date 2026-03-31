@@ -1349,7 +1349,8 @@ fn signal_from_event(event: ProcessEvent) -> Option<Signal> {
         | ProcessEvent::OpenCodePartUpdated { .. }
         | ProcessEvent::WorkerInitialResult { .. }
         | ProcessEvent::WorkerText { .. }
-        | ProcessEvent::CortexChatUpdate { .. } => return None,
+        | ProcessEvent::CortexChatUpdate { .. }
+        | ProcessEvent::SettingsUpdated { .. } => return None,
     })
 }
 
@@ -3329,6 +3330,9 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         screenshot_dir,
         brave_search_key,
         logs_dir,
+        Vec::new(), // no initial history for cortex task workers
+        crate::conversation::settings::WorkerMemoryMode::None,
+        None, // No model override for cortex workers
     );
 
     // Detached workers are not channel-owned, so injection senders are not

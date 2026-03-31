@@ -1,16 +1,16 @@
 import { useCallback, useState } from "react";
 import { api } from "@/api/client";
 
-export function getPortalChatSessionId(agentId: string) {
+export function getPortalSessionId(agentId: string) {
 	return `portal:chat:${agentId}`;
 }
 
 /**
- * Sends messages to the webchat endpoint. The response arrives via the global
+ * Sends messages to the portal endpoint. The response arrives via the global
  * SSE event bus (same timeline used by regular channels) — no per-request SSE.
  */
-export function useWebChat(agentId: string) {
-	const sessionId = getPortalChatSessionId(agentId);
+export function usePortal(agentId: string, sessionId?: string) {
+	const resolvedSessionId = sessionId || getPortalSessionId(agentId);
 	const [isSending, setIsSending] = useState(false);
 	const [error, setError] = useState<string | null>(null);
 
@@ -22,7 +22,7 @@ export function useWebChat(agentId: string) {
 			setIsSending(true);
 
 			try {
-				const response = await api.webChatSend(agentId, sessionId, text);
+				const response = await api.portalSend(agentId, resolvedSessionId, text);
 				if (!response.ok) {
 					throw new Error(`HTTP ${response.status}`);
 				}
@@ -34,8 +34,8 @@ export function useWebChat(agentId: string) {
 				setIsSending(false);
 			}
 		},
-		[agentId, sessionId, isSending],
+		[agentId, resolvedSessionId, isSending],
 	);
 
-	return { sessionId, isSending, error, sendMessage };
+	return { sessionId: resolvedSessionId, isSending, error, sendMessage };
 }

@@ -76,9 +76,6 @@ pub struct RuntimeConfig {
     pub settings: ArcSwap<Option<Arc<crate::settings::SettingsStore>>>,
     /// Prompt snapshot store for debugging prompt construction.
     pub prompt_snapshots: ArcSwap<Option<Arc<crate::agent::prompt_snapshot::PromptSnapshotStore>>>,
-    /// Tracks whether listen_only_mode is explicitly configured via agent/env.
-    /// When set, channel-local persisted values must not override it.
-    pub channel_listen_only_explicit: ArcSwap<Option<bool>>,
     /// Secrets store for encrypted credential storage.
     pub secrets: ArcSwap<Option<Arc<crate::secrets::store::SecretsStore>>>,
     /// Sandbox configuration for process containment.
@@ -154,7 +151,6 @@ impl RuntimeConfig {
             cron_scheduler: ArcSwap::from_pointee(None),
             settings: ArcSwap::from_pointee(None),
             prompt_snapshots: ArcSwap::from_pointee(None),
-            channel_listen_only_explicit: ArcSwap::from_pointee(None),
             secrets: ArcSwap::from_pointee(None),
             sandbox: Arc::new(ArcSwap::from_pointee(agent_config.sandbox.clone())),
             projects: ArcSwap::from_pointee(agent_config.projects.clone()),
@@ -180,29 +176,8 @@ impl RuntimeConfig {
     }
 
     /// Set the settings store after initialization.
-    pub fn set_settings(
-        &self,
-        settings: Arc<crate::settings::SettingsStore>,
-        explicit_listen_only: Option<bool>,
-    ) {
-        self.settings.store(Arc::new(Some(settings.clone())));
-        self.channel_listen_only_explicit
-            .store(Arc::new(explicit_listen_only));
-        if explicit_listen_only.is_none() {
-            match settings.channel_listen_only_mode() {
-                Ok(Some(enabled)) => {
-                    self.channel_config.rcu(move |current| {
-                        let mut next = **current;
-                        next.listen_only_mode = enabled;
-                        Arc::new(next)
-                    });
-                }
-                Ok(None) => {}
-                Err(error) => {
-                    tracing::warn!(%error, "failed to load persisted channel listen_only_mode");
-                }
-            }
-        }
+    pub fn set_settings(&self, settings: Arc<crate::settings::SettingsStore>) {
+        self.settings.store(Arc::new(Some(settings)));
     }
 
     /// Set the secrets store after initialization.
@@ -268,29 +243,7 @@ impl RuntimeConfig {
         self.coalesce.store(Arc::new(resolved.coalesce));
         self.ingestion.store(Arc::new(resolved.ingestion));
         let resolved_channel = resolved.channel;
-        let configured_listen_only = agent.channel.map(|channel| channel.listen_only_mode);
-        self.channel_listen_only_explicit
-            .store(Arc::new(configured_listen_only));
-        let persisted_listen_only = self.settings.load().as_ref().as_ref().and_then(|settings| {
-            match settings.channel_listen_only_mode() {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::warn!(
-                        %error,
-                        "failed to load persisted channel listen_only_mode during reload"
-                    );
-                    None
-                }
-            }
-        });
-        self.channel_config.rcu(move |current| {
-            let mut next = resolved_channel;
-            next.listen_only_mode = configured_listen_only
-                .or(persisted_listen_only)
-                .unwrap_or(current.as_ref().listen_only_mode);
-            // save_attachments has no persisted override — config is authoritative
-            Arc::new(next)
-        });
+        self.channel_config.store(Arc::new(resolved_channel));
         self.max_turns.store(Arc::new(resolved.max_turns));
         self.branch_max_turns
             .store(Arc::new(resolved.branch_max_turns));

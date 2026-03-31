@@ -1,4 +1,4 @@
-//! Web chat messaging adapter for browser-based agent interaction.
+//! Portal messaging adapter for browser-based agent interaction.
 //!
 //! Unlike other adapters, this does not own an HTTP server or inbound stream.
 //! Inbound messages are injected by the API handler via `MessagingManager::inject_message`,
@@ -16,22 +16,22 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
-/// Web chat adapter. Inbound arrives via `inject_message`, outbound is handled
-/// by the global SSE event bus in `main.rs`.
-pub struct WebChatAdapter {
+/// Portal adapter. Inbound arrives via `inject_message`, outbound is handled
+/// by the global SSE event bus in main.rs.
+pub struct PortalAdapter {
     conversation_loggers: HashMap<String, ConversationLogger>,
     /// SSE event bus for delivering broadcast messages (cron, etc.) to the
     /// portal frontend. Set after construction via `set_event_tx`.
     event_tx: std::sync::RwLock<Option<broadcast::Sender<ApiEvent>>>,
 }
 
-impl Default for WebChatAdapter {
+impl Default for PortalAdapter {
     fn default() -> Self {
         Self::new(HashMap::new())
     }
 }
 
-impl WebChatAdapter {
+impl PortalAdapter {
     pub fn new(agent_pools: HashMap<String, SqlitePool>) -> Self {
         let conversation_loggers = agent_pools
             .into_iter()
@@ -50,9 +50,9 @@ impl WebChatAdapter {
     }
 }
 
-impl Messaging for WebChatAdapter {
+impl Messaging for PortalAdapter {
     fn name(&self) -> &str {
-        "webchat"
+        "portal"
     }
 
     async fn start(&self) -> crate::Result<InboundStream> {
@@ -67,7 +67,7 @@ impl Messaging for WebChatAdapter {
         _response: OutboundResponse,
     ) -> crate::Result<()> {
         // Outbound delivery is handled by the global SSE event bus in main.rs.
-        // The webchat adapter itself doesn't need to do anything — the API events
+        // The portal adapter itself doesn't need to do anything — the API events
         // stream already pushes outbound_message events to all connected clients,
         // and the portal chat UI consumes the same timeline as regular channels.
         Ok(())
@@ -83,14 +83,14 @@ impl Messaging for WebChatAdapter {
         // Target format is the full conversation_id: "portal:chat:{agent_id}"
         let agent_id = target
             .strip_prefix("portal:chat:")
-            .context("webchat broadcast target must be in 'portal:chat:{agent_id}' format")?;
+            .context("portal broadcast target must be in 'portal:chat:{agent_id}' format")?;
 
         let tx = self
             .event_tx
             .read()
             .unwrap()
             .clone()
-            .context("webchat event_tx not configured")?;
+            .context("portal event_tx not configured")?;
 
         tx.send(ApiEvent::OutboundMessage {
             agent_id: agent_id.to_string(),
@@ -114,12 +114,12 @@ impl Messaging for WebChatAdapter {
         let agent_id = message
             .agent_id
             .as_ref()
-            .context("missing agent_id on webchat history message")?;
+            .context("missing agent_id on portal history message")?;
         let logger = self
             .conversation_loggers
             .get(agent_id.as_ref())
             .with_context(|| {
-                format!("no webchat history logger configured for agent '{agent_id}'")
+                format!("no portal history logger configured for agent '{agent_id}'")
             })?;
 
         let channel_id: crate::ChannelId = Arc::from(message.conversation_id.as_str());
@@ -151,7 +151,7 @@ impl Messaging for WebChatAdapter {
             agent_id = %agent_id,
             conversation_id = %message.conversation_id,
             count = history.len(),
-            "fetched webchat message history"
+            "fetched portal message history"
         );
 
         Ok(history)
@@ -162,7 +162,7 @@ impl Messaging for WebChatAdapter {
     }
 
     async fn shutdown(&self) -> crate::Result<()> {
-        tracing::info!("webchat adapter shut down");
+        tracing::info!("portal adapter shut down");
         Ok(())
     }
 }
@@ -174,7 +174,7 @@ mod tests {
     use chrono::Utc;
 
     #[tokio::test]
-    async fn fetch_history_reads_webchat_messages_from_db() {
+    async fn fetch_history_reads_portal_messages_from_db() {
         let pool = SqlitePool::connect("sqlite::memory:")
             .await
             .expect("in-memory sqlite should connect");
@@ -201,7 +201,7 @@ mod tests {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("m1")
-        .bind("webchat-session")
+        .bind("portal-session")
         .bind("user")
         .bind("Alice")
         .bind("alice-id")
@@ -218,7 +218,7 @@ mod tests {
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind("m2")
-        .bind("webchat-session")
+        .bind("portal-session")
         .bind("assistant")
         .bind(Option::<String>::None)
         .bind(Option::<String>::None)
@@ -229,13 +229,13 @@ mod tests {
         .await
         .expect("assistant row should insert");
 
-        let adapter = WebChatAdapter::new(HashMap::from([("agent-a".to_string(), pool)]));
+        let adapter = PortalAdapter::new(HashMap::from([("agent-a".to_string(), pool)]));
 
         let inbound = InboundMessage {
             id: "trigger".to_string(),
-            source: "webchat".to_string(),
-            adapter: Some("webchat".to_string()),
-            conversation_id: "webchat-session".to_string(),
+            source: "portal".to_string(),
+            adapter: Some("portal".to_string()),
+            conversation_id: "portal-session".to_string(),
             sender_id: "alice-id".to_string(),
             agent_id: Some(Arc::from("agent-a")),
             content: MessageContent::Text("new message".to_string()),

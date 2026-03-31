@@ -36,6 +36,10 @@ check-typegen:
     cd interface && bunx openapi-typescript /tmp/spacebot-openapi-check.json -o /tmp/spacebot-schema-check.d.ts
     diff interface/src/api/schema.d.ts /tmp/spacebot-schema-check.d.ts
 
+typegen-package:
+	cargo run --bin openapi-spec > /tmp/spacebot-openapi-package.json
+	cd interface && bunx openapi-typescript /tmp/spacebot-openapi-package.json -o src/api/schema.d.ts
+
 gate-pr-ci: preflight-ci
     ./scripts/gate-pr.sh --ci
 

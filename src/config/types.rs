@@ -855,8 +855,10 @@ impl Default for BrowserConfig {
 /// Channel behavior configuration.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ChannelConfig {
-    /// When true, unsolicited chat messages are ignored unless command/mention/reply.
+    /// Deprecated: use `response_mode` instead. Kept for backwards compatibility.
     pub listen_only_mode: bool,
+    /// Default response mode for channels. Overrides listen_only_mode when set.
+    pub response_mode: Option<crate::conversation::settings::ResponseMode>,
     /// When true, file attachments received in the channel are saved to
     /// `workspace/saved/` and tracked in the `saved_attachments` table so
     /// they can be recalled on later turns.
@@ -1543,6 +1545,8 @@ pub struct Binding {
     pub require_mention: bool,
     /// User IDs allowed to DM the bot through this binding.
     pub dm_allowed_users: Vec<String>,
+    /// Default conversation settings for channels matched by this binding.
+    pub settings: Option<crate::conversation::ConversationSettings>,
 }
 
 impl Binding {
@@ -1567,8 +1571,8 @@ impl Binding {
             return false;
         }
 
-        // For webchat messages, match based on agent_id in the message
-        if message.source == "webchat"
+        // For portal messages, match based on agent_id in the message
+        if message.source == "portal"
             && let Some(message_agent_id) = &message.agent_id
         {
             return message_agent_id.as_ref() == self.agent_id;
@@ -2200,15 +2204,24 @@ fn validate_runtime_keys(
 ///
 /// Returns `None` when a binding matched on routing but the message was
 /// suppressed by `require_mention` — the caller should drop the message.
+///
+/// When a binding matches, its optional `settings` are returned alongside the
+/// agent ID so the caller can use them as channel defaults.
 pub fn resolve_agent_for_message(
     bindings: &[Binding],
     message: &crate::InboundMessage,
     default_agent_id: &str,
-) -> Option<crate::AgentId> {
+) -> Option<(
+    crate::AgentId,
+    Option<crate::conversation::ConversationSettings>,
+)> {
     for binding in bindings {
         if binding.matches_route(message) {
             if binding.passes_require_mention(message) {
-                return Some(std::sync::Arc::from(binding.agent_id.as_str()));
+                return Some((
+                    std::sync::Arc::from(binding.agent_id.as_str()),
+                    binding.settings.clone(),
+                ));
             }
             // Binding owns this message but require_mention blocked it.
             // Drop instead of falling through to the default agent.
@@ -2220,7 +2233,7 @@ pub fn resolve_agent_for_message(
             return None;
         }
     }
-    Some(std::sync::Arc::from(default_agent_id))
+    Some((std::sync::Arc::from(default_agent_id), None))
 }
 
 // ---------------------------------------------------------------------------

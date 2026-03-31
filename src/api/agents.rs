@@ -837,8 +837,7 @@ pub async fn create_agent_internal(
         identity,
         skills,
     ));
-    let explicit_listen_only = raw_config.channel.map(|channel| channel.listen_only_mode);
-    runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
+    runtime_config.set_settings(settings_store.clone());
 
     let llm_manager = {
         let guard = state.llm_manager.read().await;

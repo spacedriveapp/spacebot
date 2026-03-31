@@ -209,8 +209,8 @@ pub fn normalize_target(adapter: &str, raw_target: &str) -> Option<String> {
         "twitch" => normalize_twitch_target(trimmed),
         "email" => normalize_email_target(trimmed),
         "mattermost" => normalize_mattermost_target(trimmed),
-        // Webchat targets are full conversation IDs (e.g. "portal:chat:main")
-        "webchat" => Some(trimmed.to_string()),
+        // Portal targets are full conversation IDs (e.g. "portal:chat:main")
+        "portal" => Some(trimmed.to_string()),
         "signal" => normalize_signal_target(trimmed),
         _ => Some(trimmed.to_string()),
     }

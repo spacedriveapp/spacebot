@@ -591,6 +591,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/workers": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List worker runs for an agent, with live status merged from StatusBlocks. */
+        get: operations["list_workers"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/workers/detail": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get full detail for a single worker run, including decompressed transcript. */
+        get: operations["worker_detail"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/bindings": {
         parameters: {
             query?: never;
@@ -790,7 +824,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/messages": {
+    "/cortex-chat/messages": {
         parameters: {
             query?: never;
             header?: never;
@@ -811,7 +845,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/send": {
+    "/cortex-chat/send": {
         parameters: {
             query?: never;
             header?: never;
@@ -836,7 +870,24 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/cortex/chat/threads": {
+    "/cortex-chat/thread": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Delete a cortex chat thread and all its messages. */
+        delete: operations["cortex_chat_delete_thread"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/cortex-chat/threads": {
         parameters: {
             query?: never;
             header?: never;
@@ -847,8 +898,7 @@ export interface paths {
         get: operations["cortex_chat_threads"];
         put?: never;
         post?: never;
-        /** Delete a cortex chat thread and all its messages. */
-        delete: operations["cortex_chat_delete_thread"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1887,6 +1937,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/webchat/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_webchat_conversations"];
+        put?: never;
+        post: operations["create_webchat_conversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/webchat/conversations/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_webchat_conversation"];
+        post?: never;
+        delete: operations["delete_webchat_conversation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/webchat/history": {
         parameters: {
             query?: never;
@@ -1917,40 +1999,6 @@ export interface paths {
          *     event bus (`/api/events`), same as every other channel.
          */
         post: operations["webchat_send"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/workers": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** List worker runs for an agent, with live status merged from StatusBlocks. */
-        get: operations["list_workers"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/workers/detail": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Get full detail for a single worker run, including decompressed transcript. */
-        get: operations["worker_detail"];
-        put?: never;
-        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -2432,6 +2480,10 @@ export interface components {
             status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][];
             title: string;
+        };
+        CreateWebChatConversationRequest: {
+            agent_id: string;
+            title?: string | null;
         };
         CreateWorktreeRequest: {
             agent_id: string;
@@ -3481,6 +3533,11 @@ export interface components {
             title?: string | null;
             worker_id?: string | null;
         };
+        UpdateWebChatConversationRequest: {
+            agent_id: string;
+            archived?: boolean | null;
+            title?: string | null;
+        };
         UploadSkillResponse: {
             installed: string[];
         };
@@ -3530,6 +3587,40 @@ export interface components {
             refresh_secs?: number | null;
             /** Format: int64 */
             startup_delay_secs?: number | null;
+        };
+        WebChatConversation: {
+            agent_id: string;
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            title: string;
+            title_source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        WebChatConversationResponse: {
+            conversation: components["schemas"]["WebChatConversation"];
+        };
+        WebChatConversationSummary: {
+            agent_id: string;
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: date-time */
+            last_message_at?: string | null;
+            last_message_preview?: string | null;
+            last_message_role?: string | null;
+            /** Format: int64 */
+            message_count: number;
+            title: string;
+            title_source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        WebChatConversationsResponse: {
+            conversations: components["schemas"]["WebChatConversationSummary"][];
         };
         WebChatHistoryMessage: {
             content: string;
@@ -5272,6 +5363,86 @@ export interface operations {
             };
         };
     };
+    list_workers: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Maximum number of results to return */
+                limit: number;
+                /** @description Number of results to skip */
+                offset: number;
+                /** @description Filter by worker status */
+                status?: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerListResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    worker_detail: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Worker ID */
+                worker_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WorkerDetailResponse"];
+                };
+            };
+            /** @description Agent or worker not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_bindings: {
         parameters: {
             query?: {
@@ -5867,42 +6038,6 @@ export interface operations {
             };
         };
     };
-    cortex_chat_threads: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["CortexChatThreadsResponse"];
-                };
-            };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
     cortex_chat_delete_thread: {
         parameters: {
             query?: never;
@@ -5924,6 +6059,42 @@ export interface operations {
                 content?: never;
             };
             /** @description Agent or thread not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    cortex_chat_threads: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CortexChatThreadsResponse"];
+                };
+            };
+            /** @description Agent not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -8272,6 +8443,162 @@ export interface operations {
             };
         };
     };
+    list_webchat_conversations: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Include archived conversations */
+                include_archived: boolean;
+                /** @description Maximum number of conversations to return (default: 100, max: 500) */
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebChatConversationsResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_webchat_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreateWebChatConversationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebChatConversationResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_webchat_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation session ID */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateWebChatConversationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebChatConversationResponse"];
+                };
+            };
+            /** @description Conversation not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_webchat_conversation: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            header?: never;
+            path: {
+                /** @description Conversation session ID */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WebChatSendResponse"];
+                };
+            };
+            /** @description Conversation not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     webchat_history: {
         parameters: {
             query: {
@@ -8340,41 +8667,6 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Messaging manager not available */
-            503: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    list_workers: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Maximum number of results to return */
-                limit: number;
-                /** @description Number of results to skip */
-                offset: number;
-                /** @description Filter by worker status */
-                status?: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerListResponse"];
-                };
-            };
             /** @description Agent not found */
             404: {
                 headers: {
@@ -8382,46 +8674,8 @@ export interface operations {
                 };
                 content?: never;
             };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    worker_detail: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Worker ID */
-                worker_id: string;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WorkerDetailResponse"];
-                };
-            };
-            /** @description Agent or worker not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
+            /** @description Messaging manager not available */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
