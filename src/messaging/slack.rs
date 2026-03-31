@@ -1146,17 +1146,28 @@ impl Messaging for SlackAdapter {
 
         match response {
             OutboundResponse::Text(text) => {
+                let mut sent_any = false;
                 for chunk in split_message(&text, 12_000) {
                     let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
                         markdown_content(chunk),
                     );
                     req = req.opt_thread_ts(thread_ts.clone());
-                    session
+                    match session
                         .chat_post_message(&req)
                         .await
                         .context("failed to broadcast slack message")
-                        .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+                    {
+                        Ok(_) => sent_any = true,
+                        Err(error) => {
+                            let error = crate::messaging::traits::mark_classified_broadcast(error);
+                            return Err(
+                                crate::messaging::traits::classify_chunked_broadcast_failure(
+                                    "slack", error, sent_any,
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             OutboundResponse::RichMessage { text, blocks, .. } => {
@@ -1824,6 +1835,20 @@ mod tests {
             error
                 .to_string()
                 .contains("unsupported slack broadcast response variant: Reaction")
+        );
+    }
+
+    #[test]
+    fn slack_partial_delivery_failures_become_permanent() {
+        let error = crate::messaging::traits::classify_chunked_broadcast_failure(
+            "slack",
+            crate::messaging::traits::mark_classified_broadcast(anyhow::anyhow!("timeout")),
+            true,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
         );
     }
 }

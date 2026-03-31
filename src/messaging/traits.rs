@@ -74,6 +74,30 @@ pub fn mark_classified_broadcast(error: impl Into<anyhow::Error>) -> crate::Erro
     mark_broadcast_failure(kind, error)
 }
 
+/// Classify a proactive broadcast failure for chunked/multi-send delivery.
+///
+/// `broadcast_proactive` retries the whole response payload, not individual chunks.
+/// Once any chunk has already been accepted by the platform, a later failure must
+/// become terminal so the retry loop does not replay previously delivered chunks.
+pub fn classify_chunked_broadcast_failure(
+    platform: &str,
+    error: crate::Error,
+    sent_any: bool,
+) -> crate::Error {
+    if sent_any {
+        match error {
+            crate::error::Error::Other(error) => mark_permanent_broadcast(error.context(format!(
+                "{platform} broadcast partially delivered before failure"
+            ))),
+            other => mark_permanent_broadcast(anyhow::anyhow!(
+                "{platform} broadcast partially delivered before failure: {other}"
+            )),
+        }
+    } else {
+        error
+    }
+}
+
 /// Reject unsupported proactive broadcast variants unless an adapter opts into an explicit fallback.
 pub fn unsupported_broadcast_variant_error(
     platform: &str,
@@ -374,7 +398,8 @@ pub fn apply_runtime_adapter_to_conversation_id(
 mod tests {
     use super::{
         BroadcastFailureKind, broadcast_failure_kind, broadcast_variant_name,
-        ensure_supported_broadcast_response, mark_broadcast_failure, mark_classified_broadcast,
+        classify_chunked_broadcast_failure, ensure_supported_broadcast_response,
+        mark_broadcast_failure, mark_classified_broadcast,
     };
     use crate::OutboundResponse;
 
@@ -472,6 +497,39 @@ mod tests {
         assert_eq!(
             broadcast_failure_kind(&error),
             BroadcastFailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn chunked_broadcast_failures_preserve_retryability_before_any_send() {
+        let error = classify_chunked_broadcast_failure(
+            "test",
+            mark_classified_broadcast(anyhow::anyhow!("HTTP 503")),
+            false,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Transient
+        );
+    }
+
+    #[test]
+    fn chunked_broadcast_failures_become_permanent_after_partial_delivery() {
+        let error = classify_chunked_broadcast_failure(
+            "test",
+            mark_classified_broadcast(anyhow::anyhow!("HTTP 503")),
+            true,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("test broadcast partially delivered before failure")
         );
     }
 }

@@ -440,12 +440,23 @@ impl Messaging for DiscordAdapter {
         };
 
         if let OutboundResponse::Text(text) = response {
+            let mut sent_any = false;
             for chunk in split_message(&text, 2000) {
-                channel_id
+                match channel_id
                     .say(&*http, &chunk)
                     .await
                     .context("failed to broadcast discord message")
-                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+                {
+                    Ok(_) => sent_any = true,
+                    Err(error) => {
+                        let error = crate::messaging::traits::mark_classified_broadcast(error);
+                        return Err(
+                            crate::messaging::traits::classify_chunked_broadcast_failure(
+                                "discord", error, sent_any,
+                            ),
+                        );
+                    }
+                }
             }
         } else if let OutboundResponse::RichMessage {
             text,
@@ -464,6 +475,7 @@ impl Messaging for DiscordAdapter {
             }
 
             let chunks = split_message(&parts.text, 2000);
+            let mut sent_any = false;
             for (i, chunk) in chunks.iter().enumerate() {
                 let is_last = i == chunks.len() - 1;
                 let mut msg = CreateMessage::new();
@@ -492,11 +504,21 @@ impl Messaging for DiscordAdapter {
                     }
                 }
 
-                channel_id
+                match channel_id
                     .send_message(&*http, msg)
                     .await
                     .context("failed to broadcast discord rich message")
-                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+                {
+                    Ok(_) => sent_any = true,
+                    Err(error) => {
+                        let error = crate::messaging::traits::mark_classified_broadcast(error);
+                        return Err(
+                            crate::messaging::traits::classify_chunked_broadcast_failure(
+                                "discord", error, sent_any,
+                            ),
+                        );
+                    }
+                }
             }
         }
 
@@ -1262,6 +1284,7 @@ fn build_poll(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
     use crate::{Button, ButtonStyle, Card, CardField, InteractiveElements, Poll};
 
     #[test]
@@ -1374,5 +1397,19 @@ mod tests {
 
         assert_eq!(parts.text, "Status\n\nAll green");
         assert!(!parts.dropped_invalid_poll);
+    }
+
+    #[test]
+    fn discord_partial_delivery_failures_become_permanent() {
+        let error = crate::messaging::traits::classify_chunked_broadcast_failure(
+            "discord",
+            crate::messaging::traits::mark_classified_broadcast(anyhow::anyhow!("timeout")),
+            true,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
     }
 }

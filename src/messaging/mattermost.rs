@@ -1008,21 +1008,41 @@ impl Messaging for MattermostAdapter {
         // Resolve DM targets (dm:{user_id}) to a real Mattermost channel ID.
         let resolved_target;
         let target = if let Some(user_id) = target.strip_prefix("dm:") {
+            Self::validate_id(user_id)
+                .map_err(crate::messaging::traits::mark_permanent_broadcast)?;
             resolved_target = self
                 .get_or_create_dm_channel(user_id)
                 .await
                 .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             resolved_target.as_str()
         } else {
+            Self::validate_id(target)
+                .map_err(crate::messaging::traits::mark_permanent_broadcast)?;
             target
         };
 
         match response {
             OutboundResponse::Text(text) => {
+                let mut sent_any = false;
                 for chunk in split_message(&text, MAX_MESSAGE_LENGTH) {
-                    self.create_post(target, &chunk, None)
-                        .await
-                        .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+                    match self.create_post(target, &chunk, None).await {
+                        Ok(_) => sent_any = true,
+                        Err(error) => {
+                            let error = match error {
+                                crate::error::Error::Other(error) => {
+                                    crate::messaging::traits::mark_classified_broadcast(error)
+                                }
+                                other => other,
+                            };
+                            return Err(
+                                crate::messaging::traits::classify_chunked_broadcast_failure(
+                                    "mattermost",
+                                    error,
+                                    sent_any,
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             OutboundResponse::File {
@@ -1977,6 +1997,39 @@ mod tests {
 
         assert_eq!(
             broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn mattermost_partial_delivery_failures_become_permanent() {
+        let error = crate::messaging::traits::classify_chunked_broadcast_failure(
+            "mattermost",
+            crate::messaging::traits::mark_classified_broadcast(anyhow::anyhow!("timeout")),
+            true,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+    }
+
+    #[test]
+    fn mattermost_invalid_target_validation_is_permanent() {
+        let direct_error = MattermostAdapter::validate_id("bad:channel")
+            .map_err(crate::messaging::traits::mark_permanent_broadcast)
+            .expect_err("invalid direct target should fail");
+        let dm_error = MattermostAdapter::validate_id("bad:user")
+            .map_err(crate::messaging::traits::mark_permanent_broadcast)
+            .expect_err("invalid dm user should fail");
+
+        assert_eq!(
+            broadcast_failure_kind(&direct_error),
+            BroadcastFailureKind::Permanent
+        );
+        assert_eq!(
+            broadcast_failure_kind(&dm_error),
             BroadcastFailureKind::Permanent
         );
     }

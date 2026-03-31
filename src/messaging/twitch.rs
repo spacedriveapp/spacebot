@@ -484,7 +484,12 @@ impl Messaging for TwitchAdapter {
             {
                 Ok(()) => sent_any = true,
                 Err(error) => {
-                    return Err(classify_twitch_broadcast_error(error, sent_any));
+                    let error = crate::messaging::traits::mark_classified_broadcast(error);
+                    return Err(
+                        crate::messaging::traits::classify_chunked_broadcast_failure(
+                            "twitch", error, sent_any,
+                        ),
+                    );
                 }
             }
         }
@@ -521,16 +526,6 @@ fn supports_twitch_broadcast_response(response: &OutboundResponse) -> bool {
     )
 }
 
-fn classify_twitch_broadcast_error(error: anyhow::Error, sent_any: bool) -> crate::Error {
-    if sent_any {
-        crate::messaging::traits::mark_permanent_broadcast(
-            error.context("twitch broadcast partially delivered before failure"),
-        )
-    } else {
-        crate::messaging::traits::mark_classified_broadcast(error)
-    }
-}
-
 /// Split a message into chunks that fit within Twitch's character limit.
 /// Tries to split at newlines, then spaces, then hard-cuts.
 fn split_message(text: &str, max_len: usize) -> Vec<String> {
@@ -561,7 +556,7 @@ fn split_message(text: &str, max_len: usize) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_twitch_broadcast_error, supports_twitch_broadcast_response};
+    use super::supports_twitch_broadcast_response;
     use crate::OutboundResponse;
     use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
 
@@ -598,7 +593,11 @@ mod tests {
 
     #[test]
     fn twitch_partial_delivery_failures_become_permanent() {
-        let error = classify_twitch_broadcast_error(anyhow::anyhow!("timeout"), true);
+        let error = crate::messaging::traits::classify_chunked_broadcast_failure(
+            "twitch",
+            crate::messaging::traits::mark_classified_broadcast(anyhow::anyhow!("timeout")),
+            true,
+        );
         assert_eq!(
             broadcast_failure_kind(&error),
             BroadcastFailureKind::Permanent

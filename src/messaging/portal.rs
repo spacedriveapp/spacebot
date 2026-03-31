@@ -178,7 +178,7 @@ fn extract_portal_broadcast_text(response: OutboundResponse) -> crate::Result<St
             let text =
                 rich_message_plaintext_fallback(&text, &cards, poll.as_ref()).ok_or_else(|| {
                     crate::messaging::traits::unsupported_broadcast_variant_error(
-                        "webchat",
+                        "portal",
                         &OutboundResponse::RichMessage {
                             text,
                             blocks: Vec::new(),
@@ -324,9 +324,9 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_webchat_broadcast_variants_are_permanent_failures() {
+    fn unsupported_portal_broadcast_variants_are_permanent_failures() {
         let error =
-            extract_webchat_broadcast_text(OutboundResponse::Reaction("thumbsup".to_string()))
+            extract_portal_broadcast_text(OutboundResponse::Reaction("thumbsup".to_string()))
                 .expect_err("unsupported variants should error");
 
         assert_eq!(
@@ -336,13 +336,13 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("unsupported webchat broadcast response variant: Reaction")
+                .contains("unsupported portal broadcast response variant: Reaction")
         );
     }
 
     #[test]
-    fn webchat_extracts_card_text_fallback_for_rich_broadcasts() {
-        let text = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+    fn portal_extracts_card_text_fallback_for_rich_broadcasts() {
+        let text = extract_portal_broadcast_text(OutboundResponse::RichMessage {
             text: String::new(),
             blocks: Vec::new(),
             cards: vec![Card {
@@ -360,15 +360,15 @@ mod tests {
             interactive_elements: Vec::new(),
             poll: None,
         })
-        .expect("card-only webchat broadcasts should derive plaintext");
+        .expect("card-only portal broadcasts should derive plaintext");
 
         assert!(text.contains("Digest"));
         assert!(text.contains("One item needs attention"));
     }
 
     #[test]
-    fn webchat_extracts_poll_text_fallback_for_rich_broadcasts() {
-        let text = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+    fn portal_extracts_poll_text_fallback_for_rich_broadcasts() {
+        let text = extract_portal_broadcast_text(OutboundResponse::RichMessage {
             text: String::new(),
             blocks: Vec::new(),
             cards: Vec::new(),
@@ -380,15 +380,15 @@ mod tests {
                 duration_hours: 24,
             }),
         })
-        .expect("poll-only webchat broadcasts should derive plaintext");
+        .expect("poll-only portal broadcasts should derive plaintext");
 
         assert!(text.contains("Ship it?"));
         assert!(text.contains("- Yes"));
     }
 
     #[test]
-    fn webchat_rejects_empty_rich_broadcasts() {
-        let error = extract_webchat_broadcast_text(OutboundResponse::RichMessage {
+    fn portal_rejects_empty_rich_broadcasts() {
+        let error = extract_portal_broadcast_text(OutboundResponse::RichMessage {
             text: String::new(),
             blocks: Vec::new(),
             cards: Vec::new(),
@@ -404,8 +404,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn webchat_broadcast_fails_when_event_subscribers_are_gone() {
-        let adapter = WebChatAdapter::new(HashMap::new());
+    async fn portal_broadcast_fails_when_event_subscribers_are_gone() {
+        let adapter = PortalAdapter::new(HashMap::new());
         let (event_tx, event_rx) = broadcast::channel(4);
         drop(event_rx);
         adapter.set_event_tx(event_tx);
@@ -425,7 +425,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("webchat broadcast dropped: no active event subscribers")
+                .contains("portal broadcast dropped: no active event subscribers")
         );
     }
 }
