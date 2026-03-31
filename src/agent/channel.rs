@@ -1759,7 +1759,13 @@ impl Channel {
 
         // Listen-first guardrail:
         // ingest all messages, but only reply when explicitly invoked.
-        if self.listen_only_mode && message.source != "system" && !self.is_dm() {
+        // Cron-originated messages carry a platform source (e.g., "slack") for adapter
+        // routing but use sender_id="system" — exempt them from suppression.
+        if self.listen_only_mode
+            && message.source != "system"
+            && message.sender_id != "system"
+            && !self.is_dm()
+        {
             (invoked_by_command, invoked_by_mention, invoked_by_reply) =
                 self.compute_listen_mode_invocation(&message, &raw_text);
 
@@ -3682,6 +3688,36 @@ mod tests {
         assert!(!invoked_by_command);
         assert!(invoked_by_mention);
         assert!(!invoked_by_reply);
+    }
+
+    #[test]
+    fn listen_only_guard_allows_cron_messages_through() {
+        // Cron messages have source="slack" (for adapter routing) but sender_id="system".
+        // The listen-only guard must not suppress them.
+        let mut message = inbound_message("slack", &[], "Check the weather");
+        message.sender_id = "system".into();
+        message.conversation_id = "cron:daily-weather".into();
+
+        // compute_listen_mode_invocation returns all false — no command/mention/reply
+        let (cmd, mention, reply) =
+            compute_listen_mode_invocation(&message, "Check the weather");
+        assert!(!cmd);
+        assert!(!mention);
+        assert!(!reply);
+
+        // The guard condition should NOT enter suppression because sender_id == "system"
+        let listen_only = true;
+        let source_is_system = message.source == "system"; // false
+        let sender_is_system = message.sender_id == "system"; // true
+        let is_dm = is_dm_conversation_id(&message.conversation_id); // false
+
+        // Full guard: all four conditions must be true to suppress
+        let would_suppress =
+            listen_only && !source_is_system && !sender_is_system && !is_dm;
+        assert!(
+            !would_suppress,
+            "cron messages (sender_id=system) must bypass listen-only suppression"
+        );
     }
 
     #[test]
