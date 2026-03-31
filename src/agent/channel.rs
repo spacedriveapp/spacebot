@@ -3821,8 +3821,7 @@ mod tests {
         message.conversation_id = "cron:daily-weather".into();
 
         // compute_listen_mode_invocation returns all false — no command/mention/reply
-        let (cmd, mention, reply) =
-            compute_listen_mode_invocation(&message, "Check the weather");
+        let (cmd, mention, reply) = compute_listen_mode_invocation(&message, "Check the weather");
         assert!(!cmd);
         assert!(!mention);
         assert!(!reply);
