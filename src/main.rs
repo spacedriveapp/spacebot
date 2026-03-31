@@ -223,7 +223,9 @@ struct DeferredMessageQueue {
 
 impl DeferredMessageQueue {
     fn new() -> Self {
-        Self { messages: Vec::new() }
+        Self {
+            messages: Vec::new(),
+        }
     }
 
     /// Add a message to the queue bound to a specific target channel.
@@ -237,22 +239,20 @@ impl DeferredMessageQueue {
 
     /// Drain and return all messages intended for the given channel key.
     fn drain_for(&mut self, key: &ActiveChannelKey) -> Vec<spacebot::InboundMessage> {
-        let mut result = Vec::new();
-        let mut indices_to_remove = Vec::new();
-        
-        for (i, deferred) in self.messages.iter().enumerate() {
+        let existing = std::mem::take(&mut self.messages);
+        let mut drained = Vec::new();
+        let mut kept = Vec::with_capacity(existing.len());
+
+        for deferred in existing {
             if &deferred.target_key == key {
-                result.push(deferred.message.clone());
-                indices_to_remove.push(i);
+                drained.push(deferred.message);
+            } else {
+                kept.push(deferred);
             }
         }
-        
-        // Remove in reverse order to maintain correct indices
-        for i in indices_to_remove.into_iter().rev() {
-            self.messages.remove(i);
-        }
-        
-        result
+
+        self.messages = kept;
+        drained
     }
 
     /// Check if there are any deferred messages for a specific channel.
@@ -2204,8 +2204,10 @@ async fn run(
                         }
                     });
 
+                    let channel_key =
+                        ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
                     active_channels.insert(
-                        ActiveChannelKey::new(agent_id.clone(), conversation_id.clone()),
+                        channel_key.clone(),
                         ActiveChannel {
                             message_tx: channel_tx,
                             _outbound_handle: outbound_handle,
@@ -2213,7 +2215,6 @@ async fn run(
                     );
 
                     // Deliver any deferred messages that were waiting for this channel
-                    let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
                     let deferred = deferred_messages.drain_for(&channel_key);
                     let deferred_count = deferred.len();
                     if deferred_count > 0 {
@@ -2473,8 +2474,9 @@ async fn run(
                         );
                     });
 
+                    let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
                     active_channels.insert(
-                        ActiveChannelKey::new(agent_id.clone(), conversation_id.clone()),
+                        channel_key.clone(),
                         ActiveChannel {
                             message_tx: channel_tx,
                             _outbound_handle: outbound_handle,
@@ -2482,7 +2484,6 @@ async fn run(
                     );
 
                     // Deliver any deferred messages that were waiting for this channel
-                    let channel_key = ActiveChannelKey::new(agent_id.clone(), conversation_id.clone());
                     let deferred = deferred_messages.drain_for(&channel_key);
                     let deferred_count = deferred.len();
                     if deferred_count > 0 {
@@ -2584,6 +2585,7 @@ async fn run(
                     // instead of delivering it to any active channel. This prevents
                     // cron output from leaking to unintended channels.
                     deferred_messages.push(target_key, injection.message);
+                    deferred_messages.remove_expired(chrono::Duration::hours(24));
                     tracing::info!(
                         conversation_id = %injection.conversation_id,
                         agent_id = %injection.agent_id,
@@ -3858,7 +3860,7 @@ async fn initialize_agents(
 
 #[cfg(test)]
 mod tests {
-    use super::wait_for_startup_warmup_tasks;
+    use super::{ActiveChannelKey, DeferredMessageQueue, wait_for_startup_warmup_tasks};
     use std::future::pending;
     use std::sync::Arc;
     use std::time::Duration;
@@ -3950,7 +3952,7 @@ mod tests {
     fn deferred_message_queue_binds_messages_to_target_key() {
         let mut queue = DeferredMessageQueue::new();
         let target_key = ActiveChannelKey::new("agent1", "dm_channel_123");
-        
+
         // Create a test message
         let message = spacebot::InboundMessage {
             id: "test-msg-1".to_string(),
@@ -3958,7 +3960,7 @@ mod tests {
             adapter: None,
             conversation_id: "dm_channel_123".to_string(),
             sender_id: "system".into(),
-            agent_id: Some("agent1".to_string()),
+            agent_id: Some("agent1".into()),
             content: spacebot::MessageContent::Text("test message".to_string()),
             timestamp: chrono::Utc::now(),
             metadata: std::collections::HashMap::new(),
@@ -3997,14 +3999,14 @@ mod tests {
     fn deferred_message_queue_remove_expired_works() {
         let mut queue = DeferredMessageQueue::new();
         let target_key = ActiveChannelKey::new("agent1", "dm_channel_123");
-        
+
         let message = spacebot::InboundMessage {
             id: "test-msg-1".to_string(),
             source: "test".into(),
             adapter: None,
             conversation_id: "dm_channel_123".to_string(),
             sender_id: "system".into(),
-            agent_id: Some("agent1".to_string()),
+            agent_id: Some("agent1".into()),
             content: spacebot::MessageContent::Text("test message".to_string()),
             timestamp: chrono::Utc::now(),
             metadata: std::collections::HashMap::new(),
@@ -4018,7 +4020,8 @@ mod tests {
         queue.remove_expired(chrono::Duration::seconds(60));
         assert_eq!(queue.len(), 1);
 
-        // Zero duration should remove all messages (they're at least 0 seconds old)
-        // Note: In practice, we use reasonable expiration like 24 hours
+        // Zero duration should remove all messages (they're at least 0 nanoseconds old)
+        queue.remove_expired(chrono::Duration::seconds(0));
+        assert_eq!(queue.len(), 0);
     }
 }
