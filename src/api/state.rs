@@ -12,7 +12,7 @@ use crate::llm::LlmManager;
 use crate::mcp::McpManager;
 use crate::memory::{EmbeddingModel, MemorySearch};
 use crate::messaging::MessagingManager;
-use crate::messaging::webchat::WebChatAdapter;
+use crate::messaging::portal::PortalAdapter;
 use crate::projects::ProjectStore;
 use crate::prompts::PromptEngine;
 use crate::tasks::TaskStore;
@@ -122,8 +122,8 @@ pub struct ApiState {
     pub agent_tx: mpsc::Sender<crate::Agent>,
     /// Sender to remove agents from the main event loop.
     pub agent_remove_tx: mpsc::Sender<String>,
-    /// Shared webchat adapter for session management from API handlers.
-    pub webchat_adapter: ArcSwap<Option<Arc<WebChatAdapter>>>,
+    /// Shared portal adapter for session management from API handlers.
+    pub portal_adapter: ArcSwap<Option<Arc<PortalAdapter>>>,
     /// Sender for cross-agent message injection.
     pub injection_tx: mpsc::Sender<crate::ChannelInjection>,
     /// Instance-level agent links for the communication graph.
@@ -327,7 +327,7 @@ impl ApiState {
             agent_tx,
             agent_remove_tx,
             injection_tx,
-            webchat_adapter: ArcSwap::from_pointee(None),
+            portal_adapter: ArcSwap::from_pointee(None),
             agent_links: ArcSwap::from_pointee(Vec::new()),
             agent_groups: ArcSwap::from_pointee(Vec::new()),
             agent_humans: ArcSwap::from_pointee(Vec::new()),
@@ -824,9 +824,9 @@ impl ApiState {
         *self.defaults_config.write().await = Some(defaults);
     }
 
-    /// Set the shared webchat adapter for API handlers.
-    pub fn set_webchat_adapter(&self, adapter: Arc<WebChatAdapter>) {
-        self.webchat_adapter.store(Arc::new(Some(adapter)));
+    /// Set the shared portal adapter for API handlers.
+    pub fn set_portal_adapter(&self, adapter: Arc<PortalAdapter>) {
+        self.portal_adapter.store(Arc::new(Some(adapter)));
     }
 
     /// Set the agent links for the communication graph.

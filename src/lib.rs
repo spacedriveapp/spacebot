@@ -316,6 +316,12 @@ pub enum ProcessEvent {
         channel_id: Option<ChannelId>,
         text: String,
     },
+    /// Conversation settings were updated via API. The channel should
+    /// re-load its settings from the database.
+    SettingsUpdated {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+    },
 }
 
 /// Default broadcast capacity for the per-agent control event bus.

@@ -18,6 +18,7 @@ mod memories;
 mod messaging;
 mod models;
 mod opencode_proxy;
+mod portal;
 mod projects;
 mod providers;
 mod secrets;
@@ -29,7 +30,6 @@ mod state;
 mod system;
 mod tasks;
 mod tools;
-mod webchat;
 mod workers;
 
 pub use server::{api_router, start_http_server};

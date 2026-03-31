@@ -35,6 +35,8 @@ pub struct Branch {
     pub max_turns: usize,
     /// Optional completion contract state used only by silent memory-persistence branches.
     pub memory_persistence_contract: Option<Arc<MemoryPersistenceContractState>>,
+    /// Model override from conversation settings (per-process or blanket).
+    pub model_override: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +47,7 @@ pub struct BranchExecutionConfig {
 
 impl Branch {
     /// Create a new branch from a channel.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         channel_id: ChannelId,
         description: impl Into<String>,
@@ -53,6 +56,7 @@ impl Branch {
         history: Vec<rig::message::Message>,
         tool_server: ToolServerHandle,
         execution_config: BranchExecutionConfig,
+        model_override: Option<String>,
     ) -> Self {
         let id = Uuid::new_v4();
         let process_id = ProcessId::Branch(id);
@@ -78,6 +82,7 @@ impl Branch {
             tool_server,
             max_turns: execution_config.max_turns,
             memory_persistence_contract: execution_config.memory_persistence_contract,
+            model_override,
         }
     }
 
@@ -105,7 +110,11 @@ impl Branch {
         self.maybe_compact_history();
 
         let routing = self.deps.runtime_config.routing.load();
-        let model_name = routing.resolve(ProcessType::Branch, None).to_string();
+        let model_name = self
+            .model_override
+            .as_deref()
+            .unwrap_or_else(|| routing.resolve(ProcessType::Branch, None))
+            .to_string();
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "branch")
             .with_routing((**routing).clone());

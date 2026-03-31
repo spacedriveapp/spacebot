@@ -221,6 +221,12 @@ impl Tool for SpawnWorkerTool {
                 .await
                 .map_err(|e| SpawnWorkerError(format!("{e}")))?
         } else {
+            // Read worker context settings from ChannelState
+            let worker_context = {
+                let settings = self.state.worker_context_settings.read().await;
+                settings.clone()
+            };
+
             spawn_worker_from_state(
                 &self.state,
                 &args.task,
@@ -230,6 +236,7 @@ impl Tool for SpawnWorkerTool {
                     .iter()
                     .map(String::as_str)
                     .collect::<Vec<_>>(),
+                &worker_context,
             )
             .await
             .map_err(|e| SpawnWorkerError(format!("{e}")))?
@@ -440,6 +447,9 @@ impl Tool for DetachedSpawnWorkerTool {
             self.screenshot_dir.clone(),
             brave_search_key,
             self.logs_dir.clone(),
+            Vec::new(), // no initial history for detached workers
+            crate::conversation::settings::WorkerMemoryMode::None,
+            None, // No model override for detached workers
         );
 
         let (worker, _input_tx) = worker;
