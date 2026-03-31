@@ -1,10 +1,14 @@
+import { useEffect, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { AnimatePresence, motion } from "framer-motion";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/api/client";
 import type { ChannelInfo } from "@/api/client";
+import type { ConversationSettings, ConversationDefaultsResponse } from "@/api/types";
 import { isOpenCodeWorker, type ActiveBranch, type ActiveWorker, type ChannelLiveState } from "@/hooks/useChannelLiveState";
 import { LiveDuration } from "@/components/LiveDuration";
+import { ConversationSettingsPanel } from "@/components/ConversationSettingsPanel";
+import { Popover, PopoverTrigger, PopoverContent } from "@/ui/Popover";
 import { formatTimeAgo, formatTimestamp, platformIcon, platformColor } from "@/lib/format";
 
 const VISIBLE_MESSAGES = 6;
@@ -87,9 +91,42 @@ export function ChannelCard({
 	const visible = messages.slice(-VISIBLE_MESSAGES);
 	const hasActivity = workers.length > 0 || branches.length > 0;
 
+	const [showSettings, setShowSettings] = useState(false);
+	const [settings, setSettings] = useState<ConversationSettings>({});
+
+	const { data: defaults } = useQuery<ConversationDefaultsResponse>({
+		queryKey: ["conversation-defaults", channel.agent_id],
+		queryFn: () => api.getConversationDefaults(channel.agent_id),
+		enabled: showSettings,
+	});
+
+	const { data: channelSettingsData } = useQuery({
+		queryKey: ["channel-settings", channel.id, channel.agent_id],
+		queryFn: () => api.getChannelSettings(channel.id, channel.agent_id),
+		enabled: showSettings,
+	});
+
+	useEffect(() => {
+		if (showSettings) {
+			setSettings(channelSettingsData?.settings ?? {});
+		}
+	}, [channelSettingsData, showSettings]);
+
 	const deleteChannel = useMutation({
 		mutationFn: () => api.deleteChannel(channel.agent_id, channel.id),
 		onSuccess: () => queryClient.invalidateQueries({ queryKey: ["channels"] }),
+	});
+
+	const saveSettingsMutation = useMutation({
+		mutationFn: async () => {
+			const response = await api.updateChannelSettings(channel.id, channel.agent_id, settings);
+			if (!response.ok) throw new Error(`HTTP ${response.status}`);
+		},
+		onSuccess: () => {
+			queryClient.invalidateQueries({ queryKey: ["channel-settings", channel.id] });
+			queryClient.invalidateQueries({ queryKey: ["channels"] });
+			setShowSettings(false);
+		},
 	});
 
 	return (
@@ -123,6 +160,16 @@ export function ChannelCard({
 						<span className="text-tiny text-ink-faint">
 							{formatTimeAgo(channel.last_activity_at)}
 						</span>
+						{channel.response_mode === "quiet" && (
+							<span className="inline-flex items-center rounded-md bg-amber-500/10 px-1.5 py-0.5 text-tiny font-medium text-amber-400">
+								Quiet
+							</span>
+						)}
+						{channel.response_mode === "mention_only" && (
+							<span className="inline-flex items-center rounded-md bg-red-500/10 px-1.5 py-0.5 text-tiny font-medium text-red-400">
+								Mention Only
+							</span>
+						)}
 						{hasActivity && (
 							<span className="text-tiny text-ink-faint">
 								{workers.length > 0 && `${workers.length}w`}
@@ -133,6 +180,38 @@ export function ChannelCard({
 					</div>
 				</div>
 				<div className="ml-2 flex shrink-0 items-center gap-2">
+					<Popover open={showSettings} onOpenChange={setShowSettings}>
+						<PopoverTrigger asChild>
+							<button
+								onClick={(e) => {
+									e.preventDefault();
+									e.stopPropagation();
+									setShowSettings((v) => !v);
+								}}
+								className="rounded p-1 text-ink-faint opacity-0 transition-opacity hover:bg-ink/10 hover:text-ink group-hover/card:opacity-100"
+								title="Channel settings"
+							>
+								<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+									<circle cx="12" cy="12" r="3" />
+									<path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.32 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+								</svg>
+							</button>
+						</PopoverTrigger>
+						<PopoverContent align="end" sideOffset={4} collisionPadding={16} className="max-h-[80vh] w-96 overflow-y-auto p-3" onClick={(e) => e.preventDefault()}>
+							{defaults && channelSettingsData ? (
+								<ConversationSettingsPanel
+									defaults={defaults}
+									currentSettings={settings}
+									onChange={setSettings}
+									onSave={() => saveSettingsMutation.mutate()}
+									onCancel={() => setShowSettings(false)}
+									saving={saveSettingsMutation.isPending}
+								/>
+							) : (
+								<div className="py-4 text-center text-xs text-ink-faint">Loading...</div>
+							)}
+						</PopoverContent>
+					</Popover>
 					<button
 						onClick={(e) => {
 							e.preventDefault();

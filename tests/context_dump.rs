@@ -250,6 +250,8 @@ async fn dump_channel_context() {
         live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        model_overrides: Arc::new(Default::default()),
     };
 
     let tool_server = rig::tool::server::ToolServer::new().run();
@@ -401,6 +403,8 @@ async fn dump_worker_context() {
         deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
+        Default::default(),
+        deps.memory_search.clone(),
     );
 
     let tool_defs = worker_tool_server
@@ -490,6 +494,8 @@ async fn dump_all_contexts() {
         live_worker_transcripts: Arc::new(tokio::sync::RwLock::new(
             std::collections::HashMap::new(),
         )),
+        worker_context_settings: Arc::new(tokio::sync::RwLock::new(Default::default())),
+        model_overrides: Arc::new(Default::default()),
     };
     let channel_tool_server = rig::tool::server::ToolServer::new().run();
     let skip_flag = spacebot::tools::new_skip_flag();
@@ -581,6 +587,8 @@ async fn dump_all_contexts() {
         deps.sandbox.clone(),
         vec![],
         deps.runtime_config.clone(),
+        Default::default(),
+        deps.memory_search.clone(),
     );
     let worker_tool_defs = worker_tool_server.get_tool_defs(None).await.unwrap();
     let worker_tools_text = format_tool_defs(&worker_tool_defs);

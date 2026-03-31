@@ -3,7 +3,7 @@ import {useQuery} from "@tanstack/react-query";
 import {api} from "@/api/client";
 import {useAudioRecorder} from "@/hooks/useAudioRecorder";
 import {useTtsPlayback} from "@/hooks/useTtsPlayback";
-import {getPortalChatSessionId} from "@/hooks/useWebChat";
+import {getPortalSessionId} from "@/hooks/usePortal";
 import {useEventSource} from "@/hooks/useEventSource";
 import {cx} from "@/ui/utils";
 import {IS_TAURI, resizeWindow, listen as platformListen} from "@/platform";
@@ -36,7 +36,7 @@ export function Overlay() {
 	const [transcript, setTranscript] = useState<Array<{role: string; text: string}>>([]);
 	const containerRef = useRef<HTMLDivElement>(null);
 
-	const sessionId = getPortalChatSessionId(agentId);
+	const sessionId = getPortalSessionId(agentId);
 	const {
 		state: recorderState,
 		startRecording,
@@ -188,7 +188,7 @@ export function Overlay() {
 		setTranscript((prev) => [...prev, {role: "user", text: "[voice message]"}]);
 
 		try {
-			const response = await api.webChatSendAudio(agentId, sessionId, blob);
+			const response = await api.portalSendAudio(agentId, sessionId, blob);
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			// Now waiting for SSE events (typing_state, outbound_message, spoken_response)
 		} catch (error) {
