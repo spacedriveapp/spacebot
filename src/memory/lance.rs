@@ -1,8 +1,11 @@
-//! LanceDB table management and embedding storage with HNSW vector index and FTS.
+//! LanceDB table management and embedding storage with IVF-HNSW-SQ vector index and FTS.
 //!
 //! Index creation uses a single-flight guard pattern to prevent race conditions
 //! when multiple concurrent callers attempt to ensure indexes exist simultaneously.
 //! This ensures only ONE index build runs at a time per index type.
+//!
+//! Guards are module-level statics to ensure serialization across all
+//! EmbeddingTable instances in the process, not just clones of the same instance.
 
 use crate::error::{DbError, Result};
 use arrow_array::cast::AsArray;
@@ -12,43 +15,32 @@ use futures::TryStreamExt;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
+/// Module-level single-flight guards for index creation.
+///
+/// These are statics to ensure that index creation is serialized across
+/// ALL EmbeddingTable instances in the process, not just clones of the same instance.
+/// This prevents race conditions when multiple threads independently call
+/// `open_or_create()` and then attempt to ensure indexes exist.
+static VECTOR_INDEX_GUARD: OnceCell<()> = OnceCell::const_new();
+static FTS_INDEX_GUARD: OnceCell<()> = OnceCell::const_new();
+
 /// Schema constants for the embeddings table.
 const TABLE_NAME: &str = "memory_embeddings";
 const EMBEDDING_DIM: i32 = 384; // all-MiniLM-L6-v2 dimension
 
 /// LanceDB table for memory embeddings with HNSW index and FTS.
 ///
-/// Index creation is protected by single-flight guards to prevent duplicate
-/// concurrent builds. The guards are stored as `OnceCell` instances that
-/// coordinate across all cloned `EmbeddingTable` instances sharing the same
-/// underlying `lancedb::Table`.
+/// Index creation is protected by module-level static single-flight guards
+/// to prevent duplicate concurrent builds. The guards ensure that only ONE
+/// index creation runs at a time across ALL EmbeddingTable instances.
 pub struct EmbeddingTable {
     table: lancedb::Table,
-    /// Single-flight guard for vector index creation.
-    ///
-    /// When multiple callers concurrently call `ensure_indexes_exist()`,
-    /// only the first caller will actually create the index. Subsequent
-    /// callers will wait for the first to complete and then reuse the result.
-    ///
-    /// The `OnceCell<()>` pattern works because:
-    /// 1. `OnceCell` is async-aware and safe to await from multiple tasks
-    /// 2. All `EmbeddingTable` instances clone the `Arc<OnceCell>`, so they
-    ///    share the same guard state
-    /// 3. Once initialized, the guard returns immediately for all callers
-    vector_index_guard: Arc<OnceCell<()>>,
-    /// Single-flight guard for FTS index creation.
-    ///
-    /// Same pattern as `vector_index_guard`, but for the full-text search
-    /// index on the `content` column.
-    fts_index_guard: Arc<OnceCell<()>>,
 }
 
 impl Clone for EmbeddingTable {
     fn clone(&self) -> Self {
         Self {
             table: self.table.clone(),
-            vector_index_guard: self.vector_index_guard.clone(),
-            fts_index_guard: self.fts_index_guard.clone(),
         }
     }
 }
@@ -62,11 +54,7 @@ impl EmbeddingTable {
         // Try to open existing table
         match connection.open_table(TABLE_NAME).execute().await {
             Ok(table) => {
-                return Ok(Self {
-                    table,
-                    vector_index_guard: Arc::new(OnceCell::new()),
-                    fts_index_guard: Arc::new(OnceCell::new()),
-                })
+                return Ok(Self { table })
             }
             Err(error) => {
                 tracing::debug!(%error, "failed to open embeddings table, will create");
@@ -76,11 +64,7 @@ impl EmbeddingTable {
         // Table doesn't exist or is unreadable — try creating it
         match Self::create_empty_table(connection).await {
             Ok(table) => {
-                return Ok(Self {
-                    table,
-                    vector_index_guard: Arc::new(OnceCell::new()),
-                    fts_index_guard: Arc::new(OnceCell::new()),
-                })
+                return Ok(Self { table })
             }
             Err(error) => {
                 tracing::warn!(
@@ -99,11 +83,7 @@ impl EmbeddingTable {
         let table = Self::create_empty_table(connection).await?;
         tracing::info!("embeddings table recovered — embeddings will be rebuilt from memory store");
 
-        Ok(Self {
-            table,
-            vector_index_guard: Arc::new(OnceCell::new()),
-            fts_index_guard: Arc::new(OnceCell::new()),
-        })
+        Ok(Self { table })
     }
 
     /// Create an empty embeddings table.
@@ -343,8 +323,8 @@ impl EmbeddingTable {
     /// Ensure vector and FTS indexes exist, creating them only if they don't already exist.
     ///
     /// This prevents the expensive HNSW index training from running on every startup.
-    /// Uses single-flight guards to ensure only ONE index creation runs at a time,
-    /// even when multiple concurrent callers invoke this method simultaneously.
+    /// Uses module-level static single-flight guards to ensure only ONE index creation
+    /// runs at a time, even when multiple concurrent callers invoke this method simultaneously.
     ///
     /// # Problem this solves
     ///
@@ -356,23 +336,23 @@ impl EmbeddingTable {
     /// # Solution
     ///
     /// Two-layer protection:
-    /// 1. **Single-flight guards** (`OnceCell`): Ensure only one index creation runs
+    /// 1. **Single-flight guards** (module-level statics): Ensure only one index creation runs
     ///    at a time. Concurrent callers wait for the first to complete.
     /// 2. **`list_indices()` check**: After acquiring the guard, verify the index still
     ///    doesn't exist (handles cases where another process created it externally).
     ///
     /// # Concurrency pattern
     ///
-    /// The `OnceCell` guard ensures that:
+    /// The module-level static `OnceCell` guard ensures that:
     /// - Only the first caller actually performs the index creation
     /// - Subsequent callers await the initialization and get the same result
-    /// - The guard is shared across all cloned `EmbeddingTable` instances
+    /// - The guard is shared across ALL EmbeddingTable instances in the process
     /// - No deadlocks: each index has its own independent guard
     pub async fn ensure_indexes_exist(&self) -> Result<()> {
         use lancedb::index::Index;
 
-        // Ensure vector index on embedding column using single-flight guard
-        self.vector_index_guard
+        // Ensure vector index on embedding column using module-level static guard
+        VECTOR_INDEX_GUARD
             .get_or_try_init(|| async {
                 // Double-check: verify index doesn't exist before creating
                 // This handles cases where another process created it externally
@@ -391,9 +371,11 @@ impl EmbeddingTable {
                     return Ok::<(), crate::error::Error>(());
                 }
 
-                tracing::info!("Creating HNSW vector index on embedding column");
+                tracing::info!("Creating vector index (IVF-HNSW with Scalar Quantization)");
                 self.table
-                    .create_index(&["embedding"], Index::Auto)
+                    .create_index(&["embedding"], Index::IvfHnswSq(
+                        lancedb::index::vector::IvfHnswSqIndexBuilder::default()
+                    ))
                     .execute()
                     .await
                     .map_err(|e| DbError::LanceDb(format!("Failed to create vector index: {}", e)))?;
@@ -403,8 +385,8 @@ impl EmbeddingTable {
             })
             .await?;
 
-        // Ensure FTS index on content column using single-flight guard
-        self.fts_index_guard
+        // Ensure FTS index on content column using module-level static guard
+        FTS_INDEX_GUARD
             .get_or_try_init(|| async {
                 // Double-check: verify index doesn't exist before creating
                 let indices = self
