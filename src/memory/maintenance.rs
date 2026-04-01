@@ -90,6 +90,18 @@ pub async fn run_maintenance_with_cancel(
         .await?;
     }
 
+    // Optimize indexes to incorporate all changes from decay, prune, and merge.
+    // This ensures the ANN index stays current with the full dataset.
+    if let Err(error) = embedding_table.optimize_indexes().await {
+        tracing::warn!(
+            %error,
+            "failed to optimize indexes during maintenance — index may be stale"
+        );
+        // Don't fail the entire maintenance — optimization is best-effort
+    } else {
+        tracing::info!("Index optimization complete after maintenance");
+    }
+
     Ok(report)
 }
 
