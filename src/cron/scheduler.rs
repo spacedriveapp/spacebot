@@ -883,6 +883,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         context.logs_dir.clone(),
         None, // cron channels don't capture prompt snapshots
         None, // cron channels don't share live transcript cache
+        crate::conversation::settings::ResolvedConversationSettings::default(),
     );
 
     // Spawn the channel's event loop

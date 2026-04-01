@@ -1919,6 +1919,58 @@ async fn run(
                         .load()
                         .as_ref()
                         .clone();
+
+                    // Load per-conversation settings (idle worker resume).
+                    // Try portal store first, then channel_settings for platform channels.
+                    let resolved_settings = {
+                        let agent_id_str = agent_id.to_string();
+                        let portal_store = spacebot::conversation::PortalConversationStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        let channel_store = spacebot::conversation::ChannelSettingsStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        match portal_store.get(&agent_id_str, &conversation_id).await {
+                            Ok(Some(conv)) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    conv.settings.as_ref(),
+                                    None,
+                                    None,
+                                )
+                            }
+                            Ok(None) => {
+                                match channel_store.get(&agent_id_str, &conversation_id).await {
+                                    Ok(Some(settings)) => {
+                                        spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                            Some(&settings),
+                                            None,
+                                            None,
+                                        )
+                                    }
+                                    Ok(None) => {
+                                        spacebot::conversation::settings::ResolvedConversationSettings::default()
+                                    }
+                                    Err(error) => {
+                                        tracing::warn!(
+                                            %error,
+                                            %conversation_id,
+                                            "idle worker resume: failed to load channel settings, using defaults"
+                                        );
+                                        spacebot::conversation::settings::ResolvedConversationSettings::default()
+                                    }
+                                }
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %conversation_id,
+                                    "idle worker resume: failed to load portal settings, using defaults"
+                                );
+                                spacebot::conversation::settings::ResolvedConversationSettings::default()
+                            }
+                        }
+                    };
+
                     let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
@@ -1928,6 +1980,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
+                        resolved_settings,
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2083,11 +2136,12 @@ async fn run(
         };
         tokio::select! {
             Some(mut message) = inbound_next, if agents_initialized => {
+                let mut binding_settings: Option<spacebot::conversation::ConversationSettings> = None;
                 let agent_id = if let Some(existing) = message.agent_id.as_ref() {
                     existing.clone()
                 } else {
                     let current_bindings = bindings.load();
-                    let Some(resolved) = spacebot::config::resolve_agent_for_message(
+                    let Some((resolved, matched_settings)) = spacebot::config::resolve_agent_for_message(
                         &current_bindings,
                         &message,
                         &default_agent_id,
@@ -2095,6 +2149,7 @@ async fn run(
                         // Message suppressed by require_mention — drop it.
                         continue;
                     };
+                    binding_settings = matched_settings;
                     message.agent_id = Some(resolved.clone());
                     resolved
                 };
@@ -2127,6 +2182,77 @@ async fn run(
                         .load()
                         .as_ref()
                         .clone();
+
+                    // Load per-conversation settings.
+                    // Resolution: per-channel DB override > binding defaults > agent defaults > system defaults
+                    let resolved_settings = if message.adapter.as_deref() == Some("portal") {
+                        // Portal: load from portal_conversations table.
+                        let store = spacebot::conversation::PortalConversationStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        match store.get(agent_id.as_ref(), &conversation_id).await {
+                            Ok(Some(conv)) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    conv.settings.as_ref(),
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Ok(None) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %conversation_id,
+                                    "failed to load portal conversation settings, falling back to binding defaults"
+                                );
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                        }
+                    } else {
+                        // Platform channels: load from channel_settings table.
+                        let store = spacebot::conversation::ChannelSettingsStore::new(
+                            agent.deps.sqlite_pool.clone(),
+                        );
+                        match store.get(agent_id.as_ref(), &conversation_id).await {
+                            Ok(Some(settings)) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    Some(&settings),
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Ok(None) => {
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                            Err(error) => {
+                                tracing::warn!(
+                                    %error,
+                                    %conversation_id,
+                                    "failed to load channel settings, falling back to binding defaults"
+                                );
+                                spacebot::conversation::settings::ResolvedConversationSettings::resolve(
+                                    None,
+                                    binding_settings.as_ref(),
+                                    None,
+                                )
+                            }
+                        }
+                    };
+
                     let (mut channel, channel_tx) = spacebot::agent::channel::Channel::new(
                         channel_id,
                         agent.deps.clone(),
@@ -2136,6 +2262,7 @@ async fn run(
                         agent.config.logs_dir(),
                         snapshot_store,
                         Some(api_state.live_worker_transcripts.clone()),
+                        resolved_settings,
                     );
                     let channel_registration_id = agent
                         .deps
@@ -2692,13 +2819,7 @@ async fn initialize_agents(
             skills,
         ));
 
-        // Set the settings store in RuntimeConfig and apply config-driven defaults
-        let explicit_listen_only = config
-            .agents
-            .iter()
-            .find(|agent| agent.id == agent_config.id)
-            .and_then(|agent| agent.channel.map(|channel| channel.listen_only_mode));
-        runtime_config.set_settings(settings_store.clone(), explicit_listen_only);
+        runtime_config.set_settings(settings_store.clone());
         runtime_config
             .prompt_snapshots
             .store(Arc::new(prompt_snapshot_store.clone()));
@@ -3353,18 +3474,18 @@ async fn initialize_agents(
         }
     }
 
-    let webchat_agent_pools = agents
+    let portal_agent_pools = agents
         .iter()
         .map(|(agent_id, agent)| (agent_id.to_string(), agent.db.sqlite.clone()))
         .collect();
-    let webchat_adapter = Arc::new(spacebot::messaging::webchat::WebChatAdapter::new(
-        webchat_agent_pools,
+    let portal_adapter = Arc::new(spacebot::messaging::portal::PortalAdapter::new(
+        portal_agent_pools,
     ));
-    webchat_adapter.set_event_tx(api_state.event_tx.clone());
+    portal_adapter.set_event_tx(api_state.event_tx.clone());
     new_messaging_manager
-        .register_shared(webchat_adapter.clone())
+        .register_shared(portal_adapter.clone())
         .await;
-    api_state.set_webchat_adapter(webchat_adapter);
+    api_state.set_portal_adapter(portal_adapter);
 
     *messaging_manager = Arc::new(new_messaging_manager);
     api_state
