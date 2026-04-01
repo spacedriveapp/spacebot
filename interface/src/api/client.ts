@@ -1605,9 +1605,10 @@ export const api = {
 		}
 		return response.json() as Promise<Types.ProviderModelTestResponse>;
 	},
-	getProviderConfig: async (provider: string) => {
+	getProviderConfig: async (provider: string, options?: { signal?: AbortSignal }) => {
 		const response = await fetch(`${getApiBase()}/providers/${provider}/config`, {
 			method: "GET",
+			signal: options?.signal,
 		});
 		if (!response.ok) {
 			throw new Error(`API error: ${response.status}`);

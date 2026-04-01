@@ -198,9 +198,6 @@ channel = "my-provider/my-model"
 **Azure OpenAI Service** — configure Azure OpenAI deployments:
 
 ```toml
-[llm]
-azure_api_key = "env:AZURE_API_KEY"
-
 [llm.provider.azure]
 api_type = "azure"
 base_url = "https://{resource-name}.openai.azure.com"

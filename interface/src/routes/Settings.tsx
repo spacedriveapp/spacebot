@@ -316,6 +316,7 @@ export function Settings() {
 	const [azureBaseUrl, setAzureBaseUrl] = useState("");
 	const [azureApiVersion, setAzureApiVersion] = useState("");
 	const [azureDeployment, setAzureDeployment] = useState("");
+	const fetchAbortControllerRef = useRef<AbortController | null>(null);
 
 	// Fetch providers data (only when on providers tab)
 	const { data, isLoading } = useQuery({
@@ -390,7 +391,7 @@ export function Settings() {
 
 	const editingProviderData = PROVIDERS.find((p) => p.id === editingProvider);
 
-	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${modelInput.trim()}`;
+	const currentSignature = `${editingProvider ?? ""}|${keyInput.trim()}|${editingProvider === "azure" ? azureDeployment.trim() : modelInput.trim()}`;
 
 	const oauthAutoStartRef = useRef(false);
 	const oauthAbortRef = useRef<AbortController | null>(null);
@@ -411,7 +412,8 @@ export function Settings() {
 				setTestResult({ success: false, message: "Deployment Name is required for Azure OpenAI" });
 				return false;
 			}
-			if (!azureBaseUrl.trim().includes(".openai.azure.com")) {
+			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
+			if (!normalizedBaseUrl.includes(".openai.azure.com")) {
 				setTestResult({ success: false, message: "Base URL must contain '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)" });
 				return false;
 			}
@@ -420,11 +422,12 @@ export function Settings() {
 		setMessage(null);
 		setTestResult(null);
 		try {
+			const azureModel = editingProvider === "azure" ? `azure/${azureDeployment.trim()}` : modelInput.trim();
 			const result = await testModelMutation.mutateAsync({
 				provider: editingProvider,
 				apiKey: keyInput.trim(),
-				model: modelInput.trim(),
-				baseUrl: editingProvider === "azure" ? azureBaseUrl.trim() : undefined,
+				model: azureModel,
+				baseUrl: editingProvider === "azure" ? azureBaseUrl.trim().replace(/\/+$/, '') : undefined,
 				apiVersion: editingProvider === "azure" ? azureApiVersion.trim() : undefined,
 				deployment: editingProvider === "azure" ? azureDeployment.trim() : undefined,
 			});
@@ -459,7 +462,8 @@ export function Settings() {
 				setMessage({ text: "Deployment Name is required for Azure OpenAI", type: "error" });
 				return;
 			}
-			if (!azureBaseUrl.trim().includes(".openai.azure.com")) {
+			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
+			if (!normalizedBaseUrl.includes(".openai.azure.com")) {
 				setMessage({ text: "Base URL must contain '.openai.azure.com'", type: "error" });
 				return;
 			}
@@ -471,11 +475,12 @@ export function Settings() {
 		}
 
 		if (editingProvider === "azure") {
+			const azureModel = `azure/${azureDeployment.trim()}`;
 			updateMutation.mutate({
 				provider: editingProvider,
 				apiKey: keyInput.trim(),
-				model: modelInput.trim(),
-				baseUrl: azureBaseUrl.trim(),
+				model: azureModel,
+				baseUrl: azureBaseUrl.trim().replace(/\/+$/, ''),
 				apiVersion: azureApiVersion.trim(),
 				deployment: azureDeployment.trim(),
 			});
@@ -631,6 +636,7 @@ export function Settings() {
 	};
 
 	const handleClose = () => {
+		fetchAbortControllerRef.current?.abort();
 		setEditingProvider(null);
 		setKeyInput("");
 		setModelInput("");
@@ -728,9 +734,18 @@ export function Settings() {
 													setTestResult(null);
 													setMessage(null);
 													if (provider.id === "azure") {
-														// Fetch existing Azure config and populate fields
-														api.getProviderConfig("azure")
+														// Cancel previous request
+														fetchAbortControllerRef.current?.abort();
+
+														// Create new abort controller
+														const abortController = new AbortController();
+														fetchAbortControllerRef.current = abortController;
+
+														api.getProviderConfig("azure", { signal: abortController.signal })
 															.then((result) => {
+																// Check if aborted
+																if (abortController.signal.aborted) return;
+
 																if (result.success) {
 																	if (result.base_url) {
 																		setAzureBaseUrl(result.base_url);
@@ -742,12 +757,10 @@ export function Settings() {
 																		setAzureDeployment(result.deployment);
 																		setModelInput(`azure/${result.deployment}`);
 																	}
-																	if (result.api_key) {
-																		setKeyInput(result.api_key);
-																	}
 																}
 															})
 															.catch((error) => {
+																if (error.name === 'AbortError') return;
 																console.error("Failed to fetch Azure config:", error);
 																// Clear fields if config not found
 																setAzureBaseUrl("");

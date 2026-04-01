@@ -962,13 +962,6 @@ async fn update_azure_provider(
         }));
     }
 
-    if request.api_key.trim().is_empty() {
-        return Ok(Json(ProviderUpdateResponse {
-            success: false,
-            message: "API key cannot be empty".into(),
-        }));
-    }
-
     if normalized_model.is_empty() {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
@@ -976,12 +969,13 @@ async fn update_azure_provider(
         }));
     }
 
-    if !model_matches_provider("azure", normalized_model) {
+    let normalized_deployment = request.deployment.as_ref().map(|s| s.trim()).unwrap_or("");
+    if !model_matches_provider("azure", normalized_deployment) {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
             message: format!(
-                "Model '{}' does not match provider 'azure'.",
-                normalized_model
+                "Deployment '{}' does not match provider 'azure'.",
+                normalized_deployment
             ),
         }));
     }
@@ -999,6 +993,23 @@ async fn update_azure_provider(
         .parse()
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Determine the API key: use incoming if non-empty, otherwise preserve existing
+    let api_key = if request.api_key.trim().is_empty() {
+        // Read existing API key from config
+        doc.get("llm")
+            .and_then(|llm| llm.get("provider"))
+            .and_then(|provider| provider.get("azure"))
+            .and_then(|azure| azure.get("api_key"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+            .ok_or_else(|| {
+                tracing::error!("No existing Azure API key found and none provided");
+                StatusCode::BAD_REQUEST
+            })?
+    } else {
+        request.api_key.trim().to_string()
+    };
+
     if doc.get("llm").is_none() {
         doc["llm"] = toml_edit::Item::Table(toml_edit::Table::new());
     }
@@ -1012,7 +1023,7 @@ async fn update_azure_provider(
     let azure_table = doc["llm"]["provider"]["azure"].as_table_mut().unwrap();
     azure_table["api_type"] = toml_edit::value("azure");
     azure_table["base_url"] = toml_edit::value(base_url.trim());
-    azure_table["api_key"] = toml_edit::value(request.api_key.trim());
+    azure_table["api_key"] = toml_edit::value(api_key.trim());
     azure_table["api_version"] = toml_edit::value(api_version.trim());
     azure_table["deployment"] = toml_edit::value(deployment.trim());
 
@@ -1030,19 +1041,19 @@ async fn update_azure_provider(
             .and_then(|item| item.as_table_mut())
         {
             if routing_table.get("channel").is_none() {
-                routing_table["channel"] = toml_edit::value(normalized_model);
+                routing_table["channel"] = toml_edit::value(format!("azure/{}", normalized_deployment));
             }
             if routing_table.get("branch").is_none() {
-                routing_table["branch"] = toml_edit::value(normalized_model);
+                routing_table["branch"] = toml_edit::value(format!("azure/{}", normalized_deployment));
             }
             if routing_table.get("worker").is_none() {
-                routing_table["worker"] = toml_edit::value(normalized_model);
+                routing_table["worker"] = toml_edit::value(format!("azure/{}", normalized_deployment));
             }
             if routing_table.get("compactor").is_none() {
-                routing_table["compactor"] = toml_edit::value(normalized_model);
+                routing_table["compactor"] = toml_edit::value(format!("azure/{}", normalized_deployment));
             }
             if routing_table.get("cortex").is_none() {
-                routing_table["cortex"] = toml_edit::value(normalized_model);
+                routing_table["cortex"] = toml_edit::value(format!("azure/{}", normalized_deployment));
             }
         }
     }
@@ -1080,8 +1091,8 @@ pub(super) struct ProviderConfigResponse {
     api_version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     deployment: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    api_key: Option<String>,
+    // Note: api_key is intentionally excluded for security.
+    // Credentials should never be returned to the client.
 }
 
 #[utoipa::path(
@@ -1110,7 +1121,6 @@ pub(super) async fn get_provider_config(
             base_url: None,
             api_version: None,
             deployment: None,
-            api_key: None,
         }));
     }
 
@@ -1122,7 +1132,6 @@ pub(super) async fn get_provider_config(
             base_url: None,
             api_version: None,
             deployment: None,
-            api_key: None,
         }));
     }
 
@@ -1144,16 +1153,14 @@ pub(super) async fn get_provider_config(
         let base_url = azure_table.get("base_url").and_then(|v| v.as_str()).map(String::from);
         let api_version = azure_table.get("api_version").and_then(|v| v.as_str()).map(String::from);
         let deployment = azure_table.get("deployment").and_then(|v| v.as_str()).map(String::from);
-        let api_key = azure_table.get("api_key").and_then(|v| v.as_str()).map(String::from);
 
-        if base_url.is_some() || api_version.is_some() || deployment.is_some() || api_key.is_some() {
+        if base_url.is_some() || api_version.is_some() || deployment.is_some() {
             return Ok(Json(ProviderConfigResponse {
                 success: true,
                 message: "Azure configuration found".to_string(),
                 base_url,
                 api_version,
                 deployment,
-                api_key,
             }));
         }
     }
@@ -1164,7 +1171,6 @@ pub(super) async fn get_provider_config(
         base_url: None,
         api_version: None,
         deployment: None,
-        api_key: None,
     }))
 }
 
