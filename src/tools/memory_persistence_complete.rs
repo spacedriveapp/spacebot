@@ -416,11 +416,22 @@ mod tests {
         .await
         .expect("timed out waiting for working memory events");
         assert_eq!(events.len(), 2);
+<<<<<<< HEAD
         assert!(events.iter().any(|event| {
             event.event_type == crate::memory::WorkingMemoryEventType::UserCorrection
         }));
         assert!(events.iter().any(|event| {
             event.event_type == crate::memory::WorkingMemoryEventType::DecisionRevised
         }));
+=======
+        assert_eq!(
+            events[0].event_type,
+            crate::memory::WorkingMemoryEventType::UserCorrection
+        );
+        assert_eq!(
+            events[1].event_type,
+            crate::memory::WorkingMemoryEventType::DecisionRevised
+        );
+>>>>>>> af646041 (fix(memory): tighten persistence rules and add conversational events)
     }
 }
