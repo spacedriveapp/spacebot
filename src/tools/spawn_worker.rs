@@ -29,6 +29,21 @@ impl SpawnWorkerTool {
     }
 }
 
+fn summarize_duplicate_task(task: &str) -> String {
+    let trimmed = task.trim();
+    if trimmed.is_empty() {
+        return "unspecified task".to_string();
+    }
+
+    const MAX_CHARS: usize = 80;
+    if trimmed.len() <= MAX_CHARS {
+        trimmed.to_string()
+    } else {
+        let boundary = trimmed.floor_char_boundary(MAX_CHARS);
+        format!("{}...", &trimmed[..boundary])
+    }
+}
+
 /// Error type for spawn worker tool.
 #[derive(Debug, thiserror::Error)]
 #[error("Worker spawn failed: {0}")]
@@ -194,7 +209,8 @@ impl Tool for SpawnWorkerTool {
                     .emit(
                         crate::memory::WorkingMemoryEventType::BlockedOn,
                         format!(
-                            "Worker spawn blocked on active worker {existing_id} for duplicate task"
+                            "Worker spawn blocked on active worker {existing_id} for duplicate task: {}",
+                            summarize_duplicate_task(&args.task)
                         ),
                     )
                     .channel(self.state.channel_id.to_string())

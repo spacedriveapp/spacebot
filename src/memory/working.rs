@@ -1080,7 +1080,7 @@ mod tests {
         let store = setup_test_store().await;
         let today = store.today();
 
-        for event_type in [
+        let inserted = [
             WorkingMemoryEventType::BranchCompleted,
             WorkingMemoryEventType::WorkerSpawned,
             WorkingMemoryEventType::WorkerCompleted,
@@ -1099,7 +1099,9 @@ mod tests {
             WorkingMemoryEventType::System,
             WorkingMemoryEventType::MemoryPromoted,
             WorkingMemoryEventType::MemoryDemoted,
-        ] {
+        ];
+
+        for event_type in inserted {
             let event = WorkingMemoryEvent {
                 id: Uuid::new_v4().to_string(),
                 event_type,
@@ -1115,7 +1117,7 @@ mod tests {
         }
 
         let events = store.get_events_for_day(&today).await.unwrap();
-        assert_eq!(events.len(), 18);
+        assert_eq!(events.len(), inserted.len());
 
         // Verify all types survived the roundtrip.
         let types: Vec<WorkingMemoryEventType> = events.iter().map(|e| e.event_type).collect();

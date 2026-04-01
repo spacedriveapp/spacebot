@@ -93,42 +93,50 @@ fn classify_conversational_event_summary(
 
     if let Some((prefix, rest)) = trimmed.split_once(':') {
         let rest_trimmed = rest.trim();
-        match prefix.trim().to_ascii_lowercase().as_str() {
-            "outcome" => {
-                return (
-                    crate::memory::WorkingMemoryEventType::Outcome,
-                    if rest_trimmed.is_empty() {
-                        trimmed.to_string()
-                    } else {
-                        rest_trimmed.to_string()
-                    },
-                );
-            }
-            "blocked_on" => {
-                return (
-                    crate::memory::WorkingMemoryEventType::BlockedOn,
-                    if rest_trimmed.is_empty() {
-                        trimmed.to_string()
-                    } else {
-                        rest_trimmed.to_string()
-                    },
-                );
-            }
-            "constraint" => {
-                return (
-                    crate::memory::WorkingMemoryEventType::Constraint,
-                    if rest_trimmed.is_empty() {
-                        trimmed.to_string()
-                    } else {
-                        rest_trimmed.to_string()
-                    },
-                );
-            }
-            _ => {}
+        let prefix = prefix.trim();
+        if prefix.eq_ignore_ascii_case("outcome") {
+            return (
+                crate::memory::WorkingMemoryEventType::Outcome,
+                rest_trimmed.to_string(),
+            );
+        }
+        if prefix.eq_ignore_ascii_case("blocked_on") {
+            return (
+                crate::memory::WorkingMemoryEventType::BlockedOn,
+                rest_trimmed.to_string(),
+            );
+        }
+        if prefix.eq_ignore_ascii_case("constraint") {
+            return (
+                crate::memory::WorkingMemoryEventType::Constraint,
+                rest_trimmed.to_string(),
+            );
         }
     }
 
     (default_event_type, trimmed.to_string())
+}
+
+fn format_conversational_event_summary(
+    event_type: crate::memory::WorkingMemoryEventType,
+    source: &str,
+    event_summary: &str,
+) -> String {
+    let label = match event_type {
+        crate::memory::WorkingMemoryEventType::Outcome => "outcome",
+        crate::memory::WorkingMemoryEventType::BlockedOn => "blocked on",
+        crate::memory::WorkingMemoryEventType::Constraint => "constraint",
+        crate::memory::WorkingMemoryEventType::Error => "failed",
+        crate::memory::WorkingMemoryEventType::BranchCompleted
+        | crate::memory::WorkingMemoryEventType::WorkerCompleted => "completed",
+        _ => "concluded",
+    };
+
+    if event_summary.is_empty() {
+        format!("{source} {label}")
+    } else {
+        format!("{source} {label}: {event_summary}")
+    }
 }
 
 /// Shared state that channel tools need to act on the channel.
@@ -3065,18 +3073,11 @@ impl Channel {
                         .working_memory
                         .emit(
                             event_type,
-                            match event_type {
-                                crate::memory::WorkingMemoryEventType::Outcome => {
-                                    format!("Branch outcome: {event_summary}")
-                                }
-                                crate::memory::WorkingMemoryEventType::BlockedOn => {
-                                    format!("Branch blocked on: {event_summary}")
-                                }
-                                crate::memory::WorkingMemoryEventType::Constraint => {
-                                    format!("Branch constraint: {event_summary}")
-                                }
-                                _ => format!("Branch concluded: {event_summary}"),
-                            },
+                            format_conversational_event_summary(
+                                event_type,
+                                "Branch",
+                                &event_summary,
+                            ),
                         )
                         .channel(self.id.to_string())
                         .importance(0.7)
@@ -3156,21 +3157,7 @@ impl Channel {
                     .working_memory
                     .emit(
                         event_type,
-                        match event_type {
-                            crate::memory::WorkingMemoryEventType::Outcome => {
-                                format!("Worker outcome: {event_summary}")
-                            }
-                            crate::memory::WorkingMemoryEventType::BlockedOn => {
-                                format!("Worker blocked on: {event_summary}")
-                            }
-                            crate::memory::WorkingMemoryEventType::Constraint => {
-                                format!("Worker constraint: {event_summary}")
-                            }
-                            crate::memory::WorkingMemoryEventType::Error => {
-                                format!("Worker failed: {event_summary}")
-                            }
-                            _ => format!("Worker completed: {event_summary}"),
-                        },
+                        format_conversational_event_summary(event_type, "Worker", &event_summary),
                     )
                     .channel(self.id.to_string())
                     .importance(if *success { 0.6 } else { 0.8 })
@@ -3750,7 +3737,7 @@ mod tests {
         ObserveModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
         recv_channel_event, should_process_event_for_channel,
         should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
-        classify_conversational_event_summary,
+        classify_conversational_event_summary, format_conversational_event_summary,
     };
     use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
@@ -3949,6 +3936,30 @@ mod tests {
         );
         assert_eq!(event_type, WorkingMemoryEventType::WorkerCompleted);
         assert_eq!(summary, "completed with no blockers");
+    }
+
+    #[test]
+    fn conversational_event_summary_extracts_constraint_prefix_case_insensitively() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "CoNsTrAiNt: must keep migrations immutable",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Constraint);
+        assert_eq!(summary, "must keep migrations immutable");
+    }
+
+    #[test]
+    fn conversational_event_summary_treats_empty_prefixed_content_as_empty_summary() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "outcome:   ",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert!(summary.is_empty());
+        assert_eq!(
+            format_conversational_event_summary(event_type, "Worker", &summary),
+            "Worker outcome"
+        );
     }
 
     #[test]

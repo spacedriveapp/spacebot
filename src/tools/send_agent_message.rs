@@ -333,6 +333,7 @@ mod tests {
     use crate::links::{AgentLink, LinkDirection, LinkKind};
     use crate::memory::working::WorkingMemoryEvent;
     use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
     use arc_swap::ArcSwap;
     use chrono_tz::Tz;
     use sqlx::sqlite::SqlitePoolOptions;
@@ -358,47 +359,8 @@ mod tests {
 
     #[tokio::test]
     async fn send_agent_message_emits_outcome_event() {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("sqlite connect");
-        sqlx::query(
-            r#"
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL,
-                priority TEXT NOT NULL,
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("tasks schema should be created");
-        sqlx::query(
-            "CREATE TABLE task_number_seq (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                next_number INTEGER NOT NULL DEFAULT 1
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("task_number_seq should be created");
+        let task_store = setup_test_store().await;
+        let pool = task_store.pool().clone();
         sqlx::query(
             "CREATE TABLE conversation_messages (
                 id TEXT PRIMARY KEY,
@@ -414,12 +376,7 @@ mod tests {
         .execute(&pool)
         .await
         .expect("conversation messages schema should be created");
-        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
-            .execute(&pool)
-            .await
-            .expect("sequence seed should be inserted");
-
-        let task_store = Arc::new(TaskStore::new(pool.clone()));
+        let task_store = Arc::new(task_store);
         let conversation_logger = ConversationLogger::new(pool.clone());
         let working_memory_pool = SqlitePoolOptions::new()
             .max_connections(1)

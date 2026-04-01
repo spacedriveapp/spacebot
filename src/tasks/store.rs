@@ -9,6 +9,8 @@ use anyhow::Context as _;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(test)]
+use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::{Row as _, SqlitePool};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, utoipa::ToSchema)]
@@ -181,6 +183,11 @@ pub struct TaskStore {
 impl TaskStore {
     pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pool(&self) -> &SqlitePool {
+        &self.pool
     }
 
     /// Maximum number of retries when a concurrent create races on the
@@ -670,61 +677,65 @@ fn read_optional_timestamp(row: &sqlx::sqlite::SqliteRow, column: &str) -> Optio
 }
 
 #[cfg(test)]
+pub(crate) async fn setup_test_store() -> TaskStore {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("in-memory sqlite should connect");
+
+    sqlx::query(
+        r#"
+        CREATE TABLE tasks (
+            id TEXT PRIMARY KEY,
+            task_number INTEGER NOT NULL UNIQUE,
+            title TEXT NOT NULL,
+            description TEXT,
+            status TEXT NOT NULL DEFAULT 'backlog',
+            priority TEXT NOT NULL DEFAULT 'medium',
+            owner_agent_id TEXT NOT NULL,
+            assigned_agent_id TEXT NOT NULL,
+            subtasks TEXT,
+            metadata TEXT,
+            source_memory_id TEXT,
+            worker_id TEXT,
+            created_by TEXT NOT NULL,
+            approved_at TEXT,
+            approved_by TEXT,
+            created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+            completed_at TEXT
+        )
+        "#,
+    )
+    .execute(&pool)
+    .await
+    .expect("tasks schema should be created");
+
+    sqlx::query(
+        "CREATE TABLE task_number_seq (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            next_number INTEGER NOT NULL DEFAULT 1
+        )",
+    )
+    .execute(&pool)
+    .await
+    .expect("task_number_seq should be created");
+
+    sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
+        .execute(&pool)
+        .await
+        .expect("sequence seed should be inserted");
+
+    TaskStore::new(pool)
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use sqlx::sqlite::SqlitePoolOptions;
 
     async fn setup_store() -> TaskStore {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("in-memory sqlite should connect");
-
-        sqlx::query(
-            r#"
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL DEFAULT 'backlog',
-                priority TEXT NOT NULL DEFAULT 'medium',
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT,
-                metadata TEXT,
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("tasks schema should be created");
-
-        sqlx::query(
-            "CREATE TABLE task_number_seq (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                next_number INTEGER NOT NULL DEFAULT 1
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("task_number_seq should be created");
-
-        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
-            .execute(&pool)
-            .await
-            .expect("sequence seed should be inserted");
-
-        TaskStore::new(pool)
+        setup_test_store().await
     }
 
     fn self_assigned_input(title: &str, status: TaskStatus) -> CreateTaskInput {

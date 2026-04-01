@@ -179,58 +179,10 @@ mod tests {
 
     use crate::memory::working::WorkingMemoryEvent;
     use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
     use chrono_tz::Tz;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
-
-    async fn setup_task_store() -> TaskStore {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("sqlite connect");
-        sqlx::query(
-            r#"
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL,
-                priority TEXT NOT NULL,
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("tasks schema should be created");
-        sqlx::query(
-            "CREATE TABLE task_number_seq (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                next_number INTEGER NOT NULL DEFAULT 1
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("task_number_seq should be created");
-        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
-            .execute(&pool)
-            .await
-            .expect("sequence seed should be inserted");
-        TaskStore::new(pool)
-    }
 
     async fn wait_for_single_event(store: &WorkingMemoryStore) -> WorkingMemoryEvent {
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -251,7 +203,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_create_emits_outcome_for_done_tasks() {
-        let task_store = Arc::new(setup_task_store().await);
+        let task_store = Arc::new(setup_test_store().await);
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")

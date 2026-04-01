@@ -155,6 +155,13 @@ impl Tool for TaskUpdateTool {
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
         let task_number = i64::from(args.task_number);
+        let previous_status = self
+            .task_store
+            .get_by_number(task_number)
+            .await
+            .map_err(|error| TaskUpdateError(format!("{error}")))?
+            .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?
+            .status;
 
         if let TaskUpdateScope::Worker(ref worker_id) = self.scope {
             let current = self
@@ -236,7 +243,9 @@ impl Tool for TaskUpdateTool {
             .ok_or_else(|| TaskUpdateError(format!("task #{} not found", task_number)))?;
 
         if let Some(working_memory) = &self.working_memory {
-            let (event_type, summary, importance) = if updated.status == TaskStatus::Done {
+            let transitioned_to_done =
+                previous_status != TaskStatus::Done && updated.status == TaskStatus::Done;
+            let (event_type, summary, importance) = if transitioned_to_done {
                 (
                     crate::memory::WorkingMemoryEventType::Outcome,
                     format!("Task #{} completed", updated.task_number),
@@ -273,58 +282,10 @@ mod tests {
 
     use crate::memory::working::WorkingMemoryEvent;
     use crate::memory::{WorkingMemoryEventType, WorkingMemoryStore};
+    use crate::tasks::store::setup_test_store;
     use chrono_tz::Tz;
     use sqlx::sqlite::SqlitePoolOptions;
     use std::time::Duration;
-
-    async fn setup_task_store() -> TaskStore {
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect("sqlite::memory:")
-            .await
-            .expect("sqlite connect");
-        sqlx::query(
-            r#"
-            CREATE TABLE tasks (
-                id TEXT PRIMARY KEY,
-                task_number INTEGER NOT NULL UNIQUE,
-                title TEXT NOT NULL,
-                description TEXT,
-                status TEXT NOT NULL,
-                priority TEXT NOT NULL,
-                owner_agent_id TEXT NOT NULL,
-                assigned_agent_id TEXT NOT NULL,
-                subtasks TEXT NOT NULL,
-                metadata TEXT NOT NULL DEFAULT '{}',
-                source_memory_id TEXT,
-                worker_id TEXT,
-                created_by TEXT NOT NULL,
-                approved_at TEXT,
-                approved_by TEXT,
-                created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-                completed_at TEXT
-            )
-            "#,
-        )
-        .execute(&pool)
-        .await
-        .expect("tasks schema should be created");
-        sqlx::query(
-            "CREATE TABLE task_number_seq (
-                id INTEGER PRIMARY KEY CHECK (id = 1),
-                next_number INTEGER NOT NULL DEFAULT 1
-            )",
-        )
-        .execute(&pool)
-        .await
-        .expect("task_number_seq should be created");
-        sqlx::query("INSERT INTO task_number_seq (id, next_number) VALUES (1, 1)")
-            .execute(&pool)
-            .await
-            .expect("sequence seed should be inserted");
-        TaskStore::new(pool)
-    }
 
     async fn setup_working_memory() -> Arc<WorkingMemoryStore> {
         let pool = SqlitePoolOptions::new()
@@ -358,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_update_emits_outcome_for_done_status() {
-        let task_store = Arc::new(setup_task_store().await);
+        let task_store = Arc::new(setup_test_store().await);
         let working_memory = setup_working_memory().await;
 
         let created = task_store
@@ -403,6 +364,56 @@ mod tests {
         assert_eq!(
             event.summary,
             format!("Task #{} completed", created.task_number)
+        );
+    }
+
+    #[tokio::test]
+    async fn task_update_keeps_task_update_event_when_task_was_already_done() {
+        let task_store = Arc::new(setup_test_store().await);
+        let working_memory = setup_working_memory().await;
+
+        let created = task_store
+            .create(crate::tasks::CreateTaskInput {
+                owner_agent_id: "agent-test".to_string(),
+                assigned_agent_id: "agent-test".to_string(),
+                title: "Review merged changes".to_string(),
+                description: None,
+                status: TaskStatus::Done,
+                priority: TaskPriority::Medium,
+                subtasks: Vec::new(),
+                metadata: serde_json::json!({}),
+                source_memory_id: None,
+                created_by: "branch".to_string(),
+            })
+            .await
+            .expect("task should be created");
+
+        let tool = TaskUpdateTool::for_branch(task_store, AgentId::from("agent-test"))
+            .with_working_memory(working_memory.clone());
+
+        let output = tool
+            .call(TaskUpdateArgs {
+                task_number: created.task_number as i32,
+                title: Some("Review merged changes carefully".to_string()),
+                description: None,
+                status: None,
+                priority: None,
+                subtasks: None,
+                metadata: None,
+                complete_subtask: None,
+                worker_id: None,
+                approved_by: None,
+            })
+            .await
+            .expect("task update should succeed");
+
+        assert_eq!(output.status, "done");
+
+        let event = wait_for_single_event(&working_memory).await;
+        assert_eq!(event.event_type, WorkingMemoryEventType::TaskUpdate);
+        assert_eq!(
+            event.summary,
+            format!("Task #{} updated to done", created.task_number)
         );
     }
 }
