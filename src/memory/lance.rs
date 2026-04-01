@@ -1,4 +1,8 @@
 //! LanceDB table management and embedding storage with HNSW vector index and FTS.
+//!
+//! Index creation uses a single-flight guard pattern to prevent race conditions
+//! when multiple concurrent callers attempt to ensure indexes exist simultaneously.
+//! This ensures only ONE index build runs at a time per index type.
 
 use crate::error::{DbError, Result};
 use arrow_array::cast::AsArray;
@@ -6,20 +10,45 @@ use arrow_array::types::Float32Type;
 use arrow_array::{Array, RecordBatchIterator};
 use futures::TryStreamExt;
 use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 /// Schema constants for the embeddings table.
 const TABLE_NAME: &str = "memory_embeddings";
 const EMBEDDING_DIM: i32 = 384; // all-MiniLM-L6-v2 dimension
 
 /// LanceDB table for memory embeddings with HNSW index and FTS.
+///
+/// Index creation is protected by single-flight guards to prevent duplicate
+/// concurrent builds. The guards are stored as `OnceCell` instances that
+/// coordinate across all cloned `EmbeddingTable` instances sharing the same
+/// underlying `lancedb::Table`.
 pub struct EmbeddingTable {
     table: lancedb::Table,
+    /// Single-flight guard for vector index creation.
+    ///
+    /// When multiple callers concurrently call `ensure_indexes_exist()`,
+    /// only the first caller will actually create the index. Subsequent
+    /// callers will wait for the first to complete and then reuse the result.
+    ///
+    /// The `OnceCell<()>` pattern works because:
+    /// 1. `OnceCell` is async-aware and safe to await from multiple tasks
+    /// 2. All `EmbeddingTable` instances clone the `Arc<OnceCell>`, so they
+    ///    share the same guard state
+    /// 3. Once initialized, the guard returns immediately for all callers
+    vector_index_guard: Arc<OnceCell<()>>,
+    /// Single-flight guard for FTS index creation.
+    ///
+    /// Same pattern as `vector_index_guard`, but for the full-text search
+    /// index on the `content` column.
+    fts_index_guard: Arc<OnceCell<()>>,
 }
 
 impl Clone for EmbeddingTable {
     fn clone(&self) -> Self {
         Self {
             table: self.table.clone(),
+            vector_index_guard: self.vector_index_guard.clone(),
+            fts_index_guard: self.fts_index_guard.clone(),
         }
     }
 }
@@ -32,7 +61,13 @@ impl EmbeddingTable {
     pub async fn open_or_create(connection: &lancedb::Connection) -> Result<Self> {
         // Try to open existing table
         match connection.open_table(TABLE_NAME).execute().await {
-            Ok(table) => return Ok(Self { table }),
+            Ok(table) => {
+                return Ok(Self {
+                    table,
+                    vector_index_guard: Arc::new(OnceCell::new()),
+                    fts_index_guard: Arc::new(OnceCell::new()),
+                })
+            }
             Err(error) => {
                 tracing::debug!(%error, "failed to open embeddings table, will create");
             }
@@ -40,7 +75,13 @@ impl EmbeddingTable {
 
         // Table doesn't exist or is unreadable — try creating it
         match Self::create_empty_table(connection).await {
-            Ok(table) => return Ok(Self { table }),
+            Ok(table) => {
+                return Ok(Self {
+                    table,
+                    vector_index_guard: Arc::new(OnceCell::new()),
+                    fts_index_guard: Arc::new(OnceCell::new()),
+                })
+            }
             Err(error) => {
                 tracing::warn!(
                     %error,
@@ -58,7 +99,11 @@ impl EmbeddingTable {
         let table = Self::create_empty_table(connection).await?;
         tracing::info!("embeddings table recovered — embeddings will be rebuilt from memory store");
 
-        Ok(Self { table })
+        Ok(Self {
+            table,
+            vector_index_guard: Arc::new(OnceCell::new()),
+            fts_index_guard: Arc::new(OnceCell::new()),
+        })
     }
 
     /// Create an empty embeddings table.
@@ -298,7 +343,8 @@ impl EmbeddingTable {
     /// Ensure vector and FTS indexes exist, creating them only if they don't already exist.
     ///
     /// This prevents the expensive HNSW index training from running on every startup.
-    /// Uses `list_indices()` to check for existing indexes BEFORE attempting creation.
+    /// Uses single-flight guards to ensure only ONE index creation runs at a time,
+    /// even when multiple concurrent callers invoke this method simultaneously.
     ///
     /// # Problem this solves
     ///
@@ -309,51 +355,84 @@ impl EmbeddingTable {
     ///
     /// # Solution
     ///
-    /// Check for existing indexes using `list_indices()` before calling `create_index()`.
-    /// Only create if no index exists on the target column.
+    /// Two-layer protection:
+    /// 1. **Single-flight guards** (`OnceCell`): Ensure only one index creation runs
+    ///    at a time. Concurrent callers wait for the first to complete.
+    /// 2. **`list_indices()` check**: After acquiring the guard, verify the index still
+    ///    doesn't exist (handles cases where another process created it externally).
+    ///
+    /// # Concurrency pattern
+    ///
+    /// The `OnceCell` guard ensures that:
+    /// - Only the first caller actually performs the index creation
+    /// - Subsequent callers await the initialization and get the same result
+    /// - The guard is shared across all cloned `EmbeddingTable` instances
+    /// - No deadlocks: each index has its own independent guard
     pub async fn ensure_indexes_exist(&self) -> Result<()> {
         use lancedb::index::Index;
 
-        // Check for existing indexes
-        let indices = self
-            .table
-            .list_indices()
-            .await
-            .map_err(|e| DbError::LanceDb(e.to_string()))?;
+        // Ensure vector index on embedding column using single-flight guard
+        self.vector_index_guard
+            .get_or_try_init(|| async {
+                // Double-check: verify index doesn't exist before creating
+                // This handles cases where another process created it externally
+                let indices = self
+                    .table
+                    .list_indices()
+                    .await
+                    .map_err(|e| DbError::LanceDb(e.to_string()))?;
 
-        // Check vector index on embedding column
-        let has_vector_index = indices
-            .iter()
-            .any(|idx| idx.columns.iter().any(|col| col == "embedding"));
+                let has_vector_index = indices
+                    .iter()
+                    .any(|idx| idx.columns.iter().any(|col| col == "embedding"));
 
-        if !has_vector_index {
-            tracing::info!("Creating HNSW vector index on embedding column");
-            self.table
-                .create_index(&["embedding"], Index::Auto)
-                .execute()
-                .await
-                .map_err(|e| DbError::LanceDb(format!("Failed to create vector index: {}", e)))?;
-            tracing::info!("Vector index created successfully");
-        } else {
-            tracing::debug!("Vector index already exists, skipping creation");
-        }
+                if has_vector_index {
+                    tracing::debug!("Vector index already exists, skipping creation");
+                    return Ok::<(), crate::error::Error>(());
+                }
 
-        // Check FTS index on content column
-        let has_fts_index = indices
-            .iter()
-            .any(|idx| idx.columns.iter().any(|col| col == "content"));
+                tracing::info!("Creating HNSW vector index on embedding column");
+                self.table
+                    .create_index(&["embedding"], Index::Auto)
+                    .execute()
+                    .await
+                    .map_err(|e| DbError::LanceDb(format!("Failed to create vector index: {}", e)))?;
+                tracing::info!("Vector index created successfully");
 
-        if !has_fts_index {
-            tracing::info!("Creating FTS index on content column");
-            self.table
-                .create_index(&["content"], Index::FTS(Default::default()))
-                .execute()
-                .await
-                .map_err(|e| DbError::LanceDb(format!("Failed to create FTS index: {}", e)))?;
-            tracing::info!("FTS index created successfully");
-        } else {
-            tracing::debug!("FTS index already exists, skipping creation");
-        }
+                Ok::<(), crate::error::Error>(())
+            })
+            .await?;
+
+        // Ensure FTS index on content column using single-flight guard
+        self.fts_index_guard
+            .get_or_try_init(|| async {
+                // Double-check: verify index doesn't exist before creating
+                let indices = self
+                    .table
+                    .list_indices()
+                    .await
+                    .map_err(|e| DbError::LanceDb(e.to_string()))?;
+
+                let has_fts_index = indices
+                    .iter()
+                    .any(|idx| idx.columns.iter().any(|col| col == "content"));
+
+                if has_fts_index {
+                    tracing::debug!("FTS index already exists, skipping creation");
+                    return Ok::<(), crate::error::Error>(());
+                }
+
+                tracing::info!("Creating FTS index on content column");
+                self.table
+                    .create_index(&["content"], Index::FTS(Default::default()))
+                    .execute()
+                    .await
+                    .map_err(|e| DbError::LanceDb(format!("Failed to create FTS index: {}", e)))?;
+                tracing::info!("FTS index created successfully");
+
+                Ok::<(), crate::error::Error>(())
+            })
+            .await?;
 
         Ok(())
     }
