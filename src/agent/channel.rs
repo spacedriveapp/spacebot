@@ -3949,6 +3949,23 @@ mod tests {
     }
 
     #[test]
+    fn conversational_event_summary_is_case_insensitive_across_prefixes() {
+        let (event_type, summary) = classify_conversational_event_summary(
+            "OUTCOME: implemented the follow-up",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::Outcome);
+        assert_eq!(summary, "implemented the follow-up");
+
+        let (event_type, summary) = classify_conversational_event_summary(
+            "Blocked_On: waiting on reviewer signoff",
+            WorkingMemoryEventType::WorkerCompleted,
+        );
+        assert_eq!(event_type, WorkingMemoryEventType::BlockedOn);
+        assert_eq!(summary, "waiting on reviewer signoff");
+    }
+
+    #[test]
     fn conversational_event_summary_treats_empty_prefixed_content_as_empty_summary() {
         let (event_type, summary) = classify_conversational_event_summary(
             "outcome:   ",
