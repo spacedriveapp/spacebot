@@ -188,6 +188,19 @@ impl Tool for SpawnWorkerTool {
         {
             let status = self.state.status_block.read().await;
             if let Some(existing_id) = status.find_duplicate_worker_task(&args.task) {
+                self.state
+                    .deps
+                    .working_memory
+                    .emit(
+                        crate::memory::WorkingMemoryEventType::BlockedOn,
+                        format!(
+                            "Worker spawn blocked on active worker {existing_id} for duplicate task"
+                        ),
+                    )
+                    .channel(self.state.channel_id.to_string())
+                    .importance(0.6)
+                    .record();
+
                 return Ok(SpawnWorkerOutput {
                     worker_id: existing_id,
                     spawned: false,

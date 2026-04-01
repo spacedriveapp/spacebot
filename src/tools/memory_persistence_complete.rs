@@ -109,7 +109,8 @@ pub struct MemoryPersistenceCompleteArgs {
 /// A single event extracted by the persistence branch for the working memory log.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct WorkingMemoryEventInput {
-    /// Event type: "decision", "user_correction", "decision_revised", "error", or "system".
+    /// Event type: "decision", "user_correction", "decision_revised", "deadline_set",
+    /// "blocked_on", "constraint", "outcome", "error", or "system".
     pub event_type: String,
     /// One-line summary of the event.
     pub summary: String,
@@ -170,6 +171,10 @@ impl Tool for MemoryPersistenceCompleteTool {
                                         "decision",
                                         "user_correction",
                                         "decision_revised",
+                                        "deadline_set",
+                                        "blocked_on",
+                                        "constraint",
+                                        "outcome",
                                         "error",
                                         "system"
                                     ],
