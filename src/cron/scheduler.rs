@@ -6,7 +6,7 @@
 //! to the delivery target via the messaging system.
 
 use crate::agent::channel::Channel;
-use crate::cron::store::CronStore;
+use crate::cron::store::{CronExecutionRecord, CronStore};
 use crate::error::Result;
 use crate::messaging::MessagingManager;
 use crate::messaging::target::{BroadcastTarget, parse_delivery_target};
@@ -17,7 +17,7 @@ use cron::Schedule;
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, mpsc};
 use tokio::time::Duration;
 
 /// A cron job definition loaded from the database.
@@ -33,6 +33,7 @@ pub struct CronJob {
     pub enabled: bool,
     pub run_once: bool,
     pub consecutive_failures: u32,
+    pub next_run_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
@@ -54,6 +55,8 @@ pub struct CronConfig {
     pub enabled: bool,
     #[serde(default)]
     pub run_once: bool,
+    #[serde(default)]
+    pub next_run_at: Option<String>,
     /// Maximum wall-clock seconds to wait for the job to complete.
     /// `None` uses the default of 120 seconds.
     pub timeout_secs: Option<u64>,
@@ -88,10 +91,85 @@ const MAX_CONSECUTIVE_FAILURES: u32 = 3;
 struct ExecutionGuard(Arc<std::sync::atomic::AtomicBool>);
 
 impl Drop for ExecutionGuard {
+    /// SAFETY: This is the only place that writes to this AtomicBool, and all reads
+    /// use `Acquire` ordering (see line 436). The `Release` store here establishes
+    /// a happens-before relationship with those acquire loads, ensuring the flag
+    /// is properly cleared when observed by other threads.
     fn drop(&mut self) {
         self.0.store(false, std::sync::atomic::Ordering::Release);
     }
 }
+
+/// Emit a cron execution error to both working memory and tracing.
+/// Centralizes error reporting to ensure consistent handling across all error paths.
+fn emit_cron_error(
+    context: &CronContext,
+    job_id: &str,
+    failure_class: &'static str,
+    error: &crate::error::Error,
+) {
+    let message = format!("Cron {failure_class}: {job_id}: {error}");
+
+    // Emit to working memory for agent context awareness
+    context
+        .deps
+        .working_memory
+        .emit(crate::memory::WorkingMemoryEventType::Error, message)
+        .importance(0.8)
+        .record();
+
+    // Log to tracing for observability
+    tracing::error!(cron_id = %job_id, failure_class, %error, "cron job execution failed");
+}
+
+#[derive(Debug)]
+enum CronRunError {
+    Execution(crate::error::Error),
+    Delivery(crate::error::Error),
+}
+
+impl CronRunError {
+    fn as_error(&self) -> &crate::error::Error {
+        match self {
+            Self::Execution(error) | Self::Delivery(error) => error,
+        }
+    }
+
+    fn into_error(self) -> crate::error::Error {
+        match self {
+            Self::Execution(error) | Self::Delivery(error) => error,
+        }
+    }
+
+    fn failure_class(&self) -> &'static str {
+        match self {
+            Self::Execution(_) => "execution_error",
+            Self::Delivery(_) => "delivery_error",
+        }
+    }
+}
+
+impl From<crate::error::Error> for CronRunError {
+    fn from(error: crate::error::Error) -> Self {
+        Self::Execution(error)
+    }
+}
+
+async fn set_job_enabled_state(
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+    enabled: bool,
+) -> Result<()> {
+    let mut jobs = jobs.write().await;
+    let Some(job) = jobs.get_mut(job_id) else {
+        return Err(crate::error::Error::Other(anyhow::anyhow!(
+            "cron job not found"
+        )));
+    };
+    job.enabled = enabled;
+    Ok(())
+}
+
 const SYSTEM_TIMEZONE_LABEL: &str = "system";
 
 /// Scheduler that manages cron job timers and execution.
@@ -146,33 +224,8 @@ impl Scheduler {
         config: CronConfig,
         last_executed_at: Option<&str>,
     ) -> Result<()> {
-        let delivery_target = parse_delivery_target(&config.delivery_target).ok_or_else(|| {
-            crate::error::Error::Other(anyhow::anyhow!(
-                "invalid delivery target '{}': expected format 'adapter:target'",
-                config.delivery_target
-            ))
-        })?;
-
-        let cron_expr = normalize_cron_expr(config.cron_expr.clone())?;
-        let job = CronJob {
-            id: config.id.clone(),
-            prompt: config.prompt,
-            cron_expr,
-            interval_secs: config.interval_secs,
-            delivery_target,
-            active_hours: normalize_active_hours(config.active_hours),
-            enabled: config.enabled,
-            run_once: config.run_once,
-            consecutive_failures: 0,
-            timeout_secs: config.timeout_secs,
-        };
-
-        {
-            let mut jobs = self.jobs.write().await;
-            jobs.insert(config.id.clone(), job);
-        }
-
-        if config.enabled {
+        let job = cron_job_from_config(&config)?;
+        let anchor = if config.enabled {
             let anchor = last_executed_at.and_then(|ts| {
                 chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%d %H:%M:%S")
                     .ok()
@@ -190,6 +243,41 @@ impl Scheduler {
                     "failed to parse last_executed_at; falling back to epoch-aligned interval delay"
                 );
             }
+            anchor
+        } else {
+            None
+        };
+
+        let maybe_prev_job = {
+            let mut jobs = self.jobs.write().await;
+            jobs.insert(config.id.clone(), job)
+        };
+
+        if config.enabled
+            && let Err(error) = self.ensure_job_next_run_at(&config.id, anchor).await
+        {
+            {
+                let mut jobs = self.jobs.write().await;
+                // Restore previous job if one existed, otherwise remove the key
+                match maybe_prev_job {
+                    Some(prev_job) => {
+                        jobs.insert(config.id.clone(), prev_job);
+                    }
+                    None => {
+                        jobs.remove(&config.id);
+                    }
+                }
+            }
+
+            tracing::warn!(
+                cron_id = %config.id,
+                %error,
+                "failed to initialize cron cursor; rolling back in-memory registration"
+            );
+            return Err(error);
+        }
+
+        if config.enabled {
             self.start_timer(&config.id, anchor).await;
         }
 
@@ -204,6 +292,51 @@ impl Scheduler {
         Ok(())
     }
 
+    async fn ensure_job_next_run_at(
+        &self,
+        job_id: &str,
+        anchor: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Result<()> {
+        let next_run_at = {
+            let jobs = self.jobs.read().await;
+            let Some(job) = jobs.get(job_id) else {
+                return Err(crate::error::Error::Other(anyhow::anyhow!(
+                    "cron job not found"
+                )));
+            };
+
+            if job.next_run_at.is_some() {
+                return Ok(());
+            }
+
+            compute_initial_next_run_at(job, &self.context, anchor)
+        };
+
+        let Some(next_run_at) = next_run_at else {
+            return Ok(());
+        };
+
+        let next_run_at_text = format_cron_timestamp(next_run_at);
+        let initialized = self
+            .context
+            .store
+            .initialize_next_run_at(job_id, &next_run_at_text)
+            .await?;
+
+        if initialized {
+            let mut jobs = self.jobs.write().await;
+            if let Some(job) = jobs.get_mut(job_id)
+                && job.next_run_at.is_none()
+            {
+                job.next_run_at = Some(next_run_at);
+            }
+        } else {
+            sync_job_from_store(&self.context.store, &self.jobs, job_id).await?;
+        }
+
+        Ok(())
+    }
+
     /// Start a timer loop for a cron job.
     ///
     /// Idempotent: if a timer is already running for this job, it is aborted before
@@ -212,7 +345,7 @@ impl Scheduler {
     /// When `anchor` is provided, interval-based jobs use it to compute the first
     /// sleep duration from the last known execution, preventing skipped or duplicate
     /// firings after a restart.
-    async fn start_timer(&self, job_id: &str, anchor: Option<chrono::DateTime<chrono::Utc>>) {
+    async fn start_timer(&self, job_id: &str, _anchor: Option<chrono::DateTime<chrono::Utc>>) {
         let job_id_for_map = job_id.to_string();
         let job_id = job_id.to_string();
         let jobs = self.jobs.clone();
@@ -230,7 +363,6 @@ impl Scheduler {
 
         let handle = tokio::spawn(async move {
             let execution_lock = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let mut interval_first_tick = true;
 
             loop {
                 let job = {
@@ -248,45 +380,48 @@ impl Scheduler {
                     }
                 };
 
-                let sleep_duration = if let Some(cron_expr) = job.cron_expr.as_deref() {
-                    match next_fire_duration(&context, &job_id, cron_expr) {
-                        Some((duration, next_fire_utc, timezone)) => {
-                            tracing::debug!(
-                                cron_id = %job_id,
-                                cron_expr,
-                                cron_timezone = %timezone,
-                                next_fire_utc = %next_fire_utc.to_rfc3339(),
-                                sleep_secs = duration.as_secs(),
-                                "wall-clock cron next fire computed"
-                            );
-                            duration
-                        }
-                        None => {
-                            tracing::warn!(
-                                cron_id = %job_id,
-                                cron_expr,
-                                "failed to compute next wall-clock fire; retrying in 60s"
-                            );
-                            Duration::from_secs(60)
-                        }
-                    }
-                } else {
-                    let interval_secs = job.interval_secs;
-                    let delay = if interval_first_tick {
-                        interval_first_tick = false;
-                        anchored_initial_delay(interval_secs, anchor)
-                    } else {
-                        Duration::from_secs(interval_secs)
-                    };
-                    tracing::debug!(
-                        cron_id = %job_id,
-                        interval_secs,
-                        sleep_secs = delay.as_secs(),
-                        anchored = anchor.is_some(),
-                        "interval cron next fire computed"
-                    );
-                    delay
+                let Some(next_run_at) =
+                    ensure_job_cursor_initialized(&context, &jobs, &job_id, &job, None).await
+                else {
+                    tracing::warn!(cron_id = %job_id, "cron job has no next_run_at, retrying in 60s");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                    continue;
                 };
+
+                let now = chrono::Utc::now();
+                if let Some(fast_forward_to) =
+                    stale_recovery_next_run_at(&job, &context, next_run_at, now)
+                {
+                    if let Err(error) = advance_job_cursor(
+                        &context,
+                        &jobs,
+                        &job_id,
+                        &job,
+                        next_run_at,
+                        fast_forward_to,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            cron_id = %job_id,
+                            scheduled_run_at = %format_cron_timestamp(next_run_at),
+                            next_run_at = %format_cron_timestamp(fast_forward_to),
+                            %error,
+                            "failed to fast-forward stale cron cursor"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                    continue;
+                }
+
+                let sleep_duration = duration_until_next_run(next_run_at);
+
+                tracing::debug!(
+                    cron_id = %job_id,
+                    next_run_at = %format_cron_timestamp(next_run_at),
+                    sleep_secs = sleep_duration.as_secs(),
+                    "cron next fire computed from persisted cursor"
+                );
 
                 tokio::time::sleep(sleep_duration).await;
 
@@ -305,6 +440,14 @@ impl Scheduler {
                     }
                 };
 
+                let Some(scheduled_run_at) = job.next_run_at else {
+                    continue;
+                };
+                let now = chrono::Utc::now();
+                if scheduled_run_at > now {
+                    continue;
+                }
+
                 // Check active hours window
                 if let Some((start, end)) = job.active_hours {
                     let (current_hour, timezone) = current_hour_and_timezone(&context, &job_id);
@@ -318,13 +461,83 @@ impl Scheduler {
                             end,
                             "outside active hours, skipping"
                         );
+                        if let Some(next_run_at) =
+                            compute_following_next_run_at(&job, &context, scheduled_run_at)
+                            && let Err(error) = advance_job_cursor(
+                                &context,
+                                &jobs,
+                                &job_id,
+                                &job,
+                                scheduled_run_at,
+                                next_run_at,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                cron_id = %job_id,
+                                scheduled_run_at = %format_cron_timestamp(scheduled_run_at),
+                                next_run_at = %format_cron_timestamp(next_run_at),
+                                %error,
+                                "failed to advance skipped cron cursor for active-hours gate"
+                            );
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                        }
                         continue;
                     }
                 }
 
                 if execution_lock.load(std::sync::atomic::Ordering::Acquire) {
                     tracing::debug!(cron_id = %job_id, "previous execution still running, skipping tick");
+                    if let Some(next_run_at) =
+                        compute_following_next_run_at(&job, &context, scheduled_run_at)
+                        && let Err(error) = advance_job_cursor(
+                            &context,
+                            &jobs,
+                            &job_id,
+                            &job,
+                            scheduled_run_at,
+                            next_run_at,
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            cron_id = %job_id,
+                            scheduled_run_at = %format_cron_timestamp(scheduled_run_at),
+                            next_run_at = %format_cron_timestamp(next_run_at),
+                            %error,
+                            "failed to advance skipped cron cursor while prior execution was still running"
+                        );
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
                     continue;
+                }
+
+                let claimed = if job.run_once {
+                    claim_run_once_fire(&context, &jobs, &job_id, scheduled_run_at).await
+                } else if let Some(next_run_at) =
+                    compute_following_next_run_at(&job, &context, scheduled_run_at)
+                {
+                    advance_job_cursor(
+                        &context,
+                        &jobs,
+                        &job_id,
+                        &job,
+                        scheduled_run_at,
+                        next_run_at,
+                    )
+                    .await
+                } else {
+                    Ok(false)
+                };
+
+                match claimed {
+                    Ok(true) => {}
+                    Ok(false) => continue,
+                    Err(error) => {
+                        tracing::warn!(cron_id = %job_id, %error, "failed to claim cron fire");
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        continue;
+                    }
                 }
 
                 tracing::info!(cron_id = %job_id, "cron job firing");
@@ -339,16 +552,6 @@ impl Scheduler {
                     let _guard = guard;
                     match run_cron_job(&job, &exec_context).await {
                         Ok(()) => {
-                            #[cfg(feature = "metrics")]
-                            crate::telemetry::Metrics::global()
-                                .cron_executions_total
-                                .with_label_values(&[
-                                    &exec_context.deps.agent_id,
-                                    &exec_job_id,
-                                    "success",
-                                ])
-                                .inc();
-
                             exec_context
                                 .deps
                                 .working_memory
@@ -365,30 +568,11 @@ impl Scheduler {
                             }
                         }
                         Err(error) => {
-                            #[cfg(feature = "metrics")]
-                            crate::telemetry::Metrics::global()
-                                .cron_executions_total
-                                .with_label_values(&[
-                                    &exec_context.deps.agent_id,
-                                    &exec_job_id,
-                                    "failure",
-                                ])
-                                .inc();
-
-                            exec_context
-                                .deps
-                                .working_memory
-                                .emit(
-                                    crate::memory::WorkingMemoryEventType::Error,
-                                    format!("Cron failed: {exec_job_id}: {error}"),
-                                )
-                                .importance(0.8)
-                                .record();
-
-                            tracing::error!(
-                                cron_id = %exec_job_id,
-                                %error,
-                                "cron job execution failed"
+                            emit_cron_error(
+                                &exec_context,
+                                &exec_job_id,
+                                error.failure_class(),
+                                error.as_error(),
                             );
 
                             let should_disable = {
@@ -518,7 +702,9 @@ impl Scheduler {
             }
 
             tracing::info!(cron_id = %job_id, "cron job triggered manually");
-            run_cron_job(&job, &self.context).await
+            run_cron_job(&job, &self.context)
+                .await
+                .map_err(CronRunError::into_error)
         } else {
             Err(crate::error::Error::Other(anyhow::anyhow!(
                 "cron job not found"
@@ -549,69 +735,51 @@ impl Scheduler {
             }
 
             // Cold re-enable: job was disabled at startup so was never loaded into the scheduler.
-            // Reload from the store, insert, then start the timer.
+            // Reload from the store, insert with enabled=false first, initialize, then enable atomically.
             tracing::info!(cron_id = %job_id, "cold re-enable: reloading config from store");
-            let configs = self.context.store.load_all_unfiltered().await?;
-            let config = configs
-                .into_iter()
-                .find(|c| c.id == job_id)
-                .ok_or_else(|| {
-                    crate::error::Error::Other(anyhow::anyhow!("cron job not found in store"))
-                })?;
+            let config = self.context.store.load(job_id).await?.ok_or_else(|| {
+                crate::error::Error::Other(anyhow::anyhow!("cron job not found in store"))
+            })?;
+            let job = cron_job_from_config(&config)?;
 
-            let delivery_target =
-                parse_delivery_target(&config.delivery_target).ok_or_else(|| {
-                    crate::error::Error::Other(anyhow::anyhow!(
-                        "invalid delivery target '{}': expected format 'adapter:target'",
-                        config.delivery_target
-                    ))
-                })?;
-
+            // Insert disabled first to avoid orphaned enabled state if init fails
             {
                 let mut jobs = self.jobs.write().await;
-                jobs.insert(
-                    job_id.to_string(),
-                    CronJob {
-                        id: config.id.clone(),
-                        prompt: config.prompt,
-                        cron_expr: normalize_cron_expr(config.cron_expr)?,
-                        interval_secs: config.interval_secs,
-                        delivery_target,
-                        active_hours: normalize_active_hours(config.active_hours),
-                        enabled: true,
-                        run_once: config.run_once,
-                        consecutive_failures: 0,
-                        timeout_secs: config.timeout_secs,
-                    },
-                );
+                jobs.insert(job_id.to_string(), job);
             }
 
+            // Initialize cursor, make the enabled state visible, then start the timer.
+            if let Err(error) = self.ensure_job_next_run_at(job_id, None).await {
+                // Clean up on failure - remove the partially inserted job
+                let mut jobs = self.jobs.write().await;
+                jobs.remove(job_id);
+                return Err(error);
+            }
+            set_job_enabled_state(&self.jobs, job_id, true).await?;
             self.start_timer(job_id, None).await;
             tracing::info!(cron_id = %job_id, "cron job cold-re-enabled and timer started");
             return Ok(());
         }
 
         // Job is in the HashMap — normal path.
+        // Use read lock to check current state first
         let was_enabled = {
-            let mut jobs = self.jobs.write().await;
-            if let Some(job) = jobs.get_mut(job_id) {
-                let old = job.enabled;
-                job.enabled = enabled;
-                old
-            } else {
-                // Should not happen (we checked above), but be defensive.
-                return Err(crate::error::Error::Other(anyhow::anyhow!(
-                    "cron job not found"
-                )));
-            }
+            let jobs = self.jobs.read().await;
+            jobs.get(job_id).map(|j| j.enabled).unwrap_or(false)
         };
 
         if enabled && !was_enabled {
+            // Initialize the cursor, make the enabled state visible, then start the timer.
+            self.ensure_job_next_run_at(job_id, None).await?;
+            set_job_enabled_state(&self.jobs, job_id, true).await?;
             self.start_timer(job_id, None).await;
             tracing::info!(cron_id = %job_id, "cron job enabled and timer started");
         }
 
         if !enabled && was_enabled {
+            // Atomically disable first, then abort timer
+            set_job_enabled_state(&self.jobs, job_id, false).await?;
+
             // Abort the timer immediately rather than waiting up to one full interval.
             let handle = {
                 let mut timers = self.timers.write().await;
@@ -625,6 +793,61 @@ impl Scheduler {
 
         Ok(())
     }
+}
+
+fn cron_job_from_config(config: &CronConfig) -> Result<CronJob> {
+    let delivery_target = parse_delivery_target(&config.delivery_target).ok_or_else(|| {
+        crate::error::Error::Other(anyhow::anyhow!(
+            "invalid delivery target '{}': expected format 'adapter:target'",
+            config.delivery_target
+        ))
+    })?;
+    let cron_expr = normalize_cron_expr(config.cron_expr.clone())?;
+
+    if cron_expr.is_none() && config.interval_secs == 0 {
+        return Err(crate::error::Error::Other(anyhow::anyhow!(
+            "interval_secs must be > 0 when no cron_expr is provided"
+        )));
+    }
+
+    Ok(CronJob {
+        id: config.id.clone(),
+        prompt: config.prompt.clone(),
+        cron_expr,
+        interval_secs: config.interval_secs,
+        delivery_target,
+        active_hours: normalize_active_hours(config.active_hours),
+        enabled: config.enabled,
+        run_once: config.run_once,
+        consecutive_failures: 0,
+        next_run_at: config.next_run_at.as_deref().and_then(parse_cron_timestamp),
+        timeout_secs: config.timeout_secs,
+    })
+}
+
+async fn sync_job_from_store(
+    store: &CronStore,
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+) -> Result<()> {
+    let Some(config) = store.load(job_id).await? else {
+        let mut guard = jobs.write().await;
+        guard.remove(job_id);
+        return Ok(());
+    };
+
+    let synced_job = cron_job_from_config(&config)?;
+
+    let mut guard = jobs.write().await;
+    if let Some(job) = guard.get_mut(job_id) {
+        let consecutive_failures = job.consecutive_failures;
+        *job = CronJob {
+            consecutive_failures,
+            ..synced_job
+        };
+    }
+
+    Ok(())
 }
 
 fn cron_timezone_label(context: &CronContext) -> String {
@@ -758,6 +981,174 @@ fn interval_initial_delay(interval_secs: u64) -> Duration {
     }
 }
 
+fn parse_cron_timestamp(value: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    chrono::DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|timestamp| timestamp.to_utc())
+        .or_else(|| {
+            chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%d %H:%M:%S")
+                .ok()
+                .map(|timestamp| timestamp.and_utc())
+        })
+}
+
+fn format_cron_timestamp(value: chrono::DateTime<chrono::Utc>) -> String {
+    value.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+
+fn duration_until_next_run(next_run_at: chrono::DateTime<chrono::Utc>) -> Duration {
+    let delay_ms = (next_run_at - chrono::Utc::now()).num_milliseconds().max(1) as u64;
+    Duration::from_millis(delay_ms)
+}
+
+fn compute_initial_next_run_at(
+    job: &CronJob,
+    context: &CronContext,
+    anchor: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(cron_expr) = job.cron_expr.as_deref() {
+        next_fire_after(context, &job.id, cron_expr, chrono::Utc::now()).map(|(next, _)| next)
+    } else {
+        let delay = anchored_initial_delay(job.interval_secs, anchor);
+        Some(chrono::Utc::now() + chrono::Duration::from_std(delay).ok()?)
+    }
+}
+
+fn compute_following_next_run_at(
+    job: &CronJob,
+    context: &CronContext,
+    after: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(cron_expr) = job.cron_expr.as_deref() {
+        next_fire_after(context, &job.id, cron_expr, after).map(|(next, _)| next)
+    } else {
+        Some(after + chrono::Duration::seconds(job.interval_secs as i64))
+    }
+}
+
+fn recurring_grace_window(job: &CronJob, context: &CronContext) -> Duration {
+    const MIN_GRACE_SECS: u64 = 120;
+    const MAX_GRACE_SECS: u64 = 7200;
+
+    let period_secs = if let Some(cron_expr) = job.cron_expr.as_deref() {
+        cron_period_secs(context, cron_expr).unwrap_or(MIN_GRACE_SECS)
+    } else {
+        job.interval_secs.max(1)
+    };
+
+    let grace_secs = (period_secs / 2).clamp(MIN_GRACE_SECS, MAX_GRACE_SECS);
+    Duration::from_secs(grace_secs)
+}
+
+fn stale_recovery_next_run_at(
+    job: &CronJob,
+    context: &CronContext,
+    next_run_at: chrono::DateTime<chrono::Utc>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    let overdue = (now - next_run_at).to_std().ok()?;
+    if overdue <= recurring_grace_window(job, context) {
+        return None;
+    }
+
+    compute_following_next_run_at(job, context, now)
+}
+
+async fn ensure_job_cursor_initialized(
+    context: &CronContext,
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+    job: &CronJob,
+    anchor: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Some(next_run_at) = job.next_run_at {
+        return Some(next_run_at);
+    }
+
+    let next_run_at = compute_initial_next_run_at(job, context, anchor)?;
+    let next_run_at_text = format_cron_timestamp(next_run_at);
+    let initialized = match context
+        .store
+        .initialize_next_run_at(job_id, &next_run_at_text)
+        .await
+    {
+        Ok(initialized) => initialized,
+        Err(error) => {
+            tracing::warn!(cron_id = %job_id, %error, "failed to initialize cron cursor");
+            return None;
+        }
+    };
+
+    if initialized {
+        let mut guard = jobs.write().await;
+        if let Some(job) = guard.get_mut(job_id)
+            && job.next_run_at.is_none()
+        {
+            job.next_run_at = Some(next_run_at);
+        }
+
+        return Some(next_run_at);
+    }
+
+    if let Err(error) = sync_job_from_store(&context.store, jobs, job_id).await {
+        tracing::warn!(cron_id = %job_id, %error, "failed to refresh cron cursor after contention");
+        return None;
+    }
+
+    let guard = jobs.read().await;
+    guard.get(job_id).and_then(|job| job.next_run_at)
+}
+
+async fn advance_job_cursor(
+    context: &CronContext,
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+    job: &CronJob,
+    expected_next_run_at: chrono::DateTime<chrono::Utc>,
+    next_run_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let expected = format_cron_timestamp(expected_next_run_at);
+    let next = format_cron_timestamp(next_run_at);
+    let claimed = context
+        .store
+        .claim_and_advance(job_id, &expected, &next)
+        .await?;
+
+    if claimed {
+        let mut guard = jobs.write().await;
+        if let Some(stored_job) = guard.get_mut(job_id) {
+            stored_job.next_run_at = Some(next_run_at);
+            stored_job.enabled = job.enabled;
+        }
+    } else {
+        sync_job_from_store(&context.store, jobs, job_id).await?;
+    }
+
+    Ok(claimed)
+}
+
+async fn claim_run_once_fire(
+    context: &CronContext,
+    jobs: &Arc<RwLock<HashMap<String, CronJob>>>,
+    job_id: &str,
+    expected_next_run_at: chrono::DateTime<chrono::Utc>,
+) -> Result<bool> {
+    let expected = format_cron_timestamp(expected_next_run_at);
+    let claimed = context.store.claim_run_once(job_id, &expected).await?;
+
+    if claimed {
+        let mut guard = jobs.write().await;
+        if let Some(job) = guard.get_mut(job_id) {
+            job.enabled = false;
+            job.next_run_at = None;
+        }
+    } else {
+        sync_job_from_store(&context.store, jobs, job_id).await?;
+    }
+
+    Ok(claimed)
+}
+
 /// Expand a 5-field standard cron expression to the 7-field format required by
 /// the `cron` crate: `sec min hour dom month dow year`. If the expression
 /// already has 6+ fields, return it as-is.
@@ -789,11 +1180,12 @@ fn resolve_cron_timezone(context: &CronContext) -> (Option<chrono_tz::Tz>, Strin
     }
 }
 
-fn next_fire_duration(
+fn next_fire_after(
     context: &CronContext,
     cron_id: &str,
     cron_expr: &str,
-) -> Option<(Duration, chrono::DateTime<chrono::Utc>, String)> {
+    after_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<(chrono::DateTime<chrono::Utc>, String)> {
     // Expand 5-field standard cron to 7-field for the `cron` crate.
     let expanded = expand_cron_expr(cron_expr);
     let schedule = match Schedule::from_str(&expanded) {
@@ -804,24 +1196,30 @@ fn next_fire_duration(
         }
     };
 
-    let now_utc = chrono::Utc::now();
     let (timezone, timezone_label) = resolve_cron_timezone(context);
     let next_utc = if let Some(timezone) = timezone {
-        let now_local = now_utc.with_timezone(&timezone);
+        let after_local = after_utc.with_timezone(&timezone);
         schedule
-            .after(&now_local)
+            .after(&after_local)
             .next()?
             .with_timezone(&chrono::Utc)
     } else {
-        let now_local = chrono::Local::now();
+        let after_local = after_utc.with_timezone(&chrono::Local);
         schedule
-            .after(&now_local)
+            .after(&after_local)
             .next()?
             .with_timezone(&chrono::Utc)
     };
-    let delay_ms = (next_utc - now_utc).num_milliseconds().max(1) as u64;
 
-    Some((Duration::from_millis(delay_ms), next_utc, timezone_label))
+    Some((next_utc, timezone_label))
+}
+
+fn cron_period_secs(context: &CronContext, cron_expr: &str) -> Option<u64> {
+    let baseline = chrono::Utc::now();
+    let (first, _) = next_fire_after(context, "period", cron_expr, baseline)?;
+    let (second, _) = next_fire_after(context, "period", cron_expr, first)?;
+    let period = (second - first).num_seconds().max(1) as u64;
+    Some(period)
 }
 
 fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
@@ -864,7 +1262,10 @@ fn ensure_cron_dispatch_readiness(context: &CronContext, cron_id: &str) {
 
 /// Execute a single cron job: create a fresh channel, run the prompt, deliver the result.
 #[tracing::instrument(skip(context), fields(cron_id = %job.id, agent_id = %context.deps.agent_id))]
-async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
+async fn run_cron_job(
+    job: &CronJob,
+    context: &CronContext,
+) -> std::result::Result<(), CronRunError> {
     ensure_cron_dispatch_readiness(context, &job.id);
     let channel_id: crate::ChannelId = Arc::from(format!("cron:{}", job.id).as_str());
 
@@ -887,11 +1288,7 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
     );
 
     // Spawn the channel's event loop
-    let channel_handle = tokio::spawn(async move {
-        if let Err(error) = channel.run().await {
-            tracing::error!(%error, "cron channel failed");
-        }
-    });
+    let channel_handle = tokio::spawn(async move { channel.run().await });
 
     // Send the cron job prompt as a synthetic message
     // Derive source from the delivery target's adapter so adapter_selector() can extract
@@ -916,68 +1313,143 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
         formatted_author: None,
     };
 
-    channel_tx
-        .send(message)
-        .await
-        .map_err(|error| anyhow::anyhow!("failed to send cron prompt to channel: {error}"))?;
-
-    // Collect responses with a timeout. The channel may produce multiple messages
-    // (e.g. status updates, then text). We only care about text responses.
-    let mut collected_text = Vec::new();
-    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(120));
-
-    // Drop the sender so the channel knows no more messages are coming.
-    // The channel will process the one message and then its event loop will end
-    // when the sender is dropped (message_rx returns None).
-    drop(channel_tx);
-
-    let deadline = tokio::time::Instant::now() + timeout;
-    loop {
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            tracing::warn!(cron_id = %job.id, "cron job timed out after {timeout:?}");
-            channel_handle.abort();
-            break;
-        }
-        match tokio::time::timeout(remaining, response_rx.recv()).await {
-            Ok(Some(RoutedResponse {
-                response: OutboundResponse::Text(text),
-                ..
-            })) => {
-                collected_text.push(text);
-            }
-            Ok(Some(RoutedResponse {
-                response: OutboundResponse::RichMessage { text, .. },
-                ..
-            })) => {
-                collected_text.push(text);
-            }
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                break;
-            }
-            Err(_) => {
-                tracing::warn!(cron_id = %job.id, "cron job timed out after {timeout:?}");
-                channel_handle.abort();
-                break;
-            }
-        }
+    if let Err(error) = channel_tx.send(message).await {
+        let error_message = format!("failed to send cron prompt to channel: {error}");
+        persist_cron_execution(
+            context,
+            &job.id,
+            CronExecutionRecord {
+                execution_succeeded: false,
+                delivery_attempted: false,
+                delivery_succeeded: None,
+                result_summary: None,
+                execution_error: Some(error_message.clone()),
+                delivery_error: None,
+            },
+        );
+        return Err(CronRunError::Execution(
+            anyhow::anyhow!(error_message).into(),
+        ));
     }
 
-    // Wait for the channel task to finish (it should already be done since we dropped channel_tx)
-    let _ = channel_handle.await;
+    let timeout = Duration::from_secs(job.timeout_secs.unwrap_or(120));
 
-    let result_text = collected_text.join("\n\n");
-    let has_result = !result_text.trim().is_empty();
+    // Drop the sender so the cron channel behaves as a one-shot conversation.
+    drop(channel_tx);
+
+    let delivery_response = match await_cron_delivery_response(&job.id, &mut response_rx, timeout)
+        .await
+    {
+        CronResponseWaitOutcome::Delivered(response) => {
+            if !channel_handle.is_finished() {
+                channel_handle.abort();
+            }
+
+            match channel_handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(cron_id = %job.id, %error, "cron channel returned an error after emitting a delivery response");
+                }
+                Err(join_error) if !join_error.is_cancelled() => {
+                    tracing::warn!(cron_id = %job.id, %join_error, "cron channel join failed after emitting a delivery response");
+                }
+                Err(_) => {}
+            }
+
+            Some(response)
+        }
+        CronResponseWaitOutcome::ChannelClosed => match channel_handle.await {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => {
+                let error_message = format!("cron channel failed: {error}");
+                persist_cron_execution(
+                    context,
+                    &job.id,
+                    CronExecutionRecord {
+                        execution_succeeded: false,
+                        delivery_attempted: false,
+                        delivery_succeeded: None,
+                        result_summary: None,
+                        execution_error: Some(error_message.clone()),
+                        delivery_error: None,
+                    },
+                );
+                return Err(CronRunError::Execution(
+                    anyhow::anyhow!(error_message).into(),
+                ));
+            }
+            Err(join_error) => {
+                let error_message = format!("cron channel join failed: {join_error}");
+                persist_cron_execution(
+                    context,
+                    &job.id,
+                    CronExecutionRecord {
+                        execution_succeeded: false,
+                        delivery_attempted: false,
+                        delivery_succeeded: None,
+                        result_summary: None,
+                        execution_error: Some(error_message.clone()),
+                        delivery_error: None,
+                    },
+                );
+                return Err(CronRunError::Execution(
+                    anyhow::anyhow!(error_message).into(),
+                ));
+            }
+        },
+        CronResponseWaitOutcome::TimedOut => {
+            if !channel_handle.is_finished() {
+                channel_handle.abort();
+            }
+
+            match channel_handle.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => {
+                    tracing::warn!(
+                        cron_id = %job.id,
+                        %error,
+                        "cron channel returned an error after timing out"
+                    );
+                }
+                Err(join_error) if !join_error.is_cancelled() => {
+                    tracing::warn!(
+                        cron_id = %job.id,
+                        %join_error,
+                        "cron channel join failed after timing out"
+                    );
+                }
+                Err(_) => {}
+            }
+
+            let error_message = format!("cron job timed out after {timeout:?}");
+            persist_cron_execution(
+                context,
+                &job.id,
+                CronExecutionRecord {
+                    execution_succeeded: false,
+                    delivery_attempted: false,
+                    delivery_succeeded: None,
+                    result_summary: None,
+                    execution_error: Some(error_message.clone()),
+                    delivery_error: None,
+                },
+            );
+
+            return Err(CronRunError::Execution(
+                anyhow::anyhow!(error_message).into(),
+            ));
+        }
+    };
 
     // Deliver result to target (only if there's something to say)
-    if has_result {
+    if let Some(response) = delivery_response {
+        let summary = cron_response_summary(&response);
         if let Err(error) = context
             .messaging_manager
-            .broadcast(
+            .broadcast_proactive(
                 &job.delivery_target.adapter,
                 &job.delivery_target.target,
-                OutboundResponse::Text(result_text.clone()),
+                response,
             )
             .await
         {
@@ -987,14 +1459,19 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
                 %error,
                 "failed to deliver cron result"
             );
-            if let Err(log_error) = context
-                .store
-                .log_execution(&job.id, false, Some(&error.to_string()))
-                .await
-            {
-                tracing::warn!(%log_error, "failed to log cron execution");
-            }
-            return Err(error);
+            persist_cron_execution(
+                context,
+                &job.id,
+                CronExecutionRecord {
+                    execution_succeeded: true,
+                    delivery_attempted: true,
+                    delivery_succeeded: Some(false),
+                    result_summary: summary.clone(),
+                    execution_error: None,
+                    delivery_error: Some(error.to_string()),
+                },
+            );
+            return Err(CronRunError::Delivery(error));
         }
 
         tracing::info!(
@@ -1002,25 +1479,231 @@ async fn run_cron_job(job: &CronJob, context: &CronContext) -> Result<()> {
             target = %job.delivery_target,
             "cron result delivered"
         );
+        persist_cron_execution(
+            context,
+            &job.id,
+            CronExecutionRecord {
+                execution_succeeded: true,
+                delivery_attempted: true,
+                delivery_succeeded: Some(true),
+                result_summary: summary,
+                execution_error: None,
+                delivery_error: None,
+            },
+        );
     } else {
         tracing::debug!(cron_id = %job.id, "cron job produced no output, skipping delivery");
-    }
-
-    let summary = if has_result {
-        Some(result_text.as_str())
-    } else {
-        None
-    };
-    if let Err(error) = context.store.log_execution(&job.id, true, summary).await {
-        tracing::warn!(%error, "failed to log cron execution");
+        persist_cron_execution(
+            context,
+            &job.id,
+            CronExecutionRecord {
+                execution_succeeded: true,
+                delivery_attempted: false,
+                delivery_succeeded: None,
+                result_summary: None,
+                execution_error: None,
+                delivery_error: None,
+            },
+        );
     }
 
     Ok(())
 }
 
+fn persist_cron_execution(context: &CronContext, cron_id: &str, record: CronExecutionRecord) {
+    #[cfg(feature = "metrics")]
+    record_cron_metrics(&context.deps.agent_id, cron_id, &record);
+
+    let store = context.store.clone();
+    let cron_id = cron_id.to_string();
+    tokio::spawn(async move {
+        if let Err(error) = store.log_execution(&cron_id, &record).await {
+            tracing::warn!(cron_id = %cron_id, %error, "failed to log cron execution");
+        }
+    });
+}
+
+#[cfg(feature = "metrics")]
+fn record_cron_metrics(agent_id: &str, cron_id: &str, record: &CronExecutionRecord) {
+    let overall_result = if record.execution_succeeded {
+        "success"
+    } else {
+        "failure"
+    };
+
+    let delivery_result = if !record.delivery_attempted {
+        "skipped"
+    } else if record.delivery_succeeded == Some(true) {
+        "success"
+    } else {
+        "failure"
+    };
+
+    crate::telemetry::Metrics::global()
+        .cron_executions_total
+        .with_label_values(&[agent_id, cron_id, overall_result])
+        .inc();
+    crate::telemetry::Metrics::global()
+        .cron_delivery_total
+        .with_label_values(&[agent_id, cron_id, delivery_result])
+        .inc();
+}
+
+#[derive(Debug)]
+enum CronResponseWaitOutcome {
+    Delivered(OutboundResponse),
+    ChannelClosed,
+    TimedOut,
+}
+
+async fn await_cron_delivery_response(
+    cron_id: &str,
+    response_rx: &mut mpsc::Receiver<RoutedResponse>,
+    timeout: Duration,
+) -> CronResponseWaitOutcome {
+    let deadline = tokio::time::Instant::now() + timeout;
+
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            tracing::warn!(cron_id = %cron_id, "cron job timed out after {timeout:?}");
+            return CronResponseWaitOutcome::TimedOut;
+        }
+
+        match tokio::time::timeout(remaining, response_rx.recv()).await {
+            Ok(Some(RoutedResponse { response, .. })) => {
+                if let Some(delivery_response) = normalize_cron_delivery_response(response) {
+                    return CronResponseWaitOutcome::Delivered(delivery_response);
+                }
+            }
+            Ok(None) => return CronResponseWaitOutcome::ChannelClosed,
+            Err(_) => {
+                tracing::warn!(cron_id = %cron_id, "cron job timed out after {timeout:?}");
+                return CronResponseWaitOutcome::TimedOut;
+            }
+        }
+    }
+}
+
+fn normalize_cron_delivery_response(response: OutboundResponse) -> Option<OutboundResponse> {
+    match response {
+        OutboundResponse::Text(text) => {
+            if text.trim().is_empty() {
+                None
+            } else {
+                Some(OutboundResponse::Text(text))
+            }
+        }
+        OutboundResponse::RichMessage {
+            text,
+            blocks,
+            cards,
+            interactive_elements,
+            poll,
+        } => {
+            if text.trim().is_empty()
+                && blocks.is_empty()
+                && cards.is_empty()
+                && interactive_elements.is_empty()
+                && poll.is_none()
+            {
+                None
+            } else {
+                Some(OutboundResponse::RichMessage {
+                    text,
+                    blocks,
+                    cards,
+                    interactive_elements,
+                    poll,
+                })
+            }
+        }
+        OutboundResponse::ThreadReply { text, .. }
+        | OutboundResponse::Ephemeral { text, .. }
+        | OutboundResponse::ScheduledMessage { text, .. } => {
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                None
+            } else {
+                Some(OutboundResponse::Text(text))
+            }
+        }
+        OutboundResponse::File {
+            filename,
+            data,
+            mime_type,
+            caption,
+        } => Some(OutboundResponse::File {
+            filename,
+            data,
+            mime_type,
+            caption,
+        }),
+        OutboundResponse::Status(_)
+        | OutboundResponse::Reaction(_)
+        | OutboundResponse::RemoveReaction(_)
+        | OutboundResponse::StreamStart
+        | OutboundResponse::StreamChunk(_)
+        | OutboundResponse::StreamEnd => None,
+    }
+}
+
+fn cron_response_summary(response: &OutboundResponse) -> Option<String> {
+    match response {
+        OutboundResponse::Text(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        OutboundResponse::RichMessage { text, cards, .. } => {
+            let text = text.trim();
+            if !text.is_empty() {
+                Some(text.to_string())
+            } else {
+                let derived = OutboundResponse::text_from_cards(cards);
+                let derived = derived.trim();
+                (!derived.is_empty()).then(|| derived.to_string())
+            }
+        }
+        OutboundResponse::ThreadReply { text, .. }
+        | OutboundResponse::Ephemeral { text, .. }
+        | OutboundResponse::ScheduledMessage { text, .. } => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        OutboundResponse::File {
+            filename, caption, ..
+        } => caption
+            .as_deref()
+            .map(str::trim)
+            .filter(|caption| !caption.is_empty())
+            .map(ToOwned::to_owned)
+            .or_else(|| Some(format!("Attached file: {filename}"))),
+        OutboundResponse::Status(_)
+        | OutboundResponse::Reaction(_)
+        | OutboundResponse::RemoveReaction(_)
+        | OutboundResponse::StreamStart
+        | OutboundResponse::StreamChunk(_)
+        | OutboundResponse::StreamEnd => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{hour_in_active_window, normalize_active_hours};
+    use super::{
+        CronConfig, CronJob, CronResponseWaitOutcome, CronRunError, await_cron_delivery_response,
+        cron_response_summary, hour_in_active_window, normalize_active_hours,
+        normalize_cron_delivery_response, set_job_enabled_state, sync_job_from_store,
+    };
+    use crate::cron::store::CronStore;
+    use crate::messaging::target::parse_delivery_target;
+    use crate::{Card, InboundMessage, OutboundResponse, RoutedResponse};
+    use chrono::Timelike as _;
+    use sqlx::sqlite::SqlitePoolOptions;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tokio::sync::mpsc;
+    use tokio::time::Duration;
 
     #[test]
     fn test_hour_in_active_window_non_wrapping() {
@@ -1052,5 +1735,247 @@ mod tests {
         assert_eq!(normalize_active_hours(Some((12, 12))), None);
         assert_eq!(normalize_active_hours(Some((9, 17))), Some((9, 17)));
         assert_eq!(normalize_active_hours(None), None);
+    }
+
+    #[tokio::test]
+    async fn cron_wait_returns_first_delivery_response_without_waiting_for_channel_close() {
+        let (response_tx, mut response_rx) = mpsc::channel(4);
+
+        response_tx
+            .send(RoutedResponse {
+                response: OutboundResponse::RichMessage {
+                    text: "daily digest".to_string(),
+                    blocks: Vec::new(),
+                    cards: vec![Card {
+                        title: Some("Digest".to_string()),
+                        ..Card::default()
+                    }],
+                    interactive_elements: Vec::new(),
+                    poll: None,
+                },
+                target: InboundMessage::empty(),
+            })
+            .await
+            .expect("send test response");
+
+        let outcome =
+            await_cron_delivery_response("daily-digest", &mut response_rx, Duration::from_secs(1))
+                .await;
+
+        match outcome {
+            CronResponseWaitOutcome::Delivered(OutboundResponse::RichMessage {
+                text,
+                cards,
+                ..
+            }) => {
+                assert_eq!(text, "daily digest");
+                assert_eq!(cards.len(), 1);
+                assert_eq!(cards[0].title.as_deref(), Some("Digest"));
+            }
+            CronResponseWaitOutcome::Delivered(other) => {
+                panic!("expected rich message, got {other:?}");
+            }
+            CronResponseWaitOutcome::ChannelClosed => {
+                panic!("expected delivered response, channel closed");
+            }
+            CronResponseWaitOutcome::TimedOut => {
+                panic!("expected delivered response, timed out");
+            }
+        }
+    }
+
+    #[test]
+    fn cron_normalizes_thread_replies_to_text() {
+        let response = normalize_cron_delivery_response(OutboundResponse::ThreadReply {
+            thread_name: "ops".to_string(),
+            text: "hello from cron".to_string(),
+        });
+
+        match response {
+            Some(OutboundResponse::Text(text)) => assert_eq!(text, "hello from cron"),
+            Some(other) => panic!("expected text response, got {other:?}"),
+            None => panic!("expected normalized text response"),
+        }
+    }
+
+    #[test]
+    fn cron_preserves_file_responses_for_delivery() {
+        let response = normalize_cron_delivery_response(OutboundResponse::File {
+            filename: "digest.txt".to_string(),
+            data: b"all good".to_vec(),
+            mime_type: "text/plain".to_string(),
+            caption: Some("nightly digest".to_string()),
+        });
+
+        match response {
+            Some(OutboundResponse::File {
+                filename,
+                mime_type,
+                caption,
+                ..
+            }) => {
+                assert_eq!(filename, "digest.txt");
+                assert_eq!(mime_type, "text/plain");
+                assert_eq!(caption.as_deref(), Some("nightly digest"));
+            }
+            Some(other) => panic!("expected file response, got {other:?}"),
+            None => panic!("expected file response"),
+        }
+    }
+
+    #[test]
+    fn cron_summary_uses_card_fallback_when_rich_text_is_empty() {
+        let summary = cron_response_summary(&OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: vec![Card {
+                title: Some("Digest".to_string()),
+                description: Some("Everything is green.".to_string()),
+                ..Card::default()
+            }],
+            interactive_elements: Vec::new(),
+            poll: None,
+        });
+
+        assert_eq!(summary.as_deref(), Some("Digest\n\nEverything is green."));
+    }
+
+    #[test]
+    fn cron_summary_uses_file_caption_or_filename() {
+        let with_caption = cron_response_summary(&OutboundResponse::File {
+            filename: "digest.txt".to_string(),
+            data: Vec::new(),
+            mime_type: "text/plain".to_string(),
+            caption: Some("nightly digest".to_string()),
+        });
+        let without_caption = cron_response_summary(&OutboundResponse::File {
+            filename: "digest.txt".to_string(),
+            data: Vec::new(),
+            mime_type: "text/plain".to_string(),
+            caption: None,
+        });
+
+        assert_eq!(with_caption.as_deref(), Some("nightly digest"));
+        assert_eq!(
+            without_caption.as_deref(),
+            Some("Attached file: digest.txt")
+        );
+    }
+
+    async fn setup_cron_store() -> Arc<CronStore> {
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory db");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        Arc::new(CronStore::new(pool))
+    }
+
+    fn sample_cron_job(
+        id: &str,
+        next_run_at: Option<chrono::DateTime<chrono::Utc>>,
+        consecutive_failures: u32,
+    ) -> CronJob {
+        CronJob {
+            id: id.to_string(),
+            prompt: "digest".to_string(),
+            cron_expr: None,
+            interval_secs: 300,
+            delivery_target: parse_delivery_target("discord:123456789")
+                .expect("parse delivery target"),
+            active_hours: None,
+            enabled: true,
+            run_once: false,
+            consecutive_failures,
+            next_run_at,
+            timeout_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cron_sync_job_from_store_refreshes_stale_cursor_after_lost_claim() {
+        let store = setup_cron_store().await;
+        let expected_next_run_at = chrono::Utc::now()
+            .with_nanosecond(0)
+            .expect("truncate nanos");
+        let advanced_next_run_at = expected_next_run_at + chrono::Duration::minutes(5);
+        let expected_text = expected_next_run_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let advanced_text = advanced_next_run_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+        store
+            .save(&CronConfig {
+                id: "daily-digest".to_string(),
+                prompt: "digest".to_string(),
+                cron_expr: None,
+                interval_secs: 300,
+                delivery_target: "discord:123456789".to_string(),
+                active_hours: None,
+                enabled: true,
+                run_once: false,
+                next_run_at: Some(expected_text.clone()),
+                timeout_secs: None,
+            })
+            .await
+            .expect("save cron config");
+
+        assert!(
+            store
+                .claim_and_advance("daily-digest", &expected_text, &advanced_text)
+                .await
+                .expect("advance persisted cursor")
+        );
+
+        let jobs = Arc::new(RwLock::new(HashMap::from([(
+            "daily-digest".to_string(),
+            sample_cron_job("daily-digest", Some(expected_next_run_at), 2),
+        )])));
+
+        sync_job_from_store(store.as_ref(), &jobs, "daily-digest")
+            .await
+            .expect("sync local job from store");
+
+        let guard = jobs.read().await;
+        let job = guard.get("daily-digest").expect("job remains registered");
+        assert_eq!(job.next_run_at, Some(advanced_next_run_at));
+        assert_eq!(job.consecutive_failures, 2);
+    }
+
+    #[test]
+    fn cron_run_error_distinguishes_delivery_failures() {
+        let delivery_error = CronRunError::Delivery(crate::error::Error::Other(anyhow::anyhow!(
+            "adapter offline"
+        )));
+        let execution_error = CronRunError::Execution(crate::error::Error::Other(anyhow::anyhow!(
+            "channel failed"
+        )));
+
+        assert_eq!(delivery_error.as_error().to_string(), "adapter offline");
+        assert_eq!(delivery_error.failure_class(), "delivery_error");
+        assert_eq!(execution_error.failure_class(), "execution_error");
+    }
+
+    #[tokio::test]
+    async fn set_job_enabled_state_updates_in_memory_flag() {
+        let jobs = Arc::new(RwLock::new(HashMap::from([(
+            "daily-digest".to_string(),
+            CronJob {
+                enabled: false,
+                ..sample_cron_job("daily-digest", None, 1)
+            },
+        )])));
+
+        set_job_enabled_state(&jobs, "daily-digest", true)
+            .await
+            .expect("enable in-memory job");
+
+        let guard = jobs.read().await;
+        let job = guard.get("daily-digest").expect("job remains registered");
+        assert!(job.enabled);
+        assert_eq!(job.consecutive_failures, 1);
+        assert_eq!(job.next_run_at, None);
     }
 }

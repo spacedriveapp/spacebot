@@ -233,8 +233,12 @@ export function AgentCron({ agentId }: AgentCronProps) {
 
 	const totalJobs = data?.jobs.length ?? 0;
 	const enabledJobs = data?.jobs.filter((j) => j.enabled).length ?? 0;
-	const totalRuns = data?.jobs.reduce((sum, j) => sum + j.success_count + j.failure_count, 0) ?? 0;
-	const failedRuns = data?.jobs.reduce((sum, j) => sum + j.failure_count, 0) ?? 0;
+	const totalRuns =
+		data?.jobs.reduce((sum, j) => sum + j.execution_success_count + j.execution_failure_count, 0) ?? 0;
+	const executionFailures =
+		data?.jobs.reduce((sum, j) => sum + j.execution_failure_count, 0) ?? 0;
+	const deliveryFailures =
+		data?.jobs.reduce((sum, j) => sum + j.delivery_failure_count, 0) ?? 0;
 
 	return (
 		<div className="flex h-full flex-col">
@@ -243,8 +247,9 @@ export function AgentCron({ agentId }: AgentCronProps) {
 				<div className="flex items-center gap-2 border-b border-app-line px-6 py-3">
 					<Badge variant="accent" size="md">{totalJobs} total</Badge>
 					<Badge variant="green" size="md">{enabledJobs} enabled</Badge>
-					<Badge variant="outline" size="md">{totalRuns} runs</Badge>
-					{failedRuns > 0 && <Badge variant="red" size="md">{failedRuns} failed</Badge>}
+					<Badge variant="outline" size="md">{totalRuns} executions</Badge>
+					{executionFailures > 0 && <Badge variant="red" size="md">{executionFailures} exec failed</Badge>}
+					{deliveryFailures > 0 && <Badge variant="red" size="md">{deliveryFailures} delivery failed</Badge>}
 					{data?.timezone && (
 						<span className="text-tiny text-ink-faint">tz: {data.timezone}</span>
 					)}
@@ -599,8 +604,9 @@ function CronJobCard({
 	isToggling: boolean;
 	isTriggering: boolean;
 }) {
-	const totalRuns = job.success_count + job.failure_count;
-	const successRate = totalRuns > 0 ? Math.round((job.success_count / totalRuns) * 100) : null;
+	const totalRuns = job.execution_success_count + job.execution_failure_count;
+	const executionSuccessRate =
+		totalRuns > 0 ? Math.round((job.execution_success_count / totalRuns) * 100) : null;
 	const schedule = formatCronSchedule(job.cron_expr, job.interval_secs);
 
 	return (
@@ -648,11 +654,31 @@ function CronJobCard({
 								<span>ran {formatTimeAgo(job.last_executed_at)}</span>
 							</>
 						)}
-						{successRate !== null && (
+						{executionSuccessRate !== null && (
 							<>
 								<span className="text-ink-faint/50">·</span>
-								<span className={successRate >= 90 ? "text-green-500" : successRate >= 50 ? "text-yellow-500" : "text-red-500"}>
-									{successRate}% ({job.success_count}/{totalRuns})
+								<span
+									className={
+										executionSuccessRate >= 90
+											? "text-green-500"
+											: executionSuccessRate >= 50
+												? "text-yellow-500"
+												: "text-red-500"
+									}
+								>
+									exec {executionSuccessRate}% ({job.execution_success_count}/{totalRuns})
+								</span>
+							</>
+						)}
+						{(job.delivery_success_count > 0 ||
+							job.delivery_failure_count > 0 ||
+							job.delivery_skipped_count > 0) && (
+							<>
+								<span className="text-ink-faint/50">·</span>
+								<span className="text-ink-faint">
+									delivery {job.delivery_success_count} sent
+									{job.delivery_failure_count > 0 ? `, ${job.delivery_failure_count} failed` : ""}
+									{job.delivery_skipped_count > 0 ? `, ${job.delivery_skipped_count} skipped` : ""}
 								</span>
 							</>
 						)}
@@ -728,22 +754,63 @@ function JobExecutions({ agentId, jobId }: { agentId: string; jobId: string }) {
 
 	return (
 		<div className="flex flex-col gap-1">
-			{data.executions.map((execution) => (
-				<div
-					key={execution.id}
-					className="flex items-center gap-3 rounded-lg px-3 py-1.5"
-				>
-					<span className={`h-1.5 w-1.5 rounded-full ${execution.success ? "bg-green-500" : "bg-red-500"}`} />
-					<span className="text-tiny tabular-nums text-ink-faint">
-						{formatTimeAgo(execution.executed_at)}
-					</span>
-					{execution.result_summary && (
-						<span className="min-w-0 flex-1 truncate text-tiny text-ink-dull">
-							{execution.result_summary}
+			{data.executions.map((execution) => {
+					const statusTone = !execution.execution_succeeded
+						? "bg-red-500"
+						: execution.delivery_attempted && execution.delivery_succeeded === false
+							? "bg-yellow-500"
+							: execution.delivery_attempted && execution.delivery_succeeded === true
+								? "bg-green-500"
+								: "bg-gray-500";
+					const detail =
+						execution.delivery_error ?? execution.execution_error ?? execution.result_summary;
+					const deliveryLabel = !execution.delivery_attempted
+						? "no delivery"
+						: execution.delivery_succeeded === true
+							? "delivered"
+							: execution.delivery_succeeded === false
+								? "delivery failed"
+								: "delivery unknown";
+
+				return (
+					<div
+						key={execution.id}
+						className="flex items-center gap-3 rounded-lg px-3 py-1.5"
+					>
+						<span className={`h-1.5 w-1.5 rounded-full ${statusTone}`} />
+						<span className="text-tiny tabular-nums text-ink-faint">
+							{formatTimeAgo(execution.executed_at)}
 						</span>
-					)}
-				</div>
-			))}
+						<span
+							className={`rounded px-1.5 py-0.5 text-tiny ${
+								execution.execution_succeeded
+									? "bg-green-500/10 text-green-400"
+									: "bg-red-500/10 text-red-400"
+							}`}
+						>
+							{execution.execution_succeeded ? "exec ok" : "exec failed"}
+						</span>
+						<span
+							className={`rounded px-1.5 py-0.5 text-tiny ${
+								!execution.delivery_attempted
+									? "bg-app-lightBox text-ink-faint"
+									: execution.delivery_succeeded === true
+										? "bg-green-500/10 text-green-400"
+										: execution.delivery_succeeded === false
+											? "bg-yellow-500/10 text-yellow-300"
+											: "bg-app-lightBox text-ink-faint"
+							}`}
+						>
+							{deliveryLabel}
+						</span>
+						{detail && (
+							<span className="min-w-0 flex-1 truncate text-tiny text-ink-dull">
+								{detail}
+							</span>
+						)}
+					</div>
+				);
+			})}
 		</div>
 	);
 }

@@ -394,9 +394,13 @@ Scheduled recurring tasks. Each cron job gets a fresh short-lived channel with f
 - Multiple cron jobs run independently on wall-clock schedules (or legacy intervals)
 - Stored in the database, created via config, conversation, or programmatically
 - Cron expressions execute against the resolved cron timezone for predictable local-time firing
+- Persisted `next_run_at` cursor for deterministic restart behavior and missed-run fast-forwarding
+- Claim-before-run scheduling so multi-process or restarted schedulers do not double-fire recurring jobs
+- Run-once jobs use at-most-once claiming semantics and disable before execution starts
 - Per-job `timeout_secs` to cap execution time
 - Circuit breaker auto-disables after 3 consecutive failures
 - Active hours support with midnight wrapping
+- Execution and delivery outcomes are logged separately, with bounded retry/backoff for proactive sends
 
 ### Multi-Agent
 

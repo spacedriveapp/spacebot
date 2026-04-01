@@ -12,6 +12,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::process::Command;
 
+pub mod detection;
+
+pub use detection::{SandboxBackend, detect_backend};
+
 /// Sandbox configuration from the agent config file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
@@ -64,9 +68,9 @@ pub enum SandboxMode {
     Disabled,
 }
 
-/// Detected sandbox backend.
+/// Detected sandbox backend (internal version with proc_supported tracking).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SandboxBackend {
+enum InternalBackend {
     /// Linux: bubblewrap available.
     Bubblewrap { proc_supported: bool },
     /// macOS: /usr/bin/sandbox-exec available.
@@ -158,7 +162,7 @@ pub struct Sandbox {
     workspace: PathBuf,
     data_dir: PathBuf,
     tools_bin: PathBuf,
-    backend: SandboxBackend,
+    backend: InternalBackend,
     /// Reference to the secrets store for injecting tool secrets into worker
     /// subprocesses. When set, `wrap()` reads tool secrets from the store and
     /// injects them as env vars via `--setenv` (bubblewrap) or `Command::env()`
@@ -194,11 +198,11 @@ impl Sandbox {
 
         // Always detect the backend so we know what's available if the user
         // later enables sandboxing via the API.
-        let backend = detect_backend().await;
+        let backend = detect_backend_internal().await;
         let current_mode = config.load().mode;
 
         match backend {
-            SandboxBackend::Bubblewrap { proc_supported } => {
+            InternalBackend::Bubblewrap { proc_supported } => {
                 if current_mode == SandboxMode::Enabled {
                     tracing::info!(proc_supported, "sandbox enabled: bubblewrap backend");
                 } else {
@@ -208,20 +212,20 @@ impl Sandbox {
                     );
                 }
             }
-            SandboxBackend::SandboxExec => {
+            InternalBackend::SandboxExec => {
                 if current_mode == SandboxMode::Enabled {
                     tracing::info!("sandbox enabled: macOS sandbox-exec backend");
                 } else {
                     tracing::info!("sandbox disabled by config (sandbox-exec available)");
                 }
             }
-            SandboxBackend::None if current_mode == SandboxMode::Enabled => {
+            InternalBackend::None if current_mode == SandboxMode::Enabled => {
                 tracing::warn!(
                     "sandbox mode is enabled but no backend available — \
                      processes will run unsandboxed"
                 );
             }
-            SandboxBackend::None => {
+            InternalBackend::None => {
                 tracing::info!("sandbox disabled by config (no backend available)");
             }
         }
@@ -260,6 +264,11 @@ impl Sandbox {
     /// True when sandbox mode is enabled in config.
     pub fn mode_enabled(&self) -> bool {
         self.config.load().mode == SandboxMode::Enabled
+    }
+
+    /// Get the workspace directory path.
+    pub fn workspace(&self) -> &Path {
+        &self.workspace
     }
 
     /// Update the sandbox allowlist with project root paths.
@@ -303,7 +312,7 @@ impl Sandbox {
     /// If mode is enabled but no backend is available, this returns false
     /// because subprocesses fall back to passthrough execution.
     pub fn containment_active(&self) -> bool {
-        self.mode_enabled() && !matches!(self.backend, SandboxBackend::None)
+        self.mode_enabled() && !matches!(self.backend, InternalBackend::None)
     }
 
     /// Read-allowlisted filesystem paths exposed to shell subprocesses when
@@ -317,7 +326,7 @@ impl Sandbox {
         let mut paths = Vec::new();
 
         match self.backend {
-            SandboxBackend::Bubblewrap { .. } => {
+            InternalBackend::Bubblewrap { .. } => {
                 for system_path in LINUX_READ_ONLY_SYSTEM_PATHS {
                     let path = Path::new(system_path);
                     if path.exists() {
@@ -337,7 +346,7 @@ impl Sandbox {
                     }
                 }
             }
-            SandboxBackend::SandboxExec => {
+            InternalBackend::SandboxExec => {
                 for system_path in MACOS_READ_ONLY_SYSTEM_PATHS {
                     let path = Path::new(system_path);
                     if path.exists() {
@@ -355,7 +364,7 @@ impl Sandbox {
                     push_unique_path(&mut paths, canonicalize_or_self(path));
                 }
             }
-            SandboxBackend::None => {}
+            InternalBackend::None => {}
         }
 
         paths
@@ -375,19 +384,19 @@ impl Sandbox {
         push_unique_path(&mut paths, canonicalize_or_self(Path::new("/tmp")));
 
         match self.backend {
-            SandboxBackend::Bubblewrap { .. } => {
+            InternalBackend::Bubblewrap { .. } => {
                 for path in config.all_writable_paths() {
                     if let Ok(canonical) = path.canonicalize() {
                         push_unique_path(&mut paths, canonical);
                     }
                 }
             }
-            SandboxBackend::SandboxExec => {
+            InternalBackend::SandboxExec => {
                 for path in config.all_writable_paths() {
                     push_unique_path(&mut paths, canonicalize_or_self(path));
                 }
             }
-            SandboxBackend::None => {}
+            InternalBackend::None => {}
         }
 
         paths
@@ -444,7 +453,7 @@ impl Sandbox {
         }
 
         match self.backend {
-            SandboxBackend::Bubblewrap { proc_supported } => self.wrap_bubblewrap(
+            InternalBackend::Bubblewrap { proc_supported } => self.wrap_bubblewrap(
                 program,
                 args,
                 working_dir,
@@ -454,7 +463,7 @@ impl Sandbox {
                 &tool_secrets,
                 command_env,
             ),
-            SandboxBackend::SandboxExec => self.wrap_sandbox_exec(
+            InternalBackend::SandboxExec => self.wrap_sandbox_exec(
                 program,
                 args,
                 working_dir,
@@ -463,7 +472,7 @@ impl Sandbox {
                 &tool_secrets,
                 command_env,
             ),
-            SandboxBackend::None => self.wrap_passthrough(
+            InternalBackend::None => self.wrap_passthrough(
                 program,
                 args,
                 working_dir,
@@ -888,7 +897,7 @@ impl Sandbox {
             workspace,
             data_dir: PathBuf::new(),
             tools_bin: PathBuf::new(),
-            backend: SandboxBackend::None,
+            backend: InternalBackend::None,
             secrets_store: ArcSwap::from_pointee(None),
         }
     }
@@ -915,25 +924,40 @@ fn canonicalize_or_self(path: &Path) -> PathBuf {
 }
 
 /// Detect the best available sandbox backend for the current platform.
-async fn detect_backend() -> SandboxBackend {
+async fn detect_backend_internal() -> InternalBackend {
     if cfg!(target_os = "linux") {
         detect_bubblewrap().await
     } else if cfg!(target_os = "macos") {
         detect_sandbox_exec()
     } else {
         tracing::warn!("no sandbox backend available for this platform");
-        SandboxBackend::None
+        InternalBackend::None
+    }
+}
+
+fn bubblewrap_true_binary() -> &'static str {
+    if Path::new("/bin/true").exists() {
+        "/bin/true"
+    } else {
+        "/usr/bin/true"
     }
 }
 
 /// Linux: check if bwrap is available and whether --proc /proc works.
-async fn detect_bubblewrap() -> SandboxBackend {
+async fn detect_bubblewrap() -> InternalBackend {
     // Check if bwrap exists
     let version_check = Command::new("bwrap").arg("--version").output().await;
 
-    if version_check.is_err() {
-        tracing::debug!("bwrap not found in PATH");
-        return SandboxBackend::None;
+    match version_check {
+        Ok(output) if output.status.success() => {}
+        Ok(_) => {
+            tracing::debug!("bwrap not found in PATH");
+            return InternalBackend::None;
+        }
+        Err(_) => {
+            tracing::debug!("bwrap not found in PATH");
+            return InternalBackend::None;
+        }
     }
 
     // Preflight: test if --proc /proc works (may fail in nested containers)
@@ -945,7 +969,7 @@ async fn detect_bubblewrap() -> SandboxBackend {
             "--proc",
             "/proc",
             "--",
-            "/usr/bin/true",
+            bubblewrap_true_binary(),
         ])
         .output()
         .await;
@@ -956,15 +980,67 @@ async fn detect_bubblewrap() -> SandboxBackend {
         tracing::debug!("bwrap --proc /proc not supported, running without fresh procfs");
     }
 
-    SandboxBackend::Bubblewrap { proc_supported }
+    InternalBackend::Bubblewrap { proc_supported }
 }
 
 /// macOS: check if sandbox-exec exists at its known path.
-fn detect_sandbox_exec() -> SandboxBackend {
+fn detect_sandbox_exec() -> InternalBackend {
     if Path::new("/usr/bin/sandbox-exec").exists() {
-        SandboxBackend::SandboxExec
+        InternalBackend::SandboxExec
     } else {
         tracing::debug!("/usr/bin/sandbox-exec not found");
-        SandboxBackend::None
+        InternalBackend::None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_sandbox_config_defaults() {
+        let config = SandboxConfig::default();
+        assert_eq!(config.mode, SandboxMode::Enabled);
+        assert!(config.writable_paths.is_empty());
+        assert!(config.project_paths.is_empty());
+        assert!(config.passthrough_env.is_empty());
+    }
+
+    #[test]
+    fn test_sandbox_mode_serialization() {
+        #[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+        struct ModeWrapper {
+            mode: SandboxMode,
+        }
+
+        let enabled = toml::to_string(&ModeWrapper {
+            mode: SandboxMode::Enabled,
+        })
+        .expect("serialize enabled mode");
+        let disabled = toml::to_string(&ModeWrapper {
+            mode: SandboxMode::Disabled,
+        })
+        .expect("serialize disabled mode");
+
+        assert_eq!(enabled.trim(), "mode = \"enabled\"");
+        assert_eq!(disabled.trim(), "mode = \"disabled\"");
+
+        let enabled_roundtrip: ModeWrapper =
+            toml::from_str(&enabled).expect("deserialize enabled mode");
+        let disabled_roundtrip: ModeWrapper =
+            toml::from_str(&disabled).expect("deserialize disabled mode");
+
+        assert_eq!(
+            enabled_roundtrip,
+            ModeWrapper {
+                mode: SandboxMode::Enabled
+            }
+        );
+        assert_eq!(
+            disabled_roundtrip,
+            ModeWrapper {
+                mode: SandboxMode::Disabled
+            }
+        );
     }
 }

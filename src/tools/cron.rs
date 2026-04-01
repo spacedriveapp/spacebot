@@ -383,6 +383,7 @@ impl CronTool {
             active_hours,
             enabled: true,
             run_once,
+            next_run_at: None,
             timeout_secs: args.timeout_secs,
         };
 
