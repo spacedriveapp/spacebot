@@ -166,8 +166,20 @@ impl SpacebotModel {
             }
             ApiType::Azure => {
                 // Azure OpenAI Service requires a specific endpoint structure.
-                // Supported domain: *.openai.azure.com
+                // Supported domain: *.openai.azure.com (HTTPS only)
                 let base_url = provider_config.base_url.trim_end_matches('/');
+
+                // Validate HTTPS scheme
+                if !base_url.starts_with("https://") {
+                    return Err(CompletionError::ProviderError(format!(
+                        "Invalid Azure endpoint. Azure OpenAI Service requires HTTPS.\n\
+                        \n\
+                        Detected: {}\n\
+                        \n\
+                        The endpoint must use https:// (e.g., https://<resource-name>.openai.azure.com)",
+                        base_url
+                    )));
+                }
 
                 // Validate that the endpoint is actually an Azure OpenAI endpoint
                 if !base_url.ends_with(".openai.azure.com") {
@@ -599,8 +611,20 @@ impl CompletionModel for SpacebotModel {
             }
             ApiType::Azure => {
                 // Azure OpenAI Service requires a specific endpoint structure.
-                // Supported domain: *.openai.azure.com
+                // Supported domain: *.openai.azure.com (HTTPS only)
                 let base_url = provider_config.base_url.trim_end_matches('/');
+
+                // Validate HTTPS scheme
+                if !base_url.starts_with("https://") {
+                    return Err(CompletionError::ProviderError(format!(
+                        "Invalid Azure endpoint. Azure OpenAI Service requires HTTPS.\n\
+                        \n\
+                        Detected: {}\n\
+                        \n\
+                        The endpoint must use https:// (e.g., https://<resource-name>.openai.azure.com)",
+                        base_url
+                    )));
+                }
 
                 // Validate that the endpoint is actually an Azure OpenAI endpoint
                 if !base_url.ends_with(".openai.azure.com") {

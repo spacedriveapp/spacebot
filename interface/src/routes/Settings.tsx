@@ -400,6 +400,10 @@ export function Settings() {
 		if (!editingProvider || !modelInput.trim()) return false;
 
 		if (editingProvider === "azure") {
+			if (!keyInput.trim()) {
+				setTestResult({ success: false, message: "API key is required for Azure OpenAI" });
+				return false;
+			}
 			if (!azureBaseUrl.trim()) {
 				setTestResult({ success: false, message: "Base URL is required for Azure OpenAI" });
 				return false;
@@ -413,8 +417,8 @@ export function Settings() {
 				return false;
 			}
 			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
-			if (!normalizedBaseUrl.includes(".openai.azure.com")) {
-				setTestResult({ success: false, message: "Base URL must contain '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)" });
+			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
+				setTestResult({ success: false, message: "Base URL must end with '.openai.azure.com' (e.g., https://{resource-name}.openai.azure.com)" });
 				return false;
 			}
 		}
@@ -450,6 +454,10 @@ export function Settings() {
 		if (!editingProvider || !modelInput.trim()) return;
 
 		if (editingProvider === "azure") {
+			if (!keyInput.trim()) {
+				setMessage({ text: "API key is required for Azure OpenAI", type: "error" });
+				return;
+			}
 			if (!azureBaseUrl.trim()) {
 				setMessage({ text: "Base URL is required for Azure OpenAI", type: "error" });
 				return;
@@ -463,8 +471,8 @@ export function Settings() {
 				return;
 			}
 			const normalizedBaseUrl = azureBaseUrl.trim().replace(/\/+$/, '');
-			if (!normalizedBaseUrl.includes(".openai.azure.com")) {
-				setMessage({ text: "Base URL must contain '.openai.azure.com'", type: "error" });
+			if (!normalizedBaseUrl.endsWith(".openai.azure.com")) {
+				setMessage({ text: "Base URL must end with '.openai.azure.com'", type: "error" });
 				return;
 			}
 		}
@@ -734,6 +742,11 @@ export function Settings() {
 													setTestResult(null);
 													setMessage(null);
 													if (provider.id === "azure") {
+														// Reset Azure fields before hydrating
+														setAzureBaseUrl("");
+														setAzureApiVersion("");
+														setAzureDeployment("");
+
 														// Cancel previous request
 														fetchAbortControllerRef.current?.abort();
 
@@ -745,28 +758,19 @@ export function Settings() {
 															.then((result) => {
 																// Check if aborted
 																if (abortController.signal.aborted) return;
+																if (!result.success) return;
 
-																if (result.success) {
-																	if (result.base_url) {
-																		setAzureBaseUrl(result.base_url);
-																	}
-																	if (result.api_version) {
-																		setAzureApiVersion(result.api_version);
-																	}
-																	if (result.deployment) {
-																		setAzureDeployment(result.deployment);
-																		setModelInput(`azure/${result.deployment}`);
-																	}
+																setAzureBaseUrl(result.base_url ?? "");
+																setAzureApiVersion(result.api_version ?? "");
+																const deployment = result.deployment ?? "";
+																setAzureDeployment(deployment);
+																if (deployment) {
+																	setModelInput(`azure/${deployment}`);
 																}
 															})
 															.catch((error) => {
 																if (error.name === 'AbortError') return;
 																console.error("Failed to fetch Azure config:", error);
-																// Clear fields if config not found
-																setAzureBaseUrl("");
-																setAzureApiVersion("");
-																setAzureDeployment("");
-																setKeyInput("");
 															});
 													}
 												}}
@@ -891,7 +895,7 @@ export function Settings() {
 									}}
 								/>
 								<p className="text-tiny text-ink-faint">
-									Must contain '.openai.azure.com'
+									Must end with '.openai.azure.com'
 								</p>
 							</div>
 							<div className="space-y-1.5 mt-3">
@@ -1008,22 +1012,24 @@ export function Settings() {
 						</div>
 					)}
 					<DialogFooter>
-						{editingProvider === "azure" && isConfigured(editingProvider ?? "") ? (
+						{editingProvider === "azure" ? (
 							<>
-								<Button
-									onClick={() => removeMutation.mutate(editingProvider)}
-									loading={removeMutation.isPending}
-									variant="destructive"
-									size="sm"
-								>
-									Remove
-								</Button>
+								{isConfigured(editingProvider ?? "") && (
+									<Button
+										onClick={() => removeMutation.mutate(editingProvider, { onSuccess: (result) => { if (result.success) handleClose(); } })}
+										loading={removeMutation.isPending}
+										variant="destructive"
+										size="sm"
+									>
+										Remove
+									</Button>
+								)}
 								<Button onClick={handleClose} variant="ghost" size="sm">
 									Cancel
 								</Button>
 							<Button
 								onClick={handleSave}
-								disabled={!azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim() || !modelInput.trim()}
+								disabled={!keyInput.trim() || !azureBaseUrl.trim() || !azureApiVersion.trim() || !azureDeployment.trim()}
 								loading={updateMutation.isPending}
 								size="sm"
 							>

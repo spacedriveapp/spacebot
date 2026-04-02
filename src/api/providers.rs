@@ -926,8 +926,9 @@ async fn update_azure_provider(
     normalized_model: &str,
 ) -> Result<Json<ProviderUpdateResponse>, StatusCode> {
     let base_url = request.base_url.as_ref().ok_or_else(|| StatusCode::BAD_REQUEST)?;
-    
-    if !base_url.trim().ends_with(".openai.azure.com") {
+    let normalized_base_url = base_url.trim().trim_end_matches('/');
+
+    if !normalized_base_url.ends_with(".openai.azure.com") {
         return Ok(Json(ProviderUpdateResponse {
             success: false,
             message: "Base URL must end with .openai.azure.com".to_string(),
@@ -997,16 +998,21 @@ async fn update_azure_provider(
     // Determine the API key: use incoming if non-empty, otherwise preserve existing
     let api_key = if request.api_key.trim().is_empty() {
         // Read existing API key from config
-        doc.get("llm")
+        match doc.get("llm")
             .and_then(|llm| llm.get("provider"))
             .and_then(|provider| provider.get("azure"))
             .and_then(|azure| azure.get("api_key"))
             .and_then(|v| v.as_str())
             .map(String::from)
-            .ok_or_else(|| {
-                tracing::error!("No existing Azure API key found and none provided");
-                StatusCode::BAD_REQUEST
-            })?
+        {
+            Some(key) => key,
+            None => {
+                return Ok(Json(ProviderUpdateResponse {
+                    success: false,
+                    message: "API key is required but no existing key found".to_string(),
+                }));
+            }
+        }
     } else {
         request.api_key.trim().to_string()
     };
@@ -1271,8 +1277,9 @@ pub(super) async fn test_provider_model(
 
     if normalized_provider == "azure" {
         let base_url = request.base_url.as_ref().ok_or_else(|| StatusCode::BAD_REQUEST)?;
-        
-        if !base_url.trim().ends_with(".openai.azure.com") {
+        let normalized_base_url = base_url.trim().trim_end_matches('/');
+
+        if !normalized_base_url.ends_with(".openai.azure.com") {
             return Ok(Json(ProviderModelTestResponse {
                 success: false,
                 message: "Base URL must end with .openai.azure.com".to_string(),
