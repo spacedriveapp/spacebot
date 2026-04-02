@@ -544,19 +544,37 @@ impl Messaging for TelegramAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        crate::messaging::traits::ensure_supported_broadcast_response(
+            "telegram",
+            &response,
+            supports_telegram_broadcast_response,
+        )?;
+
         let chat_id = ChatId(
             target
                 .parse::<i64>()
-                .context("invalid telegram chat id for broadcast target")?,
+                .context("invalid telegram chat id for broadcast target")
+                .map_err(crate::messaging::traits::mark_permanent_broadcast)?,
         );
 
         if let OutboundResponse::Text(text) = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
-        } else if let OutboundResponse::RichMessage { text, poll, .. } = response {
-            send_formatted(&self.bot, chat_id, &text, None).await?;
+            send_formatted(&self.bot, chat_id, &text, None)
+                .await
+                .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+        } else if let OutboundResponse::RichMessage {
+            text, cards, poll, ..
+        } = response
+        {
+            if let Some(text) = telegram_rich_message_text(&text, &cards) {
+                send_formatted(&self.bot, chat_id, &text, None)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
+            }
 
             if let Some(poll_data) = poll {
-                send_poll(&self.bot, chat_id, &poll_data).await?;
+                send_poll(&self.bot, chat_id, &poll_data)
+                    .await
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
         }
 
@@ -587,6 +605,33 @@ impl Messaging for TelegramAdapter {
         tracing::info!("telegram adapter shut down");
         Ok(())
     }
+}
+
+fn supports_telegram_broadcast_response(response: &OutboundResponse) -> bool {
+    match response {
+        OutboundResponse::Text(_) => true,
+        OutboundResponse::RichMessage {
+            text,
+            cards,
+            interactive_elements,
+            poll,
+            ..
+        } => {
+            interactive_elements.is_empty()
+                && (telegram_rich_message_text(text, cards).is_some() || poll.is_some())
+        }
+        _ => false,
+    }
+}
+
+fn telegram_rich_message_text(text: &str, cards: &[crate::Card]) -> Option<String> {
+    let text = text.trim();
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+
+    let derived = OutboundResponse::text_from_cards(cards);
+    (!derived.trim().is_empty()).then_some(derived)
 }
 
 // -- Helper functions --
@@ -1266,6 +1311,7 @@ async fn send_formatted(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{Card, InteractiveElements, OutboundResponse, Poll};
 
     #[test]
     fn bold() {
@@ -1433,5 +1479,62 @@ mod tests {
 
         assert!(should_retry_plain_caption(&parse_error));
         assert!(!should_retry_plain_caption(&non_parse_error));
+    }
+
+    #[test]
+    fn telegram_supports_card_only_rich_message_with_text_fallback() {
+        assert!(supports_telegram_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: String::new(),
+                blocks: Vec::new(),
+                cards: vec![Card {
+                    title: Some("Digest".to_string()),
+                    description: Some("One item needs attention".to_string()),
+                    color: None,
+                    url: None,
+                    fields: Vec::new(),
+                    footer: None,
+                    thumbnail: None,
+                    image: None,
+                    author: None,
+                    timestamp: None,
+                }],
+                interactive_elements: Vec::new(),
+                poll: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn telegram_rejects_interactive_only_rich_messages() {
+        assert!(!supports_telegram_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: String::new(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: vec![InteractiveElements::Buttons {
+                    buttons: Vec::new()
+                }],
+                poll: None,
+            }
+        ));
+    }
+
+    #[test]
+    fn telegram_supports_poll_only_rich_messages() {
+        assert!(supports_telegram_broadcast_response(
+            &OutboundResponse::RichMessage {
+                text: String::new(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: Some(Poll {
+                    question: "Ship it?".to_string(),
+                    answers: vec!["Yes".to_string(), "No".to_string()],
+                    allow_multiselect: false,
+                    duration_hours: 24,
+                }),
+            }
+        ));
     }
 }

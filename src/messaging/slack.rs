@@ -1122,6 +1122,7 @@ impl Messaging for SlackAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
+        ensure_supported_broadcast_response(&response)?;
         let session = self.session();
 
         // Parse an optional thread target encoded as `#thread:<ts>` suffix.
@@ -1136,7 +1137,8 @@ impl Messaging for SlackAdapter {
             let open_resp = session
                 .conversations_open(&open_req)
                 .await
-                .context("failed to open Slack DM conversation")?;
+                .context("failed to open Slack DM conversation")
+                .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             open_resp.channel.id
         } else {
             SlackChannelId(bare_target.to_string())
@@ -1144,16 +1146,28 @@ impl Messaging for SlackAdapter {
 
         match response {
             OutboundResponse::Text(text) => {
+                let mut sent_any = false;
                 for chunk in split_message(&text, 12_000) {
                     let mut req = SlackApiChatPostMessageRequest::new(
                         channel_id.clone(),
                         markdown_content(chunk),
                     );
                     req = req.opt_thread_ts(thread_ts.clone());
-                    session
+                    match session
                         .chat_post_message(&req)
                         .await
-                        .context("failed to broadcast slack message")?;
+                        .context("failed to broadcast slack message")
+                    {
+                        Ok(_) => sent_any = true,
+                        Err(error) => {
+                            let error = crate::messaging::traits::mark_classified_broadcast(error);
+                            return Err(
+                                crate::messaging::traits::classify_chunked_broadcast_failure(
+                                    "slack", error, sent_any,
+                                ),
+                            );
+                        }
+                    }
                 }
             }
             OutboundResponse::RichMessage { text, blocks, .. } => {
@@ -1170,18 +1184,10 @@ impl Messaging for SlackAdapter {
                 session
                     .chat_post_message(&req)
                     .await
-                    .context("failed to broadcast slack rich message")?;
+                    .context("failed to broadcast slack rich message")
+                    .map_err(crate::messaging::traits::mark_classified_broadcast)?;
             }
-            // Other variants are not meaningful for broadcast (e.g. Ephemeral requires a
-            // specific user_id from a live conversation, Reaction requires an existing ts,
-            // Scheduled/Stream are respond()-only flows).
-            other => {
-                tracing::warn!(
-                    variant = %variant_name(&other),
-                    target = %target,
-                    "broadcast() received a variant that is not supported for broadcast — ignoring"
-                );
-            }
+            _ => unreachable!("unsupported broadcast responses are rejected up front"),
         }
 
         Ok(())
@@ -1625,22 +1631,13 @@ fn strip_bot_mention(text: &str, bot_user_id: &str) -> String {
         .to_string()
 }
 
-/// Return a short human-readable name for an `OutboundResponse` variant for log messages.
-fn variant_name(response: &OutboundResponse) -> &'static str {
-    match response {
-        OutboundResponse::Text(_) => "Text",
-        OutboundResponse::ThreadReply { .. } => "ThreadReply",
-        OutboundResponse::File { .. } => "File",
-        OutboundResponse::Reaction(_) => "Reaction",
-        OutboundResponse::RemoveReaction(_) => "RemoveReaction",
-        OutboundResponse::Ephemeral { .. } => "Ephemeral",
-        OutboundResponse::RichMessage { .. } => "RichMessage",
-        OutboundResponse::ScheduledMessage { .. } => "ScheduledMessage",
-        OutboundResponse::StreamStart => "StreamStart",
-        OutboundResponse::StreamChunk(_) => "StreamChunk",
-        OutboundResponse::StreamEnd => "StreamEnd",
-        OutboundResponse::Status(_) => "Status",
-    }
+fn ensure_supported_broadcast_response(response: &OutboundResponse) -> crate::Result<()> {
+    crate::messaging::traits::ensure_supported_broadcast_response("slack", response, |response| {
+        matches!(
+            response,
+            OutboundResponse::Text(_) | OutboundResponse::RichMessage { .. }
+        )
+    })
 }
 
 /// Split a message into UTF-8-safe chunks at line/word boundaries.
@@ -1731,6 +1728,7 @@ fn resolve_slack_user_identity(user: &SlackUser, user_id: &str) -> SlackUserIden
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
 
     #[test]
     fn sanitize_reaction_name_unicode_emoji_with_shortcode() {
@@ -1802,5 +1800,55 @@ mod tests {
     fn sanitize_reaction_name_custom_with_colons() {
         let result = sanitize_reaction_name(":partyparrot:");
         assert_eq!(result, "partyparrot");
+    }
+
+    #[test]
+    fn supported_broadcast_variants_validate() {
+        assert!(
+            ensure_supported_broadcast_response(&OutboundResponse::Text("hello".to_string()))
+                .is_ok()
+        );
+        assert!(
+            ensure_supported_broadcast_response(&OutboundResponse::RichMessage {
+                text: "hello".to_string(),
+                blocks: Vec::new(),
+                cards: Vec::new(),
+                interactive_elements: Vec::new(),
+                poll: None,
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn unsupported_broadcast_variants_are_permanent_failures() {
+        let error = ensure_supported_broadcast_response(&OutboundResponse::Reaction(
+            "thumbsup".to_string(),
+        ))
+        .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported slack broadcast response variant: Reaction")
+        );
+    }
+
+    #[test]
+    fn slack_partial_delivery_failures_become_permanent() {
+        let error = crate::messaging::traits::classify_chunked_broadcast_failure(
+            "slack",
+            crate::messaging::traits::mark_classified_broadcast(anyhow::anyhow!("timeout")),
+            true,
+        );
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
     }
 }

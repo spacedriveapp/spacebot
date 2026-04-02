@@ -74,30 +74,32 @@ impl Messaging for PortalAdapter {
     }
 
     async fn broadcast(&self, target: &str, response: OutboundResponse) -> crate::Result<()> {
-        let text = match &response {
-            OutboundResponse::Text(text) => text.clone(),
-            OutboundResponse::RichMessage { text, .. } => text.clone(),
-            _ => return Ok(()),
-        };
+        let text = extract_portal_broadcast_text(response)?;
 
         // Target format is the full conversation_id: "portal:chat:{agent_id}"
         let agent_id = target
             .strip_prefix("portal:chat:")
-            .context("portal broadcast target must be in 'portal:chat:{agent_id}' format")?;
+            .context("portal broadcast target must be in 'portal:chat:{agent_id}' format")
+            .map_err(crate::messaging::traits::mark_permanent_broadcast)?;
 
         let tx = self
             .event_tx
             .read()
             .unwrap()
             .clone()
-            .context("portal event_tx not configured")?;
+            .context("portal event_tx not configured")
+            .map_err(crate::messaging::traits::mark_retryable_broadcast)?;
 
         tx.send(ApiEvent::OutboundMessage {
             agent_id: agent_id.to_string(),
             channel_id: target.to_string(),
             text,
         })
-        .ok();
+        .map_err(|_| {
+            crate::messaging::traits::mark_retryable_broadcast(anyhow::anyhow!(
+                "portal broadcast dropped: no active event subscribers"
+            ))
+        })?;
 
         Ok(())
     }
@@ -167,10 +169,72 @@ impl Messaging for PortalAdapter {
     }
 }
 
+fn extract_portal_broadcast_text(response: OutboundResponse) -> crate::Result<String> {
+    match response {
+        OutboundResponse::Text(text) => Ok(text),
+        OutboundResponse::RichMessage {
+            text, cards, poll, ..
+        } => {
+            let text =
+                rich_message_plaintext_fallback(&text, &cards, poll.as_ref()).ok_or_else(|| {
+                    crate::messaging::traits::unsupported_broadcast_variant_error(
+                        "portal",
+                        &OutboundResponse::RichMessage {
+                            text,
+                            blocks: Vec::new(),
+                            cards,
+                            interactive_elements: Vec::new(),
+                            poll,
+                        },
+                    )
+                })?;
+            Ok(text)
+        }
+        other => {
+            Err(crate::messaging::traits::unsupported_broadcast_variant_error("portal", &other))
+        }
+    }
+}
+
+fn rich_message_plaintext_fallback(
+    text: &str,
+    cards: &[crate::Card],
+    poll: Option<&crate::Poll>,
+) -> Option<String> {
+    let text = text.trim();
+    if !text.is_empty() {
+        return Some(text.to_string());
+    }
+
+    let card_text = OutboundResponse::text_from_cards(cards);
+    if !card_text.trim().is_empty() {
+        return Some(card_text);
+    }
+
+    poll.and_then(|poll| {
+        let question = poll.question.trim();
+        if question.is_empty() {
+            return None;
+        }
+
+        let answers = poll
+            .answers
+            .iter()
+            .map(|answer| answer.trim())
+            .filter(|answer| !answer.is_empty())
+            .map(|answer| format!("- {answer}"))
+            .collect::<Vec<_>>();
+        let mut lines = vec![question.to_string()];
+        lines.extend(answers);
+        Some(lines.join("\n"))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::MessageContent;
+    use crate::messaging::traits::{BroadcastFailureKind, broadcast_failure_kind};
+    use crate::{Card, MessageContent, OutboundResponse, Poll};
     use chrono::Utc;
 
     #[tokio::test]
@@ -257,5 +321,111 @@ mod tests {
         assert_eq!(history[1].author, "assistant");
         assert_eq!(history[1].content, "hello Alice");
         assert!(history[1].is_bot);
+    }
+
+    #[test]
+    fn unsupported_portal_broadcast_variants_are_permanent_failures() {
+        let error =
+            extract_portal_broadcast_text(OutboundResponse::Reaction("thumbsup".to_string()))
+                .expect_err("unsupported variants should error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported portal broadcast response variant: Reaction")
+        );
+    }
+
+    #[test]
+    fn portal_extracts_card_text_fallback_for_rich_broadcasts() {
+        let text = extract_portal_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: vec![Card {
+                title: Some("Digest".to_string()),
+                description: Some("One item needs attention".to_string()),
+                color: None,
+                url: None,
+                fields: Vec::new(),
+                footer: None,
+                thumbnail: None,
+                image: None,
+                author: None,
+                timestamp: None,
+            }],
+            interactive_elements: Vec::new(),
+            poll: None,
+        })
+        .expect("card-only portal broadcasts should derive plaintext");
+
+        assert!(text.contains("Digest"));
+        assert!(text.contains("One item needs attention"));
+    }
+
+    #[test]
+    fn portal_extracts_poll_text_fallback_for_rich_broadcasts() {
+        let text = extract_portal_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: Vec::new(),
+            interactive_elements: Vec::new(),
+            poll: Some(Poll {
+                question: "Ship it?".to_string(),
+                answers: vec!["Yes".to_string(), "No".to_string()],
+                allow_multiselect: false,
+                duration_hours: 24,
+            }),
+        })
+        .expect("poll-only portal broadcasts should derive plaintext");
+
+        assert!(text.contains("Ship it?"));
+        assert!(text.contains("- Yes"));
+    }
+
+    #[test]
+    fn portal_rejects_empty_rich_broadcasts() {
+        let error = extract_portal_broadcast_text(OutboundResponse::RichMessage {
+            text: String::new(),
+            blocks: Vec::new(),
+            cards: Vec::new(),
+            interactive_elements: Vec::new(),
+            poll: None,
+        })
+        .expect_err("empty rich broadcasts should be rejected");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Permanent
+        );
+    }
+
+    #[tokio::test]
+    async fn portal_broadcast_fails_when_event_subscribers_are_gone() {
+        let adapter = PortalAdapter::new(HashMap::new());
+        let (event_tx, event_rx) = broadcast::channel(4);
+        drop(event_rx);
+        adapter.set_event_tx(event_tx);
+
+        let error = adapter
+            .broadcast(
+                "portal:chat:agent-a",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect_err("dropped send must surface as an error");
+
+        assert_eq!(
+            broadcast_failure_kind(&error),
+            BroadcastFailureKind::Transient
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("portal broadcast dropped: no active event subscribers")
+        );
     }
 }
