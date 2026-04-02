@@ -177,8 +177,12 @@ pub struct Metrics {
 
     // -- Cron --
     /// Cron task executions.
-    /// Labels: agent_id, task_type, result.
+    /// Labels: agent_id, cron_id, result.
     pub cron_executions_total: IntCounterVec,
+
+    /// Cron delivery outcomes.
+    /// Labels: agent_id, cron_id, result.
+    pub cron_delivery_total: IntCounterVec,
 
     // -- Ingestion --
     /// Ingestion files processed.
@@ -511,7 +515,12 @@ impl Metrics {
         // Cron (1)
         let cron_executions_total = IntCounterVec::new(
             Opts::new("spacebot_cron_executions_total", "Cron task executions"),
-            &["agent_id", "task_type", "result"],
+            &["agent_id", "cron_id", "result"],
+        )
+        .expect("hardcoded metric descriptor");
+        let cron_delivery_total = IntCounterVec::new(
+            Opts::new("spacebot_cron_delivery_total", "Cron delivery outcomes"),
+            &["agent_id", "cron_id", "result"],
         )
         .expect("hardcoded metric descriptor");
 
@@ -653,6 +662,9 @@ impl Metrics {
         registry
             .register(Box::new(cron_executions_total.clone()))
             .expect("hardcoded metric");
+        registry
+            .register(Box::new(cron_delivery_total.clone()))
+            .expect("hardcoded metric");
 
         // New: Ingestion
         registry
@@ -699,6 +711,7 @@ impl Metrics {
             context_overflow_total,
             worker_cost_dollars,
             cron_executions_total,
+            cron_delivery_total,
             ingestion_files_processed_total,
         }
     }

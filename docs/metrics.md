@@ -121,7 +121,8 @@ The `tier` label corresponds to the process type making the request: `channel`, 
 
 | Metric                                          | Type      | Labels                        | Description                         |
 | ----------------------------------------------- | --------- | ----------------------------- | ----------------------------------- |
-| `spacebot_cron_executions_total`                | Counter   | agent_id, task_type, result   | Cron task executions                |
+| `spacebot_cron_executions_total`                | Counter   | agent_id, cron_id, result     | Cron execution outcome only (`success`/`failure`) |
+| `spacebot_cron_delivery_total`                  | Counter   | agent_id, cron_id, result     | Cron delivery outcome (`success`/`failure`/`skipped`) |
 | `spacebot_ingestion_files_processed_total`      | Counter   | agent_id, result              | Ingestion files processed           |
 
 ## Useful PromQL Queries

@@ -1064,18 +1064,19 @@ impl SpacebotModel {
                                 return;
                             }
                         }
-                    } else {
-                        if let Ok(raw_event) = serde_json::from_str::<serde_json::Value>(data) {
-                            match process_openai_responses_stream_raw_event(&raw_event, &mut pending_tool_calls) {
-                                Ok(events) => {
-                                    for event in events {
-                                        yield Ok(event);
-                                    }
+                    } else if let Ok(raw_event) = serde_json::from_str::<serde_json::Value>(data) {
+                        match process_openai_responses_stream_raw_event(
+                            &raw_event,
+                            &mut pending_tool_calls,
+                        ) {
+                            Ok(events) => {
+                                for event in events {
+                                    yield Ok(event);
                                 }
-                                Err(error) => {
-                                    yield Err(error);
-                                    return;
-                                }
+                            }
+                            Err(error) => {
+                                yield Err(error);
+                                return;
                             }
                         }
                     }

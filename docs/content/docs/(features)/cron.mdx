@@ -20,9 +20,10 @@ Cron job "check-email" fires (every 30m, active 09:00-17:00)
     → Scheduler creates a fresh Channel
     → Channel receives the cron job prompt as a synthetic message
     → Channel runs the LLM loop (can branch, spawn workers, use tools)
-    → Channel produces OutboundResponse::Text
-    → Scheduler collects the response
-    → Scheduler delivers it via MessagingManager::broadcast("discord", "123456789")
+    → Channel produces the first user-visible OutboundResponse
+    → Scheduler treats that response as the terminal delivery payload
+    → Scheduler delivers the OutboundResponse via MessagingManager::broadcast_proactive(...)
+    → Scheduler records execution status and delivery outcome in the log
     → Channel shuts down
 
 Cron job "daily-summary" fires (every 24h)
@@ -30,7 +31,7 @@ Cron job "daily-summary" fires (every 24h)
     → Runs independently even if "check-email" is still in-flight
 ```
 
-If the channel produces no text output, nothing is delivered. No magic tokens, no special markers — if there's nothing to say, the cron job is silent.
+If the channel produces no delivery response, nothing is delivered. Cron records that as execution success with delivery skipped.
 
 ## Storage
 
@@ -50,6 +51,9 @@ CREATE TABLE cron_jobs (
     active_start_hour INTEGER,
     active_end_hour INTEGER,
     enabled INTEGER NOT NULL DEFAULT 1,
+    run_once INTEGER NOT NULL DEFAULT 0,
+    next_run_at TIMESTAMP,
+    timeout_secs INTEGER,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 ```
@@ -64,7 +68,9 @@ CREATE TABLE cron_jobs (
 | `active_start_hour` | Optional start of active window (0-23, 24h local time) |
 | `active_end_hour` | Optional end of active window (0-23, 24h local time) |
 | `enabled` | Flipped to 0 by the circuit breaker after consecutive failures |
-| `run_once` | If 1, the job auto-disables after its first execution attempt |
+| `run_once` | If 1, the job is claimed by disabling it before execution starts so the fire is at-most-once |
+| `next_run_at` | Persisted scheduler cursor used for deterministic restart/claim behavior |
+| `timeout_secs` | Optional per-job wall-clock timeout for the cron run |
 
 ### cron_executions
 
@@ -77,9 +83,16 @@ CREATE TABLE cron_executions (
     executed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     success INTEGER NOT NULL,
     result_summary TEXT,
+    execution_succeeded INTEGER,
+    delivery_attempted INTEGER,
+    delivery_succeeded INTEGER,
+    execution_error TEXT,
+    delivery_error TEXT,
     FOREIGN KEY (cron_id) REFERENCES cron_jobs(id) ON DELETE CASCADE
 );
 ```
+
+`success` remains as a backward-compatible aggregate flag. New rows also record whether the agent run succeeded, whether delivery was attempted, and whether proactive delivery actually succeeded.
 
 ## Delivery Targets
 
@@ -91,7 +104,7 @@ The `delivery_target` field uses the format `adapter:target`:
 | `discord:987654321` | Send to a different Discord channel |
 | `webhook:some-endpoint` | Send via webhook adapter |
 
-The adapter name maps to a registered messaging adapter. The target string is adapter-specific — for Discord, it's a channel ID parsed to u64. Delivery goes through `MessagingManager::broadcast()`, which is the proactive (non-reply) message path.
+The adapter name maps to a registered messaging adapter. The target string is adapter-specific — for Discord, it's a channel ID parsed to u64. Delivery goes through `MessagingManager::broadcast_proactive()`, which applies bounded retry/backoff for transient proactive-send failures.
 
 ## Creation Paths
 
@@ -99,7 +112,7 @@ Cron jobs enter the system three ways.
 
 ### 1. Config File
 
-Defined in `config.toml` under an agent. Seeded into the database on startup (upsert — won't overwrite runtime changes to existing IDs).
+Defined in `config.toml` under an agent. Jobs are seeded into the database on startup and existing IDs are upserted, so `config.toml` remains the source of truth for prompt, schedule, target, `enabled`, `run_once`, and timeout settings while preserving compatible persisted cursor state. In practice that means the `enabled` value from `config.toml` overrides any previously persisted disabled state on startup.
 
 ```toml
 [[agents]]
@@ -150,7 +163,7 @@ The tool persists to the database and registers with the running scheduler immed
 
 The tool also supports `list` (show all active cron jobs) and `delete` (remove by ID).
 
-For one-time reminders, set `run_once: true` on create. The scheduler disables the job after the first execution attempt.
+For one-time reminders, set `run_once: true` on create. The scheduler claims the fire by disabling the job before execution starts and clearing its persisted cursor, which gives at-most-once ownership across processes.
 
 ### 3. Programmatic
 
@@ -173,7 +186,7 @@ If active hours are not set, the cron job runs at all hours.
 
 If a configured timezone is invalid, Spacebot logs a warning and falls back to server local timezone.
 
-For cron-expression jobs, active hours are evaluated at fire time and can further gate delivery. For legacy interval jobs, active hours don't change tick cadence — ticks outside the window are skipped.
+For cron-expression jobs, active hours are evaluated at fire time and can further gate execution. For legacy interval jobs, active hours don't change tick cadence — ticks outside the window are skipped.
 
 ## Circuit Breaker
 
@@ -184,9 +197,9 @@ If a cron job fails 3 consecutive times, it's automatically disabled:
 3. The timer loop exits
 4. A warning is logged
 
-A "failure" is any error from `run_cron_job()` — LLM errors, channel failures, delivery failures. A successful execution (even one that produces no output) resets the failure counter to 0.
+A "failure" for breaker purposes is still any terminal error from `run_cron_job()` — prompt dispatch failures, channel failures, timeouts, or delivery failures after retries. A successful execution, including a run that produces no delivery response, resets the failure counter to 0.
 
-Disabled cron jobs are not loaded on restart (the store query filters `WHERE enabled = 1`). To re-enable a disabled cron job, update the database row directly or re-seed it from config with `enabled = true`.
+Disabled cron jobs are filtered out by the store query on restart (`WHERE enabled = 1`), but config-defined jobs are seeded first. If `config.toml` sets a job's `enabled = true`, that upsert restores the persisted row before the scheduler reloads enabled jobs. For database-only jobs, re-enable by updating the row directly.
 
 ## Execution Flow
 
@@ -198,15 +211,17 @@ When the scheduler fires a cron job:
 
 3. **Run** — The channel processes the message through its normal LLM loop. It can use all channel tools (reply, branch, spawn_worker, memory_save, etc).
 
-4. **Collect** — The scheduler reads from the channel's `response_tx`. Text responses are collected. Status updates and stream events are ignored.
+4. **Collect** — The scheduler reads from the channel's `response_tx`. The first user-visible delivery response becomes the terminal payload. Status updates and stream events are ignored.
 
-5. **Timeout** — If the channel doesn't finish within 120 seconds, it's aborted.
+5. **Timeout** — If the channel doesn't finish within `timeout_secs` (default 120s), it's aborted and logged as execution failure.
 
-6. **Log** — The execution is recorded in `cron_executions` with success status and a summary of the output.
+6. **Claim and cursor advance** — Recurring jobs advance `next_run_at` before execution starts. Run-once jobs disable themselves before execution starts. This gives deterministic ownership and prevents replay bursts after restart.
 
-7. **Deliver** — If there's non-empty text, it's sent to the delivery target via `MessagingManager::broadcast()`. If the output is empty, delivery is skipped.
+7. **Deliver** — If there is a delivery response, the Scheduler sends the `OutboundResponse` to the target via `MessagingManager::broadcast_proactive()`. Transient send failures retry with bounded backoff; permanent failures fail immediately. Unsupported proactive variants are treated as delivery failures, not silent skips.
 
-8. **Teardown** — The channel's sender is dropped after sending the prompt, so the channel's event loop exits naturally after processing the single message.
+8. **Log** — The execution is recorded in `cron_executions` with split execution and delivery outcomes plus any execution/delivery error text.
+
+9. **Teardown** — The channel sender is dropped after sending the prompt, so the channel behaves as a one-shot conversation and exits naturally once processing completes.
 
 ## Scheduler Lifecycle
 
@@ -219,7 +234,7 @@ The scheduler is created per-agent after messaging adapters are initialized (it 
 5. Each cron job is registered, starting its timer loop
 6. The `cron` tool is registered on the agent's `ToolServerHandle`
 
-Timer loops skip the first tick — cron jobs wait one full interval before their first execution. This prevents a burst of activity on startup.
+Timer loops now run off the persisted `next_run_at` cursor instead of relying only on in-memory interval state. On startup the scheduler initializes missing cursors, reloads stale state from the store when it loses a claim, and fast-forwards overdue recurring jobs instead of replaying every missed tick.
 
 On shutdown, all timer handles are aborted.
 

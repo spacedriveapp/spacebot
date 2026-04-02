@@ -735,16 +735,25 @@ export interface CronJobWithStats {
 	run_once: boolean;
 	active_hours: [number, number] | null;
 	timeout_secs: number | null;
-	success_count: number;
-	failure_count: number;
+	execution_success_count: number;
+	execution_failure_count: number;
+	delivery_success_count: number;
+	delivery_failure_count: number;
+	delivery_skipped_count: number;
 	last_executed_at: string | null;
 }
 
 export interface CronExecutionEntry {
 	id: string;
+	cron_id: string | null;
 	executed_at: string;
 	success: boolean;
+	execution_succeeded: boolean;
+	delivery_attempted: boolean;
+	delivery_succeeded: boolean | null;
 	result_summary: string | null;
+	execution_error: string | null;
+	delivery_error: string | null;
 }
 
 export interface CronListResponse {
