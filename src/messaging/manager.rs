@@ -1,6 +1,9 @@
 //! MessagingManager: Fan-in and routing for all adapters.
 
-use crate::messaging::traits::{HistoryMessage, InboundStream, Messaging, MessagingDyn};
+use crate::messaging::traits::{
+    BroadcastFailureKind, HistoryMessage, InboundStream, Messaging, MessagingDyn,
+    broadcast_failure_kind,
+};
 use crate::{InboundMessage, OutboundResponse, StatusUpdate};
 
 use anyhow::Context as _;
@@ -47,6 +50,16 @@ impl MessagingManager {
 
     /// Maximum number of retry attempts for failed adapters before giving up.
     const MAX_RETRY_ATTEMPTS: u32 = 12;
+    /// Maximum number of proactive-send retry attempts for transient broadcast failures.
+    const MAX_BROADCAST_RETRY_ATTEMPTS: u32 = 3;
+    #[cfg(test)]
+    const BROADCAST_INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(1);
+    #[cfg(not(test))]
+    const BROADCAST_INITIAL_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+    #[cfg(test)]
+    const BROADCAST_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(8);
+    #[cfg(not(test))]
+    const BROADCAST_MAX_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(8);
 
     /// Start all registered adapters and return the merged inbound stream.
     ///
@@ -222,9 +235,12 @@ impl MessagingManager {
     ) -> crate::Result<()> {
         let adapters = self.adapters.read().await;
         let adapter_key = message.adapter_key();
-        let adapter = adapters
-            .get(adapter_key)
-            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
+        let adapter = Arc::clone(
+            adapters
+                .get(adapter_key)
+                .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?,
+        );
+        drop(adapters);
         adapter.respond(message, response).await
     }
 
@@ -236,24 +252,96 @@ impl MessagingManager {
     ) -> crate::Result<()> {
         let adapters = self.adapters.read().await;
         let adapter_key = message.adapter_key();
-        let adapter = adapters
-            .get(adapter_key)
-            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
+        let adapter = Arc::clone(
+            adapters
+                .get(adapter_key)
+                .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?,
+        );
+        drop(adapters);
         adapter.send_status(message, status).await
     }
 
-    /// Send a proactive message through a specific adapter.
+    /// Send a message through a specific adapter without retry.
     pub async fn broadcast(
         &self,
         adapter_name: &str,
         target: &str,
         response: OutboundResponse,
     ) -> crate::Result<()> {
-        let adapters = self.adapters.read().await;
-        let adapter = adapters
-            .get(adapter_name)
-            .with_context(|| format!("no messaging adapter named '{adapter_name}'"))?;
+        let adapter = {
+            let adapters = self.adapters.read().await;
+            adapters
+                .get(adapter_name)
+                .cloned()
+                .with_context(|| format!("no messaging adapter named '{adapter_name}'"))?
+        };
         adapter.broadcast(target, response).await
+    }
+
+    /// Send a proactive message through a specific adapter with bounded retry/backoff.
+    pub async fn broadcast_proactive(
+        &self,
+        adapter_name: &str,
+        target: &str,
+        response: OutboundResponse,
+    ) -> crate::Result<()> {
+        let adapter = {
+            let adapters = self.adapters.read().await;
+            adapters
+                .get(adapter_name)
+                .cloned()
+                .with_context(|| format!("no messaging adapter named '{adapter_name}'"))?
+        };
+        let mut delay = Self::BROADCAST_INITIAL_RETRY_DELAY;
+
+        for attempt in 1..=Self::MAX_BROADCAST_RETRY_ATTEMPTS {
+            match adapter.broadcast(target, response.clone()).await {
+                Ok(()) => {
+                    if attempt > 1 {
+                        tracing::info!(
+                            adapter = %adapter_name,
+                            target,
+                            attempt,
+                            "proactive broadcast succeeded after retry"
+                        );
+                    }
+                    return Ok(());
+                }
+                Err(error) => {
+                    let failure_kind = broadcast_failure_kind(&error);
+                    if failure_kind == BroadcastFailureKind::Transient
+                        && attempt < Self::MAX_BROADCAST_RETRY_ATTEMPTS
+                    {
+                        tracing::warn!(
+                            adapter = %adapter_name,
+                            target,
+                            attempt,
+                            max_attempts = Self::MAX_BROADCAST_RETRY_ATTEMPTS,
+                            retry_delay_ms = delay.as_millis(),
+                            %error,
+                            "proactive broadcast failed with retryable error"
+                        );
+                        tokio::time::sleep(delay).await;
+                        delay = (delay * 2).min(Self::BROADCAST_MAX_RETRY_DELAY);
+                        continue;
+                    }
+
+                    if failure_kind == BroadcastFailureKind::Transient {
+                        tracing::warn!(
+                            adapter = %adapter_name,
+                            target,
+                            attempt,
+                            max_attempts = Self::MAX_BROADCAST_RETRY_ATTEMPTS,
+                            %error,
+                            "proactive broadcast exhausted retry budget"
+                        );
+                    }
+                    return Err(error);
+                }
+            }
+        }
+
+        unreachable!("broadcast retry loop must return on success or terminal error")
     }
 
     /// Fetch recent message history from the platform for context backfill.
@@ -264,9 +352,12 @@ impl MessagingManager {
     ) -> crate::Result<Vec<HistoryMessage>> {
         let adapters = self.adapters.read().await;
         let adapter_key = message.adapter_key();
-        let adapter = adapters
-            .get(adapter_key)
-            .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?;
+        let adapter = Arc::clone(
+            adapters
+                .get(adapter_key)
+                .with_context(|| format!("no messaging adapter named '{}'", adapter_key))?,
+        );
+        drop(adapters);
         adapter.fetch_history(message, limit).await
     }
 
@@ -314,5 +405,185 @@ impl MessagingManager {
 impl Default for MessagingManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::MessagingManager;
+    use crate::messaging::traits::{
+        InboundStream, Messaging, mark_permanent_broadcast, mark_retryable_broadcast,
+    };
+    use crate::{InboundMessage, OutboundResponse, StatusUpdate};
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    struct TestMessagingAdapter {
+        name: &'static str,
+        results: Arc<Mutex<VecDeque<crate::Result<()>>>>,
+        attempts: Arc<Mutex<usize>>,
+    }
+
+    impl TestMessagingAdapter {
+        fn new(name: &'static str, results: Vec<crate::Result<()>>) -> Self {
+            Self {
+                name,
+                results: Arc::new(Mutex::new(results.into())),
+                attempts: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            *self.attempts.lock().expect("lock attempts")
+        }
+    }
+
+    impl Messaging for TestMessagingAdapter {
+        fn name(&self) -> &str {
+            self.name
+        }
+
+        async fn start(&self) -> crate::Result<InboundStream> {
+            Ok(Box::pin(futures::stream::empty()))
+        }
+
+        async fn respond(
+            &self,
+            _message: &InboundMessage,
+            _response: OutboundResponse,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn send_status(
+            &self,
+            _message: &InboundMessage,
+            _status: StatusUpdate,
+        ) -> crate::Result<()> {
+            Ok(())
+        }
+
+        async fn broadcast(&self, _target: &str, _response: OutboundResponse) -> crate::Result<()> {
+            *self.attempts.lock().expect("lock attempts") += 1;
+            self.results
+                .lock()
+                .expect("lock results")
+                .pop_front()
+                .unwrap_or_else(|| Ok(()))
+        }
+
+        async fn health_check(&self) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn proactive_broadcast_retries_transient_failure_then_succeeds() {
+        let manager = MessagingManager::new();
+        let adapter = TestMessagingAdapter::new(
+            "test",
+            vec![
+                Err(mark_retryable_broadcast(anyhow::anyhow!(
+                    "temporary outage"
+                ))),
+                Ok(()),
+            ],
+        );
+        manager.register(adapter.clone()).await;
+
+        manager
+            .broadcast_proactive(
+                "test",
+                "target",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect("retry then success");
+
+        assert_eq!(adapter.attempts(), 2);
+    }
+
+    #[tokio::test]
+    async fn proactive_broadcast_exhausts_retry_budget_on_transient_failures() {
+        let manager = MessagingManager::new();
+        let adapter = TestMessagingAdapter::new(
+            "test",
+            vec![
+                Err(mark_retryable_broadcast(anyhow::anyhow!(
+                    "temporary outage 1"
+                ))),
+                Err(mark_retryable_broadcast(anyhow::anyhow!(
+                    "temporary outage 2"
+                ))),
+                Err(mark_retryable_broadcast(anyhow::anyhow!(
+                    "temporary outage final"
+                ))),
+            ],
+        );
+        manager.register(adapter.clone()).await;
+
+        let error = manager
+            .broadcast_proactive(
+                "test",
+                "target",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect_err("exhaust retries");
+
+        assert!(error.to_string().contains("temporary outage final"));
+        assert_eq!(adapter.attempts(), 3);
+    }
+
+    #[tokio::test]
+    async fn one_shot_broadcast_does_not_retry_retryable_errors() {
+        let manager = MessagingManager::new();
+        let adapter = TestMessagingAdapter::new(
+            "test",
+            vec![
+                Err(mark_retryable_broadcast(anyhow::anyhow!(
+                    "temporary outage"
+                ))),
+                Ok(()),
+            ],
+        );
+        manager.register(adapter.clone()).await;
+
+        let error = manager
+            .broadcast(
+                "test",
+                "target",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect_err("one-shot broadcast should not retry");
+
+        assert!(error.to_string().contains("temporary outage"));
+        assert_eq!(adapter.attempts(), 1);
+    }
+
+    #[tokio::test]
+    async fn proactive_broadcast_does_not_retry_permanent_failures() {
+        let manager = MessagingManager::new();
+        let adapter = TestMessagingAdapter::new(
+            "test",
+            vec![Err(mark_permanent_broadcast(anyhow::anyhow!(
+                "invalid broadcast target"
+            )))],
+        );
+        manager.register(adapter.clone()).await;
+
+        let error = manager
+            .broadcast_proactive(
+                "test",
+                "target",
+                OutboundResponse::Text("hello".to_string()),
+            )
+            .await
+            .expect_err("permanent failures should not retry");
+
+        assert!(error.to_string().contains("invalid broadcast target"));
+        assert_eq!(adapter.attempts(), 1);
     }
 }

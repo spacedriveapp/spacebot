@@ -2498,7 +2498,13 @@ export interface components {
         };
         /** @description Entry in the cron execution log. */
         CronExecutionEntry: {
+            cron_id?: string | null;
+            delivery_attempted: boolean;
+            delivery_error?: string | null;
+            delivery_succeeded?: boolean | null;
             executed_at: string;
+            execution_error?: string | null;
+            execution_succeeded: boolean;
             id: string;
             result_summary?: string | null;
             success: boolean;
@@ -2529,17 +2535,23 @@ export interface components {
             ] | null;
             cron_expr?: string | null;
             delivery_target: string;
+            /** Format: int64 */
+            delivery_failure_count: number;
+            /** Format: int64 */
+            delivery_skipped_count: number;
+            /** Format: int64 */
+            delivery_success_count: number;
             enabled: boolean;
             /** Format: int64 */
-            failure_count: number;
+            execution_failure_count: number;
+            /** Format: int64 */
+            execution_success_count: number;
             id: string;
             /** Format: int64 */
             interval_secs: number;
             last_executed_at?: string | null;
             prompt: string;
             run_once: boolean;
-            /** Format: int64 */
-            success_count: number;
             /** Format: int64 */
             timeout_secs?: number | null;
         };
