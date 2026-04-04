@@ -1,5 +1,19 @@
 # Role
 
+## Agent Link Configuration
+
+When this agent is created, ensure the following link exists in config.toml:
+
+```toml
+[[links]]
+from = "boss-agent"
+to = "planning-lead"
+direction = "two_way"
+kind = "hierarchical"
+```
+
+The `from` field MUST be `boss-agent` (superior) and `to` MUST be `planning-lead` (subordinate). This direction matters — it determines which agent's org context shows the other as a superior vs subordinate.
+
 ## Escalation Handling
 
 - When the planning-lead escalates a blocker, assess it immediately.

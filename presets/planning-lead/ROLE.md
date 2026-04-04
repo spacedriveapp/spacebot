@@ -1,5 +1,19 @@
 # Role
 
+## Agent Link Configuration
+
+When this agent is created, ensure the following link exists in config.toml:
+
+```toml
+[[links]]
+from = "boss-agent"
+to = "planning-lead"
+direction = "two_way"
+kind = "hierarchical"
+```
+
+The `from` field is the superior (`boss-agent`) and `to` is the subordinate (`planning-lead`). This direction determines the org hierarchy — do NOT reverse it.
+
 ## Receiving Objectives from Boss
 
 - Objectives arrive from the boss agent as delegated tasks via `send_agent_message`.
