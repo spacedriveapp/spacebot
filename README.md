@@ -427,6 +427,46 @@ Scheduled recurring tasks. Each cron job gets a fresh short-lived channel with f
 
 Each agent is an independent entity with its own workspace, databases, identity files, cortex, and messaging bindings. All agents share one binary, one tokio runtime, and one set of API keys.
 
+### Boss Agent Hierarchy
+
+For teams that need structured delegation, Spacebot supports hierarchical agent org charts. A **boss** agent delegates work to subordinate agents (like a **planning-lead**), which in turn spawn builder workers to execute tasks. This creates a clear chain of command with built-in escalation paths.
+
+**How it works:**
+
+1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store.
+2. **Planning-lead orchestrates** — The planning-lead's cortex picks up `Ready` tasks and spawns builder workers with shell, file, and browser tools.
+3. **Builders execute** — Workers run autonomously. If they hit a blocker, they escalate via `task_create`, which routes back to the planning-lead.
+4. **Escalation loop protection** — An `escalation_chain` metadata array tracks the escalation path. If an agent's ID appears in the chain, further escalation is blocked to prevent infinite loops.
+
+**Escalation flow:**
+
+```
+Builder hits blocker
+    → task_create (escalation) → Planning-lead
+        → Planning-lead resolves or escalates to Boss
+            → Boss makes decision, routes back down
+```
+
+**Config example:**
+
+```toml
+[[agents]]
+id = "boss"
+display_name = "Strategic Director"
+
+[[agents]]
+id = "planning-lead"
+display_name = "Planning Lead"
+
+[[links]]
+from = "boss"
+to = "planning-lead"
+direction = "two_way"
+kind = "hierarchical"
+```
+
+Builder workers are injected with an escalation fragment that defines when and how to escalate — only for genuine blockers, missing information, or ambiguous requirements. Routine errors are handled autonomously.
+
 ---
 
 ### Spacedrive Integration (Future)

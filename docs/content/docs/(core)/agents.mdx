@@ -145,6 +145,90 @@ You are part of a multi-agent system. Here is your position:
 
 The agent sees its position in the hierarchy before processing any message. Authority framing comes from the link structure — the agent knows who to escalate to, who to delegate to, and who to collaborate with.
 
+## Boss Agent Hierarchy
+
+The communication graph enables a structured delegation pattern: the **boss hierarchy**. This is a multi-tier org chart where a boss agent delegates to a planning-lead, which orchestrates builder workers to execute tasks.
+
+### Configuration
+
+```toml
+[[agents]]
+id = "boss"
+display_name = "Strategic Director"
+
+[[agents]]
+id = "planning-lead"
+display_name = "Planning Lead"
+
+[[links]]
+from = "boss"
+to = "planning-lead"
+direction = "two_way"
+kind = "hierarchical"
+```
+
+The `hierarchical` link kind establishes that `boss` manages `planning-lead`. The boss can delegate tasks down, and the planning-lead can escalate issues up.
+
+### How It Works
+
+**Delegation flow:**
+
+1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store. This appears as a message in the planning-lead's link channel (`link:planning-lead:boss`).
+2. **Planning-lead orchestrates** — The planning-lead's cortex picks up `Ready` tasks from its task board and spawns builder workers. Each builder gets shell, file, and browser tools plus a focused system prompt.
+3. **Builders execute** — Workers run autonomously. They can create subtasks via `task_create` for escalation when they hit blockers.
+4. **Completion flows back** — When builders finish, results propagate up through the planning-lead to the boss, and ultimately back to the originating user channel.
+
+### Escalation Flow
+
+Builder workers are injected with an escalation protocol (from `prompts/en/fragments/builder_escalation.md.j2`) that defines when and how to escalate:
+
+```
+Builder hits blocker
+    → task_create (escalation) → Planning-lead
+        → Planning-lead resolves or escalates to Boss
+            → Boss makes decision, routes back down
+```
+
+**When to escalate:**
+
+- **Blockers** — A dependency is missing, a service is unreachable, or an external system prevents progress.
+- **Missing information** — The task references files, credentials, or context that do not exist and cannot be inferred.
+- **Ambiguous requirements** — Conflicting instructions or underspecified goals where the choice materially affects the outcome.
+
+**When NOT to escalate:**
+
+- Routine errors recoverable by retry or alternative approach.
+- Minor ambiguities where a reasonable default exists — pick one and document the choice.
+- Tasks that are simply difficult or time-consuming.
+
+### Escalation Loop Protection
+
+Before escalating, builders check the `escalation_chain` metadata array on their task:
+
+- If the builder's **own agent ID** appears in the chain, escalation is blocked — the builder reports the loop condition via `set_status` instead.
+- When escalating, the builder **appends its agent ID** to the `escalation_chain` so downstream agents can detect loops.
+- If no `escalation_chain` exists, a new one is started with the builder's ID as the first entry.
+
+This prevents infinite escalation cycles in complex multi-agent setups.
+
+### Escalation Task Structure
+
+When a builder escalates, it creates a task via `task_create` with this structure:
+
+```
+title: "Escalation: <brief description of the blocker>"
+description: "<detailed explanation of what was encountered, what was tried, and why progress is blocked>"
+priority: "high"
+metadata: {
+  "escalation": true,
+  "original_task": "<the task title or description>",
+  "reason": "blocker | missing_info | ambiguous_requirement",
+  "escalation_chain": ["<agent-id-1>", "<agent-id-2>"]
+}
+```
+
+After creating the escalation task, the builder calls `set_status` with `kind: "outcome"` and a summary, then waits for resolution.
+
 ## Humans
 
 Org-level humans represent real people in the organization. They appear as nodes in the topology graph and can be linked to agents.

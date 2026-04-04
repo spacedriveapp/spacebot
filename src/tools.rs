@@ -656,9 +656,14 @@ pub fn create_worker_tool_server(
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
         .tool(TaskUpdateTool::for_worker(
-            task_store,
+            task_store.clone(),
             agent_id.clone(),
             worker_id,
+        ))
+        .tool(TaskCreateTool::new(
+            task_store.clone(),
+            agent_id.to_string(),
+            format!("worker:{}", worker_id),
         ))
         .tool({
             let mut status_tool =
