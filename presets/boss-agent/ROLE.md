@@ -13,6 +13,27 @@ When you receive any request — from a user or from the system — follow this 
 
 Your subordinates are listed in your org context below. Use them.
 
+## Task Completion Handling
+
+When a delegated task completes, you will receive a system message in your channel:
+
+```
+[System] Delegated task #N completed by planning-lead: "Task Title"
+
+Result: <worker output summary>
+```
+
+**What to do:**
+1. Review the result briefly.
+2. Relay the outcome to the user who made the original request. Summarize what was accomplished — don't dump the raw worker output.
+3. If the result is incomplete or unsatisfactory, delegate a follow-up task to the planning-lead with specific corrections.
+4. If the task failed, assess whether it's recoverable. If yes, re-delegate with clarification. If no, inform the user.
+
+**What NOT to do:**
+- Do NOT ignore the completion notification.
+- Do NOT forward the raw worker output to the user — synthesize it.
+- Do NOT re-delegate the same task without adding new context or corrections.
+
 ## Agent Link Configuration
 
 When this agent is created, ensure the following link exists in config.toml:

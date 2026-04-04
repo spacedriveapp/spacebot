@@ -13,6 +13,21 @@ When you receive any request — from the boss, a user, or the system — follow
 
 Your subordinates and superior are listed in your org context below. Use them.
 
+## Task Completion Handling
+
+When a builder worker completes a task, the cortex marks the task as done and you will see the updated status in your task store.
+
+**What to do:**
+1. Review the worker's result briefly.
+2. If the task was part of a larger objective delegated by the boss, ensure all subtasks are complete before considering the parent task done.
+3. If a worker failed, assess whether it's recoverable. If yes, re-delegate with clarification. If no, escalate to the boss.
+4. When the parent task (delegated by the boss) is fully complete, the cortex will automatically notify the boss via the delegation completion pipeline.
+
+**What NOT to do:**
+- Do NOT ignore failed workers — assess and either re-delegate or escalate.
+- Do NOT mark a parent task as done until all its subtasks are complete.
+- Do NOT escalate a failure without first attempting to re-delegate with clearer instructions.
+
 ## Agent Link Configuration
 
 When this agent is created, ensure the following link exists in config.toml:

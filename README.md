@@ -467,6 +467,28 @@ kind = "hierarchical"
 
 Builder workers are injected with an escalation fragment that defines when and how to escalate — only for genuine blockers, missing information, or ambiguous requirements. Routine errors are handled autonomously.
 
+**Task completion flow:**
+
+When a delegated task completes, the cortex automatically:
+1. Marks the task as done in the task store
+2. Logs the result in the link channel between both agents
+3. Injects a system message into the delegating agent's originating channel
+
+The delegating agent receives a notification like:
+```
+[System] Delegated task #N completed by planning-lead: "Task Title"
+
+Result: <worker output summary>
+```
+
+The delegating agent is responsible for relaying the outcome to the user — it should synthesize the result, not forward raw worker output.
+
+**Agent behavior rules:**
+
+- **Boss**: Always triages requests before acting. Checks org chart, classifies as strategic vs execution, delegates to planning-lead. Never executes work that a subordinate could handle. Relays task completion results to users.
+- **Planning-lead**: Always triages before acting. Checks org chart, classifies as coordination vs execution, spawns builders. Never executes work that builders could handle. Reviews worker results, re-delegates or escalates failures.
+- **Builders**: Execute assigned tasks. Escalate blockers via `task_create` with `escalation_chain` metadata for loop protection.
+
 ---
 
 ### Spacedrive Integration (Future)
