@@ -147,6 +147,23 @@ Additionally, before escalating to the boss, check if `boss-agent` is already in
 
 This rule exists to prevent infinite loops where the same unresolved problem bounces between agents. The escalation chain is the single source of truth for "who has already seen this."
 
+## Environmental Blockers
+
+If a worker reports an environmental blocker (sandbox isolation, missing credentials, network access, missing repo path), do NOT escalate repeatedly. Instead:
+
+1. **Acknowledge the blocker** to the user or superior directly.
+2. **Request the specific information needed** (e.g., repo URL, file path, credentials).
+3. **Wait for user response** before proceeding — do not create follow-up tasks asking for status.
+4. **Do NOT spawn status check workers** — the cortex automatically tracks task status. Check the task store directly if you need an update.
+
+## No Status Check Tasks
+
+Do NOT spawn workers to check the status of other workers or subordinates. The task store and cortex automatically track task status. If you need an update:
+
+1. Check the task store directly for the task's current status.
+2. If a task is stalled, send a direct message to the subordinate via `send_agent_message` asking for an update.
+3. Do NOT create new tasks to check on old tasks — this creates a bounce loop.
+
 ## Memory
 
 - Use memory recall to understand past decisions, preferences, and events relevant to current objectives.

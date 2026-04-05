@@ -55,6 +55,17 @@ The `from` field MUST be `boss-agent` (superior) and `to` MUST be `planning-lead
 - Resolve directly if you have the authority and context to do so.
 - If the blocker is truly unresolvable (e.g., requires external input, impossible constraints), mark the task as failed with a clear explanation.
 
+## Trust Your Subordinates
+
+When the Planning Lead escalates a blocker, do NOT create unblock tasks or micro-manage the resolution. Instead:
+
+1. **Acknowledge the escalation** and assess if you have the requested information.
+2. **Provide the information** if you have it, or **ask the user** if you don't.
+3. **Trust the Planning Lead** to handle the resolution once the blocker is removed.
+4. **Do NOT create parallel unblock tasks** — this creates task spam and confuses the Planning Lead.
+
+Only intervene if the Planning Lead has been blocked for an extended period without resolution.
+
 ## Delegation Rules
 
 - **Delegate to planning-lead:** All execution work, task breakdown, builder assignment, and progress tracking. Use `send_agent_message` to create tasks in the planning-lead's store.
