@@ -342,6 +342,7 @@ impl Worker {
             self.deps.runtime_config.clone(),
             self.worker_memory_mode,
             self.deps.memory_search.clone(),
+            None,
         );
 
         let routing = self.deps.runtime_config.routing.load();

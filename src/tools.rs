@@ -177,6 +177,7 @@ use crate::memory::MemorySearch;
 use crate::sandbox::Sandbox;
 use crate::tasks::TaskStore;
 use crate::{AgentId, ChannelId, ProcessEvent, RoutedSender, WorkerId};
+use arc_swap::ArcSwap;
 use rig::tool::Tool as _;
 use rig::tool::server::{ToolServer, ToolServerHandle};
 use std::path::PathBuf;
@@ -628,13 +629,23 @@ pub fn create_branch_tool_server(
     server.run()
 }
 
+/// Configuration for enabling agent-to-agent delegation in workers.
+///
+/// When present, the worker gets a `send_agent_message` tool so it can
+/// delegate tasks to subordinate agents in the communication graph.
+pub struct DelegationConfig {
+    pub links: Arc<ArcSwap<Vec<crate::links::AgentLink>>>,
+    pub agent_names: Arc<std::collections::HashMap<String, String>>,
+    pub conversation_logger: crate::conversation::history::ConversationLogger,
+}
+
 /// Create a per-worker ToolServer with task-appropriate tools.
 ///
 /// Each worker gets its own isolated ToolServer. The `set_status` tool is bound to
 /// the specific worker's ID so status updates route correctly. The browser tool
 /// is included when browser automation is enabled in the agent config.
 ///
-/// Shell commands are sandboxed via the `Sandbox` backend.
+/// Shell commands are sandboxed by the `Sandbox` backend.
 /// File operations are restricted to `workspace` via path validation.
 #[allow(clippy::too_many_arguments)]
 pub fn create_worker_tool_server(
@@ -652,6 +663,7 @@ pub fn create_worker_tool_server(
     runtime_config: Arc<RuntimeConfig>,
     worker_memory_mode: WorkerMemoryMode,
     memory_search: Arc<MemorySearch>,
+    delegation_config: Option<DelegationConfig>,
 ) -> ToolServerHandle {
     let mut server = ToolServer::new()
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()))
@@ -689,6 +701,9 @@ pub fn create_worker_tool_server(
         server = server.tool(WebSearchTool::new(key));
     }
 
+    // Clone agent_id for potential use in delegation config (after memory tools may move it).
+    let agent_id_for_delegation = agent_id.clone();
+
     // Conditionally add memory tools based on worker memory mode.
     if worker_memory_mode.recall_enabled() {
         server = server.tool(MemoryRecallTool::new(memory_search.clone()));
@@ -706,6 +721,16 @@ pub fn create_worker_tool_server(
 
     for mcp_tool in mcp_tools {
         server = server.tool(mcp_tool);
+    }
+
+    if let Some(config) = delegation_config {
+        server = server.tool(SendAgentMessageTool::new(
+            agent_id_for_delegation,
+            config.links,
+            config.agent_names,
+            task_store.clone(),
+            config.conversation_logger,
+        ));
     }
 
     server.run()
