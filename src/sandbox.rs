@@ -297,20 +297,36 @@ impl Sandbox {
             .workspace
             .canonicalize()
             .unwrap_or_else(|_| self.workspace.clone());
+        let data_dir_canonical = self
+            .data_dir
+            .canonicalize()
+            .unwrap_or_else(|_| self.data_dir.clone());
+
+        if canonical.starts_with(&data_dir_canonical) {
+            return false;
+        }
+
         if canonical.starts_with(&workspace_canonical) {
             return true;
         }
+
         let config = self.config.load();
         for path in config.all_writable_paths() {
             let allowed = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if allowed.starts_with(&data_dir_canonical) {
+                continue;
+            }
             if canonical.starts_with(&allowed) {
                 return true;
             }
         }
         for path in &config.readable_paths {
             let allowed = path.canonicalize().unwrap_or_else(|_| path.clone());
+            if allowed.starts_with(&data_dir_canonical) {
+                continue;
+            }
             if canonical.starts_with(&allowed) {
-                return true;
+                return !canonical.starts_with(&data_dir_canonical);
             }
         }
         false
@@ -909,7 +925,8 @@ impl Sandbox {
         for (index, path) in config.readable_paths.iter().enumerate() {
             let canonical = canonicalize_or_self(path);
             profile.push_str(&format!(
-                "; readable path {index}\n(allow file-read* (subpath \"{}\"))\n",
+                "; readable path {index}\n(allow file-read* (subpath \"{}\"))\n(deny file-write* (subpath \"{}\"))\n",
+                escape_sbpl_path(&canonical),
                 escape_sbpl_path(&canonical)
             ));
         }
