@@ -731,7 +731,7 @@ pub fn create_worker_tool_server(
             task_store.clone(),
             config.conversation_logger,
         ));
-        server = server.tool(TaskListTool::new(task_store.clone(), agent_id.clone()));
+        server = server.tool(TaskListTool::new(task_store.clone(), agent_id.to_string()));
         server = server.tool(TaskUpdateTool::for_worker(
             task_store.clone(),
             agent_id.clone(),
