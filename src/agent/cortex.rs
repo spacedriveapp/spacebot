@@ -3325,17 +3325,15 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &deps.agent_names,
         );
 
-        let mut enhanced = String::new();
+        let mut enhanced = worker_system_prompt;
         if !identity_content.is_empty() {
-            enhanced.push_str("## Your Identity\n\n");
+            enhanced.push_str("\n\n## Your Identity\n\n");
             enhanced.push_str(&identity_content);
-            enhanced.push_str("\n\n");
         }
         if let Some(org) = org_context {
-            enhanced.push_str(&org);
             enhanced.push_str("\n\n");
+            enhanced.push_str(&org);
         }
-        enhanced.push_str(&worker_system_prompt);
         enhanced
     } else {
         worker_system_prompt
