@@ -936,13 +936,17 @@ async fn build_metadata(
             guild_channel.name.clone().into(),
         );
 
-        if let Some(ref topic) = guild_channel.topic {
-            if !topic.is_empty() {
-                metadata.insert(
-                    crate::metadata_keys::CHANNEL_TOPIC.into(),
-                    topic.clone().into(),
-                );
-            }
+        // Channel topic (trimmed, non-empty)
+        if let Some(topic) = guild_channel
+            .topic
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            metadata.insert(
+                crate::metadata_keys::CHANNEL_TOPIC.into(),
+                topic.to_string().into(),
+            );
         }
 
         // Threads have a parent_id pointing to the text channel they were created in
