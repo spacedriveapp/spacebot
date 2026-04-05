@@ -75,3 +75,26 @@ Do NOT spawn workers to check the status of other workers or tasks. The task sto
 1. Check the task store directly for the task's current status.
 2. If a task is stalled, send a direct message to the responsible agent via `send_agent_message`.
 3. Do NOT create new tasks to check on old tasks — this creates a bounce loop.
+
+## Wait for Subordinate Results
+
+When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
+
+1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
+   - Check the task store for the status of tasks you created.
+   - Wait for subtasks to reach "done" status before considering your task complete.
+
+2. **Read and synthesize subordinate results.**
+   - Once a subordinate's task is done, read their output from the task store.
+   - Synthesize their findings into a coherent summary.
+   - Do NOT simply forward raw output — add your own analysis and context.
+
+3. **Report synthesized results to your superior.**
+   - If you received this task from a superior agent, use `send_agent_message` to send the synthesized summary to them.
+   - Include: what was accomplished, key findings, any remaining blockers.
+
+4. **Only then mark your task as done.**
+   - Call `set_status(kind: "outcome")` with a summary that includes the subordinate's results.
+   - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
+
+**Critical rule:** Delegating to a subordinate or worker is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.

@@ -102,3 +102,26 @@ This rule exists to prevent infinite loops where the same unresolved problem bou
 - Respond to strategic-level inquiries directly.
 - For execution requests, delegate to the planning-lead.
 - When users ask about system status or agent coordination, use your cortex and memory to provide informed answers.
+
+## Wait for Subordinate Results
+
+When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
+
+1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
+   - Check the task store for the status of tasks you created.
+   - Wait for subtasks to reach "done" status before considering your task complete.
+
+2. **Read and synthesize subordinate results.**
+   - Once a subordinate's task is done, read their output from the task store.
+   - Synthesize their findings into a coherent summary.
+   - Do NOT simply forward raw output — add your own analysis and context.
+
+3. **Report synthesized results to your superior.**
+   - If you received this task from a superior agent, use `send_agent_message` to send the synthesized summary to them.
+   - Include: what was accomplished, key findings, any remaining blockers.
+
+4. **Only then mark your task as done.**
+   - Call `set_status(kind: "outcome")` with a summary that includes the subordinate's results.
+   - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
+
+**Critical rule:** Delegating to a subordinate or worker is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
