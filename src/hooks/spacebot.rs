@@ -2368,4 +2368,64 @@ mod tests {
 
         assert!(matches!(action, HookAction::Continue));
     }
+
+    /// Regression test for #538: ingestion hook must wire the memory persistence
+    /// contract so that `has_terminal_outcome()` returns true after a successful
+    /// `memory_persistence_complete` tool call.
+    #[tokio::test]
+    async fn ingestion_hook_without_contract_does_not_record_terminal_outcome() {
+        // Simulate the OLD ingestion code path: hook created without
+        // with_memory_persistence_contract — terminal outcome is never recorded.
+        let (event_tx, _event_rx) = tokio::sync::broadcast::channel(8);
+        let contract_state = Arc::new(MemoryPersistenceContractState::default());
+        let hook_without_contract = SpacebotHook::new(
+            std::sync::Arc::<str>::from("agent"),
+            ProcessId::Branch(uuid::Uuid::new_v4()),
+            ProcessType::Branch,
+            None,
+            event_tx,
+        );
+        // Do NOT call .with_memory_persistence_contract()
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook_without_contract,
+            "memory_persistence_complete",
+            None,
+            "internal_1",
+            "{}",
+            "{\"success\":true,\"outcome\":\"no_memories\",\"saved_memory_ids\":[],\"reason\":\"No durable facts\"}",
+        )
+        .await;
+
+        // Without contract wiring, has_terminal_outcome stays false — this was the #538 bug.
+        assert!(
+            !contract_state.has_terminal_outcome(),
+            "contract state should NOT be set when hook lacks with_memory_persistence_contract"
+        );
+    }
+
+    /// Regression test for #538: ingestion hook WITH the contract wired correctly
+    /// records the terminal outcome after memory_persistence_complete succeeds.
+    #[tokio::test]
+    async fn ingestion_hook_with_contract_records_terminal_outcome() {
+        // Simulate the FIXED ingestion code path: hook created with
+        // with_memory_persistence_contract — terminal outcome is recorded.
+        let (hook, contract_state) = make_memory_persistence_hook();
+
+        let _ = <SpacebotHook as PromptHook<SpacebotModel>>::on_tool_result(
+            &hook,
+            "memory_persistence_complete",
+            None,
+            "internal_1",
+            "{}",
+            "{\"success\":true,\"outcome\":\"no_memories\",\"saved_memory_ids\":[],\"reason\":\"No durable facts\"}",
+        )
+        .await;
+
+        // With contract wiring, has_terminal_outcome returns true — the fix for #538.
+        assert!(
+            contract_state.has_terminal_outcome(),
+            "contract state MUST be set when hook has with_memory_persistence_contract"
+        );
+    }
 }
