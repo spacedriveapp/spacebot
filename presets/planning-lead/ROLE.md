@@ -34,11 +34,12 @@ When a builder worker completes a task, the cortex marks the task as done and yo
 
 ## Wait for Subordinate Results
 
-When you delegate work to subordinate agents via `send_agent_message`:
+When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
 
 1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
-   - Check the task store for the status of tasks you created.
-   - Wait for subtasks to reach "done" status before considering your task complete.
+   - Use the `task_list` tool to check the status of tasks you created.
+   - Poll periodically until subtasks reach "done" status.
+   - Wait for subtasks to complete before considering your task done.
 
 2. **Read and synthesize subordinate results.**
    - Once a subordinate's task is done, read their output from the task store.
@@ -46,14 +47,14 @@ When you delegate work to subordinate agents via `send_agent_message`:
    - Do NOT simply forward raw output — add your own analysis and context.
 
 3. **Report synthesized results to your superior.**
-   - Use `send_agent_message` to send the synthesized summary to the agent that delegated the parent task to you.
+   - If you received this task from a superior agent, use `send_agent_message` to send the synthesized summary to them.
    - Include: what was accomplished, key findings, any remaining blockers.
 
 4. **Only then mark your task as done.**
    - Call `set_status(kind: "outcome")` with a summary that includes the subordinate's results.
    - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
 
-**Critical rule:** Delegating to a subordinate is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
+**Critical rule:** Delegating to a subordinate or worker is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
 
 ## Agent Link Configuration
 

@@ -108,8 +108,9 @@ This rule exists to prevent infinite loops where the same unresolved problem bou
 When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
 
 1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
-   - Check the task store for the status of tasks you created.
-   - Wait for subtasks to reach "done" status before considering your task complete.
+   - Use the `task_list` tool to check the status of tasks you created.
+   - Poll periodically until subtasks reach "done" status.
+   - Wait for subtasks to complete before considering your task done.
 
 2. **Read and synthesize subordinate results.**
    - Once a subordinate's task is done, read their output from the task store.
