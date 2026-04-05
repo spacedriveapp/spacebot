@@ -32,6 +32,29 @@ When a builder worker completes a task, the cortex marks the task as done and yo
 - Do NOT mark a parent task as done until all its subtasks are complete.
 - Do NOT escalate a failure without first attempting to re-delegate with clearer instructions.
 
+## Wait for Subordinate Results
+
+When you delegate work to subordinate agents via `send_agent_message`:
+
+1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
+   - Check the task store for the status of tasks you created.
+   - Wait for subtasks to reach "done" status before considering your task complete.
+
+2. **Read and synthesize subordinate results.**
+   - Once a subordinate's task is done, read their output from the task store.
+   - Synthesize their findings into a coherent summary.
+   - Do NOT simply forward raw output — add your own analysis and context.
+
+3. **Report synthesized results to your superior.**
+   - Use `send_agent_message` to send the synthesized summary to the agent that delegated the parent task to you.
+   - Include: what was accomplished, key findings, any remaining blockers.
+
+4. **Only then mark your task as done.**
+   - Call `set_status(kind: "outcome")` with a summary that includes the subordinate's results.
+   - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
+
+**Critical rule:** Delegating to a subordinate is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
+
 ## Agent Link Configuration
 
 When this agent is created, ensure the following link exists in config.toml:
