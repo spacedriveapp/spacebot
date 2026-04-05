@@ -462,6 +462,7 @@ impl Tool for DetachedSpawnWorkerTool {
             Vec::new(), // no initial history for detached workers
             crate::conversation::settings::WorkerMemoryMode::None,
             None, // No model override for detached workers
+            None, // No task metadata for detached workers
         );
 
         let (worker, _input_tx) = worker;
