@@ -28,13 +28,7 @@ impl FileContext {
         Self { workspace, sandbox }
     }
 
-    /// Resolve and validate a path.
-    ///
-    /// Relative paths are resolved against the workspace root. When sandbox mode
-    /// is enabled, absolute paths must fall within the workspace and symlink
-    /// traversal is blocked. When sandbox is disabled, any readable/writable
-    /// path is accepted.
-    fn resolve_path(&self, raw: &str) -> Result<PathBuf, FileError> {
+    fn resolve_path_inner(&self, raw: &str, require_writable: bool) -> Result<PathBuf, FileError> {
         let path = Path::new(raw);
         let resolved = if path.is_absolute() {
             path.to_path_buf()
@@ -60,6 +54,12 @@ impl FileContext {
                  outside your workspace.",
                 self.workspace.display()
             )));
+        }
+
+        if require_writable && !self.sandbox.is_path_writable(&canonical) {
+            return Err(FileError(
+                "ACCESS DENIED: This path is mounted as read-only. You can read files here but cannot write or edit them.".to_string(),
+            ));
         }
 
         let workspace_canonical = self
@@ -88,6 +88,14 @@ impl FileContext {
         }
 
         Ok(canonical)
+    }
+
+    fn resolve_path(&self, raw: &str) -> Result<PathBuf, FileError> {
+        self.resolve_path_inner(raw, false)
+    }
+
+    fn resolve_writable_path(&self, raw: &str) -> Result<PathBuf, FileError> {
+        self.resolve_path_inner(raw, true)
     }
 
     // NOTE: Identity file protection (PROTECTED_FILES) has been removed.
@@ -218,7 +226,7 @@ impl Tool for FileReadTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_path(&args.path)?;
+        let path = self.context.resolve_writable_path(&args.path)?;
 
         let raw = tokio::fs::read_to_string(&path)
             .await
@@ -325,7 +333,7 @@ impl Tool for FileWriteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_path(&args.path)?;
+        let path = self.context.resolve_writable_path(&args.path)?;
 
         // Ensure parent directory exists if requested
         if args.create_dirs
