@@ -429,9 +429,9 @@ Each agent is an independent entity with its own workspace, databases, identity 
 
 ### Boss Agent Hierarchy
 
-For teams that need structured delegation, Spacebot supports hierarchical agent org charts. A **boss** agent delegates work to subordinate agents (like a **planning-lead**), which in turn spawn builder workers to execute tasks. This creates a clear chain of command with built-in escalation paths.
+For teams that need structured delegation, Spacebot supports hierarchical agent org charts. A **boss** agent delegates work to subordinate agents (like a **planning-lead**), which in turn orchestrate builder workers to execute tasks. This creates a clear chain of command with built-in escalation paths and specialized roles.
 
-**How it works:**
+#### How It Works
 
 1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store.
 2. **Planning-lead orchestrates** — The planning-lead's cortex picks up `Ready` tasks and spawns builder workers with shell, file, and browser tools.
@@ -467,7 +467,7 @@ kind = "hierarchical"
 
 Builder workers are injected with an escalation fragment that defines when and how to escalate — only for genuine blockers, missing information, or ambiguous requirements. Routine errors are handled autonomously.
 
-**Task completion flow:**
+#### Task Completion Flow
 
 When a delegated task completes, the cortex automatically:
 1. Marks the task as done in the task store
@@ -483,11 +483,21 @@ Result: <worker output summary>
 
 The delegating agent is responsible for relaying the outcome to the user — it should synthesize the result, not forward raw worker output.
 
-**Agent behavior rules:**
+#### Agent Behavior Rules
 
 - **Boss**: Always triages requests before acting. Checks org chart, classifies as strategic vs execution, delegates to planning-lead. Never executes work that a subordinate could handle. Relays task completion results to users.
 - **Planning-lead**: Always triages before acting. Checks org chart, classifies as coordination vs execution, spawns builders. Never executes work that builders could handle. Reviews worker results, re-delegates or escalates failures.
 - **Builders**: Execute assigned tasks. Escalate blockers via `task_create` with `escalation_chain` metadata for loop protection.
+
+#### Specialized Agent Roles
+
+The hierarchy supports specialized agents that operate in both standalone and hierarchical modes:
+
+- **Research Analyst** — Conducts research and analysis. In hierarchical mode, receives research tasks from Planning Lead, delegates data gathering to workers, and reports synthesized findings with evidence.
+- **Project Manager** — Tracks work and coordinates across teams. In hierarchical mode, receives objectives from Boss, delegates analysis to Research Analysts and implementation to Engineering Assistants, and relays synthesized status to the Boss.
+- **Engineering Assistant** — Handles technical work. In hierarchical mode, triages tasks to determine if analysis is needed, delegates implementation to builders, and reports results with evidence.
+
+All specialized agents follow the same pattern: triage requests before acting, delegate execution to appropriate subordinates or workers, and always report back to their superior with clear structure and evidence. Never leave a superior waiting.
 
 ---
 

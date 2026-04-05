@@ -147,7 +147,7 @@ The agent sees its position in the hierarchy before processing any message. Auth
 
 ## Boss Agent Hierarchy
 
-The communication graph enables a structured delegation pattern: the **boss hierarchy**. This is a multi-tier org chart where a boss agent delegates to a planning-lead, which orchestrates builder workers to execute tasks.
+The communication graph enables a structured delegation pattern: the **boss hierarchy**. This is a multi-tier org chart where a boss agent delegates to a planning-lead, which orchestrates builder workers to execute tasks. The pattern supports specialized agent roles that operate in both standalone and hierarchical modes.
 
 ### Configuration
 
@@ -228,6 +228,37 @@ metadata: {
 ```
 
 After creating the escalation task, the builder calls `set_status` with `kind: "outcome"` and a summary, then waits for resolution.
+
+### Specialized Agent Roles
+
+The hierarchy supports specialized agents that can operate in both standalone and hierarchical modes:
+
+**Research Analyst** — Conducts research and analysis on topics. In standalone mode, works independently on research requests. In hierarchical mode:
+- Receives research tasks from Planning Lead
+- Triage requests to check if scoping is needed before research begins
+- Delegates data gathering (web browsing, document retrieval) to workers
+- Synthesizes findings and reports back with clear structure and evidence
+- Escalates when access or context is missing
+
+**Project Manager** — Tracks work, coordinates across teams, and maintains project visibility. In standalone mode, manages projects independently. In hierarchical mode:
+- Receives objectives from Boss agent
+- Triage requests to determine if analysis or implementation is needed
+- Delegates analysis to Research Analysts and implementation to Engineering Assistants
+- Synthesizes status reports from specialists and creates task-board tasks
+- Relays synthesized status to Boss with clear summaries
+
+**Engineering Assistant** — Handles technical work including code reviews and implementation. In standalone mode, provides technical assistance directly. In hierarchical mode:
+- Receives technical tasks from Planning Lead
+- Triage requests to check if analysis is needed before implementation
+- Delegates implementation work to builder workers
+- Reports results with evidence including files modified, test results, and follow-up needs
+
+All specialized agents follow the same behavioral rules:
+1. **Triage before acting** — Always check the request against the org chart and classify before taking action
+2. **Delegate execution** — Never do work that a subordinate or worker can handle
+3. **Report with structure** — Always return complete reports with clear organization and evidence
+4. **Never leave superior waiting** — Even if the answer is "insufficient data," return something rather than leaving the superior in limbo
+5. **Escalate appropriately** — Only escalate genuine blockers, not routine errors or tasks that are simply difficult
 
 ## Humans
 
