@@ -637,6 +637,86 @@ impl PromptEngine {
         )
     }
 
+    /// Build org context for any agent from links, humans, and agent names.
+    ///
+    /// Replicates the logic from `channel.rs:build_org_context` so that
+    /// non-channel processes (like cortex task pickup) can render org context.
+    pub fn build_org_context_for_agent(
+        &self,
+        agent_id: &str,
+        links: &[crate::links::AgentLink],
+        humans: &[crate::config::HumanDef],
+        agent_names: &std::collections::HashMap<String, String>,
+    ) -> Option<String> {
+        let agent_links = crate::links::links_for_agent(links, agent_id);
+        if agent_links.is_empty() {
+            return None;
+        }
+
+        let humans_by_id: std::collections::HashMap<&str, &crate::config::HumanDef> =
+            humans.iter().map(|h| (h.id.as_str(), h)).collect();
+
+        let mut superiors = Vec::new();
+        let mut subordinates = Vec::new();
+        let mut peers = Vec::new();
+
+        for link in &agent_links {
+            let is_from = link.from_agent_id == agent_id;
+            let other_id = if is_from {
+                &link.to_agent_id
+            } else {
+                &link.from_agent_id
+            };
+
+            let is_human = humans_by_id.contains_key(other_id.as_str());
+
+            let (name, role, description) = if let Some(human) = humans_by_id.get(other_id.as_str())
+            {
+                let name = human
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone(), human.description.clone())
+            } else {
+                let name = agent_names
+                    .get(other_id.as_str())
+                    .cloned()
+                    .unwrap_or_else(|| other_id.clone());
+                (name, None, None)
+            };
+
+            let info = LinkedAgent {
+                name,
+                id: other_id.clone(),
+                is_human,
+                role,
+                description,
+            };
+
+            match link.kind {
+                crate::links::LinkKind::Hierarchical => {
+                    if is_from {
+                        subordinates.push(info);
+                    } else {
+                        superiors.push(info);
+                    }
+                }
+                crate::links::LinkKind::Peer => peers.push(info),
+            }
+        }
+
+        if superiors.is_empty() && subordinates.is_empty() && peers.is_empty() {
+            return None;
+        }
+
+        self.render_org_context(OrgContext {
+            superiors,
+            subordinates,
+            peers,
+        })
+        .ok()
+    }
+
     /// Render the projects context fragment listing active projects with repos and worktrees.
     pub fn render_projects_context(&self, projects: Vec<ProjectContext>) -> Result<String> {
         self.render(
