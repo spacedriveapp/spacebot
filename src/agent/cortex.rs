@@ -3266,6 +3266,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         })),
     );
 
+    let is_delegated = task.metadata.get("delegated_by").is_some();
+
     let prompt_engine = deps.runtime_config.prompts.load();
     let sandbox_enabled = deps.sandbox.mode_enabled();
     let sandbox_containment_active = deps.sandbox.containment_active();
@@ -3313,6 +3315,32 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         })
         .map_err(|error| anyhow::anyhow!("failed to render worker prompt: {error}"))?;
 
+    let system_prompt = if is_delegated {
+        let identity_content = deps.runtime_config.identity.load().render();
+        let org_context = crate::prompts::engine::PromptEngine::build_org_context_for_agent(
+            &prompt_engine,
+            &deps.agent_id,
+            &deps.links.load(),
+            &deps.humans.load(),
+            &deps.agent_names,
+        );
+
+        let mut enhanced = String::new();
+        if !identity_content.is_empty() {
+            enhanced.push_str("## Your Identity\n\n");
+            enhanced.push_str(&identity_content);
+            enhanced.push_str("\n\n");
+        }
+        if let Some(org) = org_context {
+            enhanced.push_str(&org);
+            enhanced.push_str("\n\n");
+        }
+        enhanced.push_str(&worker_system_prompt);
+        enhanced
+    } else {
+        worker_system_prompt
+    };
+
     let mut task_prompt = format!("Execute task #{}: {}", task.task_number, task.title);
     if let Some(description) = &task.description {
         task_prompt.push_str("\n\nDescription:\n");
@@ -3347,7 +3375,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let (worker, inject_tx) = Worker::new(
         None,
         task_prompt,
-        worker_system_prompt,
+        system_prompt,
         deps.clone(),
         browser_config,
         screenshot_dir,
@@ -3356,7 +3384,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         Vec::new(), // no initial history for cortex task workers
         crate::conversation::settings::WorkerMemoryMode::None,
         None, // No model override for cortex workers
-        None, // No task metadata for cortex workers
+        Some(task.metadata.clone()),
     );
 
     // Detached workers are not channel-owned, so injection senders are not
