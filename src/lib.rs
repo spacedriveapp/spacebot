@@ -459,6 +459,8 @@ pub mod metadata_keys {
     pub const REPLY_TO_MESSAGE_ID: &str = "reply_to_message_id";
     /// Quoted reply text preview from the message being replied to.
     pub const REPLY_TO_TEXT: &str = "reply_to_text";
+    /// Channel topic / description (e.g. Discord channel topic).
+    pub const CHANNEL_TOPIC: &str = "channel_topic";
 }
 
 /// Inbound message from any messaging platform.

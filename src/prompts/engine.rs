@@ -274,6 +274,7 @@ impl PromptEngine {
         server_name: Option<&str>,
         channel_name: Option<&str>,
         conversation_id: Option<&str>,
+        channel_topic: Option<&str>,
     ) -> Result<String> {
         self.render(
             "fragments/conversation_context",
@@ -282,6 +283,7 @@ impl PromptEngine {
                 server_name => server_name,
                 channel_name => channel_name,
                 conversation_id => conversation_id,
+                channel_topic => channel_topic,
             },
         )
     }

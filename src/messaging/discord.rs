@@ -936,6 +936,15 @@ async fn build_metadata(
             guild_channel.name.clone().into(),
         );
 
+        if let Some(ref topic) = guild_channel.topic {
+            if !topic.is_empty() {
+                metadata.insert(
+                    crate::metadata_keys::CHANNEL_TOPIC.into(),
+                    topic.clone().into(),
+                );
+            }
+        }
+
         // Threads have a parent_id pointing to the text channel they were created in
         if guild_channel.thread_metadata.is_some() {
             metadata.insert("discord_is_thread".into(), true.into());

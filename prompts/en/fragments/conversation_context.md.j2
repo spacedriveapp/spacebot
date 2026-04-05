@@ -7,4 +7,7 @@ Channel: {{ channel_name }} ({{ platform }}{% if conversation_id %}, id: `{{ con
 {%- elif conversation_id %}
 Channel ID: `{{ conversation_id }}`
 {%- endif %}
+{%- if channel_topic %}
+Topic: {{ channel_topic }}
+{%- endif %}
 Multiple users may be present. Each message is prefixed with [username].
