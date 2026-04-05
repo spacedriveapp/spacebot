@@ -218,7 +218,7 @@ impl Tool for FileReadTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_writable_path(&args.path)?;
+        let path = self.context.resolve_path(&args.path)?;
 
         let raw = tokio::fs::read_to_string(&path)
             .await
@@ -325,7 +325,7 @@ impl Tool for FileWriteTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_writable_path(&args.path)?;
+        let path = self.context.resolve_path(&args.path)?;
 
         // Ensure parent directory exists if requested
         if args.create_dirs
