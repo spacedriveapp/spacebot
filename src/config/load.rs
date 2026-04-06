@@ -2161,6 +2161,7 @@ impl Config {
                             allowed_senders: instance.allowed_senders,
                             max_body_bytes: instance.max_body_bytes,
                             max_attachment_bytes: instance.max_attachment_bytes,
+                            sync_max_age_days: instance.sync_max_age_days,
                         }
                     })
                     .collect::<Vec<_>>();
@@ -2231,6 +2232,7 @@ impl Config {
                     allowed_senders: email.allowed_senders,
                     max_body_bytes: email.max_body_bytes,
                     max_attachment_bytes: email.max_attachment_bytes,
+                    sync_max_age_days: email.sync_max_age_days,
                     instances,
                 })
             }),
