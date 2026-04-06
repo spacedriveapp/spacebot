@@ -725,16 +725,16 @@ pub fn create_worker_tool_server(
 
     if let Some(config) = delegation_config {
         server = server.tool(SendAgentMessageTool::new(
-            agent_id_for_delegation,
+            agent_id_for_delegation.clone(),
             config.links,
             config.agent_names,
             task_store.clone(),
             config.conversation_logger,
         ));
-        server = server.tool(TaskListTool::new(task_store.clone(), agent_id.to_string()));
+        server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));
         server = server.tool(TaskUpdateTool::for_worker(
             task_store.clone(),
-            agent_id.clone(),
+            agent_id_for_delegation.clone(),
             worker_id,
         ));
     }
