@@ -418,7 +418,7 @@ impl Tool for FileEditTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let path = self.context.resolve_path(&args.path)?;
+        let path = self.context.resolve_writable_path(&args.path)?;
 
         let original = tokio::fs::read_to_string(&path)
             .await
@@ -1016,6 +1016,45 @@ mod tests {
         assert!(
             content.contains("showing lines 2-3 of 5"),
             "should have continuation notice"
+        );
+    }
+
+    #[tokio::test]
+    async fn sandbox_blocks_file_edit_on_readable_path() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let readable = temp_dir.path().join("readonly");
+        fs::create_dir_all(&workspace).expect("failed to create workspace");
+        fs::create_dir_all(&readable).expect("failed to create readable dir");
+
+        let file = readable.join("note.txt");
+        fs::write(&file, "original text").expect("failed to write readable file");
+
+        let config = SandboxConfig {
+            mode: SandboxMode::Enabled,
+            readable_paths: vec![readable.clone()],
+            ..Default::default()
+        };
+        let config = Arc::new(arc_swap::ArcSwap::from_pointee(config));
+        let sandbox = Arc::new(Sandbox::new_for_test(config, workspace.clone()));
+        let context = FileContext::new(workspace, sandbox);
+        let tool = FileEditTool { context };
+
+        let result = tool
+            .call(FileEditArgs {
+                path: file.to_string_lossy().into_owned(),
+                old_string: "original".to_string(),
+                new_string: "updated".to_string(),
+                replace_all: false,
+            })
+            .await;
+
+        let error = result
+            .expect_err("file_edit should reject readable_paths")
+            .to_string();
+        assert!(
+            error.contains("mounted as read-only") || error.contains("outside the workspace boundary"),
+            "unexpected error: {error}"
         );
     }
 }

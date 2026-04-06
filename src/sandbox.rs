@@ -1071,6 +1071,32 @@ fn detect_sandbox_exec() -> InternalBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arc_swap::ArcSwap;
+    use std::sync::Arc;
+
+    fn sandbox_for_path_tests(
+        workspace: PathBuf,
+        data_dir: PathBuf,
+        readable_paths: Vec<PathBuf>,
+        writable_paths: Vec<PathBuf>,
+    ) -> Sandbox {
+        let config = Arc::new(ArcSwap::from_pointee(SandboxConfig {
+            mode: SandboxMode::Enabled,
+            readable_paths,
+            writable_paths,
+            passthrough_env: Vec::new(),
+            project_paths: Vec::new(),
+        }));
+
+        Sandbox {
+            workspace,
+            data_dir,
+            backend: InternalBackend::None,
+            config,
+            tools_bin: PathBuf::from("/nonexistent/tools-bin"),
+            secrets_store: ArcSwap::from_pointee(None),
+        }
+    }
 
     #[test]
     fn test_sandbox_config_defaults() {
@@ -1118,5 +1144,55 @@ mod tests {
                 mode: SandboxMode::Disabled
             }
         );
+    }
+
+    #[test]
+    fn readable_paths_are_allowed_for_reads_but_not_writes() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let readable = temp_dir.path().join("readonly");
+        let data_dir = temp_dir.path().join("data");
+
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&readable).expect("create readable");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+        let sandbox = sandbox_for_path_tests(
+            workspace,
+            data_dir,
+            vec![readable.clone()],
+            Vec::new(),
+        );
+
+        let readable_file = readable.join("doc.txt");
+        std::fs::write(&readable_file, "hello").expect("write readable file");
+        let canonical = readable_file.canonicalize().expect("canonicalize readable file");
+
+        assert!(sandbox.is_path_allowed(&canonical));
+        assert!(!sandbox.is_path_writable(&canonical));
+    }
+
+    #[test]
+    fn readable_paths_do_not_override_data_dir_protection() {
+        let temp_dir = tempfile::tempdir().expect("failed to create temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        let data_dir = temp_dir.path().join("agent-data");
+
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+
+        let sandbox = sandbox_for_path_tests(
+            workspace,
+            data_dir.clone(),
+            vec![temp_dir.path().to_path_buf()],
+            Vec::new(),
+        );
+
+        let secret = data_dir.join("secret.txt");
+        std::fs::write(&secret, "secret").expect("write secret file");
+        let canonical = secret.canonicalize().expect("canonicalize secret file");
+
+        assert!(!sandbox.is_path_allowed(&canonical));
+        assert!(!sandbox.is_path_writable(&canonical));
     }
 }
