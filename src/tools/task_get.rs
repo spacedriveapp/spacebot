@@ -83,14 +83,16 @@ impl Tool for TaskGetTool {
             return Err(TaskGetError(format!("task #{} not found", task_number)));
         };
 
-        // Access control: allow if the task is owned by this agent or was
-        // created by a process belonging to this agent (branch, worker, etc.).
+        // Access control: allow if the task is owned by this agent, was
+        // created by a process belonging to this agent (branch, worker, etc.),
+        // or is assigned to this agent.
         let agent_id_str = self.agent_id.to_string();
         let is_owner = task.owner_agent_id == agent_id_str;
         let is_creator = task.created_by == agent_id_str
             || task.created_by == format!("agent:{agent_id_str}");
+        let is_assignee = task.assigned_agent_id == agent_id_str;
 
-        if !is_owner && !is_creator {
+        if !is_owner && !is_creator && !is_assignee {
             return Err(TaskGetError(format!(
                 "access denied: task #{} was created by '{}' and owned by '{}', not accessible by agent '{agent_id_str}'",
                 task_number, task.created_by, task.owner_agent_id
