@@ -40,6 +40,10 @@ pub struct SendAgentMessageTool {
     /// The originating channel (conversation_id) where the user request came from.
     /// Set per-turn so task completion notifications route back to the right place.
     originating_channel: Option<String>,
+    /// The task number of the parent task that delegated this work.
+    /// When this worker creates sub-tasks, they carry this as `parent_task_number`
+    /// so the cortex can auto-complete the parent when the child finishes.
+    parent_task_number: Option<i64>,
     working_memory: Option<Arc<crate::memory::WorkingMemoryStore>>,
 }
 
@@ -67,6 +71,7 @@ impl SendAgentMessageTool {
             conversation_logger,
             skip_flag: None,
             originating_channel: None,
+            parent_task_number: None,
             working_memory: None,
         }
     }
@@ -86,6 +91,11 @@ impl SendAgentMessageTool {
 
     pub fn with_working_memory(mut self, store: Arc<crate::memory::WorkingMemoryStore>) -> Self {
         self.working_memory = Some(store);
+        self
+    }
+
+    pub fn with_parent_task_number(mut self, task_number: i64) -> Self {
+        self.parent_task_number = Some(task_number);
         self
     }
 
@@ -214,11 +224,14 @@ impl Tool for SendAgentMessageTool {
         let title = extract_task_title(&args.message);
 
         // Build task metadata with delegation context.
-        let metadata = serde_json::json!({
+        let mut metadata = serde_json::json!({
             "delegated_by": sending_agent_id,
             "delegating_agent_id": sending_agent_id,
             "originating_channel": self.originating_channel,
         });
+        if let Some(parent) = self.parent_task_number {
+            metadata["parent_task_number"] = serde_json::json!(parent);
+        }
 
         // Create the task in the global store with cross-agent assignment.
         // Agent-delegated tasks skip pending_approval and go straight to ready.

@@ -640,6 +640,7 @@ pub struct DelegationConfig {
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
     pub conversation_logger: crate::conversation::history::ConversationLogger,
     pub originating_channel: Option<String>,
+    pub parent_task_number: Option<i64>,
 }
 
 /// Create a per-worker ToolServer with task-appropriate tools.
@@ -736,6 +737,9 @@ pub fn create_worker_tool_server(
         );
         if let Some(ch) = config.originating_channel {
             send_tool = send_tool.with_originating_channel(ch);
+        }
+        if let Some(parent_task) = config.parent_task_number {
+            send_tool = send_tool.with_parent_task_number(parent_task);
         }
         server = server.tool(send_tool);
         server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));

@@ -3536,8 +3536,38 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
+
+                                // Auto-complete parent task if this child task has a parent.
+                                if let Some(parent_num) = task.metadata.get("parent_task_number").and_then(|v| v.as_i64()) {
+                                    let parent_summary = format!("Sub-task #{} completed: {}", task.task_number, task.title);
+                                    tracing::info!(
+                                        parent_task = parent_num,
+                                        child_task = task.task_number,
+                                        "auto-completing parent task after child completion"
+                                    );
+                                    let _ = task_store.update(parent_num, UpdateTaskInput {
+                                        status: Some(TaskStatus::Done),
+                                        ..Default::default()
+                                    }).await;
+                                    let _ = event_tx.send(ProcessEvent::TaskUpdated {
+                                        agent_id: Arc::from(agent_id.as_str()),
+                                        task_number: parent_num,
+                                        status: "done".to_string(),
+                                        action: "auto-completed by child".to_string(),
+                                    });
+                                    logger.log(
+                                        "parent_task_auto_completed",
+                                        &format!("Parent task #{} auto-completed after child #{} finished", parent_num, task.task_number),
+                                        Some(serde_json::json!({
+                                            "parent_task_number": parent_num,
+                                            "child_task_number": task.task_number,
+                                            "child_title": task.title,
+                                        })),
+                                    );
+                                }
 
                                 let _ = event_tx.send(ProcessEvent::WorkerComplete {
                                     agent_id: Arc::from(agent_id.as_str()),
@@ -3615,6 +3645,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
                             }
@@ -3681,6 +3712,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                                     &agent_names,
                                     &sqlite_pool,
                                     &injection_tx,
+                                    &task_store,
                                 )
                                 .await;
                             }
@@ -3774,6 +3806,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
                             &agent_names,
                             &sqlite_pool,
                             &injection_tx,
+                            &task_store,
                         )
                         .await;
 
@@ -3902,6 +3935,7 @@ async fn notify_delegation_completion(
     agent_names: &std::collections::HashMap<String, String>,
     sqlite_pool: &sqlx::SqlitePool,
     injection_tx: &tokio::sync::mpsc::Sender<crate::ChannelInjection>,
+    task_store: &Arc<crate::tasks::TaskStore>,
 ) {
     // Check if this is a delegated task.
     let delegating_agent_id = task
@@ -4000,6 +4034,33 @@ async fn notify_delegation_completion(
             success,
             "injected delegation completion retrigger"
         );
+    }
+
+    // Auto-complete parent task if this child was spawned from a parent task.
+    if let Some(parent_num) = task.metadata.get("parent_task_number").and_then(|v| v.as_i64()) {
+        if let Err(error) = task_store
+            .update(
+                parent_num,
+                UpdateTaskInput {
+                    status: Some(if success { TaskStatus::Done } else { TaskStatus::Backlog }),
+                    ..Default::default()
+                },
+            )
+            .await
+        {
+            tracing::warn!(
+                %error,
+                parent_task_number = parent_num,
+                child_task_number = task.task_number,
+                "failed to auto-complete parent task"
+            );
+        } else {
+            tracing::info!(
+                parent_task_number = parent_num,
+                child_task_number = task.task_number,
+                "auto-completed parent task after child completion"
+            );
+        }
     }
 }
 

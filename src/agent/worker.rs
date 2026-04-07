@@ -347,6 +347,9 @@ impl Worker {
                     .and_then(|m| m.get("originating_channel"))
                     .and_then(|v| v.as_str())
                     .map(String::from),
+                parent_task_number: self.task_metadata.as_ref()
+                    .and_then(|m| m.get("task_number"))
+                    .and_then(|v| v.as_i64()),
             });
 
         // Create per-worker ToolServer with task tools
