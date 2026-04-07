@@ -343,6 +343,10 @@ impl Worker {
                 links: self.deps.links.clone(),
                 agent_names: self.deps.agent_names.clone(),
                 conversation_logger: crate::conversation::history::ConversationLogger::new(self.deps.sqlite_pool.clone()),
+                originating_channel: self.task_metadata.as_ref()
+                    .and_then(|m| m.get("originating_channel"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from),
             });
 
         // Create per-worker ToolServer with task tools

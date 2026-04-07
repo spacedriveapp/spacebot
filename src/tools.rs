@@ -639,6 +639,7 @@ pub struct DelegationConfig {
     pub links: Arc<ArcSwap<Vec<crate::links::AgentLink>>>,
     pub agent_names: Arc<std::collections::HashMap<String, String>>,
     pub conversation_logger: crate::conversation::history::ConversationLogger,
+    pub originating_channel: Option<String>,
 }
 
 /// Create a per-worker ToolServer with task-appropriate tools.
@@ -726,13 +727,17 @@ pub fn create_worker_tool_server(
     }
 
     if let Some(config) = delegation_config {
-        server = server.tool(SendAgentMessageTool::new(
+        let mut send_tool = SendAgentMessageTool::new(
             agent_id_for_delegation.clone(),
             config.links,
             config.agent_names,
             task_store.clone(),
             config.conversation_logger,
-        ));
+        );
+        if let Some(ch) = config.originating_channel {
+            send_tool = send_tool.with_originating_channel(ch);
+        }
+        server = server.tool(send_tool);
         server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));
         server = server.tool(TaskGetTool::new(task_store.clone(), agent_id_for_delegation.clone()));
         server = server.tool(TaskUpdateTool::for_worker(
