@@ -190,7 +190,24 @@ impl Compactor {
             return Ok(());
         }
 
-        let remove_count = total / 2;
+        let mut remove_count = total / 2;
+
+        // Advance past User messages containing ToolResult blocks so we never
+        // orphan tool_results whose matching tool_use was in a removed assistant
+        // message (the Anthropic API rejects orphaned tool_result blocks).
+        while remove_count < total.saturating_sub(2) {
+            let has_tool_result = matches!(
+                history.get(remove_count),
+                Some(Message::User { content })
+                    if content.iter().any(|item|
+                        matches!(item, UserContent::ToolResult(_)))
+            );
+            if has_tool_result {
+                remove_count += 1;
+            } else {
+                break;
+            }
+        }
 
         let removed: Vec<Message> = history.drain(..remove_count).collect();
         drop(removed);
@@ -225,12 +242,29 @@ async fn run_compaction(
     let (removed_messages, remove_count) = {
         let mut hist = history.write().await;
         let total = hist.len();
-        let remove_count = ((total as f32 * fraction) as usize)
+        let mut remove_count = ((total as f32 * fraction) as usize)
             .max(1)
             .min(total.saturating_sub(2));
         if remove_count == 0 {
             return Ok(0);
         }
+
+        // Advance past User messages containing ToolResult blocks so we never
+        // orphan tool_results whose matching tool_use was in a removed message.
+        while remove_count < total.saturating_sub(2) {
+            let has_tool_result = matches!(
+                hist.get(remove_count),
+                Some(Message::User { content })
+                    if content.iter().any(|item|
+                        matches!(item, UserContent::ToolResult(_)))
+            );
+            if has_tool_result {
+                remove_count += 1;
+            } else {
+                break;
+            }
+        }
+
         let removed: Vec<Message> = hist.drain(..remove_count).collect();
         (removed, remove_count)
     };
