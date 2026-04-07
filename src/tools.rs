@@ -59,6 +59,7 @@ pub mod skip;
 pub mod spacebot_docs;
 pub mod spawn_worker;
 pub mod task_create;
+pub mod task_get;
 pub mod task_list;
 pub mod task_update;
 pub mod web_search;
@@ -139,6 +140,7 @@ pub use spawn_worker::{
     DetachedSpawnWorkerTool, SpawnWorkerArgs, SpawnWorkerError, SpawnWorkerOutput, SpawnWorkerTool,
 };
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
+pub use task_get::{TaskGetArgs, TaskGetError, TaskGetOutput, TaskGetTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
@@ -732,6 +734,7 @@ pub fn create_worker_tool_server(
             config.conversation_logger,
         ));
         server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));
+        server = server.tool(TaskGetTool::new(task_store.clone(), agent_id_for_delegation.clone()));
         server = server.tool(TaskUpdateTool::for_worker(
             task_store.clone(),
             agent_id_for_delegation.clone(),
