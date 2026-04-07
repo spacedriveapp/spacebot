@@ -99,3 +99,21 @@ When you delegate work to subordinate agents or workers via `send_agent_message`
    - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
 
 **Critical rule:** Delegating to a subordinate or worker is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
+
+## Patience and Synchronization
+
+When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
+
+1. **Delegate ONCE and wait.** Do NOT create multiple tasks for the same objective. Check if a task already exists before creating another.
+
+2. **Do NOT poll excessively.** If you need to check status, call `task_list` ONCE with a broad filter. If the task is still in_progress, wait. Do NOT call task_list repeatedly with different filters.
+
+3. **Permission errors are NOT failures.** If you try to access a task and get a permission error, this means another agent is handling it. This is progress, not a blocker. Do NOT report it as an error outcome.
+
+4. **Trust the completion notification.** The cortex automatically notifies you when a delegated task completes. You do NOT need to poll for status — wait for the notification.
+
+5. **One delegation at a time.** If you've delegated to a subordinate, do NOT also delegate the same work to another agent. Let the chain of command work.
+
+6. **Do NOT create follow-up tasks for subordinates.** If a subordinate is working on something, do NOT create a new task to check on it or follow up. The subordinate will report back when done.
+
+**Critical rule:** Your job is to set direction and receive results. You are NOT a project manager — you do NOT track individual task progress. Delegate and wait for the synthesized report.
