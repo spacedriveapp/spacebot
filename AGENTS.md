@@ -252,6 +252,70 @@ Module roots (e.g., `src/memory.rs`) contain `mod` declarations and re-exports. 
 
 Tools are organized by function, not by consumer. Which processes get which tools is configured via factory functions in `tools.rs`.
 
+## Delegated Worker Architecture
+
+The cortex detects delegated tasks (via `delegated_by` metadata on tasks) and enhances the worker creation path to support hierarchical delegation chains.
+
+### Cortex Detection
+
+When the cortex picks up a `Ready` task from the task board, it checks for `delegated_by` metadata. If present, the task was created by a superior agent via `send_agent_message`, and the worker gets an enhanced setup:
+
+1. **Identity injection** — SOUL.md, IDENTITY.md, and ROLE.md are appended AFTER the worker template, giving the worker its full personality and role context.
+2. **Org context** — The worker sees its position in the hierarchy (reports to, direct reports, peers) so it knows who to escalate to and who to delegate to.
+3. **Delegation tools** — Four additional tools are added to the worker's ToolServer.
+
+### DelegationConfig
+
+An optional `DelegationConfig` param to `create_worker_tool_server` that adds four delegation tools:
+
+| Tool | Description |
+|------|-------------|
+| `send_agent_message` | Send a message to a linked agent, creating a task in their task store |
+| `task_list` | List tasks in the worker's task store, filtered by status |
+| `task_get` | Read full details of a specific task |
+| `task_update` | Update task status, priority, or metadata |
+
+### Task Metadata
+
+Tasks created via `send_agent_message` carry `delegated_by` metadata containing the source agent ID. This triggers the enhanced worker path:
+
+```
+Task metadata: {
+  "delegated_by": "boss",
+  "escalation_chain": ["builder-1"],  // optional, for loop protection
+  ...
+}
+```
+
+### Access Control
+
+`task_get` enforces strict access control: workers can only read tasks they created or that were assigned to them. This prevents information leakage between parallel workers — a builder working on task A cannot read the details of task B assigned to a different builder.
+
+### Complete Delegation Flow
+
+```
+Boss → send_agent_message → Planning-lead task store
+    → Cortex detects delegated_by metadata
+    → Planning-lead spawns Engineering Assistant (with DelegationConfig)
+        → task_list → sees assigned tasks
+        → send_agent_message → Builder workers
+            → Workers execute (shell, file, browser)
+            → set_status(kind: "outcome") → done
+        → task_get → reads worker results
+        → Synthesizes findings
+        → task_update → marks complete
+    → Planning-lead synthesizes and reports to Boss
+```
+
+### Anti-Bounce Rules
+
+Delegated workers follow behavioral rules to prevent common failure modes:
+
+- **Environmental Blockers** — Handle sandbox restrictions, missing credentials, and permission errors gracefully. Report blockers via escalation rather than silently failing.
+- **No Status Check Tasks** — Don't spawn workers just to check task status. Use `task_list` to poll the task board directly.
+- **Wait for Subordinate Results** — Don't mark a task as done until all subordinate workers have completed. Synthesize their results before reporting up.
+- **Trust Your Subordinates** — The boss doesn't micro-manage planning-lead escalations. Each level trusts the level below to handle what it can.
+
 ## Three Databases
 
 Each doing what it's best at. No server processes.

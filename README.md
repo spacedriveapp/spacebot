@@ -429,65 +429,80 @@ Each agent is an independent entity with its own workspace, databases, identity 
 
 ### Boss Agent Hierarchy
 
-For teams that need structured delegation, Spacebot supports hierarchical agent org charts. A **boss** agent delegates work to subordinate agents (like a **planning-lead**), which in turn orchestrate builder workers to execute tasks. This creates a clear chain of command with built-in escalation paths and specialized roles.
+For teams that need structured delegation, Spacebot supports hierarchical agent org charts. A **boss** agent delegates work to subordinate agents (like a **planning-lead**), which in turn delegate to specialized agents (like **engineering-assistant**) or orchestrate builder workers. This creates a clear chain of command with built-in escalation paths and specialized roles.
 
 #### How It Works
 
-1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store.
-2. **Planning-lead orchestrates** — The planning-lead's cortex picks up `Ready` tasks and spawns builder workers with shell, file, and browser tools.
-3. **Builders execute** — Workers run autonomously. If they hit a blocker, they escalate via `task_create`, which routes back to the planning-lead.
-4. **Escalation loop protection** — An `escalation_chain` metadata array tracks the escalation path. If an agent's ID appears in the chain, further escalation is blocked to prevent infinite loops.
+1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store. The task includes `delegated_by` metadata.
+2. **Cortex detects delegation** — When the cortex picks up the task, it detects the `delegated_by` metadata and:
+   - Injects the agent's identity files (SOUL.md, IDENTITY.md, ROLE.md) **after** the worker template so they take precedence
+   - Injects `org_context` showing subordinates, superiors, and peers from the link graph
+   - Adds delegation tools: `send_agent_message`, `task_list`, `task_get`, `task_update`
+3. **Planning-lead orchestrates** — The planning-lead's worker sees its subordinates in the org context and uses `send_agent_message` to delegate to the appropriate agent (e.g., engineering-assistant for code work).
+4. **Polling and synthesis** — The planning-lead uses `task_list` to poll for task completion, then `task_get` to read the subordinate's findings. It synthesizes the results and reports to the boss.
+5. **Builders execute** — If no suitable subordinate exists, the planning-lead spawns a builder worker with shell, file, and browser tools.
 
-**Escalation flow:**
+**Complete delegation flow:**
 
 ```
-Builder hits blocker
-    → task_create (escalation) → Planning-lead
-        → Planning-lead resolves or escalates to Boss
-            → Boss makes decision, routes back down
+Boss receives user request
+    ↓
+Boss calls send_agent_message(target="Planning Lead")
+    ↓
+Cortex detects delegated_by metadata → injects identity + org_context + delegation tools
+    ↓
+Planning Lead worker sees Engineering Assistant as subordinate
+    ↓
+Planning Lead calls send_agent_message(target="Engineering Assistant")
+    ↓
+Planning Lead polls task_list until task is "done"
+    ↓
+Planning Lead calls task_get(task_number=N) → reads findings
+    ↓
+Planning Lead synthesizes findings → reports to Boss → marks done
 ```
+
+**Access control:** The `task_get` tool only allows reading tasks where `owner_agent_id` matches the calling agent or `created_by` matches the calling agent. Workers cannot read superior's tasks (prevents information leakage) but can read subordinate results (enables synthesis).
 
 **Config example:**
 
 ```toml
 [[agents]]
-id = "boss"
-display_name = "Strategic Director"
+id = "boss-agent"
+preset = "boss-agent"
+display_name = "Boss Agent"
 
 [[agents]]
 id = "planning-lead"
+preset = "planning-lead"
 display_name = "Planning Lead"
 
+[[agents]]
+id = "engineering-assistant"
+preset = "engineering-assistant"
+display_name = "Engineering Assistant"
+
 [[links]]
-from = "boss"
+from = "boss-agent"
 to = "planning-lead"
+direction = "two_way"
+kind = "hierarchical"
+
+[[links]]
+from = "planning-lead"
+to = "engineering-assistant"
 direction = "two_way"
 kind = "hierarchical"
 ```
 
-Builder workers are injected with an escalation fragment that defines when and how to escalate — only for genuine blockers, missing information, or ambiguous requirements. Routine errors are handled autonomously.
+#### Anti-Bounce Rules
 
-#### Task Completion Flow
+All agents follow these rules to prevent task spam and escalation loops:
 
-When a delegated task completes, the cortex automatically:
-1. Marks the task as done in the task store
-2. Logs the result in the link channel between both agents
-3. Injects a system message into the delegating agent's originating channel
-
-The delegating agent receives a notification like:
-```
-[System] Delegated task #N completed by planning-lead: "Task Title"
-
-Result: <worker output summary>
-```
-
-The delegating agent is responsible for relaying the outcome to the user — it should synthesize the result, not forward raw worker output.
-
-#### Agent Behavior Rules
-
-- **Boss**: Always triages requests before acting. Checks org chart, classifies as strategic vs execution, delegates to planning-lead. Never executes work that a subordinate could handle. Relays task completion results to users.
-- **Planning-lead**: Always triages before acting. Checks org chart, classifies as coordination vs execution, spawns builders. Never executes work that builders could handle. Reviews worker results, re-delegates or escalates failures.
-- **Builders**: Execute assigned tasks. Escalate blockers via `task_create` with `escalation_chain` metadata for loop protection.
+- **Environmental Blockers**: When a worker hits sandbox isolation, missing credentials, or missing repo path — acknowledge the blocker, request specific info, wait for response. Do NOT escalate repeatedly.
+- **No Status Check Tasks**: Do NOT spawn workers to check status of other workers. Use `task_list` to poll the task store directly.
+- **Wait for Subordinate Results**: Do NOT mark your task done until all delegated subtasks are complete. Use `task_list` to poll, `task_get` to read results, synthesize, then report to superior.
+- **Trust Your Subordinates**: When a subordinate escalates a blocker, provide the info or ask the user. Do NOT create parallel unblock tasks.
 
 #### Specialized Agent Roles
 
@@ -497,7 +512,7 @@ The hierarchy supports specialized agents that operate in both standalone and hi
 - **Project Manager** — Tracks work and coordinates across teams. In hierarchical mode, receives objectives from Boss, delegates analysis to Research Analysts and implementation to Engineering Assistants, and relays synthesized status to the Boss.
 - **Engineering Assistant** — Handles technical work. In hierarchical mode, triages tasks to determine if analysis is needed, delegates implementation to builders, and reports results with evidence.
 
-All specialized agents follow the same pattern: triage requests before acting, delegate execution to appropriate subordinates or workers, and always report back to their superior with clear structure and evidence. Never leave a superior waiting.
+All specialized agents follow the same pattern: triage requests before acting, delegate execution to appropriate subordinates or workers, and always report back to their superior with clear structure and evidence.
 
 ---
 

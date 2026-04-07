@@ -147,7 +147,7 @@ The agent sees its position in the hierarchy before processing any message. Auth
 
 ## Boss Agent Hierarchy
 
-The communication graph enables a structured delegation pattern: the **boss hierarchy**. This is a multi-tier org chart where a boss agent delegates to a planning-lead, which orchestrates builder workers to execute tasks. The pattern supports specialized agent roles that operate in both standalone and hierarchical modes.
+The communication graph enables a structured delegation pattern: the **boss hierarchy**. This is a multi-tier org chart where a boss agent delegates to a planning-lead, which delegates to an engineering assistant, which orchestrates builder workers to execute tasks. The pattern supports specialized agent roles that operate in both standalone and hierarchical modes.
 
 ### Configuration
 
@@ -155,28 +155,88 @@ The communication graph enables a structured delegation pattern: the **boss hier
 [[agents]]
 id = "boss"
 display_name = "Strategic Director"
+preset = "boss"
 
 [[agents]]
 id = "planning-lead"
 display_name = "Planning Lead"
+preset = "planning-lead"
+
+[[agents]]
+id = "engineering-assistant"
+display_name = "Engineering Assistant"
+preset = "engineering-assistant"
 
 [[links]]
 from = "boss"
 to = "planning-lead"
 direction = "two_way"
 kind = "hierarchical"
+
+[[links]]
+from = "planning-lead"
+to = "engineering-assistant"
+direction = "two_way"
+kind = "hierarchical"
 ```
 
-The `hierarchical` link kind establishes that `boss` manages `planning-lead`. The boss can delegate tasks down, and the planning-lead can escalate issues up.
+The `hierarchical` link kind establishes the chain of command. The `preset` field configures each agent with appropriate model routing and behavior defaults for its role.
 
 ### How It Works
 
-**Delegation flow:**
+**Complete delegation flow:**
+
+```
+Boss receives user request
+    → send_agent_message → Planning-lead task store
+        → Cortex detects delegated_by metadata
+        → Injects identity (SOUL.md, IDENTITY.md, ROLE.md) + org_context
+        → Planning-lead spawns Engineering Assistant (with DelegationConfig)
+            → task_list → sees assigned tasks
+            → send_agent_message → Builder workers
+                → Workers execute (shell, file, browser)
+                → set_status(kind: "outcome") → done
+            → task_get → reads worker results
+            → Synthesizes findings
+            → task_update → marks complete
+        → Planning-lead reviews results
+        → Synthesizes and reports to Boss
+    → Boss relays synthesized result to user
+```
 
 1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store. This appears as a message in the planning-lead's link channel (`link:planning-lead:boss`).
-2. **Planning-lead orchestrates** — The planning-lead's cortex picks up `Ready` tasks from its task board and spawns builder workers. Each builder gets shell, file, and browser tools plus a focused system prompt.
-3. **Builders execute** — Workers run autonomously. They can create subtasks via `task_create` for escalation when they hit blockers.
-4. **Completion flows back** — When builders finish, results propagate up through the planning-lead to the boss, and ultimately back to the originating user channel.
+2. **Cortex detects delegation** — The planning-lead's cortex picks up `Ready` tasks with `delegated_by` metadata. It detects this is a delegated task and enhances the worker setup:
+   - **Identity injection** — SOUL.md, IDENTITY.md, and ROLE.md are appended AFTER the worker template
+   - **Org context** — The worker sees its position in the hierarchy (reports to, direct reports, peers)
+   - **Delegation tools** — Four additional tools are added to the ToolServer
+3. **Planning-lead orchestrates** — Spawns an engineering assistant with `DelegationConfig`, giving it `send_agent_message`, `task_list`, `task_get`, and `task_update` tools.
+4. **Engineering Assistant delegates** — Polls `task_list` for assigned tasks, delegates implementation to builder workers via `send_agent_message`, and waits for completion.
+5. **Builders execute** — Workers run autonomously with shell, file, and browser tools. They signal completion via `set_status(kind: "outcome")`.
+6. **Synthesis and report** — The engineering assistant reads results with `task_get`, synthesizes findings, updates the task, and reports back. The planning-lead synthesizes and reports to the boss.
+
+### Delegation Tools
+
+Workers created with a `DelegationConfig` get four additional tools for hierarchical task management:
+
+| Tool | Description |
+|------|-------------|
+| `send_agent_message` | Send a message to a linked agent, creating a task in their task store |
+| `task_list` | List tasks in the worker's task store, filtered by status |
+| `task_get` | Read full details of a specific task. **Access control:** only tasks owned by or created by the calling agent |
+| `task_update` | Update task status, priority, or metadata |
+
+### Access Control
+
+`task_get` enforces strict access control: workers can only read tasks they created or that were assigned to them. This prevents information leakage between parallel workers — a builder working on task A cannot read the details of task B assigned to a different builder.
+
+### Anti-Bounce Rules
+
+Delegated workers follow behavioral rules to prevent common failure modes:
+
+- **Environmental Blockers** — Handle sandbox restrictions, missing credentials, and permission errors gracefully. Report blockers via escalation rather than silently failing.
+- **No Status Check Tasks** — Don't spawn workers just to check task status. Use `task_list` to poll the task board directly.
+- **Wait for Subordinate Results** — Don't mark a task as done until all subordinate workers have completed. Synthesize their results before reporting up.
+- **Trust Your Subordinates** — The boss doesn't micro-manage planning-lead escalations. Each level trusts the level below to handle what it can.
 
 ### Escalation Flow
 
@@ -249,9 +309,12 @@ The hierarchy supports specialized agents that can operate in both standalone an
 
 **Engineering Assistant** — Handles technical work including code reviews and implementation. In standalone mode, provides technical assistance directly. In hierarchical mode:
 - Receives technical tasks from Planning Lead
+- Cortex detects `delegated_by` metadata and injects identity + org_context
 - Triage requests to check if analysis is needed before implementation
-- Delegates implementation work to builder workers
+- Delegates implementation work to builder workers via `send_agent_message`
+- Uses `task_list` to poll for assigned tasks, `task_get` to read results
 - Reports results with evidence including files modified, test results, and follow-up needs
+- Waits for all subordinate workers to complete before marking task done
 
 All specialized agents follow the same behavioral rules:
 1. **Triage before acting** — Always check the request against the org chart and classify before taking action
