@@ -41,9 +41,10 @@ pub(super) async fn opencode_proxy(request: Request) -> Response {
     let path = uri.path();
 
     // Parse port and remainder from the path.
-    // The route is nested under `/api` via Router::nest, so Axum strips that
-    // prefix before the handler runs.  We see `/opencode/{port}/{rest...}`.
-    let after_prefix = match path.strip_prefix("/opencode/") {
+    // The route is defined directly with the `/api/opencode/` prefix, so we
+    // strip that to extract the port and remainder. Expected path format:
+    // `/api/opencode/{port}/{*path}`.
+    let after_prefix = match path.strip_prefix("/api/opencode/") {
         Some(rest) => rest,
         None => return (StatusCode::BAD_REQUEST, "invalid proxy path").into_response(),
     };
