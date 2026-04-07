@@ -118,7 +118,11 @@ fn direct_provider_mapping(models_dev_id: &str) -> Option<&'static str> {
         "opencode-go" => Some("opencode-go"),
         "zai-coding-plan" => Some("zai-coding-plan"),
         "minimax" => Some("minimax"),
-        "moonshotai" => Some("moonshot"),
+        "minimax-cn" => Some("minimax-cn"),
+        "moonshotai" | "moonshotai-cn" => Some("moonshot"),
+        "nvidia" => Some("nvidia"),
+        "ollama" | "ollama-cloud" => Some("ollama"),
+        "github-copilot" => Some("github-copilot"),
         _ => None,
     }
 }
@@ -142,32 +146,6 @@ fn as_openai_chatgpt_model(model: &ModelInfo) -> Option<ModelInfo> {
         reasoning: model.reasoning,
         input_audio: model.input_audio,
     })
-}
-
-/// Models from providers not in models.dev (private/custom endpoints).
-fn extra_models() -> Vec<ModelInfo> {
-    vec![
-        // MiniMax CN - China-specific endpoint, not on models.dev
-        ModelInfo {
-            id: "minimax-cn/MiniMax-M2.5".into(),
-            name: "MiniMax M2.5".into(),
-            provider: "minimax-cn".into(),
-            context_window: Some(200000),
-            tool_call: true,
-            reasoning: true,
-            input_audio: false,
-        },
-        // Moonshot AI (Kimi) - moonshot-v1-8k not on models.dev
-        ModelInfo {
-            id: "moonshot/moonshot-v1-8k".into(),
-            name: "Moonshot V1 8K".into(),
-            provider: "moonshot".into(),
-            context_window: Some(8000),
-            tool_call: false,
-            reasoning: false,
-            input_audio: false,
-        },
-    ]
 }
 
 /// Fetch the full model catalog from models.dev and transform into ModelInfo entries.
@@ -290,6 +268,14 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("anthropic_key", "ANTHROPIC_API_KEY") {
         providers.push("anthropic");
     }
+    // Anthropic OAuth stores credentials as a separate JSON file
+    if !providers.contains(&"anthropic")
+        && config_path
+            .parent()
+            .is_some_and(|instance_dir| crate::auth::credentials_path(instance_dir).exists())
+    {
+        providers.push("anthropic");
+    }
     if has_key("openai_key", "OPENAI_API_KEY") {
         providers.push("openai");
     }
@@ -329,11 +315,17 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     if has_key("gemini_key", "GEMINI_API_KEY") {
         providers.push("gemini");
     }
+    if has_key("ollama_base_url", "OLLAMA_BASE_URL") || has_key("ollama_key", "OLLAMA_API_KEY") {
+        providers.push("ollama");
+    }
     if has_key("opencode_zen_key", "OPENCODE_ZEN_API_KEY") {
         providers.push("opencode-zen");
     }
     if has_key("opencode_go_key", "OPENCODE_GO_API_KEY") {
         providers.push("opencode-go");
+    }
+    if has_key("nvidia_key", "NVIDIA_API_KEY") {
+        providers.push("nvidia");
     }
     if has_key("minimax_key", "MINIMAX_API_KEY") {
         providers.push("minimax");
@@ -346,6 +338,9 @@ pub(super) async fn configured_providers(config_path: &std::path::Path) -> Vec<&
     }
     if has_key("zai_coding_plan_key", "ZAI_CODING_PLAN_API_KEY") {
         providers.push("zai-coding-plan");
+    }
+    if has_key("github_copilot_key", "GITHUB_COPILOT_API_KEY") {
+        providers.push("github-copilot");
     }
 
     providers
@@ -429,26 +424,6 @@ pub(super) async fn get_models(
             .filter_map(as_openai_chatgpt_model)
             .collect();
         models.extend(chatgpt_models);
-    }
-
-    for model in extra_models() {
-        if let Some(capability) = requested_capability {
-            if capability == "input_audio" && !model.input_audio {
-                continue;
-            }
-            if capability == "voice_transcription"
-                && (!model.input_audio || !is_known_voice_transcription_model(&model.id))
-            {
-                continue;
-            }
-        }
-        if let Some(provider) = requested_provider {
-            if model.provider == provider {
-                models.push(model);
-            }
-        } else if configured.contains(&model.provider.as_str()) {
-            models.push(model);
-        }
     }
 
     Ok(Json(ModelsResponse { models }))
