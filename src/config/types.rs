@@ -952,6 +952,24 @@ pub struct ChannelConfig {
     pub save_attachments: bool,
 }
 
+impl ChannelConfig {
+    /// Convert to a `ConversationSettings` for use as the agent-level default in
+    /// `ResolvedConversationSettings::resolve`. Returns `None` when both fields
+    /// match their system defaults (avoids injecting a no-op layer).
+    pub fn to_conversation_settings(
+        &self,
+    ) -> Option<crate::conversation::ConversationSettings> {
+        if self.response_mode.is_none() && !self.save_attachments {
+            return None;
+        }
+        Some(crate::conversation::ConversationSettings {
+            response_mode: self.response_mode.unwrap_or_default(),
+            save_attachments: Some(self.save_attachments),
+            ..Default::default()
+        })
+    }
+}
+
 /// OpenCode subprocess worker configuration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpenCodeConfig {
