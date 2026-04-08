@@ -264,9 +264,11 @@ fn text(node: tree_sitter::Node, source: &str) -> String {
 }
 
 /// Collect Rust function parameters as Parameter symbols.
+///
 /// Tree-sitter-rust wraps parameters in `parameters` containing:
 /// - `parameter` for `x: Type`
 /// - `self_parameter` for `self`, `&self`, `&mut self` (skipped — receiver)
+///
 /// Each parameter has a `pattern` field that's typically an identifier.
 #[cfg(feature = "codegraph")]
 fn collect_rust_params(
