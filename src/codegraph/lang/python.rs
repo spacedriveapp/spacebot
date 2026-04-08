@@ -148,9 +148,10 @@ fn walk_py_node(
                 } else {
                     NodeLabel::Function
                 };
+                let fn_qname = qname(file_path, parent_name, &name);
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
-                    qualified_name: qname(file_path, parent_name, &name),
+                    qualified_name: fn_qname.clone(),
                     label,
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
@@ -161,6 +162,11 @@ fn walk_py_node(
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
                 });
+
+                // Extract parameters as Parameter nodes parented to the function.
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    collect_py_params(params, source, &fn_qname, symbols);
+                }
             }
         }
         "import_statement" | "import_from_statement" => {
@@ -217,6 +223,87 @@ fn walk_py_node(
     for child in node.children(cursor) {
         walk_py_node(child, file_path, source, symbols, parent_name);
     }
+}
+
+/// Collect function/method parameters as Parameter symbols parented
+/// to the enclosing function. Tree-sitter-python wraps parameters in
+/// a `parameters` node containing children of several kinds:
+/// - `identifier` for plain `x`
+/// - `typed_parameter` for `x: int`
+/// - `default_parameter` for `x = 5`
+/// - `typed_default_parameter` for `x: int = 5`
+/// - `list_splat_pattern` / `dictionary_splat_pattern` for `*args` / `**kwargs`
+///
+/// Skips `self` and `cls` since they're not real arguments to the
+/// function — they're the receiver, already represented by the
+/// containing class.
+#[cfg(feature = "codegraph")]
+fn collect_py_params(
+    params_node: tree_sitter::Node,
+    source: &str,
+    function_qname: &str,
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    let cursor = &mut params_node.walk();
+    for child in params_node.children(cursor) {
+        let pname = match child.kind() {
+            "identifier" => Some(text_str(child, source)),
+            "typed_parameter" | "default_parameter" | "typed_default_parameter" => {
+                // Name lives on the first identifier child or in the
+                // `name` field depending on grammar version. Try field
+                // first, fall back to scanning children.
+                child
+                    .child_by_field_name("name")
+                    .map(|n| text_str(n, source))
+                    .or_else(|| {
+                        let cur = &mut child.walk();
+                        for c in child.children(cur) {
+                            if c.kind() == "identifier" {
+                                return Some(text_str(c, source));
+                            }
+                        }
+                        None
+                    })
+            }
+            "list_splat_pattern" | "dictionary_splat_pattern" => {
+                // *args / **kwargs — strip the splat marker.
+                let cur = &mut child.walk();
+                let mut found = None;
+                for c in child.children(cur) {
+                    if c.kind() == "identifier" {
+                        found = Some(text_str(c, source));
+                        break;
+                    }
+                }
+                found
+            }
+            _ => None,
+        };
+
+        let Some(pname) = pname else { continue };
+        if pname.is_empty() || pname == "self" || pname == "cls" {
+            continue;
+        }
+
+        symbols.push(ExtractedSymbol {
+            name: pname.clone(),
+            qualified_name: format!("{function_qname}::{pname}"),
+            label: NodeLabel::Parameter,
+            line_start: child.start_position().row as u32 + 1,
+            line_end: child.end_position().row as u32 + 1,
+            parent: Some(function_qname.to_string()),
+            import_source: None,
+            extends: None,
+            implements: Vec::new(),
+            decorates: None,
+            metadata: std::collections::HashMap::new(),
+        });
+    }
+}
+
+#[cfg(feature = "codegraph")]
+fn text_str(node: tree_sitter::Node, source: &str) -> String {
+    node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
 }
 
 /// Collect all class field names from a class body, including:

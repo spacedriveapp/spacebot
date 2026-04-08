@@ -14,7 +14,7 @@ pub const SCHEMA_VERSION: u32 = 2;
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
 pub const ALL_NODE_LABELS: &[&str] = &[
     "Project", "Package", "Module", "Folder", "File", "Class", "Function",
-    "Method", "Variable", "Interface", "Enum", "Decorator", "Import", "Type",
+    "Method", "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
     "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
     "Record", "Template", "Test", "Community", "Process", "Section",
 ];
@@ -42,7 +42,7 @@ pub fn schema_ddl() -> Vec<String> {
 
     for label in &[
         "Package", "Module", "Folder", "File", "Class", "Function", "Method",
-        "Variable", "Interface", "Enum", "Decorator", "Import", "Type",
+        "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
         "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
         "Record", "Template", "Test",
     ] {
@@ -169,6 +169,12 @@ pub fn schema_ddl() -> Vec<String> {
     for &c in callable {
         pairs.push((c, "Variable"));
     }
+
+    // HAS_PARAMETER: callable → Parameter (and File → Parameter for DEFINES)
+    for &c in callable {
+        pairs.push((c, "Parameter"));
+    }
+    pairs.push(("File", "Parameter"));
 
     // DECORATES: Decorator → targets
     for &t in &["Class", "Function", "Method", "Variable"] {

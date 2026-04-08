@@ -207,6 +207,12 @@ fn walk_rust_node(
                     NodeLabel::Function
                 };
                 symbols.push(sym(file_path, parent_name, &name, label, &node));
+
+                // Extract parameters from the parameters list.
+                let fn_qname = qname(file_path, parent_name, &name);
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    collect_rust_params(params, source, &fn_qname, symbols);
+                }
             }
         }
         "macro_definition" => {
@@ -255,6 +261,52 @@ fn walk_rust_node(
 #[cfg(feature = "codegraph")]
 fn text(node: tree_sitter::Node, source: &str) -> String {
     node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
+}
+
+/// Collect Rust function parameters as Parameter symbols.
+/// Tree-sitter-rust wraps parameters in `parameters` containing:
+/// - `parameter` for `x: Type`
+/// - `self_parameter` for `self`, `&self`, `&mut self` (skipped — receiver)
+/// Each parameter has a `pattern` field that's typically an identifier.
+#[cfg(feature = "codegraph")]
+fn collect_rust_params(
+    params_node: tree_sitter::Node,
+    source: &str,
+    function_qname: &str,
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    let cursor = &mut params_node.walk();
+    for child in params_node.children(cursor) {
+        if child.kind() != "parameter" {
+            continue; // skip self_parameter, commas, parens
+        }
+
+        // Pattern could be an identifier or destructuring pattern.
+        // For now we only handle the identifier case.
+        let pname = child
+            .child_by_field_name("pattern")
+            .filter(|n| n.kind() == "identifier")
+            .map(|n| text(n, source));
+
+        let Some(pname) = pname else { continue };
+        if pname.is_empty() || pname == "_" {
+            continue;
+        }
+
+        symbols.push(ExtractedSymbol {
+            name: pname.clone(),
+            qualified_name: format!("{function_qname}::{pname}"),
+            label: NodeLabel::Parameter,
+            line_start: child.start_position().row as u32 + 1,
+            line_end: child.end_position().row as u32 + 1,
+            parent: Some(function_qname.to_string()),
+            import_source: None,
+            extends: None,
+            implements: Vec::new(),
+            decorates: None,
+            metadata: std::collections::HashMap::new(),
+        });
+    }
 }
 
 #[cfg(feature = "codegraph")]

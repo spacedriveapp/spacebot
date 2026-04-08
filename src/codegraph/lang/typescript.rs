@@ -202,9 +202,10 @@ fn walk_ts_node(
         "function_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
+                let fn_qname = qualified_name(file_path, parent_name, &name);
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
-                    qualified_name: qualified_name(file_path, parent_name, &name),
+                    qualified_name: fn_qname.clone(),
                     label: NodeLabel::Function,
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
@@ -215,6 +216,9 @@ fn walk_ts_node(
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
                 });
+                if let Some(params) = node.child_by_field_name("parameters") {
+                    collect_ts_params(params, source, &fn_qname, symbols);
+                }
             }
         }
         "method_definition" | "public_field_definition" => {
@@ -225,9 +229,10 @@ fn walk_ts_node(
                 } else {
                     NodeLabel::Variable
                 };
+                let fn_qname = qualified_name(file_path, parent_name, &name);
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
-                    qualified_name: qualified_name(file_path, parent_name, &name),
+                    qualified_name: fn_qname.clone(),
                     label,
                     line_start: node.start_position().row as u32 + 1,
                     line_end: node.end_position().row as u32 + 1,
@@ -238,6 +243,12 @@ fn walk_ts_node(
                     decorates: None,
                     metadata: std::collections::HashMap::new(),
                 });
+                // Methods (and only methods) get parameter extraction.
+                if kind == "method_definition"
+                    && let Some(params) = node.child_by_field_name("parameters")
+                {
+                    collect_ts_params(params, source, &fn_qname, symbols);
+                }
             }
         }
         "interface_declaration" => {
@@ -465,6 +476,55 @@ fn walk_ts_children(
     let cursor = &mut node.walk();
     for child in node.children(cursor) {
         walk_ts_node(child, file_path, source, symbols, parent_name);
+    }
+}
+
+/// Collect TS/JS function/method parameters as Parameter symbols.
+/// Tree-sitter-typescript wraps params in `formal_parameters` containing:
+/// - `required_parameter` / `optional_parameter` for `x: T` / `x?: T`
+/// - `rest_parameter` for `...args`
+/// - `identifier` (in some JS contexts) for plain `x`
+///
+/// Each typed parameter has a `pattern` field that's an identifier
+/// (or destructuring — we skip destructured params for now).
+#[cfg(feature = "codegraph")]
+fn collect_ts_params(
+    params_node: tree_sitter::Node,
+    source: &str,
+    function_qname: &str,
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    let cursor = &mut params_node.walk();
+    for child in params_node.children(cursor) {
+        let pname = match child.kind() {
+            "identifier" => Some(node_text(child, source)),
+            "required_parameter" | "optional_parameter" | "rest_parameter" => {
+                child
+                    .child_by_field_name("pattern")
+                    .filter(|n| n.kind() == "identifier")
+                    .map(|n| node_text(n, source))
+            }
+            _ => None,
+        };
+
+        let Some(pname) = pname else { continue };
+        if pname.is_empty() || pname == "this" {
+            continue;
+        }
+
+        symbols.push(ExtractedSymbol {
+            name: pname.clone(),
+            qualified_name: format!("{function_qname}::{pname}"),
+            label: NodeLabel::Parameter,
+            line_start: child.start_position().row as u32 + 1,
+            line_end: child.end_position().row as u32 + 1,
+            parent: Some(function_qname.to_string()),
+            import_source: None,
+            extends: None,
+            implements: Vec::new(),
+            decorates: None,
+            metadata: std::collections::HashMap::new(),
+        });
     }
 }
 

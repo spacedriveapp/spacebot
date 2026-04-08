@@ -212,6 +212,10 @@ fn walk_java_node(
                 let name = text(name_node, source);
                 if !name.is_empty() {
                     symbols.push(sym(file_path, parent_name, &name, NodeLabel::Method, &node));
+                    let fn_qname = qname(file_path, parent_name, &name);
+                    if let Some(params) = node.child_by_field_name("parameters") {
+                        collect_java_params(params, source, &fn_qname, symbols);
+                    }
                 }
             }
         }
@@ -220,6 +224,10 @@ fn walk_java_node(
                 let name = text(name_node, source);
                 if !name.is_empty() {
                     symbols.push(sym(file_path, parent_name, &name, NodeLabel::Method, &node));
+                    let fn_qname = qname(file_path, parent_name, &name);
+                    if let Some(params) = node.child_by_field_name("parameters") {
+                        collect_java_params(params, source, &fn_qname, symbols);
+                    }
                 }
             }
         }
@@ -285,6 +293,45 @@ fn collect_implements(class_node: tree_sitter::Node, source: &str) -> Vec<String
 #[cfg(feature = "codegraph")]
 fn text(node: tree_sitter::Node, source: &str) -> String {
     node.utf8_text(source.as_bytes()).unwrap_or("").to_string()
+}
+
+/// Collect Java method parameters as Parameter symbols.
+/// Tree-sitter-java's `formal_parameters` contains `formal_parameter`
+/// children, each with a `name` field.
+#[cfg(feature = "codegraph")]
+fn collect_java_params(
+    params_node: tree_sitter::Node,
+    source: &str,
+    function_qname: &str,
+    symbols: &mut Vec<ExtractedSymbol>,
+) {
+    let cursor = &mut params_node.walk();
+    for child in params_node.children(cursor) {
+        if child.kind() != "formal_parameter" && child.kind() != "spread_parameter" {
+            continue;
+        }
+        let pname = child
+            .child_by_field_name("name")
+            .map(|n| text(n, source));
+        let Some(pname) = pname else { continue };
+        if pname.is_empty() {
+            continue;
+        }
+
+        symbols.push(ExtractedSymbol {
+            name: pname.clone(),
+            qualified_name: format!("{function_qname}::{pname}"),
+            label: NodeLabel::Parameter,
+            line_start: child.start_position().row as u32 + 1,
+            line_end: child.end_position().row as u32 + 1,
+            parent: Some(function_qname.to_string()),
+            import_source: None,
+            extends: None,
+            implements: Vec::new(),
+            decorates: None,
+            metadata: std::collections::HashMap::new(),
+        });
+    }
 }
 
 #[cfg(feature = "codegraph")]
