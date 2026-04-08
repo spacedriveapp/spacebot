@@ -1001,9 +1001,11 @@ impl Channel {
             "/quiet" | "/observe" => {
                 self.set_response_mode(ResponseMode::Observe).await;
                 self.send_builtin_text(
-                    "observe mode enabled. i'll learn from this conversation but won't respond.".to_string(),
+                    "observe mode enabled. i'll learn from this conversation but won't respond."
+                        .to_string(),
                     "observe",
-                ).await;
+                )
+                .await;
                 return Ok(true);
             }
             "/active" => {
@@ -1033,7 +1035,8 @@ impl Channel {
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /observe: learn from conversation, never respond".to_string(),
-                    "- /mention-only: only respond when @mentioned, replied to, or given a command".to_string(),
+                    "- /mention-only: only respond when @mentioned, replied to, or given a command"
+                        .to_string(),
                     "- /active: normal reply mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
@@ -3734,10 +3737,10 @@ fn is_dm_conversation_id(conv_id: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        ObserveModeFallbackState, compute_listen_mode_invocation, is_dm_conversation_id,
+        ObserveModeFallbackState, classify_conversational_event_summary,
+        compute_listen_mode_invocation, format_conversational_event_summary, is_dm_conversation_id,
         recv_channel_event, should_process_event_for_channel,
         should_send_discord_quiet_mode_ping_ack, should_send_quiet_mode_fallback,
-        classify_conversational_event_summary, format_conversational_event_summary,
     };
     use crate::memory::{MemoryType, WorkingMemoryEventType};
     use crate::{AgentId, ChannelId, InboundMessage, MessageContent, ProcessEvent, ProcessId};
