@@ -8,6 +8,9 @@ import {
 	type CreateWikiPageRequest,
 } from "@/api/client";
 import { BookBookmark, Plus, MagnifyingGlass, ArrowLeft, ClockCounterClockwise, X } from "@phosphor-icons/react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import rehypeRaw from "rehype-raw";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,36 +31,35 @@ const PAGE_TYPE_LABELS: Record<WikiPageType, string> = {
 // ---------------------------------------------------------------------------
 
 function WikiMarkdown({ content, onNavigate }: { content: string; onNavigate: (slug: string) => void }) {
-	// Simple rendering: convert wiki: links and basic markdown to HTML-ish JSX
-	// For production this should use a proper MD renderer (remark/rehype)
-	const parts = content.split(/(\[([^\]]+)\]\(wiki:([^)]+)\))/g);
-	const elements: React.ReactNode[] = [];
-	let i = 0;
-	for (const part of parts) {
-		if (part.startsWith("[") && part.includes("](wiki:")) {
-			const match = part.match(/\[([^\]]+)\]\(wiki:([^)]+)\)/);
-			if (match) {
-				elements.push(
-					<button
-						key={i++}
-						onClick={() => onNavigate(match[2])}
-						className="text-accent underline underline-offset-2 hover:opacity-80"
-					>
-						{match[1]}
-					</button>
-				);
-				continue;
-			}
-		}
-		if (!part.match(/^\[([^\]]+)\]\(wiki:/) && !part.match(/^[^\]]+$\]\(wiki:/)) {
-			elements.push(<span key={i++}>{part}</span>);
-		}
-	}
-
 	return (
-		<pre className="whitespace-pre-wrap font-sans text-sm leading-relaxed text-ink">
-			{elements}
-		</pre>
+		<div className="markdown">
+			<ReactMarkdown
+				remarkPlugins={[remarkGfm]}
+				rehypePlugins={[rehypeRaw]}
+				components={{
+					a: ({ children, href, ...props }) => {
+						if (href?.startsWith("wiki:")) {
+							const slug = href.slice(5);
+							return (
+								<button
+									onClick={() => onNavigate(slug)}
+									className="text-accent underline underline-offset-2 hover:opacity-80"
+								>
+									{children}
+								</button>
+							);
+						}
+						return (
+							<a href={href} target="_blank" rel="noopener noreferrer" {...props}>
+								{children}
+							</a>
+						);
+					},
+				}}
+			>
+				{content}
+			</ReactMarkdown>
+		</div>
 	);
 }
 

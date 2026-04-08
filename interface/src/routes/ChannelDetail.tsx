@@ -1,11 +1,13 @@
-import {useCallback, useEffect, useRef, useState} from "react";
+import {useCallback, useEffect, useMemo, useRef, useState} from "react";
 import {Link} from "@tanstack/react-router";
+import {useQuery} from "@tanstack/react-query";
 import {
 	api,
 	type ChannelInfo,
 	type TimelineItem,
 	type TimelineBranchRun,
 	type TimelineWorkerRun,
+	type TranscriptStep,
 } from "@/api/client";
 import {
 	isOpenCodeWorker,
@@ -13,9 +15,11 @@ import {
 	type ActiveWorker,
 	type ActiveBranch,
 } from "@/hooks/useChannelLiveState";
+import {useLiveContext} from "@/hooks/useLiveContext";
 import {LiveDuration} from "@/components/LiveDuration";
 import {Markdown} from "@/components/Markdown";
 import {PromptInspectModal} from "@/components/PromptInspectModal";
+import {pairTranscriptSteps, ToolCall} from "@/components/ToolCall";
 import {formatTimestamp, platformIcon, platformColor} from "@/lib/format";
 import {Button} from "@spacedrive/primitives";
 import {X, Code} from "@phosphor-icons/react";
@@ -47,11 +51,65 @@ function CancelButton({
 				setCancelling(true);
 				onClick();
 			}}
-			className={`h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-red-500/15 hover:text-red-400 ${className ?? ""}`}
+			className={`h-7 w-7 flex-shrink-0 text-ink-faint/50 hover:bg-status-error/15 hover:text-status-error ${className ?? ""}`}
 			title="Cancel"
 		>
 			<X className="h-3.5 w-3.5" />
 		</Button>
+	);
+}
+
+function WorkerTranscriptView({
+	workerId,
+	agentId,
+	isLive,
+	liveTranscript,
+}: {
+	workerId: string;
+	agentId: string;
+	isLive: boolean;
+	liveTranscript?: TranscriptStep[];
+}) {
+	const {data: detailData} = useQuery({
+		queryKey: ["worker-detail", agentId, workerId],
+		queryFn: () => api.workerDetail(agentId, workerId).catch(() => null),
+	});
+
+	const transcript = useMemo(() => {
+		if (isLive) {
+			return liveTranscript && liveTranscript.length > 0
+				? liveTranscript
+				: (detailData?.transcript ?? null);
+		}
+		return detailData?.transcript ?? null;
+	}, [isLive, liveTranscript, detailData]);
+
+	if (!transcript || transcript.length === 0) {
+		if (isLive) {
+			return (
+				<div className="flex items-center gap-2 py-2 pl-4 text-tiny text-ink-faint">
+					<span className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+					Waiting for first tool call...
+				</div>
+			);
+		}
+		return null;
+	}
+
+	const items = pairTranscriptSteps(transcript);
+
+	return (
+		<div className="mt-2 flex flex-col gap-2 pl-4">
+			{items.map((item, index) =>
+				item.kind === "text" ? (
+					<div key={`text-${index}`} className="text-xs text-ink-dull">
+						<Markdown>{item.text.replace(/ {3,}/g, "  ")}</Markdown>
+					</div>
+				) : (
+					<ToolCall key={item.pair.id} pair={item.pair} />
+				),
+			)}
+		</div>
 	);
 }
 
@@ -71,10 +129,10 @@ function LiveBranchRunItem({
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<div className="rounded-md bg-violet-500/10 px-3 py-2">
+				<div className="rounded-md bg-accent/10 px-3 py-2">
 					<div className="flex min-w-0 items-center gap-2">
-						<div className="h-2 w-2 animate-pulse rounded-full bg-violet-400" />
-						<span className="text-sm font-medium text-violet-300">Branch</span>
+						<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+						<span className="text-sm font-medium text-accent-faint">Branch</span>
 						<span className="min-w-0 flex-1 truncate text-sm text-ink-dull">
 							{item.description}
 						</span>
@@ -92,7 +150,7 @@ function LiveBranchRunItem({
 						{displayTool && (
 							<span
 								className={
-									live.currentTool ? "text-violet-400/70" : "text-violet-400/40"
+									live.currentTool ? "text-accent/70" : "text-accent/40"
 								}
 							>
 								{displayTool}
@@ -119,6 +177,7 @@ function LiveWorkerRunItem({
 }) {
 	const [expanded, setExpanded] = useState(true);
 	const oc = isOpenCodeWorker(live);
+	const {liveTranscripts} = useLiveContext();
 
 	return (
 		<div className="flex gap-3 px-3 py-2">
@@ -129,8 +188,8 @@ function LiveWorkerRunItem({
 				<div
 					className={`w-full rounded-md px-3 py-2 transition-colors ${
 						oc
-							? "bg-zinc-500/10 hover:bg-zinc-500/15"
-							: "bg-amber-500/10 hover:bg-amber-500/15"
+							? "bg-ink-faint/10 hover:bg-ink-faint/15"
+							: "bg-status-warning/10 hover:bg-status-warning/15"
 					}`}
 				>
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
@@ -141,10 +200,10 @@ function LiveWorkerRunItem({
 						>
 							<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 								<div
-									className={`h-2 w-2 animate-pulse rounded-full ${oc ? "bg-zinc-400" : "bg-amber-400"}`}
+									className={`h-2 w-2 animate-pulse rounded-full ${oc ? "bg-ink-faint" : "bg-status-warning"}`}
 								/>
 								<span
-									className={`text-sm font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}
+									className={`text-sm font-medium ${oc ? "text-ink-dull" : "text-status-warning"}`}
 								>
 									Worker
 								</span>
@@ -166,8 +225,8 @@ function LiveWorkerRunItem({
 							search={{worker: item.id}}
 							className={`flex-shrink-0 rounded border px-1.5 py-0.5 text-tiny font-medium transition-colors ${
 								oc
-									? "border-zinc-400/30 text-zinc-300 hover:border-zinc-400/60 hover:bg-zinc-500/15"
-									: "border-amber-400/30 text-amber-300 hover:border-amber-400/60 hover:bg-amber-500/15"
+									? "border-ink-faint/30 text-ink-dull hover:border-ink-faint/60 hover:bg-ink-faint/15"
+									: "border-status-warning/30 text-status-warning hover:border-status-warning/60 hover:bg-status-warning/15"
 							}`}
 						>
 							Open
@@ -182,18 +241,26 @@ function LiveWorkerRunItem({
 					</div>
 				</div>
 				{expanded && (
-					<div className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden pl-4 text-tiny text-ink-faint">
-						<LiveDuration startMs={live.startedAt} />
-						<span className="truncate">{live.status}</span>
-						{live.currentTool && (
-							<span
-								className={`truncate ${oc ? "text-zinc-400/70" : "text-amber-400/70"}`}
-							>
-								{live.currentTool}
-							</span>
-						)}
-						{live.toolCalls > 0 && <span>{live.toolCalls} tool calls</span>}
-					</div>
+					<>
+						<div className="mt-1 flex min-w-0 items-center gap-3 overflow-hidden pl-4 text-tiny text-ink-faint">
+							<LiveDuration startMs={live.startedAt} />
+							<span className="truncate">{live.status}</span>
+							{live.currentTool && (
+								<span
+									className={`truncate ${oc ? "text-ink-faint/70" : "text-status-warning/70"}`}
+								>
+									{live.currentTool}
+								</span>
+							)}
+							{live.toolCalls > 0 && <span>{live.toolCalls} tool calls</span>}
+						</div>
+						<WorkerTranscriptView
+							workerId={item.id}
+							agentId={agentId}
+							isLive
+							liveTranscript={liveTranscripts[item.id]}
+						/>
+					</>
 				)}
 			</div>
 		</div>
@@ -201,7 +268,7 @@ function LiveWorkerRunItem({
 }
 
 function BranchRunItem({item}: {item: TimelineBranchRun}) {
-	const [expanded, setExpanded] = useState(false);
+	const [expanded, setExpanded] = useState(true);
 
 	return (
 		<div className="flex gap-3 px-3 py-2">
@@ -209,16 +276,15 @@ function BranchRunItem({item}: {item: TimelineBranchRun}) {
 				{formatTimestamp(new Date(item.started_at).getTime())}
 			</span>
 			<div className="min-w-0 flex-1">
-				<Button
+				<button
 					type="button"
 					onClick={() => setExpanded(!expanded)}
-					variant="ghost"
-					className="h-auto w-full justify-start rounded-md bg-violet-500/10 px-3 py-2 text-left hover:bg-violet-500/15"
+					className="w-full rounded-md bg-accent/10 px-3 py-2 text-left hover:bg-accent/15"
 				>
 					<div className="flex min-w-0 items-start gap-2">
 						<span className="inline-flex flex-shrink-0 items-center gap-2 self-start">
-							<span className="h-2 w-2 rounded-full bg-violet-400/50" />
-							<span className="text-sm font-medium text-violet-300">
+							<span className="h-2 w-2 rounded-full bg-accent/50" />
+							<span className="text-sm font-medium text-accent-faint">
 								Branch
 							</span>
 						</span>
@@ -235,11 +301,11 @@ function BranchRunItem({item}: {item: TimelineBranchRun}) {
 							</span>
 						)}
 					</div>
-				</Button>
+				</button>
 				{expanded && item.conclusion && (
-					<div className="mt-1 rounded-md border border-violet-500/10 bg-violet-500/5 px-3 py-2">
+					<div className="mt-1 rounded-md border border-accent/10 bg-accent/5 px-3 py-2">
 						<div className="text-sm text-ink-dull">
-							<Markdown className="whitespace-pre-wrap break-words">
+							<Markdown className="break-words">
 								{item.conclusion}
 							</Markdown>
 						</div>
@@ -257,7 +323,7 @@ function WorkerRunItem({
 	item: TimelineWorkerRun;
 	agentId: string;
 }) {
-	const [expanded, setExpanded] = useState(false);
+	const [expanded, setExpanded] = useState(true);
 	const oc = isOpenCodeWorker({task: item.task});
 
 	return (
@@ -269,24 +335,22 @@ function WorkerRunItem({
 				<div
 					className={`w-full rounded-md px-3 py-2 transition-colors ${
 						oc
-							? "bg-zinc-500/10 hover:bg-zinc-500/15"
-							: "bg-amber-500/10 hover:bg-amber-500/15"
+							? "bg-ink-faint/10 hover:bg-ink-faint/15"
+							: "bg-status-warning/10 hover:bg-status-warning/15"
 					}`}
 				>
 					<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 						<button
 							type="button"
-							onClick={() => {
-								if (item.result) setExpanded(!expanded);
-							}}
+							onClick={() => setExpanded(!expanded)}
 							className="min-w-0 flex-1 text-left"
 						>
 							<div className="flex min-w-0 items-center gap-2 overflow-hidden">
 								<div
-									className={`h-2 w-2 rounded-full ${oc ? "bg-zinc-400/50" : "bg-amber-400/50"}`}
+									className={`h-2 w-2 rounded-full ${oc ? "bg-ink-faint/50" : "bg-status-warning/50"}`}
 								/>
 								<span
-									className={`text-sm font-medium ${oc ? "text-zinc-300" : "text-amber-300"}`}
+									className={`text-sm font-medium ${oc ? "text-ink-dull" : "text-status-warning"}`}
 								>
 									Worker
 								</span>
@@ -297,11 +361,9 @@ function WorkerRunItem({
 								>
 									{item.task}
 								</span>
-								{item.result && (
-									<span className="flex-shrink-0 text-tiny leading-5 text-ink-faint">
-										{expanded ? "▾" : "▸"}
-									</span>
-								)}
+								<span className="flex-shrink-0 text-tiny leading-5 text-ink-faint">
+									{expanded ? "▾" : "▸"}
+								</span>
 							</div>
 						</button>
 						<Link
@@ -310,28 +372,37 @@ function WorkerRunItem({
 							search={{worker: item.id}}
 							className={`flex-shrink-0 rounded border px-1.5 py-0.5 text-tiny font-medium transition-colors ${
 								oc
-									? "border-zinc-400/30 text-zinc-300 hover:border-zinc-400/60 hover:bg-zinc-500/15"
-									: "border-amber-400/30 text-amber-300 hover:border-amber-400/60 hover:bg-amber-500/15"
+									? "border-ink-faint/30 text-ink-dull hover:border-ink-faint/60 hover:bg-ink-faint/15"
+									: "border-status-warning/30 text-status-warning hover:border-status-warning/60 hover:bg-status-warning/15"
 							}`}
 						>
 							Open
 						</Link>
 					</div>
 				</div>
-				{expanded && item.result && (
-					<div
-						className={`mt-1 rounded-md border px-3 py-2 ${
-							oc
-								? "border-zinc-500/10 bg-zinc-500/5"
-								: "border-amber-500/10 bg-amber-500/5"
-						}`}
-					>
-						<div className="text-sm text-ink-dull">
-							<Markdown className="whitespace-pre-wrap break-words">
-								{item.result}
-							</Markdown>
-						</div>
-					</div>
+				{expanded && (
+					<>
+						<WorkerTranscriptView
+							workerId={item.id}
+							agentId={agentId}
+							isLive={false}
+						/>
+						{item.result && (
+							<div
+								className={`mt-2 rounded-md border px-3 py-2 ${
+									oc
+										? "border-ink-faint/10 bg-ink-faint/5"
+										: "border-status-warning/10 bg-status-warning/5"
+								}`}
+							>
+								<div className="text-sm text-ink-dull">
+									<Markdown className="break-words">
+										{item.result}
+									</Markdown>
+								</div>
+							</div>
+						)}
+					</>
 				)}
 			</div>
 		</div>
@@ -365,7 +436,7 @@ function TimelineEntry({
 					<div className="min-w-0 flex-1">
 						<span
 							className={`text-sm font-medium ${
-								item.role === "user" ? "text-accent-faint" : "text-green-400"
+								item.role === "user" ? "text-accent-faint" : "text-status-success"
 							}`}
 						>
 							{item.role === "user"
@@ -496,8 +567,8 @@ export function ChannelDetail({
 							<div className="flex items-center gap-2">
 								{activeWorkerCount > 0 && (
 									<div className="flex items-center gap-1.5">
-										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
-										<span className="text-tiny text-amber-300">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-status-warning" />
+										<span className="text-tiny text-status-warning">
 											{activeWorkerCount} worker
 											{activeWorkerCount !== 1 ? "s" : ""}
 										</span>
@@ -505,8 +576,8 @@ export function ChannelDetail({
 								)}
 								{activeBranchCount > 0 && (
 									<div className="flex items-center gap-1.5">
-										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-violet-400" />
-										<span className="text-tiny text-violet-300">
+										<div className="h-1.5 w-1.5 animate-pulse rounded-full bg-accent" />
+										<span className="text-tiny text-accent-faint">
 											{activeBranchCount} branch
 											{activeBranchCount !== 1 ? "es" : ""}
 										</span>
@@ -576,7 +647,7 @@ export function ChannelDetail({
 									{formatTimestamp(Date.now())}
 								</span>
 								<div className="flex items-center gap-1.5">
-									<span className="text-sm font-medium text-green-400">
+									<span className="text-sm font-medium text-status-success">
 										bot
 									</span>
 									<span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-ink-faint" />

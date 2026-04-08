@@ -459,6 +459,101 @@ async fn release_task_reservation(state: &ChannelState, task: &str) {
     state.reserved_tasks.write().await.remove(&normalized);
 }
 
+/// Build pre-rendered project context for injection into worker/channel prompts.
+///
+/// Fetches all active projects with their repos and worktrees, converts them
+/// to prompt-friendly structs, and renders via the projects_context template.
+/// Returns `None` if no projects exist or if rendering fails.
+pub async fn build_project_context(
+    deps: &AgentDeps,
+    prompt_engine: &crate::prompts::engine::PromptEngine,
+) -> Option<String> {
+    use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
+
+    let store = &deps.project_store;
+    let projects = match store
+        .list_projects(Some(crate::projects::ProjectStatus::Active))
+        .await
+    {
+        Ok(projects) => projects,
+        Err(error) => {
+            tracing::warn!(%error, "failed to load projects for prompt injection");
+            return None;
+        }
+    };
+
+    if projects.is_empty() {
+        return None;
+    }
+
+    let mut contexts = Vec::with_capacity(projects.len());
+    for project in &projects {
+        let repos = match store.list_repos(&project.id).await {
+            Ok(repos) => repos,
+            Err(error) => {
+                tracing::warn!(%error, project_id = %project.id, "failed to load repos for project");
+                Vec::new()
+            }
+        };
+
+        let worktrees = match store.list_worktrees_with_repos(&project.id).await {
+            Ok(worktrees) => worktrees,
+            Err(error) => {
+                tracing::warn!(%error, project_id = %project.id, "failed to load worktrees for project");
+                Vec::new()
+            }
+        };
+
+        contexts.push(ProjectContext {
+            name: project.name.clone(),
+            root_path: project.root_path.clone(),
+            description: if project.description.is_empty() {
+                None
+            } else {
+                Some(project.description.clone())
+            },
+            tags: project.tags.clone(),
+            repos: repos
+                .into_iter()
+                .map(|repo| ProjectRepoContext {
+                    name: repo.name.clone(),
+                    path: repo.path.clone(),
+                    default_branch: repo.default_branch.clone(),
+                    remote_url: if repo.remote_url.is_empty() {
+                        None
+                    } else {
+                        Some(repo.remote_url.clone())
+                    },
+                })
+                .collect(),
+            worktrees: worktrees
+                .into_iter()
+                .map(|wt| ProjectWorktreeContext {
+                    name: wt.worktree.name.clone(),
+                    path: wt.worktree.path.clone(),
+                    branch: wt.worktree.branch.clone(),
+                    repo_name: wt.repo_name.clone(),
+                })
+                .collect(),
+        });
+    }
+
+    match prompt_engine.render_projects_context(contexts) {
+        Ok(rendered) => {
+            let rendered = rendered.trim().to_string();
+            if rendered.is_empty() {
+                None
+            } else {
+                Some(rendered)
+            }
+        }
+        Err(error) => {
+            tracing::warn!(%error, "failed to render projects context");
+            None
+        }
+    }
+}
+
 /// Spawn a worker from a ChannelState. Used by the SpawnWorkerTool.
 pub async fn spawn_worker_from_state(
     state: &ChannelState,
@@ -511,6 +606,7 @@ async fn spawn_worker_inner(
     let routing = rc.routing.load();
     let model_name = routing.resolve(ProcessType::Worker, None).to_string();
     let tool_use_enforcement = rc.tool_use_enforcement.load();
+    let project_context = build_project_context(&state.deps, &prompt_engine).await;
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &rc.instance_dir.display().to_string(),
@@ -523,6 +619,7 @@ async fn spawn_worker_inner(
             browser_config.persist_session,
             worker_status_text,
             worker_context.wiki_write && state.deps.wiki_store.is_some(),
+            project_context,
         )
         .map_err(|e| AgentError::Other(anyhow::anyhow!("{e}")))?;
     let skills = rc.skills.load();
@@ -1187,6 +1284,7 @@ pub async fn resume_idle_worker_into_state(
             let routing = rc.routing.load();
             let model_name = routing.resolve(ProcessType::Worker, None).to_string();
             let tool_use_enforcement = rc.tool_use_enforcement.load();
+            let project_context = build_project_context(&state.deps, &prompt_engine).await;
             let system_prompt = prompt_engine
                 .render_worker_prompt(
                     &rc.instance_dir.display().to_string(),
@@ -1199,6 +1297,7 @@ pub async fn resume_idle_worker_into_state(
                     browser_config.persist_session,
                     worker_status_text,
                     false, // resumed workers use original context; wiki not re-injected
+                    project_context,
                 )
                 .and_then(|prompt| {
                     prompt_engine.maybe_append_tool_use_enforcement(

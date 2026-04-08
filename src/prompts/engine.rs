@@ -311,6 +311,7 @@ impl PromptEngine {
         browser_persist_session: bool,
         status_text: Option<String>,
         wiki_enabled: bool,
+        project_context: Option<String>,
     ) -> Result<String> {
         self.render(
             "worker",
@@ -325,6 +326,7 @@ impl PromptEngine {
                 browser_persist_session => browser_persist_session,
                 status_text => status_text,
                 wiki_enabled => wiki_enabled,
+                project_context => project_context,
             },
         )
     }

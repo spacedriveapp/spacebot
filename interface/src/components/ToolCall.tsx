@@ -981,8 +981,8 @@ const STATUS_ICONS: Record<ToolCallStatus, string> = {
 
 const STATUS_COLORS: Record<ToolCallStatus, string> = {
 	running: "text-accent",
-	completed: "text-emerald-500",
-	error: "text-red-400",
+	completed: "text-status-success",
+	error: "text-status-error",
 };
 
 /** Human-readable tool name: browser_navigate → Navigate */
@@ -1031,7 +1031,7 @@ export function ToolCall({pair}: {pair: ToolCallPair}) {
 		<div
 			className={cx(
 				"rounded-md border bg-app-dark-box/30",
-				pair.status === "error" ? "border-red-500/30" : "border-app-line/50",
+				pair.status === "error" ? "border-status-error/30" : "border-app-line/50",
 			)}
 		>
 			{/* Header — always visible */}

@@ -29,6 +29,11 @@ type StatusFilter = (typeof STATUS_FILTERS)[number];
 
 const KNOWN_STATUSES = new Set(["running", "idle", "done", "failed"]);
 
+/** Collapse runs of 3+ spaces to 2, preventing Markdown 4-space code blocks. */
+function stripExcessWhitespace(text: string): string {
+	return text.replace(/ {3,}/g, "  ");
+}
+
 function normalizeStatus(status: string): string {
 	if (KNOWN_STATUSES.has(status)) return status;
 	// Legacy rows where set_status text overwrote the state enum.
@@ -594,8 +599,8 @@ export function WorkerDetail({
 										transition={{duration: 0.2, ease: "easeOut"}}
 									>
 										{item.kind === "text" ? (
-											<div className="text-xs text-ink">
-												<Markdown>{item.text}</Markdown>
+											<div className="text-xs text-ink-dull">
+												<Markdown>{stripExcessWhitespace(item.text)}</Markdown>
 											</div>
 										) : (
 											<ToolCall pair={item.pair} />

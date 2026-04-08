@@ -2482,9 +2482,9 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
-    let usage_accumulator = std::sync::Arc::new(
-        tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-    );
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone())
@@ -2511,7 +2511,10 @@ pub async fn generate_bulletin(deps: &AgentDeps, logger: &CortexLogger) -> bool 
     let result = agent.prompt(&synthesis_prompt).await;
     // Flush cortex token usage.
     let acc = usage_accumulator.lock().await;
-    if let Err(error) = acc.flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None).await {
+    if let Err(error) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
         tracing::warn!(%error, "failed to flush cortex token usage");
     }
     drop(acc);
@@ -2660,9 +2663,9 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
-    let usage_accumulator = std::sync::Arc::new(
-        tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-    );
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone())
@@ -2684,7 +2687,10 @@ pub async fn generate_knowledge_synthesis(deps: &AgentDeps, logger: &CortexLogge
 
     let result = agent.prompt(&user_prompt).await;
     let acc = usage_accumulator.lock().await;
-    if let Err(error) = acc.flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None).await {
+    if let Err(error) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
         tracing::warn!(%error, "failed to flush cortex token usage");
     }
     drop(acc);
@@ -2921,9 +2927,9 @@ pub async fn maybe_synthesize_intraday_batch(
     // Use a short one-shot LLM call — no tools, no hooks.
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
-    let usage_accumulator = std::sync::Arc::new(
-        tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-    );
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone())
@@ -2936,7 +2942,10 @@ pub async fn maybe_synthesize_intraday_batch(
 
     let synthesis = agent.prompt(&prompt).await;
     let acc = usage_accumulator.lock().await;
-    if let Err(e) = acc.flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None).await {
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
         tracing::warn!(error = %e, "failed to flush cortex token usage");
     }
     drop(acc);
@@ -3073,9 +3082,9 @@ pub async fn maybe_synthesize_daily_summary(
     // One-shot LLM call.
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
-    let usage_accumulator = std::sync::Arc::new(
-        tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-    );
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone())
@@ -3088,7 +3097,10 @@ pub async fn maybe_synthesize_daily_summary(
 
     let summary = agent.prompt(&prompt).await;
     let acc = usage_accumulator.lock().await;
-    if let Err(e) = acc.flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None).await {
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
         tracing::warn!(error = %e, "failed to flush cortex token usage");
     }
     drop(acc);
@@ -3234,9 +3246,9 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
 
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Cortex, None).to_string();
-    let usage_accumulator = std::sync::Arc::new(
-        tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-    );
+    let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+        crate::llm::usage::UsageAccumulator::new(),
+    ));
     let model = SpacebotModel::make(&deps.llm_manager, &model_name)
         .with_context(&*deps.agent_id, "cortex")
         .with_routing((**routing).clone())
@@ -3251,7 +3263,10 @@ async fn generate_profile(deps: &AgentDeps, logger: &CortexLogger) {
         .prompt_typed::<ProfileLlmResponse>(&synthesis_prompt)
         .await;
     let acc = usage_accumulator.lock().await;
-    if let Err(e) = acc.flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None).await {
+    if let Err(e) = acc
+        .flush(&deps.sqlite_pool, &deps.agent_id, "cortex", None)
+        .await
+    {
         tracing::warn!(error = %e, "failed to flush cortex token usage");
     }
     drop(acc);
@@ -3406,6 +3421,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     let routing = deps.runtime_config.routing.load();
     let model_name = routing.resolve(ProcessType::Worker, None).to_string();
     let tool_use_enforcement = deps.runtime_config.tool_use_enforcement.load();
+    let project_context =
+        crate::agent::channel_dispatch::build_project_context(deps, &prompt_engine).await;
     let worker_system_prompt = prompt_engine
         .render_worker_prompt(
             &deps.runtime_config.instance_dir.display().to_string(),
@@ -3417,7 +3434,8 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &tool_secret_names,
             browser_config.persist_session,
             worker_status_text,
-            false, // cortex task workers don't get wiki tools
+            deps.wiki_store.is_some(),
+            project_context,
         )
         .and_then(|prompt| {
             prompt_engine.maybe_append_tool_use_enforcement(
@@ -3470,7 +3488,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
         logs_dir,
         Vec::new(), // no initial history for cortex task workers
         crate::conversation::settings::WorkerMemoryMode::None,
-        false, // cortex task workers don't get wiki tools
+        deps.wiki_store.is_some(),
         None, // No model override for cortex workers
     );
 

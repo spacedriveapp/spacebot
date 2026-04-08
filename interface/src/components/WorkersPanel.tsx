@@ -1,7 +1,7 @@
 import {useState, useMemo, useCallback} from "react";
 import {useQuery} from "@tanstack/react-query";
 import {useQueries} from "@tanstack/react-query";
-import {Queue, MagnifyingGlass, CaretLeft, Copy, Check} from "@phosphor-icons/react";
+import {Queue, MagnifyingGlass, CaretLeft, Copy, Check, XCircle} from "@phosphor-icons/react";
 import {
 	CircleButton,
 	PopoverRoot,
@@ -59,6 +59,7 @@ export function WorkersPanelContent() {
 	const [selectedWorker, setSelectedWorker] = useState<{
 		workerId: string;
 		agentId: string;
+		channelId?: string;
 	} | null>(null);
 
 	const {activeWorkers, liveTranscripts, liveOpenCodeParts} = useLiveContext();
@@ -96,6 +97,7 @@ export function WorkersPanelContent() {
 			worker_type: string;
 			started_at: string;
 			completed_at: string | null;
+			channel_id?: string | null;
 			tool_calls: number;
 			agentId: string;
 			agentName: string;
@@ -106,7 +108,14 @@ export function WorkersPanelContent() {
 			if (!data) continue;
 			for (const w of data.workers) {
 				merged.push({
-					...w,
+					id: w.id,
+					task: w.task,
+					status: w.status,
+					worker_type: w.worker_type,
+					started_at: w.started_at,
+					completed_at: w.completed_at ?? null,
+					channel_id: w.channel_id,
+					tool_calls: w.tool_calls,
 					agentId: agents[i].id,
 					agentName: agentNameMap[agents[i].id] ?? agents[i].id,
 				});
@@ -209,7 +218,7 @@ export function WorkersPanelContent() {
 									isLive
 									toolCalls={w.toolCalls}
 									onClick={() =>
-										setSelectedWorker({workerId: w.id, agentId: w.agentId})
+										setSelectedWorker({workerId: w.id, agentId: w.agentId, channelId: w.channelId})
 									}
 								/>
 							))
@@ -231,7 +240,7 @@ export function WorkersPanelContent() {
 								isLive={w.id in activeWorkers}
 								toolCalls={w.tool_calls}
 								onClick={() =>
-									setSelectedWorker({workerId: w.id, agentId: w.agentId})
+									setSelectedWorker({workerId: w.id, agentId: w.agentId, channelId: activeWorkers[w.id]?.channelId ?? w.channel_id ?? undefined})
 								}
 							/>
 						))
@@ -248,6 +257,7 @@ export function WorkersPanelContent() {
 					<WorkerDetailInline
 						workerId={selectedWorker.workerId}
 						agentId={selectedWorker.agentId}
+						channelId={selectedWorker.channelId}
 						liveWorker={activeWorkers[selectedWorker.workerId] as LiveWorker | undefined}
 						liveTranscript={liveTranscripts[selectedWorker.workerId]}
 						liveOpenCodeParts={liveOpenCodeParts[selectedWorker.workerId]}
@@ -335,6 +345,7 @@ function WorkerPanelRow({
 function WorkerDetailInline({
 	workerId,
 	agentId,
+	channelId,
 	liveWorker,
 	liveTranscript,
 	liveOpenCodeParts,
@@ -342,6 +353,7 @@ function WorkerDetailInline({
 }: {
 	workerId: string;
 	agentId: string;
+	channelId?: string;
 	liveWorker?: LiveWorker;
 	liveTranscript?: TranscriptStep[];
 	liveOpenCodeParts?: Map<string, OpenCodePart>;
@@ -378,6 +390,23 @@ function WorkerDetailInline({
 	}, [detailData, liveWorker]);
 
 	const [copied, setCopied] = useState(false);
+	const [cancelling, setCancelling] = useState(false);
+
+	const isActive = !!liveWorker;
+	const resolvedChannelId = channelId ?? detail?.channel_id ?? undefined;
+	const canCancel = isActive && !!resolvedChannelId;
+
+	const handleCancel = useCallback(async () => {
+		if (!resolvedChannelId || cancelling) return;
+		setCancelling(true);
+		try {
+			await api.cancelProcess(resolvedChannelId, "worker", workerId);
+		} catch (e) {
+			console.error("Failed to cancel worker:", e);
+		} finally {
+			setCancelling(false);
+		}
+	}, [resolvedChannelId, workerId, cancelling]);
 
 	const copyTranscript = useCallback(() => {
 		const steps = liveTranscript ?? detail?.transcript;
@@ -408,21 +437,29 @@ function WorkerDetailInline({
 	return (
 		<>
 			{/* Back bar */}
-			<div className="flex items-center border-b border-app-line">
-				<button
+			<div className="flex items-center gap-1 border-b border-app-line px-2 py-1.5">
+				<CircleButton
+					icon={CaretLeft}
+					title="Back to workers"
 					onClick={onBack}
-					className="flex flex-1 items-center gap-1.5 px-3 py-2 text-xs font-medium text-ink-dull transition-colors hover:text-ink"
-				>
-					<CaretLeft className="h-3.5 w-3.5" />
-					Workers
-				</button>
+					variant="default"
+				/>
+				<div className="flex-1" />
+				{canCancel && (
+					<CircleButton
+						icon={XCircle}
+						title="Cancel worker"
+						onClick={handleCancel}
+						variant="default"
+						disabled={cancelling}
+					/>
+				)}
 				<CircleButton
 					icon={copied ? Check : Copy}
 					title="Copy transcript"
 					onClick={copyTranscript}
 					variant="default"
 				/>
-				<div className="w-2" />
 			</div>
 
 			{!detail ? (

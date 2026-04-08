@@ -425,6 +425,8 @@ impl Tool for DetachedSpawnWorkerTool {
             .resolve(crate::ProcessType::Worker, None)
             .to_string();
         let tool_use_enforcement = rc.tool_use_enforcement.load();
+        let project_context =
+            crate::agent::channel_dispatch::build_project_context(&self.deps, &prompt_engine).await;
         let worker_system_prompt = prompt_engine
             .render_worker_prompt(
                 &rc.instance_dir.display().to_string(),
@@ -437,6 +439,7 @@ impl Tool for DetachedSpawnWorkerTool {
                 browser_config.persist_session,
                 worker_status_text,
                 false, // detached workers don't get wiki tools
+                project_context,
             )
             .and_then(|prompt| {
                 prompt_engine.maybe_append_tool_use_enforcement(
@@ -463,7 +466,7 @@ impl Tool for DetachedSpawnWorkerTool {
             Vec::new(), // no initial history for detached workers
             crate::conversation::settings::WorkerMemoryMode::None,
             false, // detached workers don't get wiki tools by default
-            None, // No model override for detached workers
+            None,  // No model override for detached workers
         );
 
         let (worker, _input_tx) = worker;

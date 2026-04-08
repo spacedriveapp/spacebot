@@ -151,13 +151,13 @@ pub use spawn_worker::{
 pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCreateTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
+pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use wiki_create::{WikiCreateArgs, WikiCreateError, WikiCreateOutput, WikiCreateTool};
 pub use wiki_edit::{WikiEditArgs, WikiEditError, WikiEditOutput, WikiEditTool};
 pub use wiki_history::{WikiHistoryArgs, WikiHistoryError, WikiHistoryOutput, WikiHistoryTool};
 pub use wiki_list::{WikiListArgs, WikiListError, WikiListOutput, WikiListTool};
 pub use wiki_read::{WikiReadArgs, WikiReadError, WikiReadOutput, WikiReadTool};
 pub use wiki_search::{WikiSearchArgs, WikiSearchError, WikiSearchOutput, WikiSearchTool};
-pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
 };
@@ -620,11 +620,7 @@ pub fn create_branch_tool_server(
         memory_save = memory_save.with_contract_state(contract_state.clone());
     }
 
-    let mut task_create = TaskCreateTool::new(
-        task_store.clone(),
-        agent_id.to_string(),
-        "branch",
-    );
+    let mut task_create = TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "branch");
     if let Some(ref api) = api_state {
         task_create = task_create.with_api_state(api.clone());
     }
@@ -640,12 +636,19 @@ pub fn create_branch_tool_server(
         .tool(task_create)
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
-        .tool(FileReadTool::new(runtime_config.workspace_dir.clone(), sandbox));
+        .tool(FileReadTool::new(
+            runtime_config.workspace_dir.clone(),
+            sandbox,
+        ));
 
     if let Some(wiki) = wiki_store {
         let author_id = agent_id.to_string();
         server = server
-            .tool(WikiCreateTool::new(wiki.clone(), "agent", author_id.clone()))
+            .tool(WikiCreateTool::new(
+                wiki.clone(),
+                "agent",
+                author_id.clone(),
+            ))
             .tool(WikiEditTool::new(wiki.clone(), "agent", author_id.clone()))
             .tool(WikiReadTool::new(wiki.clone()))
             .tool(WikiListTool::new(wiki.clone()))
@@ -752,12 +755,12 @@ pub fn create_worker_tool_server(
             server = server
                 .tool(WikiCreateTool::new(
                     store.clone(),
-                    "worker".to_string(),
+                    "agent".to_string(),
                     agent_id.to_string(),
                 ))
                 .tool(WikiEditTool::new(
                     store.clone(),
-                    "worker".to_string(),
+                    "agent".to_string(),
                     agent_id.to_string(),
                 ))
                 .tool(WikiReadTool::new(store.clone()))
@@ -846,14 +849,16 @@ pub fn create_cortex_chat_tool_server(
             runtime_config.clone(),
         ))
         .tool(SkillsSearchTool::new(runtime_config.clone()))
-        .tool(InstallSkillTool::new(runtime_config.clone(), api_state.clone()))
+        .tool(InstallSkillTool::new(
+            runtime_config.clone(),
+            api_state.clone(),
+        ))
         .tool(WorkerInspectTool::new(run_logger, agent_id.to_string()))
         .tool(spawn_tool)
-        .tool(TaskCreateTool::new(
-            task_store.clone(),
-            agent_id.to_string(),
-            "cortex",
-        ).with_api_state(api_state))
+        .tool(
+            TaskCreateTool::new(task_store.clone(), agent_id.to_string(), "cortex")
+                .with_api_state(api_state),
+        )
         .tool(TaskListTool::new(task_store.clone(), agent_id.to_string()))
         .tool(TaskUpdateTool::for_branch(task_store, agent_id.clone()))
         .tool(ShellTool::new(workspace.clone(), sandbox.clone()));

@@ -147,20 +147,27 @@ impl ChannelState {
             .await
     }
 
-    /// Cancel a running worker by aborting its tokio task and cleaning up state.
-    /// Emits a synthetic terminal event so downstream consumers converge.
+    /// Cancel a running worker by aborting its tokio task.
+    /// Emits a synthetic terminal event so the event handler can clean up
+    /// worker_handles and trigger a retrigger with the cancellation reason.
     pub async fn cancel_worker_with_reason(
         &self,
         worker_id: WorkerId,
         reason: &str,
     ) -> std::result::Result<(), String> {
-        let removed = self
-            .active_workers
-            .write()
-            .await
-            .remove(&worker_id)
-            .is_some();
-        let handle = self.worker_handles.write().await.remove(&worker_id);
+        // Abort via read access so the handle stays in worker_handles.
+        // The WorkerComplete event handler will remove it and trigger a retrigger.
+        let aborted = {
+            let handles = self.worker_handles.read().await;
+            if let Some(handle) = handles.get(&worker_id) {
+                handle.abort();
+                true
+            } else {
+                false
+            }
+        };
+
+        // Stop routing messages to the dead worker immediately.
         let removed_input = self
             .worker_inputs
             .write()
@@ -168,21 +175,13 @@ impl ChannelState {
             .remove(&worker_id)
             .is_some();
         self.worker_injections.write().await.remove(&worker_id);
-        let removed_status = self.status_block.write().await.remove_worker(worker_id);
-        let should_emit = removed || handle.is_some();
 
-        if !should_emit {
+        if !aborted {
+            let removed_status = self.status_block.write().await.remove_worker(worker_id);
             if removed_input || removed_status {
                 return Ok(());
             }
             return Err(format!("Worker {worker_id} not found"));
-        }
-
-        // Abort first so the worker stops producing new ToolStarted/ToolCompleted
-        // events, then drain whatever was accumulated. This avoids a race where
-        // events written between drain and abort would be lost.
-        if let Some(handle) = handle {
-            handle.abort();
         }
 
         // Now that the worker future is cancelled, drain the live transcript
@@ -282,22 +281,33 @@ impl ChannelState {
     }
 
     /// Cancel a running branch by aborting its tokio task.
-    /// Emits a synthetic terminal result so channel state converges.
+    /// Emits a synthetic terminal result so the event handler can clean up
+    /// active_branches and trigger a retrigger with the cancellation reason.
     pub async fn cancel_branch_with_reason(
         &self,
         branch_id: BranchId,
         reason: &str,
     ) -> std::result::Result<(), String> {
-        let handle = self.active_branches.write().await.remove(&branch_id);
-        let removed_status = self.status_block.write().await.remove_branch(branch_id);
-        let Some(handle) = handle else {
+        // Abort via read access so the handle stays in active_branches.
+        // The BranchResult event handler will remove it and trigger a retrigger.
+        let aborted = {
+            let branches = self.active_branches.read().await;
+            if let Some(handle) = branches.get(&branch_id) {
+                handle.abort();
+                true
+            } else {
+                false
+            }
+        };
+
+        if !aborted {
+            let removed_status = self.status_block.write().await.remove_branch(branch_id);
             if removed_status {
                 return Ok(());
             }
             return Err(format!("Branch {branch_id} not found"));
-        };
+        }
 
-        handle.abort();
         let reason = crate::summarize_first_non_empty_line(reason, crate::EVENT_SUMMARY_MAX_CHARS);
         let conclusion = if reason.is_empty() {
             "Branch cancelled.".to_string()
@@ -2247,97 +2257,13 @@ impl Channel {
 
     /// Build pre-rendered project context for prompt injection.
     ///
-    /// Fetches all active projects with their repos and worktrees, converts them
-    /// to prompt-friendly structs, and renders via the projects_context template.
-    /// Returns `None` if no projects exist or if rendering fails.
+    /// Delegates to the standalone `build_project_context` function shared
+    /// with worker spawning paths.
     async fn build_project_context(
         &self,
         prompt_engine: &crate::prompts::engine::PromptEngine,
     ) -> Option<String> {
-        use crate::prompts::engine::{ProjectContext, ProjectRepoContext, ProjectWorktreeContext};
-
-        let store = &self.deps.project_store;
-        let projects = match store
-            .list_projects(Some(crate::projects::ProjectStatus::Active))
-            .await
-        {
-            Ok(projects) => projects,
-            Err(error) => {
-                tracing::warn!(%error, "failed to load projects for prompt injection");
-                return None;
-            }
-        };
-
-        if projects.is_empty() {
-            return None;
-        }
-
-        let mut contexts = Vec::with_capacity(projects.len());
-        for project in &projects {
-            let repos = match store.list_repos(&project.id).await {
-                Ok(repos) => repos,
-                Err(error) => {
-                    tracing::warn!(%error, project_id = %project.id, "failed to load repos for project");
-                    Vec::new()
-                }
-            };
-
-            let worktrees = match store.list_worktrees_with_repos(&project.id).await {
-                Ok(worktrees) => worktrees,
-                Err(error) => {
-                    tracing::warn!(%error, project_id = %project.id, "failed to load worktrees for project");
-                    Vec::new()
-                }
-            };
-
-            contexts.push(ProjectContext {
-                name: project.name.clone(),
-                root_path: project.root_path.clone(),
-                description: if project.description.is_empty() {
-                    None
-                } else {
-                    Some(project.description.clone())
-                },
-                tags: project.tags.clone(),
-                repos: repos
-                    .into_iter()
-                    .map(|repo| ProjectRepoContext {
-                        name: repo.name.clone(),
-                        path: repo.path.clone(),
-                        default_branch: repo.default_branch.clone(),
-                        remote_url: if repo.remote_url.is_empty() {
-                            None
-                        } else {
-                            Some(repo.remote_url.clone())
-                        },
-                    })
-                    .collect(),
-                worktrees: worktrees
-                    .into_iter()
-                    .map(|worktree_with_repo| ProjectWorktreeContext {
-                        name: worktree_with_repo.worktree.name.clone(),
-                        path: worktree_with_repo.worktree.path.clone(),
-                        branch: worktree_with_repo.worktree.branch.clone(),
-                        repo_name: worktree_with_repo.repo_name.clone(),
-                    })
-                    .collect(),
-            });
-        }
-
-        match prompt_engine.render_projects_context(contexts) {
-            Ok(rendered) => {
-                let rendered = rendered.trim().to_string();
-                if rendered.is_empty() {
-                    None
-                } else {
-                    Some(rendered)
-                }
-            }
-            Err(error) => {
-                tracing::warn!(%error, "failed to render projects context");
-                None
-            }
-        }
+        crate::agent::channel_dispatch::build_project_context(&self.deps, prompt_engine).await
     }
 
     /// Build a snapshot of the system configuration for status block injection.
@@ -2598,9 +2524,9 @@ impl Channel {
                 routing.resolve(ProcessType::Channel, None)
             };
 
-        let usage_accumulator = std::sync::Arc::new(
-            tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-        );
+        let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::llm::usage::UsageAccumulator::new(),
+        ));
         let model = SpacebotModel::make(&self.deps.llm_manager, model_name)
             .with_context(&*self.deps.agent_id, "channel")
             .with_routing((**routing).clone())
@@ -3076,11 +3002,12 @@ impl Channel {
                     // Regular branch: accumulate result for the next retrigger.
                     // The result text will be embedded directly in the retrigger
                     // message so the LLM knows exactly which process produced it.
+                    let branch_success = !conclusion.starts_with("Branch cancelled:");
                     self.pending_results.push(PendingResult {
                         process_type: "branch",
                         process_id: branch_id.to_string(),
                         result: conclusion.clone(),
-                        success: true,
+                        success: branch_success,
                     });
                     should_retrigger = true;
 

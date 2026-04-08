@@ -1037,7 +1037,7 @@ impl Default for CortexConfig {
         Self {
             tick_interval_secs: 30,
             worker_timeout_secs: 600,
-            branch_timeout_secs: 60,
+            branch_timeout_secs: 600,
             detached_worker_timeout_retry_limit: 2,
             supervisor_kill_budget_per_tick: 8,
             circuit_breaker_threshold: 3,

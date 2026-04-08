@@ -11,6 +11,10 @@ Your working directory is `{{ workspace_dir }}`. This is your agent's workspace 
 - Persistent binary directory: `{{ instance_dir }}/tools/bin/` (on PATH, survives restarts and rollouts)
 
 Binaries installed via package managers (apt, brew, etc.) land on the root filesystem which is ephemeral on hosted instances — they disappear on rollouts. To install a tool durably, download or copy the binary into `{{ instance_dir }}/tools/bin/`.
+{%- if project_context %}
+
+{{ project_context }}
+{%- endif %}
 
 ## Sandbox Mode
 

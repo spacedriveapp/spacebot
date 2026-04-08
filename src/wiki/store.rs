@@ -10,7 +10,9 @@ use sqlx::{Row as _, SqlitePool};
 // Types
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, utoipa::ToSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum WikiPageType {
     Entity,
@@ -163,12 +165,8 @@ pub fn tolerant_replace(
     }
 
     // Pass 2: line-trimmed match — trim each line, then compare
-    let trim_lines = |s: &str| -> String {
-        s.lines()
-            .map(|l| l.trim())
-            .collect::<Vec<_>>()
-            .join("\n")
-    };
+    let trim_lines =
+        |s: &str| -> String { s.lines().map(|l| l.trim()).collect::<Vec<_>>().join("\n") };
     let content_trimmed = trim_lines(content);
     let old_trimmed = trim_lines(old_string);
     if content_trimmed.contains(&old_trimmed) {
@@ -187,9 +185,7 @@ pub fn tolerant_replace(
     }
 
     // Pass 3: whitespace-normalised match
-    let normalise = |s: &str| -> String {
-        s.split_whitespace().collect::<Vec<_>>().join(" ")
-    };
+    let normalise = |s: &str| -> String { s.split_whitespace().collect::<Vec<_>>().join(" ") };
     let content_norm = normalise(content);
     let old_norm = normalise(old_string);
     if content_norm.contains(&old_norm) {
@@ -298,8 +294,12 @@ fn levenshtein(a: &str, b: &str) -> usize {
     let m = a.len();
     let n = b.len();
     let mut dp = vec![vec![0usize; n + 1]; m + 1];
-    for i in 0..=m { dp[i][0] = i; }
-    for j in 0..=n { dp[0][j] = j; }
+    for i in 0..=m {
+        dp[i][0] = i;
+    }
+    for j in 0..=n {
+        dp[0][j] = j;
+    }
     for i in 1..=m {
         for j in 1..=n {
             dp[i][j] = if a[i - 1] == b[j - 1] {
@@ -315,16 +315,22 @@ fn levenshtein(a: &str, b: &str) -> usize {
 fn line_similarity(a: &str, b: &str) -> f64 {
     let a = a.trim();
     let b = b.trim();
-    if a == b { return 1.0; }
+    if a == b {
+        return 1.0;
+    }
     let max_len = a.len().max(b.len());
-    if max_len == 0 { return 1.0; }
+    if max_len == 0 {
+        return 1.0;
+    }
     let dist = levenshtein(a, b);
     1.0 - (dist as f64 / max_len as f64)
 }
 
 fn find_anchor_block(content_lines: &[&str], old_lines: &[&str]) -> Option<usize> {
     let n = old_lines.len();
-    if n == 0 || content_lines.len() < n { return None; }
+    if n == 0 || content_lines.len() < n {
+        return None;
+    }
 
     let first = old_lines[0].trim();
     let last = old_lines[n - 1].trim();
@@ -334,12 +340,16 @@ fn find_anchor_block(content_lines: &[&str], old_lines: &[&str]) -> Option<usize
 
     for i in 0..=content_lines.len().saturating_sub(n) {
         let end = i + n - 1;
-        if end >= content_lines.len() { break; }
+        if end >= content_lines.len() {
+            break;
+        }
 
         let first_sim = line_similarity(content_lines[i], first);
         let last_sim = line_similarity(content_lines[end], last);
 
-        if first_sim < 0.6 || last_sim < 0.6 { continue; }
+        if first_sim < 0.6 || last_sim < 0.6 {
+            continue;
+        }
 
         // Score interior lines
         let interior_score: f64 = if n > 2 {
@@ -411,11 +421,17 @@ impl WikiStore {
     pub async fn create(&self, input: CreateWikiPageInput) -> Result<WikiPage> {
         let id = lower_hex_id();
         let slug = slugify(&input.title);
-        let related_json = serde_json::to_string(&input.related)
-            .context("failed to serialize related slugs")?;
+        let related_json =
+            serde_json::to_string(&input.related).context("failed to serialize related slugs")?;
 
         // Check slug uniqueness; append suffix if needed
         let slug = self.unique_slug(&slug).await?;
+
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .context("failed to begin transaction")?;
 
         sqlx::query(
             r#"INSERT INTO wiki_pages
@@ -430,7 +446,7 @@ impl WikiStore {
         .bind(&related_json)
         .bind(&input.author_id)
         .bind(&input.author_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to insert wiki page")?;
 
@@ -446,9 +462,13 @@ impl WikiStore {
         .bind(&input.edit_summary)
         .bind(&input.author_type)
         .bind(&input.author_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("failed to insert wiki page version")?;
+
+        tx.commit()
+            .await
+            .context("failed to commit wiki page creation")?;
 
         self.load_by_id(&id)
             .await?
@@ -463,9 +483,13 @@ impl WikiStore {
             .await?
             .context(format!("wiki page '{}' not found", input.slug))?;
 
-        let new_content =
-            tolerant_replace(&page.content, &input.old_string, &input.new_string, input.replace_all)
-                .map_err(|e| anyhow::anyhow!("wiki_edit failed: {e}"))?;
+        let new_content = tolerant_replace(
+            &page.content,
+            &input.old_string,
+            &input.new_string,
+            input.replace_all,
+        )
+        .map_err(|e| anyhow::anyhow!("wiki_edit failed: {e}"))?;
 
         let new_version = page.version + 1;
 
@@ -509,7 +533,9 @@ impl WikiStore {
         if let Some(v) = version {
             // Return page with historical content
             let page = self.load_by_slug(slug).await?;
-            let Some(mut page) = page else { return Ok(None) };
+            let Some(mut page) = page else {
+                return Ok(None);
+            };
             let historical: Option<String> = sqlx::query_scalar(
                 "SELECT content FROM wiki_page_versions WHERE page_id = ? AND version = ?",
             )
@@ -617,11 +643,7 @@ impl WikiStore {
     }
 
     /// List version history for a page.
-    pub async fn history(
-        &self,
-        slug: &str,
-        limit: i64,
-    ) -> Result<Vec<WikiPageVersion>> {
+    pub async fn history(&self, slug: &str, limit: i64) -> Result<Vec<WikiPageVersion>> {
         let page = self.load_by_slug(slug).await?;
         let Some(page) = page else { return Ok(vec![]) };
 
@@ -680,10 +702,7 @@ impl WikiStore {
         };
 
         // Use direct update since we're replacing the whole content
-        let page = self
-            .load_by_slug(slug)
-            .await?
-            .context("page not found")?;
+        let page = self.load_by_slug(slug).await?.context("page not found")?;
         let new_version = page.version + 1;
         let restored_content = edit_input.new_string.clone();
 
@@ -759,11 +778,12 @@ impl WikiStore {
     }
 
     async fn unique_slug(&self, base: &str) -> Result<String> {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE slug = ?)")
-            .bind(base)
-            .fetch_one(&self.pool)
-            .await
-            .context("failed to check slug uniqueness")?;
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM wiki_pages WHERE slug = ?)")
+                .bind(base)
+                .fetch_one(&self.pool)
+                .await
+                .context("failed to check slug uniqueness")?;
 
         if !exists {
             return Ok(base.to_string());
