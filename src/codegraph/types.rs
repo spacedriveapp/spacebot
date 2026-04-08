@@ -66,7 +66,7 @@ impl NodeLabel {
             Self::Import => "Import",
             Self::Type => "Type",
             Self::Struct => "Struct",
-            Self::Macro => "Macro",
+            Self::Macro => "MacroDef",
             Self::Trait => "Trait",
             Self::Impl => "Impl",
             Self::Namespace => "Namespace",
@@ -288,6 +288,7 @@ pub struct PipelineProgress {
 pub struct PipelineStats {
     pub files_found: u64,
     pub files_parsed: u64,
+    pub files_skipped: u64,
     pub nodes_created: u64,
     pub edges_created: u64,
     pub communities_detected: u64,
@@ -342,6 +343,9 @@ pub struct RegisteredProject {
     /// Current pipeline progress (only set when `status == Indexing`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<PipelineProgress>,
+    /// Human-readable error message (only set when `status == Error`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_message: Option<String>,
     /// Stats from the last completed index.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_index_stats: Option<PipelineStats>,
@@ -469,6 +473,15 @@ pub struct CodeGraphConfig {
     /// Max call-chain depth for Process tracing.
     #[serde(default = "default_max_process_depth")]
     pub max_process_depth: u32,
+    /// Max number of entry-point processes to trace.
+    #[serde(default = "default_max_processes")]
+    pub max_processes: u32,
+    /// Max branching factor during BFS process tracing.
+    #[serde(default = "default_max_process_branching")]
+    pub max_process_branching: u32,
+    /// Minimum call-chain length to persist a process.
+    #[serde(default = "default_min_process_steps")]
+    pub min_process_steps: u32,
     /// Minimum nodes per persisted community.
     #[serde(default = "default_community_min_size")]
     pub community_min_size: u32,
@@ -503,6 +516,9 @@ impl Default for CodeGraphConfig {
             re_index_threshold: 5,
             staleness_threshold_hours: 24,
             max_process_depth: 10,
+            max_processes: 50,
+            max_process_branching: 4,
+            min_process_steps: 3,
             community_min_size: 3,
             agent_writes_enabled: true,
             stale_eviction_enabled: true,
@@ -528,6 +544,15 @@ fn default_staleness_threshold_hours() -> u32 {
 }
 fn default_max_process_depth() -> u32 {
     10
+}
+fn default_max_processes() -> u32 {
+    50
+}
+fn default_max_process_branching() -> u32 {
+    4
+}
+fn default_min_process_steps() -> u32 {
+    3
 }
 fn default_community_min_size() -> u32 {
     3

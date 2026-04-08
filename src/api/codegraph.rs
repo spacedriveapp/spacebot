@@ -41,14 +41,6 @@ fn default_limit() -> usize {
 pub(super) struct CreateProjectRequest {
     name: String,
     root_path: String,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Deserialize, utoipa::ToSchema)]
-pub(super) struct ReindexRequest {
-    #[serde(default)]
-    force: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +281,7 @@ pub(super) async fn reindex_project(
 )]
 pub(super) async fn get_communities(
     State(state): State<Arc<ApiState>>,
-    Path(project_id): Path<String>,
+    Path(_project_id): Path<String>,
 ) -> Result<Json<CommunitiesResponse>, StatusCode> {
     let _manager = get_manager(&state)?;
 
@@ -313,7 +305,7 @@ pub(super) async fn get_communities(
 )]
 pub(super) async fn get_processes(
     State(state): State<Arc<ApiState>>,
-    Path(project_id): Path<String>,
+    Path(_project_id): Path<String>,
 ) -> Result<Json<ProcessesResponse>, StatusCode> {
     let _manager = get_manager(&state)?;
 
@@ -373,7 +365,7 @@ pub(super) async fn search_graph(
 )]
 pub(super) async fn get_index_log(
     State(state): State<Arc<ApiState>>,
-    Path(project_id): Path<String>,
+    Path(_project_id): Path<String>,
 ) -> Result<Json<IndexLogResponse>, StatusCode> {
     let _manager = get_manager(&state)?;
 
@@ -394,7 +386,7 @@ pub(super) async fn get_index_log(
 )]
 pub(super) async fn get_project_memories(
     State(state): State<Arc<ApiState>>,
-    Path(project_id): Path<String>,
+    Path(_project_id): Path<String>,
 ) -> Result<Json<ProjectMemoriesResponse>, StatusCode> {
     let _manager = get_manager(&state)?;
 

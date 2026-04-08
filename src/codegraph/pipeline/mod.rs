@@ -1,6 +1,6 @@
 //! 10-phase indexing pipeline orchestrator.
 //!
-//! Matches GitNexus's `runFullAnalysis` orchestrator. Each phase runs
+//! 10-phase indexing pipeline. Each phase runs
 //! sequentially, reporting progress via a `watch::Sender<PipelineProgress>`.
 
 pub mod walker;
@@ -12,6 +12,8 @@ pub mod heritage;
 pub mod communities;
 pub mod processes;
 pub mod enriching;
+pub mod incremental;
+pub mod embeddings;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,9 +22,15 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use tokio::sync::watch;
 
+/// Callback for phases to report intermediate progress.
+/// Arguments: (phase_progress 0.0–1.0, message, current phase result).
+pub type ProgressFn = Arc<dyn Fn(f32, &str, &PhaseResult) + Send + Sync>;
+
 use super::db::SharedCodeGraphDb;
 use super::events::CodeGraphEvent;
 use super::types::{CodeGraphConfig, PipelinePhase, PipelineProgress, PipelineStats};
+use crate::llm::LlmManager;
+use crate::memory::EmbeddingModel;
 
 /// A handle to a running pipeline, allowing progress monitoring and cancellation.
 pub struct PipelineHandle {
@@ -51,12 +59,23 @@ impl PipelineHandle {
 /// Start a full indexing pipeline for a project.
 ///
 /// Returns a `PipelineHandle` for monitoring progress and cancellation.
+///
+/// Wave 6 added two optional integrations:
+/// - `llm_manager` unlocks LLM-driven label generation in Phase 9.
+/// - `embedding_model` unlocks semantic vector embeddings for
+///   Function/Method/Class nodes.
+///
+/// Both are optional — when `None`, the corresponding phases no-op so
+/// the pipeline still completes end-to-end.
+#[allow(clippy::too_many_arguments)]
 pub fn start_full_pipeline(
     project_id: String,
     root_path: PathBuf,
     db: SharedCodeGraphDb,
     config: Arc<CodeGraphConfig>,
     event_tx: tokio::sync::broadcast::Sender<CodeGraphEvent>,
+    llm_manager: Option<Arc<LlmManager>>,
+    embedding_model: Option<Arc<EmbeddingModel>>,
 ) -> PipelineHandle {
     let initial_progress = PipelineProgress {
         phase: PipelinePhase::Extracting,
@@ -66,6 +85,7 @@ pub fn start_full_pipeline(
     };
 
     let (progress_tx, progress_rx) = watch::channel(initial_progress);
+    let progress_tx = Arc::new(progress_tx);
     let (cancel_tx, cancel_rx) = watch::channel(false);
 
     let join_handle = tokio::spawn(run_pipeline(
@@ -76,6 +96,8 @@ pub fn start_full_pipeline(
         progress_tx,
         cancel_rx,
         event_tx,
+        llm_manager,
+        embedding_model,
     ));
 
     PipelineHandle {
@@ -86,14 +108,17 @@ pub fn start_full_pipeline(
 }
 
 /// The main pipeline execution function.
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     project_id: String,
     root_path: PathBuf,
     db: SharedCodeGraphDb,
     config: Arc<CodeGraphConfig>,
-    progress_tx: watch::Sender<PipelineProgress>,
+    progress_tx: Arc<watch::Sender<PipelineProgress>>,
     cancel_rx: watch::Receiver<bool>,
     event_tx: tokio::sync::broadcast::Sender<CodeGraphEvent>,
+    llm_manager: Option<Arc<LlmManager>>,
+    embedding_model: Option<Arc<EmbeddingModel>>,
 ) -> Result<PipelineStats> {
     let pipeline_start = Instant::now();
     let mut stats = PipelineStats::default();
@@ -101,6 +126,9 @@ async fn run_pipeline(
 
     // Ensure the database schema is initialized.
     db.ensure_schema().await?;
+
+    // Note: graph data purge for re-index scenarios happens in
+    // manager.rs::remove_project() — not here — so indexing starts instantly.
 
     // Helper macro to check cancellation between phases.
     macro_rules! check_cancel {
@@ -133,15 +161,61 @@ async fn run_pipeline(
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Extracting, 0.0, "Walking filesystem", &stats);
 
-    let files = walker::walk_project(&root_path, &config).await?;
+    // Build a progress callback so the walker can emit incremental
+    // "Walking filesystem (N files found)" updates for huge repos.
+    let walk_progress: ProgressFn = {
+        let tx = Arc::clone(&progress_tx);
+        let etx = event_tx.clone();
+        let pid = project_id.clone();
+        let base = stats.clone();
+        Arc::new(move |pct: f32, msg: &str, _pr: &PhaseResult| {
+            let _ = tx.send(PipelineProgress {
+                phase: PipelinePhase::Extracting,
+                phase_progress: pct,
+                message: msg.to_string(),
+                stats: base.clone(),
+            });
+            let _ = etx.send(CodeGraphEvent::IndexProgress {
+                project_id: pid.clone(),
+                phase: PipelinePhase::Extracting,
+                phase_progress: pct,
+                message: msg.to_string(),
+            });
+        })
+    };
+
+    let walk_outcome =
+        walker::walk_project(&root_path, &config, Some(&walk_progress)).await?;
+    let files = walk_outcome.files;
     stats.files_found = files.len() as u64;
 
-    update_progress(
-        PipelinePhase::Extracting,
-        1.0,
-        &format!("Found {} files", files.len()),
-        &stats,
-    );
+    // Surface ignore-rule state in the progress message so users can see
+    // whether their .spacebotignore / SPACEBOT_NO_GITIGNORE settings took
+    // effect without having to dig through debug logs.
+    let mut walk_suffix_parts: Vec<String> = Vec::new();
+    if walk_outcome.spacebotignore_loaded.is_some() {
+        walk_suffix_parts.push(".spacebotignore applied".to_string());
+    }
+    if walk_outcome.gitignore_bypassed {
+        walk_suffix_parts.push(".gitignore bypassed".to_string());
+    }
+    if walk_outcome.oversized_skipped > 0 {
+        walk_suffix_parts.push(format!(
+            "{} oversized skipped",
+            walk_outcome.oversized_skipped
+        ));
+    }
+    let walk_message = if walk_suffix_parts.is_empty() {
+        format!("Found {} files", files.len())
+    } else {
+        format!(
+            "Found {} files ({})",
+            files.len(),
+            walk_suffix_parts.join(", ")
+        )
+    };
+
+    update_progress(PipelinePhase::Extracting, 1.0, &walk_message, &stats);
     phase_timings.insert("extracting".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
@@ -161,8 +235,36 @@ async fn run_pipeline(
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Parsing, 0.0, "Parsing source files", &stats);
 
-    let parse_result = parsing::parse_files(&project_id, &root_path, &files, &db, &config).await?;
+    let parse_progress: ProgressFn = {
+        let tx = Arc::clone(&progress_tx);
+        let etx = event_tx.clone();
+        let pid = project_id.clone();
+        let base = stats.clone();
+        Arc::new(move |pct: f32, msg: &str, pr: &PhaseResult| {
+            let mut merged = base.clone();
+            merged.files_parsed += pr.files_parsed;
+            merged.files_skipped += pr.files_skipped;
+            merged.nodes_created += pr.nodes_created;
+            merged.edges_created += pr.edges_created;
+            merged.errors += pr.errors;
+            let _ = tx.send(PipelineProgress {
+                phase: PipelinePhase::Parsing,
+                phase_progress: pct,
+                message: msg.to_string(),
+                stats: merged,
+            });
+            let _ = etx.send(CodeGraphEvent::IndexProgress {
+                project_id: pid.clone(),
+                phase: PipelinePhase::Parsing,
+                phase_progress: pct,
+                message: msg.to_string(),
+            });
+        })
+    };
+
+    let parse_result = parsing::parse_files(&project_id, &root_path, &files, &db, &config, Some(&parse_progress)).await?;
     stats.files_parsed = parse_result.files_parsed;
+    stats.files_skipped = parse_result.files_skipped;
     stats.nodes_created += parse_result.nodes_created;
     stats.edges_created += parse_result.edges_created;
 
@@ -180,8 +282,9 @@ async fn run_pipeline(
     update_progress(PipelinePhase::Imports, 0.0, "Resolving imports", &stats);
 
     let import_result = imports::resolve_imports(&project_id, &db).await?;
-    stats.nodes_created += import_result.nodes_created;
-    stats.edges_created += import_result.edges_created;
+    stats.nodes_created += import_result.phase.nodes_created;
+    stats.edges_created += import_result.phase.edges_created;
+    let import_map = import_result.import_map;
 
     update_progress(PipelinePhase::Imports, 1.0, "Imports resolved", &stats);
     phase_timings.insert("imports".to_string(), phase_start.elapsed().as_secs_f64());
@@ -191,7 +294,31 @@ async fn run_pipeline(
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Calls, 0.0, "Resolving call-sites", &stats);
 
-    let call_result = calls::resolve_calls(&project_id, &db).await?;
+    let calls_progress: ProgressFn = {
+        let tx = Arc::clone(&progress_tx);
+        let etx = event_tx.clone();
+        let pid = project_id.clone();
+        let base = stats.clone();
+        Arc::new(move |pct: f32, msg: &str, pr: &PhaseResult| {
+            let mut merged = base.clone();
+            merged.edges_created += pr.edges_created;
+            merged.errors += pr.errors;
+            let _ = tx.send(PipelineProgress {
+                phase: PipelinePhase::Calls,
+                phase_progress: pct,
+                message: msg.to_string(),
+                stats: merged,
+            });
+            let _ = etx.send(CodeGraphEvent::IndexProgress {
+                project_id: pid.clone(),
+                phase: PipelinePhase::Calls,
+                phase_progress: pct,
+                message: msg.to_string(),
+            });
+        })
+    };
+
+    let call_result = calls::resolve_calls(&project_id, &db, &root_path, &files, &import_map, Some(&calls_progress)).await?;
     stats.edges_created += call_result.edges_created;
 
     update_progress(PipelinePhase::Calls, 1.0, "Calls resolved", &stats);
@@ -246,11 +373,29 @@ async fn run_pipeline(
     check_cancel!();
 
     // ── Phase 9: Enriching ───────────────────────────────────────────────
+    // Phase 9 now covers two orthogonal Wave 6 tasks:
+    //   9a. LLM-driven label generation for Community nodes.
+    //   9b. Vector embeddings for Function/Method/Class nodes.
+    // Both are optional and controlled by service availability + config.
     let phase_start = Instant::now();
-    if config.llm_enrichment && stats.nodes_created <= config.node_embedding_skip_threshold {
-        update_progress(PipelinePhase::Enriching, 0.0, "Enriching with LLM labels", &stats);
-        enriching::enrich(&project_id, &db).await?;
-        update_progress(PipelinePhase::Enriching, 1.0, "Enrichment complete", &stats);
+    let enrichment_eligible =
+        config.llm_enrichment && stats.nodes_created <= config.node_embedding_skip_threshold;
+
+    if enrichment_eligible {
+        if let Some(ref llm) = llm_manager {
+            update_progress(PipelinePhase::Enriching, 0.0, "Enriching with LLM labels", &stats);
+            if let Err(err) = enriching::enrich(&project_id, &db, llm).await {
+                tracing::warn!(%err, "LLM enrichment failed, continuing without labels");
+            }
+            update_progress(PipelinePhase::Enriching, 0.5, "Label enrichment complete", &stats);
+        } else {
+            update_progress(
+                PipelinePhase::Enriching,
+                0.5,
+                "LLM enrichment skipped — no llm_manager wired",
+                &stats,
+            );
+        }
     } else {
         let reason = if stats.nodes_created > config.node_embedding_skip_threshold {
             format!(
@@ -260,8 +405,42 @@ async fn run_pipeline(
         } else {
             "LLM enrichment disabled".to_string()
         };
-        update_progress(PipelinePhase::Enriching, 1.0, &reason, &stats);
+        update_progress(PipelinePhase::Enriching, 0.5, &reason, &stats);
     }
+
+    // 9b. Vector embeddings pass. Shares the node-count threshold with
+    //     the LLM pass — large projects skip both to avoid runaway cost.
+    if let Some(ref embedder) = embedding_model {
+        if stats.nodes_created <= config.node_embedding_skip_threshold {
+            update_progress(
+                PipelinePhase::Enriching,
+                0.55,
+                "Generating code embeddings",
+                &stats,
+            );
+            match embeddings::generate_embeddings(&project_id, &root_path, &db, embedder).await {
+                Ok(embed_stats) => {
+                    tracing::info!(
+                        project_id = %project_id,
+                        symbols = embed_stats.embedded,
+                        "code embeddings generated"
+                    );
+                }
+                Err(err) => {
+                    tracing::warn!(%err, "code embeddings phase failed, continuing");
+                }
+            }
+        } else {
+            tracing::info!(
+                project_id = %project_id,
+                nodes = stats.nodes_created,
+                threshold = config.node_embedding_skip_threshold,
+                "skipping embeddings (node count exceeds threshold)"
+            );
+        }
+    }
+
+    update_progress(PipelinePhase::Enriching, 1.0, "Enrichment complete", &stats);
     phase_timings.insert("enriching".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
@@ -299,6 +478,7 @@ pub struct PhaseResult {
     pub nodes_created: u64,
     pub edges_created: u64,
     pub files_parsed: u64,
+    pub files_skipped: u64,
     pub communities_detected: u64,
     pub processes_traced: u64,
     pub errors: u64,

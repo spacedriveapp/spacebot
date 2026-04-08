@@ -6,35 +6,89 @@ use anyhow::Result;
 
 use super::PhaseResult;
 use crate::codegraph::db::SharedCodeGraphDb;
-use crate::codegraph::languages;
+use crate::codegraph::lang;
 use crate::codegraph::types::CodeGraphConfig;
+
+/// Hard ceiling on file size for tree-sitter parsing. The walker's
+/// 512 KB soft cap catches the common case, but this defends against
+/// anything that slips through (e.g. when `SPACEBOT_NO_GITIGNORE` is
+/// set). tree-sitter allocates a buffer proportional to file size, so
+/// unbounded reads risk OOM.
+const MAX_PARSE_BYTES: u64 = 32 * 1024 * 1024;
+
+/// Escape a string for use in a Cypher string literal.
+fn cypher_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
+/// Normalize a path to always use forward slashes (cross-platform).
+fn normalize_path(s: &str) -> String {
+    s.replace('\\', "/")
+}
 
 /// Parse all source files with tree-sitter and extract symbol nodes.
 ///
 /// For each file, determines the language, parses the AST, and extracts
 /// Class, Function, Method, Variable, Interface, Enum, etc. nodes with
-/// DEFINES and CONTAINS edges.
+/// DEFINES edges from their containing File node.
 pub async fn parse_files(
     project_id: &str,
     root_path: &Path,
     files: &[PathBuf],
-    _db: &SharedCodeGraphDb,
+    db: &SharedCodeGraphDb,
     _config: &CodeGraphConfig,
+    progress_fn: Option<&super::ProgressFn>,
 ) -> Result<PhaseResult> {
     let mut result = PhaseResult::default();
+    let pid = cypher_escape(project_id);
 
-    for file_path in files {
+    // Accumulate ALL nodes first, then ALL edges. This guarantees nodes
+    // exist in the DB before any edge MATCH queries reference them.
+    const BATCH_SIZE: usize = 100;
+    let mut node_stmts: Vec<String> = Vec::new();
+    let mut edge_stmts: Vec<String> = Vec::new();
+    let total_files = files.len();
+    let report_interval = (total_files / 20).max(1);
+
+    for (file_idx, file_path) in files.iter().enumerate() {
         let ext = file_path
             .extension()
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
-        let provider = match languages::provider_for_extension(ext) {
+        let provider = match lang::provider_for_extension(ext) {
             Some(p) => p,
-            None => continue,
+            None => {
+                result.files_skipped += 1;
+                continue;
+            }
         };
 
-        // Read the file content.
+        // Defense-in-depth size ceiling — bail before loading the file
+        // into RAM if it exceeds MAX_PARSE_BYTES.
+        match tokio::fs::metadata(file_path).await {
+            Ok(meta) if meta.len() > MAX_PARSE_BYTES => {
+                tracing::warn!(
+                    file = %file_path.display(),
+                    size = meta.len(),
+                    max = MAX_PARSE_BYTES,
+                    "skipping file (exceeds parse size ceiling)"
+                );
+                result.files_skipped += 1;
+                continue;
+            }
+            Ok(_) => {}
+            Err(err) => {
+                tracing::warn!(
+                    file = %file_path.display(),
+                    %err,
+                    "skipping file (stat error)"
+                );
+                result.errors += 1;
+                continue;
+            }
+        }
+
         let content = match tokio::fs::read_to_string(file_path).await {
             Ok(c) => c,
             Err(err) => {
@@ -48,13 +102,13 @@ pub async fn parse_files(
             }
         };
 
-        let relative = file_path
-            .strip_prefix(root_path)
-            .unwrap_or(file_path)
-            .to_string_lossy()
-            .to_string();
+        let relative = normalize_path(
+            &file_path
+                .strip_prefix(root_path)
+                .unwrap_or(file_path)
+                .to_string_lossy(),
+        );
 
-        // Extract symbols using the language provider.
         let symbols = provider.extract_symbols(&relative, &content);
 
         tracing::trace!(
@@ -64,19 +118,108 @@ pub async fn parse_files(
             "parsed file"
         );
 
-        // Each symbol is a node with a DEFINES edge from its file.
-        result.nodes_created += symbols.len() as u64;
-        result.edges_created += symbols.len() as u64;
+        let rel_escaped = cypher_escape(&relative);
+        let file_qname = format!("{pid}::{rel_escaped}");
+
+        for sym in &symbols {
+            let label = sym.label.as_str();
+            let name = cypher_escape(&sym.name);
+            let qname = cypher_escape(&sym.qualified_name);
+            let extends_val = cypher_escape(sym.extends.as_deref().unwrap_or(""));
+            let import_src = cypher_escape(sym.import_source.as_deref().unwrap_or(""));
+
+            node_stmts.push(format!(
+                "CREATE (:{label} {{qualified_name: '{qname}', name: '{name}', \
+                 project_id: '{pid}', source_file: '{rel_escaped}', \
+                 line_start: {ls}, line_end: {le}, \
+                 source: 'pipeline', written_by: 'pipeline', \
+                 extends_type: '{extends_val}', import_source: '{import_src}'}})",
+                ls = sym.line_start,
+                le = sym.line_end,
+            ));
+
+            edge_stmts.push(format!(
+                "MATCH (f:File), (s:{label}) WHERE f.qualified_name = '{file_qname}' \
+                 AND s.qualified_name = '{qname}' AND s.project_id = '{pid}' \
+                 CREATE (f)-[:CodeRelation {{type: 'DEFINES', confidence: 1.0, reason: '', step: 0}}]->(s)",
+            ));
+
+            if let Some(ref parent_qn) = sym.parent {
+                let parent_escaped = cypher_escape(parent_qn);
+                let parent_label = symbols
+                    .iter()
+                    .find(|s| s.qualified_name == *parent_qn)
+                    .map(|s| s.label.as_str())
+                    .unwrap_or("Class");
+
+                let edge_type = match sym.label {
+                    crate::codegraph::types::NodeLabel::Method => "HAS_METHOD",
+                    crate::codegraph::types::NodeLabel::Variable => "HAS_PROPERTY",
+                    _ => "CONTAINS",
+                };
+
+                edge_stmts.push(format!(
+                    "MATCH (p:{parent_label}), (c:{label}) \
+                     WHERE p.qualified_name = '{parent_escaped}' AND p.project_id = '{pid}' \
+                     AND c.qualified_name = '{qname}' AND c.project_id = '{pid}' \
+                     CREATE (p)-[:CodeRelation {{type: '{edge_type}', confidence: 1.0, reason: '', step: 0}}]->(c)",
+                ));
+            }
+        }
+
         result.files_parsed += 1;
 
-        // Actual DB insertion will happen when kuzu is integrated.
-        // For now we have the parsed symbols in memory and track counts.
+        // Flush nodes periodically to keep memory bounded, but NEVER flush
+        // edges until all nodes in this batch are committed.
+        if node_stmts.len() >= BATCH_SIZE {
+            let batch = db.execute_batch(std::mem::take(&mut node_stmts)).await?;
+            result.nodes_created += batch.success;
+            result.errors += batch.errors;
+        }
+
+        // Report intermediate progress so the frontend can show live stats.
+        if let Some(pf) = progress_fn
+            && (file_idx + 1) % report_interval == 0
+        {
+            let pct = (file_idx + 1) as f32 / total_files as f32;
+            pf(
+                pct * 0.8,
+                &format!("Parsing files ({}/{})", file_idx + 1, total_files),
+                &result,
+            );
+        }
     }
 
-    tracing::debug!(
+    // Flush remaining nodes FIRST, then all edges.
+    if !node_stmts.is_empty() {
+        let batch = db.execute_batch(node_stmts).await?;
+        result.nodes_created += batch.success;
+        result.errors += batch.errors;
+    }
+
+    // Report that node parsing is done, starting edges.
+    if let Some(pf) = progress_fn {
+        pf(0.85, &format!("Creating symbol edges ({})", edge_stmts.len()), &result);
+    }
+
+    // Now all nodes exist — safe to create edges.
+    let total_edge_chunks = (edge_stmts.len() + BATCH_SIZE - 1).max(1) / BATCH_SIZE.max(1);
+    for (ci, chunk) in edge_stmts.chunks(BATCH_SIZE).enumerate() {
+        let batch = db.execute_batch(chunk.to_vec()).await?;
+        result.edges_created += batch.success;
+        result.errors += batch.errors;
+
+        if let Some(pf) = progress_fn {
+            let edge_pct = (ci + 1) as f32 / total_edge_chunks as f32;
+            pf(0.85 + edge_pct * 0.15, &format!("Creating edges ({})", result.edges_created), &result);
+        }
+    }
+
+    tracing::info!(
         project_id = %project_id,
         files_parsed = result.files_parsed,
-        symbols = result.nodes_created,
+        nodes = result.nodes_created,
+        edges = result.edges_created,
         errors = result.errors,
         "AST parsing complete"
     );

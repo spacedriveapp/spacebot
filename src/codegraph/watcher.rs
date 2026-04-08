@@ -1,7 +1,9 @@
 //! File watcher for real-time incremental graph updates.
 //!
 //! Uses the `notify` crate with 500ms debounce to detect file changes,
-//! then triggers incremental re-indexing (phases 3-6) for changed files.
+//! then forwards a batch of absolute paths to the manager via an mpsc
+//! channel. The manager drives the incremental indexing pipeline; this
+//! module is only responsible for debounced change detection.
 
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -15,8 +17,9 @@ use super::db::SharedCodeGraphDb;
 use super::events::CodeGraphEvent;
 use super::types::CodeGraphConfig;
 
-/// Debounce window for file change events.
-const DEBOUNCE_MS: u64 = 500;
+/// A batch of file paths that changed within a single debounce window.
+/// Paths are absolute so downstream consumers can read the files directly.
+pub type ChangeBatch = Vec<PathBuf>;
 
 /// Handle to a running file watcher. Drop to stop watching.
 pub struct WatcherHandle {
@@ -38,12 +41,18 @@ impl Drop for WatcherHandle {
 }
 
 /// Start watching a project directory for file changes.
+///
+/// When the debounce window elapses with pending changes, the watcher:
+/// 1. Fires a `GraphStale` event on `event_tx` so the UI can show a badge.
+/// 2. Sends the batch of changed absolute paths on `change_tx` so the
+///    manager can trigger an incremental re-index.
 pub fn start_watcher(
     project_id: String,
     root_path: PathBuf,
     db: SharedCodeGraphDb,
     config: Arc<CodeGraphConfig>,
     event_tx: broadcast::Sender<CodeGraphEvent>,
+    change_tx: mpsc::Sender<ChangeBatch>,
 ) -> Result<WatcherHandle> {
     let (stop_tx, stop_rx) = watch::channel(false);
 
@@ -55,6 +64,7 @@ pub fn start_watcher(
         db,
         config,
         event_tx,
+        change_tx,
         stop_rx,
         debounce_ms,
     ));
@@ -63,12 +73,14 @@ pub fn start_watcher(
 }
 
 /// The main watcher loop.
+#[allow(clippy::too_many_arguments)]
 async fn watch_loop(
     project_id: String,
     root_path: PathBuf,
     _db: SharedCodeGraphDb,
     _config: Arc<CodeGraphConfig>,
     event_tx: broadcast::Sender<CodeGraphEvent>,
+    change_tx: mpsc::Sender<ChangeBatch>,
     mut stop_rx: watch::Receiver<bool>,
     debounce_ms: u64,
 ) {
@@ -130,10 +142,10 @@ async fn watch_loop(
             Some(event) = notify_rx.recv() => {
                 for path in &event.paths {
                     // Only track source files.
-                    if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-                        if super::languages::language_for_extension(ext).is_some() {
-                            pending_changes.insert(path.clone());
-                        }
+                    if let Some(ext) = path.extension().and_then(|e| e.to_str())
+                        && super::lang::language_for_extension(ext).is_some()
+                    {
+                        pending_changes.insert(path.clone());
                     }
                 }
                 // Reset debounce timer.
@@ -149,26 +161,40 @@ async fn watch_loop(
                 }
             } => {
                 if !pending_changes.is_empty() {
-                    let changed_files: Vec<String> = pending_changes
-                        .drain()
-                        .filter_map(|p| p.strip_prefix(&root_path).ok().map(|r| r.to_string_lossy().to_string()))
+                    let absolute_paths: Vec<PathBuf> =
+                        pending_changes.drain().collect();
+
+                    let relative_strings: Vec<String> = absolute_paths
+                        .iter()
+                        .filter_map(|p| {
+                            p.strip_prefix(&root_path)
+                                .ok()
+                                .map(|r| r.to_string_lossy().to_string())
+                        })
                         .collect();
 
                     tracing::debug!(
                         project_id = %project_id,
-                        files = changed_files.len(),
-                        "file changes detected, triggering incremental update"
+                        files = absolute_paths.len(),
+                        "file changes detected, dispatching incremental update"
                     );
 
                     // Fire stale event first (UI shows stale badge).
                     let _ = event_tx.send(CodeGraphEvent::GraphStale {
                         project_id: project_id.clone(),
-                        stale_files: changed_files.clone(),
+                        stale_files: relative_strings,
                     });
 
-                    // Incremental re-index will be implemented here.
-                    // For now we just fire the event.
-                    // TODO: Run phases 3-6 on changed files, then fire GraphChanged.
+                    // Dispatch the batch to the manager's incremental worker.
+                    // A full receiver means the worker is overloaded; we fall
+                    // back to blocking send so we don't drop changes silently.
+                    if let Err(err) = change_tx.send(absolute_paths).await {
+                        tracing::warn!(
+                            project_id = %project_id,
+                            %err,
+                            "change receiver closed, dropping batch"
+                        );
+                    }
                 }
                 debounce_timer = None;
             }

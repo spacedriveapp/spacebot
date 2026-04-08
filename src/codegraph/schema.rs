@@ -2,9 +2,22 @@
 //!
 //! LadybugDB uses Cypher. Node tables and relationship tables must be created
 //! before data can be inserted. This module produces the DDL statements.
+//!
+//! Uses a single `CodeRelation` table with a `type` property rather than
+//! per-edge-type tables (e.g. `CONTAINS_Folder_File`). This keeps schema
+//! init fast (~30 DDL statements instead of ~1000) and simplifies all
+//! Cypher queries to use `:CodeRelation {type: 'CALLS', ...}`.
 
 /// Current schema version. Bump this when making breaking changes.
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
+
+/// All node table labels. Used by the pipeline to purge stale data before re-indexing.
+pub const ALL_NODE_LABELS: &[&str] = &[
+    "Project", "Package", "Module", "Folder", "File", "Class", "Function",
+    "Method", "Variable", "Interface", "Enum", "Decorator", "Import", "Type",
+    "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
+    "Record", "Template", "Test", "Community", "Process", "Section",
+];
 
 /// Generate all DDL statements for the code graph schema.
 ///
@@ -30,7 +43,7 @@ pub fn schema_ddl() -> Vec<String> {
     for label in &[
         "Package", "Module", "Folder", "File", "Class", "Function", "Method",
         "Variable", "Interface", "Enum", "Decorator", "Import", "Type",
-        "Struct", "Macro", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
+        "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
         "Record", "Template", "Test",
     ] {
         ddl.push(node_table(
@@ -44,11 +57,12 @@ pub fn schema_ddl() -> Vec<String> {
                 ("line_end", "INT32"),
                 ("source", "STRING"),
                 ("written_by", "STRING"),
+                ("extends_type", "STRING"),
+                ("import_source", "STRING"),
             ],
         ));
     }
 
-    // Semantic nodes with extra fields.
     ddl.push(node_table(
         "Community",
         &[
@@ -91,117 +105,107 @@ pub fn schema_ddl() -> Vec<String> {
     ));
 
     // -----------------------------------------------------------------------
-    // Relationship tables
+    // Single CodeRelation table
     // -----------------------------------------------------------------------
+    // LadybugDB requires explicit FROM/TO node-type pairs. We enumerate the
+    // valid combinations rather than doing the full Cartesian product.
 
-    // All code-entity node tables share the same schema, so we define
-    // relationships generically. LadybugDB (KuzuDB) requires FROM/TO to
-    // reference specific node table pairs. We'll create the most common
-    // combinations; the full cross-product can be extended later.
-    let entity_tables: &[&str] = &[
-        "Project", "Package", "Module", "Folder", "File", "Class", "Function",
-        "Method", "Variable", "Interface", "Enum", "Decorator", "Import",
-        "Type", "Struct", "Macro", "Trait", "Impl", "Namespace", "TypeAlias",
-        "Const", "Record", "Template", "Community", "Process", "Section",
-        "Test",
-    ];
+    let structural = &["Project", "Folder"];
+    let containers = &["File", "Class", "Interface", "Struct", "Trait", "Impl",
+                        "Enum", "Module", "Namespace", "Package"];
+    let symbols = &["Function", "Method", "Variable", "Class", "Interface",
+                     "Enum", "Struct", "Trait", "Impl", "MacroDef", "TypeAlias",
+                     "Const", "Decorator", "Import", "Type", "Record",
+                     "Template", "Namespace", "Module", "Test"];
+    let callable = &["Function", "Method"];
+    let inheritable = &["Class", "Interface", "Struct", "Trait"];
+    let owners = &["Class", "Interface", "Struct", "Trait", "Impl"];
 
-    // CONTAINS: structural containment (parent -> child)
-    for &parent in &["Project", "Package", "Module", "Folder", "File", "Class", "Namespace"] {
-        for &child in entity_tables {
-            if parent != child {
-                ddl.push(rel_table("CONTAINS", parent, child, &[("project_id", "STRING")]));
-            }
+    let mut pairs: Vec<(&str, &str)> = Vec::new();
+
+    // CONTAINS: structural → folders/files, containers → symbols
+    for &p in structural {
+        pairs.push((p, "Folder"));
+        pairs.push((p, "File"));
+    }
+    for &c in containers {
+        for &s in symbols {
+            pairs.push((c, s));
         }
     }
 
-    // DEFINES: File -> Symbol
-    for &symbol in &[
-        "Class", "Function", "Method", "Variable", "Interface", "Enum",
-        "Decorator", "Type", "Struct", "Macro", "Trait", "Impl", "Namespace",
-        "TypeAlias", "Const", "Record", "Template", "Test",
-    ] {
-        ddl.push(rel_table("DEFINES", "File", symbol, &[("project_id", "STRING")]));
+    // DEFINES: File → any symbol
+    for &s in symbols {
+        pairs.push(("File", s));
     }
 
-    // CALLS: caller -> callee (with confidence)
-    for &caller in &["Function", "Method"] {
-        for &callee in &["Function", "Method"] {
-            ddl.push(rel_table(
-                "CALLS",
-                caller,
-                callee,
-                &[("confidence", "DOUBLE"), ("project_id", "STRING"), ("source", "STRING")],
-            ));
+    // CALLS: callable → callable
+    for &a in callable {
+        for &b in callable {
+            pairs.push((a, b));
         }
     }
 
-    // IMPORTS: File -> Symbol
-    for &symbol in entity_tables {
-        ddl.push(rel_table("IMPORTS", "File", symbol, &[("project_id", "STRING")]));
-    }
+    // IMPORTS: File → File (cross-file import)
+    pairs.push(("File", "File"));
 
-    // Heritage: EXTENDS, IMPLEMENTS, INHERITS, OVERRIDES
-    for &edge in &["EXTENDS", "IMPLEMENTS", "INHERITS"] {
-        for &from in &["Class", "Interface", "Struct", "Trait"] {
-            for &to in &["Class", "Interface", "Struct", "Trait"] {
-                ddl.push(rel_table(edge, from, to, &[("project_id", "STRING")]));
-            }
+    // Heritage: EXTENDS, IMPLEMENTS, INHERITS
+    for &a in inheritable {
+        for &b in inheritable {
+            pairs.push((a, b));
         }
     }
 
-    ddl.push(rel_table("OVERRIDES", "Method", "Method", &[("project_id", "STRING")]));
+    // OVERRIDES: Method → Method
+    pairs.push(("Method", "Method"));
 
-    // HAS_METHOD, HAS_PROPERTY
-    for &owner in &["Class", "Interface", "Struct", "Trait", "Impl"] {
-        ddl.push(rel_table("HAS_METHOD", owner, "Method", &[("project_id", "STRING")]));
-        ddl.push(rel_table("HAS_PROPERTY", owner, "Variable", &[("project_id", "STRING")]));
+    // HAS_METHOD: owner → Method, HAS_PROPERTY: owner → Variable
+    for &o in owners {
+        pairs.push((o, "Method"));
+        pairs.push((o, "Variable"));
     }
 
-    // ACCESSES: Function/Method -> Variable
-    for &accessor in &["Function", "Method"] {
-        ddl.push(rel_table("ACCESSES", accessor, "Variable", &[("project_id", "STRING")]));
+    // ACCESSES: callable → Variable
+    for &c in callable {
+        pairs.push((c, "Variable"));
     }
 
-    // USES: generic
-    for &from in entity_tables {
-        for &to in entity_tables {
-            if from != to {
-                ddl.push(rel_table("USES", from, to, &[("project_id", "STRING")]));
-            }
-        }
+    // DECORATES: Decorator → targets
+    for &t in &["Class", "Function", "Method", "Variable"] {
+        pairs.push(("Decorator", t));
     }
 
-    // DECORATES
-    for &target in &["Class", "Function", "Method", "Variable"] {
-        ddl.push(rel_table("DECORATES", "Decorator", target, &[("project_id", "STRING")]));
+    // MEMBER_OF: any symbol → Community
+    for &s in symbols {
+        pairs.push((s, "Community"));
+    }
+    pairs.push(("File", "Community"));
+
+    // STEP_IN_PROCESS: Process → callable
+    for &c in callable {
+        pairs.push(("Process", c));
     }
 
-    // MEMBER_OF: Symbol -> Community
-    for &symbol in entity_tables {
-        if symbol != "Community" {
-            ddl.push(rel_table("MEMBER_OF", symbol, "Community", &[("project_id", "STRING")]));
-        }
+    // TESTED_BY: callable → Test
+    for &c in callable {
+        pairs.push((c, "Test"));
     }
 
-    // STEP_IN_PROCESS: Process step sequencing
-    ddl.push(rel_table(
-        "STEP_IN_PROCESS",
-        "Process",
-        "Function",
-        &[("step_order", "INT32"), ("project_id", "STRING")],
+    // Deduplicate pairs (some overlap from the loops above)
+    pairs.sort();
+    pairs.dedup();
+
+    // Build the single CodeRelation DDL
+    let from_to_clauses: Vec<String> = pairs
+        .iter()
+        .map(|(f, t)| format!("FROM {f} TO {t}"))
+        .collect();
+
+    ddl.push(format!(
+        "CREATE REL TABLE IF NOT EXISTS CodeRelation ({}, \
+         type STRING, confidence DOUBLE, reason STRING, step INT32)",
+        from_to_clauses.join(", "),
     ));
-    ddl.push(rel_table(
-        "STEP_IN_PROCESS",
-        "Process",
-        "Method",
-        &[("step_order", "INT32"), ("project_id", "STRING")],
-    ));
-
-    // TESTED_BY: Function/Method -> Test
-    for &testee in &["Function", "Method"] {
-        ddl.push(rel_table("TESTED_BY", testee, "Test", &[("project_id", "STRING")]));
-    }
 
     ddl
 }
@@ -216,21 +220,5 @@ fn node_table(label: &str, columns: &[(&str, &str)]) -> String {
         "CREATE NODE TABLE IF NOT EXISTS {label} (id SERIAL, {cols}, PRIMARY KEY(id))",
         label = label,
         cols = cols.join(", "),
-    )
-}
-
-/// Generate a CREATE REL TABLE statement.
-fn rel_table(name: &str, from: &str, to: &str, props: &[(&str, &str)]) -> String {
-    let prop_str = if props.is_empty() {
-        String::new()
-    } else {
-        let p: Vec<String> = props
-            .iter()
-            .map(|(name, ty)| format!("{name} {ty}"))
-            .collect();
-        format!(", {}", p.join(", "))
-    };
-    format!(
-        "CREATE REL TABLE IF NOT EXISTS {name}_{from}_{to} (FROM {from} TO {to}{prop_str})",
     )
 }
