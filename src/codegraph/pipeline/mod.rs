@@ -9,6 +9,7 @@ pub mod parsing;
 pub mod imports;
 pub mod calls;
 pub mod heritage;
+pub mod overrides;
 pub mod communities;
 pub mod processes;
 pub mod enriching;
@@ -325,12 +326,22 @@ async fn run_pipeline(
     phase_timings.insert("calls".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 6: Heritage ────────────────────────────────────────────────
+    // ── Phase 6: Heritage (extends/implements + overrides) ──────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Heritage, 0.0, "Resolving inheritance", &stats);
 
     let heritage_result = heritage::resolve_heritage(&project_id, &db).await?;
     stats.edges_created += heritage_result.edges_created;
+
+    update_progress(
+        PipelinePhase::Heritage,
+        0.5,
+        "Inheritance resolved, computing overrides",
+        &stats,
+    );
+
+    let overrides_result = overrides::resolve_overrides(&project_id, &db).await?;
+    stats.edges_created += overrides_result.edges_created;
 
     update_progress(PipelinePhase::Heritage, 1.0, "Heritage resolved", &stats);
     phase_timings.insert("heritage".to_string(), phase_start.elapsed().as_secs_f64());
