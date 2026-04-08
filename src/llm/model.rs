@@ -591,10 +591,8 @@ impl CompletionModel for SpacebotModel {
                 } else {
                     crate::llm::usage::ExtendedUsage::from_openai_body(body)
                 };
-                let cost = crate::llm::pricing::estimate_cost_extended(
-                    &self.full_model_name,
-                    &extended,
-                );
+                let cost =
+                    crate::llm::pricing::estimate_cost_extended(&self.full_model_name, &extended);
                 accumulator
                     .lock()
                     .await
@@ -3666,8 +3664,7 @@ fn parse_openai_responses_sse_response(
             }
             Some("response.output_text.delta") => {
                 let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
-                let content_idx =
-                    event_body["content_index"].as_u64().unwrap_or(0) as usize;
+                let content_idx = event_body["content_index"].as_u64().unwrap_or(0) as usize;
                 let delta = event_body["delta"].as_str().unwrap_or("");
                 let entry = output_acc.entry(idx).or_insert_with(|| OutputItemAcc {
                     done_snapshot: None,
@@ -3675,7 +3672,11 @@ fn parse_openai_responses_sse_response(
                     item_type: None,
                     added_skeleton: None,
                 });
-                entry.text_parts.entry(content_idx).or_default().push_str(delta);
+                entry
+                    .text_parts
+                    .entry(content_idx)
+                    .or_default()
+                    .push_str(delta);
             }
             Some("response.output_item.done") => {
                 let idx = event_body["output_index"].as_u64().unwrap_or(0) as usize;
@@ -3720,8 +3721,7 @@ fn parse_openai_responses_sse_response(
                 reconstructed.push(snapshot);
             } else if !acc.text_parts.is_empty() {
                 // Build a message output item from accumulated text
-                let full_text: String =
-                    acc.text_parts.into_values().collect();
+                let full_text: String = acc.text_parts.into_values().collect();
                 let content = serde_json::json!([{
                     "type": "output_text",
                     "text": full_text,

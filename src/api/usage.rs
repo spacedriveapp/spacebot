@@ -145,7 +145,11 @@ pub(super) async fn get_usage(
     Query(query): Query<UsageQuery>,
 ) -> Result<Json<UsageResponse>, StatusCode> {
     let pools = state.agent_pools.load();
-    let since = query.since.as_deref().unwrap_or(&default_since()).to_string();
+    let since = query
+        .since
+        .as_deref()
+        .unwrap_or(&default_since())
+        .to_string();
     let until = query.until.clone();
     let group_by = query
         .group_by
@@ -243,13 +247,12 @@ pub(super) async fn get_usage(
             total_cost += cost;
 
             // Check cost status
-            let status_rows = sqlx::query(
-                "SELECT DISTINCT cost_status FROM token_usage WHERE recorded_at >= ?",
-            )
-            .bind(&since)
-            .fetch_all(*pool)
-            .await
-            .unwrap_or_default();
+            let status_rows =
+                sqlx::query("SELECT DISTINCT cost_status FROM token_usage WHERE recorded_at >= ?")
+                    .bind(&since)
+                    .fetch_all(*pool)
+                    .await
+                    .unwrap_or_default();
             let status = aggregate_cost_status(&status_rows);
             if status == "unknown" {
                 has_unknown = true;
@@ -426,10 +429,7 @@ pub(super) async fn get_conversation_usage(
     let pools = state.agent_pools.load();
 
     let target_pools: Vec<&sqlx::SqlitePool> = if let Some(ref agent_id) = query.agent_id {
-        pools
-            .get(agent_id.as_str())
-            .into_iter()
-            .collect()
+        pools.get(agent_id.as_str()).into_iter().collect()
     } else {
         pools.values().collect()
     };
@@ -471,13 +471,12 @@ pub(super) async fn get_conversation_usage(
         total_requests += row.get::<i64, _>("request_count");
         total_cost += row.get::<f64, _>("estimated_cost_usd");
 
-        let status_rows = sqlx::query(
-            "SELECT DISTINCT cost_status FROM token_usage WHERE conversation_id = ?",
-        )
-        .bind(&conversation_id)
-        .fetch_all(*pool)
-        .await
-        .unwrap_or_default();
+        let status_rows =
+            sqlx::query("SELECT DISTINCT cost_status FROM token_usage WHERE conversation_id = ?")
+                .bind(&conversation_id)
+                .fetch_all(*pool)
+                .await
+                .unwrap_or_default();
 
         let status = aggregate_cost_status(&status_rows);
         if status == "unknown" {

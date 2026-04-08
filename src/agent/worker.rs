@@ -361,9 +361,9 @@ impl Worker {
             .as_deref()
             .unwrap_or_else(|| routing.resolve(ProcessType::Worker, None))
             .to_string();
-        let usage_accumulator = std::sync::Arc::new(
-            tokio::sync::Mutex::new(crate::llm::usage::UsageAccumulator::new()),
-        );
+        let usage_accumulator = std::sync::Arc::new(tokio::sync::Mutex::new(
+            crate::llm::usage::UsageAccumulator::new(),
+        ));
         let model = SpacebotModel::make(&self.deps.llm_manager, &model_name)
             .with_context(&*self.deps.agent_id, "worker")
             .with_worker_type("builtin")

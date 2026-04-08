@@ -81,9 +81,7 @@ impl Tool for SetOutcomeTool {
                 leak_prefix = %&leak[..leak.len().min(8)],
                 "set_outcome blocked content matching secret pattern"
             );
-            return Err(SetOutcomeError(
-                "blocked: potential secret detected".into(),
-            ));
+            return Err(SetOutcomeError("blocked: potential secret detected".into()));
         }
 
         self.outcome.set(content);

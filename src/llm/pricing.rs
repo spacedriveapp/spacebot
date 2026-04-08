@@ -185,10 +185,7 @@ pub fn estimate_cost(
 }
 
 /// Estimate cost using the full extended usage breakdown.
-pub fn estimate_cost_extended(
-    model_name: &str,
-    usage: &super::usage::ExtendedUsage,
-) -> f64 {
+pub fn estimate_cost_extended(model_name: &str, usage: &super::usage::ExtendedUsage) -> f64 {
     let pricing = lookup_pricing(model_name);
 
     (usage.input_tokens as f64 * pricing.input)

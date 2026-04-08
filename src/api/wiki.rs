@@ -125,9 +125,7 @@ fn get_wiki_store(state: &ApiState) -> Result<Arc<WikiStore>, StatusCode> {
 fn parse_page_type(s: Option<&str>) -> Result<Option<WikiPageType>, StatusCode> {
     match s {
         None => Ok(None),
-        Some(v) => Ok(Some(
-            WikiPageType::parse(v).ok_or(StatusCode::BAD_REQUEST)?,
-        )),
+        Some(v) => Ok(Some(WikiPageType::parse(v).ok_or(StatusCode::BAD_REQUEST)?)),
     }
 }
 
@@ -202,8 +200,7 @@ pub(super) async fn create_page(
     Json(request): Json<CreatePageRequest>,
 ) -> Result<Json<WikiPageResponse>, StatusCode> {
     let store = get_wiki_store(&state)?;
-    let page_type =
-        WikiPageType::parse(&request.page_type).ok_or(StatusCode::BAD_REQUEST)?;
+    let page_type = WikiPageType::parse(&request.page_type).ok_or(StatusCode::BAD_REQUEST)?;
 
     let page = store
         .create(CreateWikiPageInput {
@@ -341,7 +338,12 @@ pub(super) async fn restore_version(
 ) -> Result<Json<WikiPageResponse>, StatusCode> {
     let store = get_wiki_store(&state)?;
     let page = store
-        .restore(&slug, request.version, &request.author_type, &request.author_id)
+        .restore(
+            &slug,
+            request.version,
+            &request.author_type,
+            &request.author_id,
+        )
         .await
         .map_err(|e| {
             if e.to_string().contains("not found") {
