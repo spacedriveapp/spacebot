@@ -138,6 +138,12 @@ pub struct StatusBlock {
     pub completed_items: Vec<CompletedItem>,
     /// Active link conversations with other agents.
     pub active_link_conversations: Vec<LinkConversationStatus>,
+    /// Estimated tokens used in conversation history.
+    pub estimated_tokens: usize,
+    /// Total context window size in tokens.
+    pub context_window: usize,
+    /// Ratio of tokens used to total context window (0.0 to 1.0+).
+    pub usage_ratio: f32,
 }
 
 /// Status of an active branch.

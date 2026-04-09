@@ -245,6 +245,27 @@ pub(super) async fn channel_status(
 
     let mut result = HashMap::new();
     for (channel_id, status_block) in snapshot {
+        // Fetch token usage data from the channel state
+        let channel_states = state.channel_states.read().await;
+        let token_data = if let Some(channel_state) = channel_states.get(channel_id.as_str()) {
+            let history = channel_state.history.read().await;
+            let estimated_tokens = crate::agent::compactor::estimate_history_tokens(&history);
+            let context_window = **channel_state.deps.runtime_config.context_window.load();
+            let usage_ratio = estimated_tokens as f32 / context_window as f32;
+            Some((estimated_tokens, context_window, usage_ratio))
+        } else {
+            None
+        };
+        drop(channel_states);
+
+        if let Some((estimated_tokens, context_window, usage_ratio)) = token_data {
+            let mut block = status_block.write().await;
+            block.estimated_tokens = estimated_tokens;
+            block.context_window = context_window;
+            block.usage_ratio = usage_ratio;
+            drop(block);
+        }
+
         let block = status_block.read().await;
         if let Ok(value) = serde_json::to_value(&*block) {
             result.insert(channel_id, value);

@@ -125,6 +125,15 @@ export interface OutboundMessageDeltaEvent {
 	aggregated_text: string;
 }
 
+export interface ContextUsageEvent {
+	type: "context_usage";
+	agent_id: string;
+	channel_id: string;
+	estimated_tokens: number;
+	context_window: number;
+	usage_ratio: number;
+}
+
 export interface TypingStateEvent {
 	type: "typing_state";
 	agent_id: string;
@@ -251,6 +260,7 @@ export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
 	| OutboundMessageDeltaEvent
+	| ContextUsageEvent
 	| TypingStateEvent
 	| WorkerStartedEvent
 	| WorkerStatusEvent
@@ -336,6 +346,9 @@ export interface StatusBlockSnapshot {
 	active_workers: WorkerStatusInfo[];
 	active_branches: BranchStatusInfo[];
 	completed_items: CompletedItemInfo[];
+	estimated_tokens?: number;
+	context_window?: number;
+	usage_ratio?: number;
 }
 
 export interface PromptInspectResponse {

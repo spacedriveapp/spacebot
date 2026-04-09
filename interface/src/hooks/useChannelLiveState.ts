@@ -4,6 +4,7 @@ import {
 	api,
 	type BranchCompletedEvent,
 	type BranchStartedEvent,
+	type ContextUsageEvent,
 	type InboundMessageEvent,
 	type OutboundMessageDeltaEvent,
 	type OutboundMessageEvent,
@@ -56,6 +57,11 @@ export interface ChannelLiveState {
 	historyLoaded: boolean;
 	hasMore: boolean;
 	loadingMore: boolean;
+	contextUsage: {
+		estimatedTokens: number;
+		contextWindow: number;
+		usageRatio: number;
+	} | null;
 }
 
 const PAGE_SIZE = 50;
@@ -70,6 +76,7 @@ function emptyLiveState(): ChannelLiveState {
 		historyLoaded: false,
 		hasMore: true,
 		loadingMore: false,
+		contextUsage: null,
 	};
 }
 
@@ -185,7 +192,14 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 							toolCalls: existingBranch?.toolCalls ?? 0,
 						};
 					}
-					next[channelId] = { ...existing, workers, branches };
+					const contextUsage = snapshot.estimated_tokens !== undefined && snapshot.context_window !== undefined
+						? {
+							estimatedTokens: snapshot.estimated_tokens as number,
+							contextWindow: snapshot.context_window as number,
+							usageRatio: snapshot.usage_ratio as number,
+						}
+						: null;
+					next[channelId] = { ...existing, workers, branches, contextUsage };
 				}
 				return next;
 			});
@@ -802,10 +816,29 @@ export function useChannelLiveState(channels: ChannelInfo[]) {
 		});
 	}, []);
 
+	const handleContextUsage = useCallback((data: unknown) => {
+		const event = data as ContextUsageEvent;
+		setLiveStates((prev) => {
+			const existing = getOrCreate(prev, event.channel_id);
+			return {
+				...prev,
+				[event.channel_id]: {
+					...existing,
+					contextUsage: {
+						estimatedTokens: event.estimated_tokens,
+						contextWindow: event.context_window,
+						usageRatio: event.usage_ratio,
+					},
+				},
+			};
+		});
+	}, []);
+
 	const handlers = {
 		inbound_message: handleInboundMessage,
 		outbound_message: handleOutboundMessage,
 		outbound_message_delta: handleOutboundMessageDelta,
+		context_usage: handleContextUsage,
 		typing_state: handleTypingState,
 		worker_started: handleWorkerStarted,
 		worker_status: handleWorkerStatus,

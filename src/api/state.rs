@@ -173,6 +173,14 @@ pub enum ApiEvent {
         text_delta: String,
         aggregated_text: String,
     },
+    /// Context usage update for a channel.
+    ContextUsage {
+        agent_id: String,
+        channel_id: String,
+        estimated_tokens: usize,
+        context_window: usize,
+        usage_ratio: f32,
+    },
     /// A worker was started.
     WorkerStarted {
         agent_id: String,
@@ -666,6 +674,23 @@ impl ApiState {
                                         thread_id: thread_id.clone(),
                                         content: content.clone(),
                                         tool_calls,
+                                    })
+                                    .ok();
+                            }
+                            ProcessEvent::ContextUsage {
+                                channel_id,
+                                estimated_tokens,
+                                context_window,
+                                usage_ratio,
+                                ..
+                            } => {
+                                api_tx
+                                    .send(ApiEvent::ContextUsage {
+                                        agent_id: agent_id.clone(),
+                                        channel_id: channel_id.to_string(),
+                                        estimated_tokens: *estimated_tokens,
+                                        context_window: *context_window,
+                                        usage_ratio: *usage_ratio,
                                     })
                                     .ok();
                             }

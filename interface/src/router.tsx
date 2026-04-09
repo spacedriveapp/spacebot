@@ -3,6 +3,7 @@ import {
 	createRootRoute,
 	createRoute,
 	Outlet,
+	useLocation,
 } from "@tanstack/react-router";
 import {useQuery} from "@tanstack/react-query";
 import {api, BASE_PATH} from "@/api/client";
@@ -27,7 +28,9 @@ import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Orchestrate} from "@/routes/Orchestrate";
 import {useLiveContext} from "@/hooks/useLiveContext";
+import {getPortalSessionId} from "@/hooks/usePortal";
 import {AgentTabs} from "@/components/AgentTabs";
+import {formatTokens, getTokenUsageColor} from "@/utils/tokens";
 
 // ── Root layout ──────────────────────────────────────────────────────────
 
@@ -61,10 +64,21 @@ function AgentTopBar({agentId}: {agentId: string}) {
 	const agent = agentsQuery.data?.agents.find((a) => a.id === agentId);
 	const displayName = agent?.display_name;
 
+	const {liveStates} = useLiveContext();
+	const location = useLocation();
+
+	// Determine which channel's context usage to show
+	// Extract channelId from URL if we're on a channel detail page
+	const pathMatch = location.pathname.match(/\/agents\/[^\/]+\/channels\/([^\/]+)/);
+	const channelIdFromPath = pathMatch ? pathMatch[1] : null;
+
+	// Determine the relevant channel ID: channel detail > chat tab > nothing
+	const relevantChannelId = channelIdFromPath || getPortalSessionId(agentId);
+	const contextUsage = liveStates[relevantChannelId]?.contextUsage ?? null;
+
 	useSetTopBar(
-		<div className="flex h-full flex-col">
-			<div className="flex flex-1 items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">
+		<div className="flex h-full w-full items-center gap-4 px-6">
+			<h1 className="min-w-0 flex-1 truncate font-plex text-sm font-medium text-ink">
 					{displayName ? (
 						<>
 							{displayName}
@@ -73,8 +87,15 @@ function AgentTopBar({agentId}: {agentId: string}) {
 					) : (
 						agentId
 					)}
-				</h1>
-			</div>
+			</h1>
+			{contextUsage && contextUsage.estimatedTokens > 0 && (
+				<div
+					className={`shrink-0 text-tiny font-mono ${getTokenUsageColor(contextUsage.usageRatio)}`}
+					title={`${contextUsage.estimatedTokens.toLocaleString()} / ${contextUsage.contextWindow.toLocaleString()} tokens (${(contextUsage.usageRatio * 100).toFixed(1)}%)`}
+				>
+					{formatTokens(contextUsage.estimatedTokens)} / {formatTokens(contextUsage.contextWindow)}
+				</div>
+			)}
 		</div>,
 	);
 

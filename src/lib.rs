@@ -231,6 +231,13 @@ pub enum ProcessEvent {
         channel_id: ChannelId,
         threshold_reached: f32,
     },
+    ContextUsage {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        estimated_tokens: usize,
+        context_window: usize,
+        usage_ratio: f32,
+    },
     StatusUpdate {
         agent_id: AgentId,
         process_id: ProcessId,
