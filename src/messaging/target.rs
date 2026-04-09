@@ -666,10 +666,10 @@ pub fn is_valid_instance_name(name: &str) -> bool {
     if name.chars().all(|c| c.is_ascii_digit()) {
         return false;
     }
-    // Must not look like a Slack workspace ID (Txxxxx, Cxxxxx, etc.)
-    if name.len() > 6
-        && name.starts_with(|c: char| c.is_ascii_uppercase())
-        && name[1..].chars().all(|c| c.is_ascii_digit())
+    // Must not look like a Slack workspace ID (Txxxxx, Cxxxxx, Exxxxx, etc.)
+    if name.len() >= 6
+        && (name.starts_with('T') || name.starts_with('C') || name.starts_with('E'))
+        && name[1..].chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
     {
         return false;
     }

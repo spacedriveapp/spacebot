@@ -3657,14 +3657,16 @@ fn provider_display_name(provider_id: &str) -> String {
 }
 
 fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
+    let stripped = model_name.strip_prefix("litellm/").unwrap_or(model_name);
+
     if provider == "zai-coding-plan" {
         // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
-        model_name
+        stripped
             .strip_prefix("zai/")
-            .unwrap_or(model_name)
+            .unwrap_or(stripped)
             .to_string()
     } else {
-        model_name.to_string()
+        stripped.to_string()
     }
 }
 
