@@ -944,9 +944,11 @@ impl Channel {
             "/quiet" | "/observe" => {
                 self.set_response_mode(ResponseMode::Observe).await;
                 self.send_builtin_text(
-                    "observe mode enabled. i'll learn from this conversation but won't respond.".to_string(),
+                    "observe mode enabled. i'll learn from this conversation but won't respond."
+                        .to_string(),
                     "observe",
-                ).await;
+                )
+                .await;
                 return Ok(true);
             }
             "/active" => {
@@ -976,7 +978,8 @@ impl Channel {
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /observe: learn from conversation, never respond".to_string(),
-                    "- /mention-only: only respond when @mentioned, replied to, or given a command".to_string(),
+                    "- /mention-only: only respond when @mentioned, replied to, or given a command"
+                        .to_string(),
                     "- /active: normal reply mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
