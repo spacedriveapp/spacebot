@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod factory;
 pub mod github_copilot_auth;
+pub mod github_copilot_oauth;
 pub mod hooks;
 pub mod identity;
 pub mod links;

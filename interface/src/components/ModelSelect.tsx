@@ -32,6 +32,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   minimax: "MiniMax",
   "minimax-cn": "MiniMax CN",
   "github-copilot": "GitHub Copilot",
+  "github-copilot-oauth": "GitHub Copilot (OAuth)",
 };
 
 function formatContextWindow(tokens: number | null): string {
@@ -136,6 +137,7 @@ export function ModelSelect({
     "openai",
     "openai-chatgpt",
     "github-copilot",
+    "github-copilot-oauth",
     "ollama",
     "deepseek",
     "xai",
