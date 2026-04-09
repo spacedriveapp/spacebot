@@ -11,6 +11,7 @@ pub mod db;
 pub mod error;
 pub mod factory;
 pub mod github_copilot_auth;
+pub mod github_copilot_oauth;
 pub mod hooks;
 pub mod identity;
 pub mod links;
@@ -229,6 +230,13 @@ pub enum ProcessEvent {
         agent_id: AgentId,
         channel_id: ChannelId,
         threshold_reached: f32,
+    },
+    ContextUsage {
+        agent_id: AgentId,
+        channel_id: ChannelId,
+        estimated_tokens: usize,
+        context_window: usize,
+        usage_ratio: f32,
     },
     StatusUpdate {
         agent_id: AgentId,

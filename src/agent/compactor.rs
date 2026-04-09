@@ -57,10 +57,11 @@ impl Compactor {
         let context_window = **rc.context_window.load();
         let compaction_config = **rc.compaction.load();
 
-        let usage = {
+        let (usage, _estimated_tokens) = {
             let history = self.history.read().await;
             let estimated_tokens = estimate_history_tokens(&history);
-            estimated_tokens as f32 / context_window as f32
+            let usage = estimated_tokens as f32 / context_window as f32;
+            (usage, estimated_tokens)
         };
 
         let action = if usage >= compaction_config.emergency_threshold {
@@ -111,6 +112,31 @@ impl Compactor {
         } else {
             Ok(None)
         }
+    }
+
+    /// Emit the context usage event for a channel.
+    pub async fn emit_context_usage(&self) -> Result<()> {
+        let rc = &self.deps.runtime_config;
+        let context_window = **rc.context_window.load();
+        let history = self.history.read().await;
+        let estimated_tokens = estimate_history_tokens(&history);
+        let usage_ratio = estimated_tokens as f32 / context_window as f32;
+
+        if let Err(error) = self.deps.event_tx.send(crate::ProcessEvent::ContextUsage {
+            agent_id: self.deps.agent_id.clone(),
+            channel_id: self.channel_id.clone(),
+            estimated_tokens,
+            context_window,
+            usage_ratio,
+        }) {
+            tracing::debug!(
+                channel_id = %self.channel_id,
+                %error,
+                "failed to emit context-usage event"
+            );
+        }
+
+        Ok(())
     }
 
     /// Spawn a compaction worker in the background.

@@ -352,7 +352,7 @@ export function ChannelDetail({ agentId, channelId, channel, liveState, onLoadMo
 						</span>
 					)}
 
-					{/* Right side: activity indicators + typing + cortex toggle */}
+					{/* Right side: activity indicators + typing + token usage + cortex toggle */}
 					<div className="ml-auto flex items-center gap-3">
 						{hasActivity && (
 							<div className="flex items-center gap-2">

@@ -4,8 +4,10 @@ import {usePortal, getPortalSessionId} from "@/hooks/usePortal";
 import {isOpenCodeWorker, type ActiveWorker} from "@/hooks/useChannelLiveState";
 import {useLiveContext} from "@/hooks/useLiveContext";
 import {Markdown} from "@/components/Markdown";
+import {AgentHeaderContent} from "@/components/AgentHeaderContent";
 import {ConversationSettingsPanel} from "@/components/ConversationSettingsPanel";
 import {ConversationsSidebar} from "@/components/ConversationsSidebar";
+import {useSetTopBar} from "@/components/TopBar";
 import {Button} from "@/ui/Button";
 import {Popover, PopoverTrigger, PopoverContent} from "@/ui/Popover";
 import {api, type ConversationDefaultsResponse, type ConversationSettings} from "@/api/client";
@@ -96,25 +98,28 @@ function ThinkingIndicator() {
 	);
 }
 
+// Input owns its own state so keystrokes never trigger a re-render of the
+// parent WebChatPanel (and therefore never re-render the message list).
 function FloatingChatInput({
-	value,
-	onChange,
-	onSubmit,
+	onSend,
 	disabled,
 	agentId,
 }: {
-	value: string;
-	onChange: (value: string) => void;
-	onSubmit: () => void;
+	onSend: (message: string) => void;
 	disabled: boolean;
 	agentId: string;
 }) {
 	const textareaRef = useRef<HTMLTextAreaElement>(null);
+	const [input, setInput] = useState("");
 
+	// Focus on mount.
 	useEffect(() => {
 		textareaRef.current?.focus({preventScroll: true});
 	}, []);
 
+	// Attach the height-adjustment listener once. Using the native "input" event
+	// avoids adding [value] to the dependency array, which previously caused a
+	// remove-add cycle (and a forced reflow) on every single keystroke.
 	useEffect(() => {
 		const textarea = textareaRef.current;
 		if (!textarea) return;
@@ -130,12 +135,26 @@ function FloatingChatInput({
 		adjustHeight();
 		textarea.addEventListener("input", adjustHeight);
 		return () => textarea.removeEventListener("input", adjustHeight);
-	}, [value]);
+	}, []);
+
+	const handleSubmit = () => {
+		const trimmed = input.trim();
+		if (!trimmed || disabled) return;
+		onSend(trimmed);
+		setInput("");
+		// React's controlled value update doesn't fire a native "input" event,
+		// so reset the height directly after clearing.
+		const textarea = textareaRef.current;
+		if (textarea) {
+			textarea.style.height = "auto";
+			textarea.style.overflowY = "hidden";
+		}
+	};
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
-		if (event.key === "Enter" && !event.shiftKey) {
+		if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
 			event.preventDefault();
-			onSubmit();
+			handleSubmit();
 		}
 	};
 
@@ -146,8 +165,8 @@ function FloatingChatInput({
 					<div className="flex items-end gap-2 p-3">
 						<textarea
 							ref={textareaRef}
-							value={value}
-							onChange={(event) => onChange(event.target.value)}
+							value={input}
+							onChange={(event) => setInput(event.target.value)}
 							onKeyDown={handleKeyDown}
 							placeholder={
 								disabled ? "Waiting for response..." : `Message ${agentId}...`
@@ -159,8 +178,8 @@ function FloatingChatInput({
 						/>
 						<button
 							type="button"
-							onClick={onSubmit}
-							disabled={disabled || !value.trim()}
+							onClick={handleSubmit}
+							disabled={disabled || !input.trim()}
 							className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-accent text-white transition-all duration-150 hover:bg-accent-deep disabled:opacity-30 disabled:hover:bg-accent"
 						>
 							<svg
@@ -188,7 +207,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const [activeConversationId, setActiveConversationId] = useState<string>(getPortalSessionId(agentId));
 	const {isSending, error, sendMessage} = usePortal(agentId, activeConversationId);
 	const {liveStates} = useLiveContext();
-	const [input, setInput] = useState("");
 	const scrollRef = useRef<HTMLDivElement>(null);
 	const [showSettings, setShowSettings] = useState(false);
 	const [settings, setSettings] = useState<ConversationSettings>({});
@@ -232,6 +250,14 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 	const isTyping = liveState?.isTyping ?? false;
 	const activeWorkers = Object.values(liveState?.workers ?? {});
 	const hasActiveWorkers = activeWorkers.length > 0;
+
+	useSetTopBar(
+		<AgentHeaderContent
+			agentId={agentId}
+			displayName={agentDisplayName}
+			contextUsage={liveState?.contextUsage ?? null}
+		/>,
+	);
 
 	// Mutations
 	const createConversationMutation = useMutation({
@@ -290,13 +316,6 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 		}
 	}, [timeline.length, isTyping, activeWorkers.length]);
 
-	const handleSubmit = () => {
-		const trimmed = input.trim();
-		if (!trimmed || isSending) return;
-		setInput("");
-		sendMessage(trimmed);
-	};
-
 	const saveSettingsMutation = useMutation({
 		mutationFn: async () => {
 			if (!activeConversationId) return;
@@ -322,7 +341,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 				onRenameConversation={(id, title) => renameConversationMutation.mutate({ id, title })}
 				onArchiveConversation={(id, archived) => archiveConversationMutation.mutate({ id, archived })}
 				isLoading={conversationsLoading}
-			/>
+		/>
 
 			{/* Main Chat Area */}
 			<div className="relative flex flex-1 flex-col">
@@ -425,9 +444,7 @@ export function WebChatPanel({agentId}: WebChatPanelProps) {
 
 				{/* Floating input */}
 				<FloatingChatInput
-					value={input}
-					onChange={setInput}
-					onSubmit={handleSubmit}
+					onSend={sendMessage}
 					disabled={isSending || isTyping}
 					agentId={agentId}
 				/>

@@ -125,15 +125,16 @@ pub(super) async fn events_sse(
                             ApiEvent::BranchStarted { .. } => "branch_started",
                             ApiEvent::BranchCompleted { .. } => "branch_completed",
                             ApiEvent::ToolStarted { .. } => "tool_started",
-                            ApiEvent::ToolCompleted { .. } => "tool_completed",
-                            ApiEvent::ConfigReloaded => "config_reloaded",
-                            ApiEvent::AgentMessageSent { .. } => "agent_message_sent",
-                            ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
-                            ApiEvent::TaskUpdated { .. } => "task_updated",
-                            ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
-                            ApiEvent::WorkerText { .. } => "worker_text",
-                            ApiEvent::CortexChatMessage { .. } => "cortex_chat_message",
-                        };
+                             ApiEvent::ToolCompleted { .. } => "tool_completed",
+                             ApiEvent::ConfigReloaded => "config_reloaded",
+                             ApiEvent::AgentMessageSent { .. } => "agent_message_sent",
+                             ApiEvent::AgentMessageReceived { .. } => "agent_message_received",
+                             ApiEvent::TaskUpdated { .. } => "task_updated",
+                             ApiEvent::OpenCodePartUpdated { .. } => "opencode_part_updated",
+                             ApiEvent::WorkerText { .. } => "worker_text",
+                             ApiEvent::CortexChatMessage { .. } => "cortex_chat_message",
+                             ApiEvent::ContextUsage { .. } => "context_usage",
+                         };
                         yield Ok(axum::response::sse::Event::default()
                             .event(event_type)
                             .data(json));

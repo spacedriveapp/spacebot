@@ -935,6 +935,24 @@ impl SpacebotModel {
             body["stream"] = serde_json::json!(true);
         }
 
+        // Set reasoning effort for models that support it. Without this,
+        // some endpoints (notably ChatGPT Plus OAuth) default to "none",
+        // which produces empty output arrays.
+        let effort = self
+            .routing
+            .as_ref()
+            .map(|r| r.thinking_effort_for_model(&self.model_name))
+            .unwrap_or("auto");
+        let openai_effort = match effort {
+            "max" | "high" => "high",
+            "medium" => "medium",
+            "low" => "low",
+            // "auto" or anything else → "medium" as a safe default that
+            // guarantees the model actually produces output.
+            _ => "medium",
+        };
+        body["reasoning"] = serde_json::json!({ "effort": openai_effort });
+
         if !request.tools.is_empty() {
             let tools: Vec<serde_json::Value> = request
                 .tools
@@ -3328,6 +3346,26 @@ fn collect_openai_text_content(value: &serde_json::Value, text_parts: &mut Vec<S
             if let Some(content) = map.get("content") {
                 collect_openai_text_content(content, text_parts);
             }
+
+            for (key, nested_value) in map {
+                if matches!(
+                    key.as_str(),
+                    "type"
+                        | "id"
+                        | "call_id"
+                        | "name"
+                        | "arguments"
+                        | "status"
+                        | "role"
+                        | "text"
+                        | "summary"
+                        | "refusal"
+                        | "content"
+                ) {
+                    continue;
+                }
+                collect_openai_text_content(nested_value, text_parts);
+            }
         }
         _ => {}
     }
@@ -3406,6 +3444,26 @@ fn extract_text_content_from_responses_output_item(
             }
             if let Some(content) = map.get("content") {
                 extract_text_content_from_responses_output_item(content, text_parts);
+            }
+
+            for (key, nested_value) in map {
+                if matches!(
+                    key.as_str(),
+                    "type"
+                        | "id"
+                        | "call_id"
+                        | "name"
+                        | "arguments"
+                        | "status"
+                        | "role"
+                        | "text"
+                        | "summary"
+                        | "refusal"
+                        | "content"
+                ) {
+                    continue;
+                }
+                collect_openai_text_content(nested_value, text_parts);
             }
         }
         _ => {}
@@ -3507,22 +3565,26 @@ fn parse_openai_responses_response(
         }
     }
 
-    let choice = OneOrMany::many(assistant_content).map_err(|_| {
-        let output_types = output_items
-            .iter()
-            .map(|item| item["type"].as_str().unwrap_or("<missing-type>"))
-            .collect::<Vec<_>>()
-            .join(", ");
-        tracing::warn!(
-            provider = %provider_label,
-            output_items = output_items.len(),
-            output_types = %output_types,
-            "empty response from responses API"
-        );
-        CompletionError::ResponseError(format!(
-            "empty or unsupported response from {provider_label} Responses API; expected text-bearing message content (output_text/text/summary/refusal/content) or function_call output items; received output types: {output_types}"
-        ))
-    })?;
+    let choice = match OneOrMany::many(assistant_content) {
+        Ok(choice) => choice,
+        Err(_) => {
+            let output_types = output_items
+                .iter()
+                .map(|item| item["type"].as_str().unwrap_or("<missing-type>"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            tracing::warn!(
+                provider = %provider_label,
+                output_items = output_items.len(),
+                output_types = %output_types,
+                raw_body = %body,
+                "empty response from responses API — returning empty text to allow retry"
+            );
+            OneOrMany::one(AssistantContent::Text(Text {
+                text: String::new(),
+            }))
+        }
+    };
 
     let input_tokens = body["usage"]["input_tokens"].as_u64().unwrap_or(0);
     let output_tokens = body["usage"]["output_tokens"].as_u64().unwrap_or(0);
@@ -3547,6 +3609,11 @@ fn parse_openai_responses_sse_response(
     response_text: &str,
     provider_label: &str,
 ) -> Result<serde_json::Value, CompletionError> {
+    let mut accumulated_text = String::new();
+    let mut accumulated_tool_calls: Vec<serde_json::Value> = Vec::new();
+    let mut current_tool_call: Option<serde_json::Value> = None;
+    let mut completed_response: Option<serde_json::Value> = None;
+
     for line in response_text.lines() {
         let Some(data) = line.strip_prefix("data: ") else {
             continue;
@@ -3560,17 +3627,95 @@ fn parse_openai_responses_sse_response(
             continue;
         };
 
-        if event_body["type"].as_str() == Some("response.completed")
-            && let Some(response) = event_body.get("response")
-        {
-            return Ok(response.clone());
+        match event_body["type"].as_str() {
+            Some("response.output_text.delta") => {
+                if let Some(delta) = event_body["delta"].as_str() {
+                    accumulated_text.push_str(delta);
+                }
+            }
+            Some("response.function_call_arguments.delta") => {
+                if let (Some(tool), Some(delta)) =
+                    (current_tool_call.as_mut(), event_body["delta"].as_str())
+                {
+                    let existing = tool["arguments"].as_str().unwrap_or("");
+                    tool["arguments"] = serde_json::Value::String(format!("{existing}{delta}"));
+                }
+            }
+            Some("response.output_item.added") => {
+                if let Some(item) = event_body.get("item")
+                    && item["type"].as_str() == Some("function_call")
+                {
+                    current_tool_call = Some(item.clone());
+                }
+            }
+            Some("response.output_item.done") => {
+                if let Some(tool) = current_tool_call.take() {
+                    accumulated_tool_calls.push(tool);
+                }
+                // Also capture completed output items from the done event
+                if let Some(item) = event_body.get("item")
+                    && item["type"].as_str() == Some("function_call")
+                    && !accumulated_tool_calls.iter().any(|t| t["id"] == item["id"])
+                {
+                    accumulated_tool_calls.push(item.clone());
+                }
+            }
+            Some("response.completed") => {
+                completed_response = event_body.get("response").cloned();
+            }
+            _ => {}
         }
     }
 
-    Err(CompletionError::ProviderError(format!(
-        "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
-        truncate_body(response_text)
-    )))
+    // Start with the completed response if available, otherwise build one
+    let mut response = completed_response.unwrap_or_else(|| {
+        serde_json::json!({
+            "output": [],
+            "usage": {"input_tokens": 0, "output_tokens": 0, "input_tokens_details": {"cached_tokens": 0}}
+        })
+    });
+
+    // If the completed response has an empty output array but we accumulated
+    // text or tool calls from deltas, reconstruct the output array.
+    let output_is_empty = response["output"]
+        .as_array()
+        .is_some_and(|arr| arr.is_empty());
+
+    if output_is_empty && (!accumulated_text.is_empty() || !accumulated_tool_calls.is_empty()) {
+        let mut output = Vec::new();
+
+        if !accumulated_text.is_empty() {
+            output.push(serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{
+                    "type": "output_text",
+                    "text": accumulated_text,
+                }]
+            }));
+        }
+
+        for tool_call in &accumulated_tool_calls {
+            output.push(tool_call.clone());
+        }
+
+        response["output"] = serde_json::json!(output);
+        tracing::debug!(
+            provider = %provider_label,
+            accumulated_text_len = accumulated_text.len(),
+            accumulated_tool_calls = accumulated_tool_calls.len(),
+            "reconstructed output from SSE deltas (response.completed had empty output)"
+        );
+    }
+
+    if response["output"].as_array().is_some() {
+        Ok(response)
+    } else {
+        Err(CompletionError::ProviderError(format!(
+            "{provider_label} Responses SSE stream missing response.completed event.\nBody: {}",
+            truncate_body(response_text)
+        )))
+    }
 }
 
 fn parse_openai_error_message(response_text: &str) -> Option<String> {
@@ -4118,6 +4263,42 @@ mod tests {
     }
 
     #[test]
+    fn parse_openai_responses_response_parses_text_from_unknown_nested_fields() {
+        let body = serde_json::json!({
+            "output": [{
+                "type": "system_reminder",
+                "payload": {
+                    "value": "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>"
+                }
+            }],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        });
+
+        let response = parse_openai_responses_response(body, "OpenAI ChatGPT")
+            .expect("unknown nested text should parse");
+        let texts: Vec<_> = response
+            .choice
+            .iter()
+            .filter_map(|content| match content {
+                AssistantContent::Text(text) => Some(text.text.clone()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(
+            texts,
+            vec![
+                "<system-reminder>\nYour operational mode has changed from plan to build.\n</system-reminder>"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
     fn parse_openai_responses_response_preserves_function_call_call_id_from_completed_response() {
         let body = serde_json::json!({
             "output": [{
@@ -4147,12 +4328,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_openai_responses_response_unsupported_empty_error_is_actionable_and_provider_specific()
-    {
+    fn parse_openai_responses_response_unsupported_output_returns_empty_text() {
         let body = serde_json::json!({
             "output": [{
                 "type": "unknown_shape",
-                "foo": "bar"
+                "status": "incomplete"
             }],
             "usage": {
                 "input_tokens": 1,
@@ -4161,12 +4341,31 @@ mod tests {
             }
         });
 
-        let error =
-            parse_openai_responses_response(body, "OpenAI").expect_err("should be unsupported");
-        let error_text = error.to_string();
-        assert!(error_text.contains("OpenAI Responses API"));
-        assert!(error_text.contains("output_text/text/summary/refusal/content"));
-        assert!(error_text.contains("unknown_shape"));
+        let result = parse_openai_responses_response(body, "OpenAI")
+            .expect("should succeed with empty text");
+        match result.choice.first() {
+            AssistantContent::Text(text) => assert!(text.text.is_empty()),
+            other => panic!("expected empty text, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_openai_responses_response_empty_output_array_returns_empty_text() {
+        let body = serde_json::json!({
+            "output": [],
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0}
+            }
+        });
+
+        let result = parse_openai_responses_response(body, "OpenAI ChatGPT")
+            .expect("should succeed with empty text");
+        match result.choice.first() {
+            AssistantContent::Text(text) => assert!(text.text.is_empty()),
+            other => panic!("expected empty text, got: {other:?}"),
+        }
     }
 
     #[test]

@@ -3,10 +3,12 @@ import {
 	createRootRoute,
 	createRoute,
 	Outlet,
+	useLocation,
 } from "@tanstack/react-router";
 import {useQuery} from "@tanstack/react-query";
 import {api, BASE_PATH} from "@/api/client";
 import {ConnectionBanner} from "@/components/ConnectionBanner";
+import {AgentHeaderContent} from "@/components/AgentHeaderContent";
 import {TopBar, TopBarProvider, useSetTopBar} from "@/components/TopBar";
 import {Sidebar} from "@/components/Sidebar";
 import {Overview} from "@/routes/Overview";
@@ -27,6 +29,7 @@ import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Orchestrate} from "@/routes/Orchestrate";
 import {useLiveContext} from "@/hooks/useLiveContext";
+import {getPortalSessionId} from "@/hooks/usePortal";
 import {AgentTabs} from "@/components/AgentTabs";
 
 // ── Root layout ──────────────────────────────────────────────────────────
@@ -61,21 +64,24 @@ function AgentTopBar({agentId}: {agentId: string}) {
 	const agent = agentsQuery.data?.agents.find((a) => a.id === agentId);
 	const displayName = agent?.display_name;
 
+	const {liveStates} = useLiveContext();
+	const location = useLocation();
+
+	// Determine which channel's context usage to show
+	// Extract channelId from URL if we're on a channel detail page
+	const pathMatch = location.pathname.match(/\/agents\/[^\/]+\/channels\/([^\/]+)/);
+	const channelIdFromPath = pathMatch ? pathMatch[1] : null;
+
+	// Determine the relevant channel ID: channel detail > chat tab > nothing
+	const relevantChannelId = channelIdFromPath || getPortalSessionId(agentId);
+	const contextUsage = liveStates[relevantChannelId]?.contextUsage ?? null;
+
 	useSetTopBar(
-		<div className="flex h-full flex-col">
-			<div className="flex flex-1 items-center px-6">
-				<h1 className="font-plex text-sm font-medium text-ink">
-					{displayName ? (
-						<>
-							{displayName}
-							<span className="ml-2 text-ink-faint">{agentId}</span>
-						</>
-					) : (
-						agentId
-					)}
-				</h1>
-			</div>
-		</div>,
+		<AgentHeaderContent
+			agentId={agentId}
+			displayName={displayName}
+			contextUsage={contextUsage}
+		/>,
 	);
 
 	return <AgentTabs agentId={agentId} />;

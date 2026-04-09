@@ -944,9 +944,11 @@ impl Channel {
             "/quiet" | "/observe" => {
                 self.set_response_mode(ResponseMode::Observe).await;
                 self.send_builtin_text(
-                    "observe mode enabled. i'll learn from this conversation but won't respond.".to_string(),
+                    "observe mode enabled. i'll learn from this conversation but won't respond."
+                        .to_string(),
                     "observe",
-                ).await;
+                )
+                .await;
                 return Ok(true);
             }
             "/active" => {
@@ -976,7 +978,8 @@ impl Channel {
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /observe: learn from conversation, never respond".to_string(),
-                    "- /mention-only: only respond when @mentioned, replied to, or given a command".to_string(),
+                    "- /mention-only: only respond when @mentioned, replied to, or given a command"
+                        .to_string(),
                     "- /active: normal reply mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
@@ -1544,6 +1547,10 @@ impl Channel {
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
         }
+        // Emit context usage
+        if let Err(error) = self.compactor.emit_context_usage().await {
+            tracing::debug!(channel_id = %self.id, %error, "failed to emit context usage");
+        }
 
         // Increment message counter for memory persistence
         self.message_count += message_count;
@@ -2050,6 +2057,10 @@ impl Channel {
         // Check context size and trigger compaction if needed
         if let Err(error) = self.compactor.check_and_compact().await {
             tracing::warn!(channel_id = %self.id, %error, "compaction check failed");
+        }
+        // Emit context usage
+        if let Err(error) = self.compactor.emit_context_usage().await {
+            tracing::debug!(channel_id = %self.id, %error, "failed to emit context usage");
         }
 
         // Increment message counter and spawn memory persistence branch if threshold reached

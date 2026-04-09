@@ -30,3 +30,4 @@ docs/phases/
 docs/specs/
 PROJECT-STATUS.md
 .worktrees/
+.spacebot-dev/

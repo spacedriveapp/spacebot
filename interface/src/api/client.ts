@@ -125,6 +125,15 @@ export interface OutboundMessageDeltaEvent {
 	aggregated_text: string;
 }
 
+export interface ContextUsageEvent {
+	type: "context_usage";
+	agent_id: string;
+	channel_id: string;
+	estimated_tokens: number;
+	context_window: number;
+	usage_ratio: number;
+}
+
 export interface TypingStateEvent {
 	type: "typing_state";
 	agent_id: string;
@@ -251,6 +260,7 @@ export type ApiEvent =
 	| InboundMessageEvent
 	| OutboundMessageEvent
 	| OutboundMessageDeltaEvent
+	| ContextUsageEvent
 	| TypingStateEvent
 	| WorkerStartedEvent
 	| WorkerStatusEvent
@@ -336,6 +346,9 @@ export interface StatusBlockSnapshot {
 	active_workers: WorkerStatusInfo[];
 	active_branches: BranchStatusInfo[];
 	completed_items: CompletedItemInfo[];
+	estimated_tokens?: number;
+	context_window?: number;
+	usage_ratio?: number;
 }
 
 export interface PromptInspectResponse {
@@ -1652,6 +1665,26 @@ export const api = {
 			throw new Error(`API error: ${response.status}`);
 		}
 		return response.json() as Promise<Types.OpenAiOAuthBrowserStatusResponse>;
+	},
+	startCopilotOAuthBrowser: async (params: { model: string }) => {
+		const response = await fetch(`${getApiBase()}/providers/github-copilot/browser-oauth/start`, {
+			method: "POST",
+			headers: { "Content-Type": "application/json" },
+			body: JSON.stringify({ model: params.model }),
+		});
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<Types.CopilotOAuthBrowserStartResponse>;
+	},
+	copilotOAuthBrowserStatus: async (state: string) => {
+		const response = await fetch(
+			`${getApiBase()}/providers/github-copilot/browser-oauth/status?state=${encodeURIComponent(state)}`,
+		);
+		if (!response.ok) {
+			throw new Error(`API error: ${response.status}`);
+		}
+		return response.json() as Promise<Types.CopilotOAuthBrowserStatusResponse>;
 	},
 	removeProvider: async (provider: string) => {
 		const response = await fetch(`${getApiBase()}/providers/${encodeURIComponent(provider)}`, {

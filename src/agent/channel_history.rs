@@ -369,6 +369,10 @@ pub(crate) fn event_is_for_channel(event: &ProcessEvent, channel_id: &ChannelId)
         | ProcessEvent::BranchResult {
             channel_id: event_channel,
             ..
+        }
+        | ProcessEvent::ContextUsage {
+            channel_id: event_channel,
+            ..
         } => event_channel == channel_id,
         ProcessEvent::WorkerStarted {
             channel_id: event_channel,

@@ -1338,6 +1338,38 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/providers/github-copilot/browser-oauth/start": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post: operations["start_copilot_browser_oauth"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/github-copilot/browser-oauth/status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["copilot_browser_oauth_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/providers/openai/browser-oauth/start": {
         parameters: {
             query?: never;
@@ -2253,6 +2285,22 @@ export interface components {
             /** Format: float */
             emergency_threshold?: number | null;
         };
+        CopilotOAuthBrowserStartRequest: {
+            model: string;
+        };
+        CopilotOAuthBrowserStartResponse: {
+            message: string;
+            state?: string | null;
+            success: boolean;
+            user_code?: string | null;
+            verification_url?: string | null;
+        };
+        CopilotOAuthBrowserStatusResponse: {
+            done: boolean;
+            found: boolean;
+            message?: string | null;
+            success: boolean;
+        };
         CortexChatDeleteThreadRequest: {
             agent_id: string;
             thread_id: string;
@@ -3097,6 +3145,7 @@ export interface components {
             fireworks: boolean;
             gemini: boolean;
             github_copilot: boolean;
+            github_copilot_oauth: boolean;
             groq: boolean;
             kilo: boolean;
             minimax: boolean;
@@ -7083,6 +7132,65 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ProviderUpdateResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    start_copilot_browser_oauth: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CopilotOAuthBrowserStartRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotOAuthBrowserStartResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    copilot_browser_oauth_status: {
+        parameters: {
+            query: {
+                /** @description OAuth state parameter */
+                state: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CopilotOAuthBrowserStatusResponse"];
                 };
             };
             /** @description Invalid request */

@@ -270,6 +270,7 @@ const PROVIDERS = [
 ] as const;
 
 const CHATGPT_OAUTH_DEFAULT_MODEL = "openai-chatgpt/gpt-5.3-codex";
+const COPILOT_OAUTH_DEFAULT_MODEL = "github-copilot/claude-sonnet-4";
 
 export function Settings() {
 	const queryClient = useQueryClient();
@@ -308,6 +309,17 @@ export function Settings() {
 		verificationUrl: string;
 	} | null>(null);
 	const [deviceCodeCopied, setDeviceCodeCopied] = useState(false);
+	const [isPollingCopilotOAuth, setIsPollingCopilotOAuth] = useState(false);
+	const [copilotOAuthMessage, setCopilotOAuthMessage] = useState<{
+		text: string;
+		type: "success" | "error";
+	} | null>(null);
+	const [copilotOAuthDialogOpen, setCopilotOAuthDialogOpen] = useState(false);
+	const [copilotDeviceCodeInfo, setCopilotDeviceCodeInfo] = useState<{
+		userCode: string;
+		verificationUrl: string;
+	} | null>(null);
+	const [copilotDeviceCodeCopied, setCopilotDeviceCodeCopied] = useState(false);
 	const [message, setMessage] = useState<{
 		text: string;
 		type: "success" | "error";
@@ -373,6 +385,9 @@ export function Settings() {
 	const startOpenAiBrowserOAuthMutation = useMutation({
 		mutationFn: (params: { model: string }) => api.startOpenAiOAuthBrowser(params),
 	});
+	const startCopilotOAuthMutation = useMutation({
+		mutationFn: (params: { model: string }) => api.startCopilotOAuthBrowser(params),
+	});
 
 	const removeMutation = useMutation({
 		mutationFn: (provider: string) => api.removeProvider(provider),
@@ -395,6 +410,8 @@ export function Settings() {
 
 	const oauthAutoStartRef = useRef(false);
 	const oauthAbortRef = useRef<AbortController | null>(null);
+	const copilotOAuthAutoStartRef = useRef(false);
+	const copilotOAuthAbortRef = useRef<AbortController | null>(null);
 
 	const handleTestModel = async (): Promise<boolean> => {
 		if (!editingProvider || !modelInput.trim()) return false;
@@ -562,6 +579,67 @@ export function Settings() {
 		}
 	};
 
+	const monitorCopilotOAuth = async (stateToken: string, signal: AbortSignal) => {
+		setIsPollingCopilotOAuth(true);
+		setCopilotOAuthMessage(null);
+		try {
+			for (let attempt = 0; attempt < 360; attempt += 1) {
+				if (signal.aborted) return;
+				const status = await api.copilotOAuthBrowserStatus(stateToken);
+				if (signal.aborted) return;
+				if (status.done) {
+					setCopilotDeviceCodeInfo(null);
+					setCopilotDeviceCodeCopied(false);
+					if (status.success) {
+						setCopilotOAuthMessage({
+							text: status.message || "GitHub Copilot OAuth configured.",
+							type: "success",
+						});
+						queryClient.invalidateQueries({ queryKey: ["providers"] });
+						setTimeout(() => {
+							queryClient.invalidateQueries({ queryKey: ["agents"] });
+							queryClient.invalidateQueries({ queryKey: ["overview"] });
+						}, 3000);
+					} else {
+						setCopilotOAuthMessage({
+							text: status.message || "Sign-in failed.",
+							type: "error",
+						});
+					}
+					return;
+				}
+				await new Promise((resolve) => {
+					const onAbort = () => {
+						clearTimeout(timer);
+						resolve(undefined);
+					};
+					const timer = setTimeout(() => {
+						signal.removeEventListener("abort", onAbort);
+						resolve(undefined);
+					}, 2000);
+					signal.addEventListener("abort", onAbort, { once: true });
+				});
+			}
+			if (signal.aborted) return;
+			setCopilotDeviceCodeInfo(null);
+			setCopilotDeviceCodeCopied(false);
+			setCopilotOAuthMessage({
+				text: "Sign-in timed out. Please try again.",
+				type: "error",
+			});
+		} catch (error: any) {
+			if (signal.aborted) return;
+			setCopilotDeviceCodeInfo(null);
+			setCopilotDeviceCodeCopied(false);
+			setCopilotOAuthMessage({
+				text: `Failed to verify sign-in: ${error.message}`,
+				type: "error",
+			});
+		} finally {
+			setIsPollingCopilotOAuth(false);
+		}
+	};
+
 	const handleStartChatGptOAuth = async () => {
 		setOpenAiBrowserOAuthMessage(null);
 		setDeviceCodeInfo(null);
@@ -592,6 +670,36 @@ export function Settings() {
 		}
 	};
 
+	const handleStartCopilotOAuth = async () => {
+		setCopilotOAuthMessage(null);
+		setCopilotDeviceCodeInfo(null);
+		setCopilotDeviceCodeCopied(false);
+		try {
+			const result = await startCopilotOAuthMutation.mutateAsync({
+				model: COPILOT_OAUTH_DEFAULT_MODEL,
+			});
+			if (!result.success || !result.user_code || !result.verification_url || !result.state) {
+				setCopilotOAuthMessage({
+					text: result.message || "Failed to start device sign-in",
+					type: "error",
+				});
+				return;
+			}
+
+			copilotOAuthAbortRef.current?.abort();
+			const abort = new AbortController();
+			copilotOAuthAbortRef.current = abort;
+
+			setCopilotDeviceCodeInfo({
+				userCode: result.user_code,
+				verificationUrl: result.verification_url,
+			});
+			void monitorCopilotOAuth(result.state, abort.signal);
+		} catch (error: any) {
+			setCopilotOAuthMessage({ text: `Failed: ${error.message}`, type: "error" });
+		}
+	};
+
 	useEffect(() => {
 		if (!openAiOAuthDialogOpen) {
 			oauthAutoStartRef.current = false;
@@ -608,6 +716,23 @@ export function Settings() {
 		oauthAutoStartRef.current = true;
 		void handleStartChatGptOAuth();
 	}, [openAiOAuthDialogOpen]);
+
+	useEffect(() => {
+		if (!copilotOAuthDialogOpen) {
+			copilotOAuthAutoStartRef.current = false;
+			copilotOAuthAbortRef.current?.abort();
+			copilotOAuthAbortRef.current = null;
+			setCopilotDeviceCodeInfo(null);
+			setCopilotDeviceCodeCopied(false);
+			setCopilotOAuthMessage(null);
+			setIsPollingCopilotOAuth(false);
+			return;
+		}
+
+		if (copilotOAuthAutoStartRef.current) return;
+		copilotOAuthAutoStartRef.current = true;
+		void handleStartCopilotOAuth();
+	}, [copilotOAuthDialogOpen]);
 
 	const handleCopyDeviceCode = async () => {
 		if (!deviceCodeInfo) return;
@@ -639,6 +764,40 @@ export function Settings() {
 		window.open(
 			deviceCodeInfo.verificationUrl,
 			"spacebot-openai-device",
+			"popup=true,width=780,height=960,noopener,noreferrer",
+		);
+	};
+
+	const handleCopyCopilotDeviceCode = async () => {
+		if (!copilotDeviceCodeInfo) return;
+		try {
+			if (navigator.clipboard?.writeText) {
+				await navigator.clipboard.writeText(copilotDeviceCodeInfo.userCode);
+			} else {
+				const textarea = document.createElement("textarea");
+				textarea.value = copilotDeviceCodeInfo.userCode;
+				textarea.setAttribute("readonly", "");
+				textarea.style.position = "absolute";
+				textarea.style.left = "-9999px";
+				document.body.appendChild(textarea);
+				textarea.select();
+				document.execCommand("copy");
+				document.body.removeChild(textarea);
+			}
+			setCopilotDeviceCodeCopied(true);
+		} catch (error: any) {
+			setCopilotOAuthMessage({
+				text: `Failed to copy code: ${error.message}`,
+				type: "error",
+			});
+		}
+	};
+
+	const handleOpenCopilotDeviceLogin = () => {
+		if (!copilotDeviceCodeInfo || !copilotDeviceCodeCopied) return;
+		window.open(
+			copilotDeviceCodeInfo.verificationUrl,
+			"spacebot-copilot-device",
 			"popup=true,width=780,height=960,noopener,noreferrer",
 		);
 	};
@@ -788,8 +947,22 @@ export function Settings() {
 													onEdit={() => setOpenAiOAuthDialogOpen(true)}
 													onRemove={() => removeMutation.mutate("openai-chatgpt")}
 													removing={removeMutation.isPending}
-													actionLabel="Sign in"
+													actionLabel={isConfigured("openai-chatgpt") ? "Manage" : "Sign in"}
 													showRemove={isConfigured("openai-chatgpt")}
+												/>
+											) : provider.id === "github-copilot" ? (
+												<ProviderCard
+													key="github-copilot-oauth"
+													provider="github-copilot"
+													name="GitHub Copilot (OAuth)"
+													description="Sign in with your GitHub account using a device code."
+													configured={isConfigured("github-copilot-oauth")}
+													defaultModel={COPILOT_OAUTH_DEFAULT_MODEL}
+													onEdit={() => setCopilotOAuthDialogOpen(true)}
+													onRemove={() => removeMutation.mutate("github-copilot-oauth")}
+													removing={removeMutation.isPending}
+													actionLabel={isConfigured("github-copilot-oauth") ? "Manage" : "Sign in"}
+													showRemove={isConfigured("github-copilot-oauth")}
 												/>
 											) : null,
 										]
@@ -824,6 +997,18 @@ export function Settings() {
 								onCopyDeviceCode={handleCopyDeviceCode}
 								onOpenDeviceLogin={handleOpenDeviceLogin}
 								onRestart={handleStartChatGptOAuth}
+							/>
+							<CopilotOAuthDialog
+								open={copilotOAuthDialogOpen}
+								onOpenChange={setCopilotOAuthDialogOpen}
+								isRequesting={startCopilotOAuthMutation.isPending}
+								isPolling={isPollingCopilotOAuth}
+								message={copilotOAuthMessage}
+								deviceCodeInfo={copilotDeviceCodeInfo}
+								deviceCodeCopied={copilotDeviceCodeCopied}
+								onCopyDeviceCode={handleCopyCopilotDeviceCode}
+								onOpenDeviceLogin={handleOpenCopilotDeviceLogin}
+								onRestart={handleStartCopilotOAuth}
 							/>
 						</div>
 					) : activeSection === "channels" ? (
@@ -3236,6 +3421,151 @@ function ChatGptOAuthDialog({
 				<DialogFooter>
 					{message && !deviceCodeInfo ? (
 						/* Completed — show Done (or Retry for errors) */
+						message.type === "success" ? (
+							<Button onClick={() => onOpenChange(false)} size="sm">
+								Done
+							</Button>
+						) : (
+							<>
+								<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+									Close
+								</Button>
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									size="sm"
+								>
+									Try again
+								</Button>
+							</>
+						)
+					) : (
+						<>
+							<Button onClick={() => onOpenChange(false)} variant="ghost" size="sm">
+								Cancel
+							</Button>
+							{deviceCodeInfo && (
+								<Button
+									onClick={onRestart}
+									disabled={isRequesting}
+									loading={isRequesting}
+									variant="outline"
+									size="sm"
+								>
+									Get new code
+								</Button>
+							)}
+						</>
+					)}
+				</DialogFooter>
+			</DialogContent>
+		</Dialog>
+	);
+}
+
+type CopilotOAuthDialogProps = ChatGptOAuthDialogProps;
+
+function CopilotOAuthDialog({
+	open,
+	onOpenChange,
+	isRequesting,
+	isPolling,
+	message,
+	deviceCodeInfo,
+	deviceCodeCopied,
+	onCopyDeviceCode,
+	onOpenDeviceLogin,
+	onRestart,
+}: CopilotOAuthDialogProps) {
+	return (
+		<Dialog open={open} onOpenChange={onOpenChange}>
+			<DialogContent className="max-w-md">
+				<DialogHeader>
+					<DialogTitle className="flex items-center gap-2">
+						<ProviderIcon provider="github-copilot" size={20} />
+						Sign in with GitHub Copilot
+					</DialogTitle>
+					{!message && (
+						<DialogDescription>
+							Copy the device code below, then sign in to your GitHub account to
+							authorize access.
+						</DialogDescription>
+					)}
+				</DialogHeader>
+
+				<div className="space-y-4">
+					{message && !deviceCodeInfo ? (
+						<div
+							className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+								? "border-green-500/20 bg-green-500/10 text-green-400"
+								: "border-red-500/20 bg-red-500/10 text-red-400"
+							}`}
+						>
+							{message.text}
+						</div>
+					) : isRequesting && !deviceCodeInfo ? (
+						<div className="flex items-center gap-2 text-sm text-ink-dull">
+							<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+							Requesting device code...
+						</div>
+					) : deviceCodeInfo ? (
+						<div className="space-y-4">
+							<div className="rounded-md border border-app-line p-3">
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">1</span>
+									<p className="text-sm text-ink-dull">Copy this device code</p>
+								</div>
+								<div className="mt-2.5 flex items-center gap-2 pl-7">
+									<code className="rounded border border-app-line bg-app-darkerBox px-3 py-1.5 font-mono text-base tracking-widest text-ink">
+										{deviceCodeInfo.userCode}
+									</code>
+									<Button onClick={onCopyDeviceCode} size="sm" variant={deviceCodeCopied ? "secondary" : "outline"}>
+										{deviceCodeCopied ? "Copied" : "Copy"}
+									</Button>
+								</div>
+							</div>
+
+							<div className={`rounded-md border border-app-line p-3 ${!deviceCodeCopied ? "opacity-50" : ""}`}>
+								<div className="flex items-center gap-2">
+									<span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-accent/15 text-[11px] font-semibold text-accent">2</span>
+									<p className="text-sm text-ink-dull">Open GitHub and paste the code</p>
+								</div>
+								<div className="mt-2.5 pl-7">
+									<Button
+										onClick={onOpenDeviceLogin}
+										disabled={!deviceCodeCopied}
+										size="sm"
+										variant="outline"
+									>
+										Open login page
+									</Button>
+								</div>
+							</div>
+
+							{isPolling && !message && (
+								<div className="flex items-center gap-2 text-sm text-ink-faint">
+									<div className="h-2 w-2 animate-pulse rounded-full bg-accent" />
+									Waiting for sign-in confirmation...
+								</div>
+							)}
+
+							{message && (
+								<div
+									className={`rounded-md border px-3 py-2 text-sm ${message.type === "success"
+										? "border-green-500/20 bg-green-500/10 text-green-400"
+										: "border-red-500/20 bg-red-500/10 text-red-400"
+									}`}
+								>
+									{message.text}
+								</div>
+							)}
+						</div>
+					) : null}
+				</div>
+
+				<DialogFooter>
+					{message && !deviceCodeInfo ? (
 						message.type === "success" ? (
 							<Button onClick={() => onOpenChange(false)} size="sm">
 								Done
