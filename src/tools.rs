@@ -983,7 +983,9 @@ pub fn create_cortex_tool_server(
 /// Remaining unique tools here (skills_search, install_skill, config_inspect)
 /// need to be ported to channel/worker toolsets before removal.
 #[allow(clippy::too_many_arguments)]
-#[deprecated(note = "Cortex chat is being replaced by Channel Settings. Port remaining tools before removing.")]
+#[deprecated(
+    note = "Cortex chat is being replaced by Channel Settings. Port remaining tools before removing."
+)]
 pub fn create_cortex_chat_tool_server(
     agent_id: AgentId,
     deps: crate::AgentDeps,

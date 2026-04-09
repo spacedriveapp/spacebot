@@ -598,10 +598,7 @@ impl SpacebotHook {
                                     if let Ok(content) =
                                         rig::OneOrMany::many(std::mem::take(&mut tool_calls))
                                     {
-                                        chat_history.push(Message::Assistant {
-                                            id: None,
-                                            content,
-                                        });
+                                        chat_history.push(Message::Assistant { id: None, content });
                                     }
                                     return Err(PromptError::PromptCancelled {
                                         chat_history: Box::new(chat_history),
