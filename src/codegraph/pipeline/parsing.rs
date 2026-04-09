@@ -1,4 +1,4 @@
-//! Phase 3: tree-sitter AST parse, extract symbol nodes.
+//! tree-sitter AST parse, extract symbol nodes.
 
 use std::path::{Path, PathBuf};
 
@@ -127,13 +127,23 @@ pub async fn parse_files(
             let qname = cypher_escape(&sym.qualified_name);
             let extends_val = cypher_escape(sym.extends.as_deref().unwrap_or(""));
             let import_src = cypher_escape(sym.import_source.as_deref().unwrap_or(""));
+            // Type text stashed in metadata by the language provider
+            // (typed params / typed fields). Empty string when the
+            // symbol doesn't carry a declared type.
+            let declared_type = cypher_escape(
+                sym.metadata
+                    .get("declared_type")
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
 
             node_stmts.push(format!(
                 "CREATE (:{label} {{qualified_name: '{qname}', name: '{name}', \
                  project_id: '{pid}', source_file: '{rel_escaped}', \
                  line_start: {ls}, line_end: {le}, \
                  source: 'pipeline', written_by: 'pipeline', \
-                 extends_type: '{extends_val}', import_source: '{import_src}'}})",
+                 extends_type: '{extends_val}', import_source: '{import_src}', \
+                 declared_type: '{declared_type}'}})",
                 ls = sym.line_start,
                 le = sym.line_end,
             ));
@@ -152,9 +162,12 @@ pub async fn parse_files(
                     .map(|s| s.label.as_str())
                     .unwrap_or("Class");
 
+                // Parameters get HAS_PARAMETER rather than the generic
+                // CONTAINS so downstream queries can distinguish them.
                 let edge_type = match sym.label {
                     crate::codegraph::types::NodeLabel::Method => "HAS_METHOD",
                     crate::codegraph::types::NodeLabel::Variable => "HAS_PROPERTY",
+                    crate::codegraph::types::NodeLabel::Parameter => "HAS_PARAMETER",
                     _ => "CONTAINS",
                 };
 

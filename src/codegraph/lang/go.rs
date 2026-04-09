@@ -1,4 +1,4 @@
-//! Go language provider (Wave 5).
+//! Go language provider.
 //!
 //! Extracts:
 //! - `function_declaration`  → Function
@@ -242,18 +242,31 @@ fn walk_type_spec(
                 let cursor = &mut fields.walk();
                 for child in fields.children(cursor) {
                     if child.kind() == "field_declaration" {
+                        // Type applies to every field_identifier in the
+                        // same declaration (`Foo, Bar int` → both int).
+                        let declared_type = child
+                            .child_by_field_name("type")
+                            .map(|n| text(n, source))
+                            .unwrap_or_default();
                         let field_cursor = &mut child.walk();
                         for f in child.children(field_cursor) {
                             if f.kind() == "field_identifier" {
                                 let fname = text(f, source);
                                 if !fname.is_empty() {
-                                    symbols.push(sym(
+                                    let mut field_sym = sym(
                                         file_path,
                                         Some(&parent_qname),
                                         &fname,
                                         NodeLabel::Variable,
                                         &child,
-                                    ));
+                                    );
+                                    if !declared_type.is_empty() {
+                                        field_sym.metadata.insert(
+                                            "declared_type".to_string(),
+                                            declared_type.clone(),
+                                        );
+                                    }
+                                    symbols.push(field_sym);
                                 }
                             }
                         }
@@ -329,6 +342,11 @@ fn collect_go_params(
         {
             continue;
         }
+        // Grouped params (`func f(a, b int)`) share one type.
+        let declared_type = child
+            .child_by_field_name("type")
+            .map(|n| text(n, source))
+            .unwrap_or_default();
         let id_cursor = &mut child.walk();
         for c in child.children(id_cursor) {
             if c.kind() != "identifier" {
@@ -337,6 +355,10 @@ fn collect_go_params(
             let pname = text(c, source);
             if pname.is_empty() || pname == "_" {
                 continue;
+            }
+            let mut metadata = std::collections::HashMap::new();
+            if !declared_type.is_empty() {
+                metadata.insert("declared_type".to_string(), declared_type.clone());
             }
             symbols.push(ExtractedSymbol {
                 name: pname.clone(),
@@ -349,7 +371,7 @@ fn collect_go_params(
                 extends: None,
                 implements: Vec::new(),
                 decorates: None,
-                metadata: std::collections::HashMap::new(),
+                metadata,
             });
         }
     }

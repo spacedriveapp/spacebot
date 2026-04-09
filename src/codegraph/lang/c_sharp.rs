@@ -255,18 +255,51 @@ fn walk_csharp_node(
             }
         }
         "field_declaration" | "property_declaration" | "event_declaration" => {
+            // Resolve the declared type for call-site resolution.
+            // `property_declaration` / `event_declaration` carry a
+            // `type` field directly. `field_declaration` wraps a
+            // `variable_declaration` whose `type` field holds the type
+            // shared by all declarators.
+            let declared_type = node
+                .child_by_field_name("type")
+                .map(|n| text(n, source))
+                .or_else(|| {
+                    let cursor = &mut node.walk();
+                    node.children(cursor).find_map(|c| {
+                        if c.kind() == "variable_declaration" {
+                            c.child_by_field_name("type").map(|t| text(t, source))
+                        } else {
+                            None
+                        }
+                    })
+                })
+                .unwrap_or_default();
+
             // Walk descendants for variable_declarator(s) / identifier name.
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = text(name_node, source);
                 if !name.is_empty() {
-                    symbols.push(sym(file_path, parent_name, &name, NodeLabel::Variable, &node));
+                    let mut var_sym = sym(file_path, parent_name, &name, NodeLabel::Variable, &node);
+                    if !declared_type.is_empty() {
+                        var_sym
+                            .metadata
+                            .insert("declared_type".to_string(), declared_type.clone());
+                    }
+                    symbols.push(var_sym);
                 }
             } else {
                 // Field declarations have a declaration child whose
                 // variable_declarator children carry identifiers.
                 let cursor = &mut node.walk();
                 for child in node.children(cursor) {
-                    collect_field_names(child, file_path, source, symbols, parent_name);
+                    collect_field_names(
+                        child,
+                        file_path,
+                        source,
+                        symbols,
+                        parent_name,
+                        &declared_type,
+                    );
                 }
             }
         }
@@ -286,19 +319,26 @@ fn collect_field_names(
     source: &str,
     symbols: &mut Vec<ExtractedSymbol>,
     parent_name: Option<&str>,
+    declared_type: &str,
 ) {
     if node.kind() == "variable_declarator"
         && let Some(n) = node.child_by_field_name("name")
     {
         let name = text(n, source);
         if !name.is_empty() {
-            symbols.push(sym(file_path, parent_name, &name, NodeLabel::Variable, &node));
+            let mut var_sym = sym(file_path, parent_name, &name, NodeLabel::Variable, &node);
+            if !declared_type.is_empty() {
+                var_sym
+                    .metadata
+                    .insert("declared_type".to_string(), declared_type.to_string());
+            }
+            symbols.push(var_sym);
         }
         return;
     }
     let cursor = &mut node.walk();
     for child in node.children(cursor) {
-        collect_field_names(child, file_path, source, symbols, parent_name);
+        collect_field_names(child, file_path, source, symbols, parent_name, declared_type);
     }
 }
 
@@ -326,6 +366,15 @@ fn collect_csharp_params(
         if pname.is_empty() || pname == "this" {
             continue;
         }
+        // C# parameters carry a `type` field (e.g. `Foo`, `List<Bar>`,
+        // `Foo?`). Stash it for the call-site resolver.
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(type_node) = child.child_by_field_name("type") {
+            let ty = text(type_node, source);
+            if !ty.is_empty() {
+                metadata.insert("declared_type".to_string(), ty);
+            }
+        }
         symbols.push(ExtractedSymbol {
             name: pname.clone(),
             qualified_name: format!("{method_qname}::{pname}"),
@@ -337,7 +386,7 @@ fn collect_csharp_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
 }

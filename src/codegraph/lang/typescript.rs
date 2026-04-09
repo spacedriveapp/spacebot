@@ -230,6 +230,17 @@ fn walk_ts_node(
                     NodeLabel::Variable
                 };
                 let fn_qname = qualified_name(file_path, parent_name, &name);
+                // public_field_definition may carry a type annotation
+                // (`foo: Bar = ...`) that's the field's type.
+                let mut metadata = std::collections::HashMap::new();
+                if kind == "public_field_definition"
+                    && let Some(type_node) = node.child_by_field_name("type")
+                {
+                    let ty = clean_ts_type_annotation(&node_text(type_node, source));
+                    if !ty.is_empty() {
+                        metadata.insert("declared_type".to_string(), ty);
+                    }
+                }
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: fn_qname.clone(),
@@ -241,7 +252,7 @@ fn walk_ts_node(
                     extends: None,
                     implements: Vec::new(),
                     decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    metadata,
                 });
                 // Methods (and only methods) get parameter extraction.
                 if kind == "method_definition"
@@ -279,6 +290,15 @@ fn walk_ts_node(
         "property_signature" | "property_declaration" => {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = node_text(name_node, source);
+                // Capture the annotation type for interface/class
+                // property declarations (`foo: Bar`).
+                let mut metadata = std::collections::HashMap::new();
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    let ty = clean_ts_type_annotation(&node_text(type_node, source));
+                    if !ty.is_empty() {
+                        metadata.insert("declared_type".to_string(), ty);
+                    }
+                }
                 symbols.push(ExtractedSymbol {
                     name: name.clone(),
                     qualified_name: qualified_name(file_path, parent_name, &name),
@@ -290,7 +310,7 @@ fn walk_ts_node(
                     extends: None,
                     implements: Vec::new(),
                     decorates: None,
-                    metadata: std::collections::HashMap::new(),
+                    metadata,
                 });
             }
         }
@@ -496,20 +516,33 @@ fn collect_ts_params(
 ) {
     let cursor = &mut params_node.walk();
     for child in params_node.children(cursor) {
-        let pname = match child.kind() {
-            "identifier" => Some(node_text(child, source)),
+        let (pname, declared_type) = match child.kind() {
+            "identifier" => (Some(node_text(child, source)), None),
             "required_parameter" | "optional_parameter" | "rest_parameter" => {
-                child
+                let name = child
                     .child_by_field_name("pattern")
                     .filter(|n| n.kind() == "identifier")
-                    .map(|n| node_text(n, source))
+                    .map(|n| node_text(n, source));
+                // The `type` field is a `type_annotation` node whose
+                // text includes the leading `:`/`?:` — strip it.
+                let ty = child
+                    .child_by_field_name("type")
+                    .map(|n| clean_ts_type_annotation(&node_text(n, source)));
+                (name, ty)
             }
-            _ => None,
+            _ => (None, None),
         };
 
         let Some(pname) = pname else { continue };
         if pname.is_empty() || pname == "this" {
             continue;
+        }
+
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(ty) = declared_type
+            && !ty.is_empty()
+        {
+            metadata.insert("declared_type".to_string(), ty);
         }
 
         symbols.push(ExtractedSymbol {
@@ -523,9 +556,20 @@ fn collect_ts_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
+}
+
+/// Strip the leading `:` (or `?:`) and surrounding whitespace from a
+/// `type_annotation` node's raw text. Tree-sitter-typescript stores the
+/// annotation including the colon, so `: Foo` needs to become `Foo`.
+#[cfg(feature = "codegraph")]
+fn clean_ts_type_annotation(raw: &str) -> String {
+    raw.trim_start_matches('?')
+        .trim_start_matches(':')
+        .trim()
+        .to_string()
 }
 
 #[cfg(feature = "codegraph")]

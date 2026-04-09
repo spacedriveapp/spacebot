@@ -65,6 +65,12 @@ pub struct ExtractedSymbol {
     /// For decorators: what they decorate.
     pub decorates: Option<String>,
     /// Additional language-specific metadata.
+    ///
+    /// Known keys read by the pipeline:
+    /// - `"declared_type"`: for Parameters and typed Variables, the
+    ///   source-level type expression (e.g. `"Foo"`, `"Arc<Mutex<T>>"`,
+    ///   `"map[string]int"`). The call-site resolver uses this to bind
+    ///   receivers to their class qnames for method lookup.
     pub metadata: std::collections::HashMap<String, String>,
 }
 

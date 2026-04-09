@@ -107,7 +107,16 @@ fn walk_rust_node(
                             && let Some(fn_node) = child.child_by_field_name("name")
                         {
                             let fname = text(fn_node, source);
-                            symbols.push(sym(file_path, Some(&struct_qname), &fname, NodeLabel::Variable, &child));
+                            let mut field_sym = sym(file_path, Some(&struct_qname), &fname, NodeLabel::Variable, &child);
+                            // Capture the declared type text so the
+                            // resolver can bind `self.field.method()` calls.
+                            if let Some(type_node) = child.child_by_field_name("type") {
+                                let ty = text(type_node, source);
+                                if !ty.is_empty() {
+                                    field_sym.metadata.insert("declared_type".to_string(), ty);
+                                }
+                            }
+                            symbols.push(field_sym);
                         }
                     }
                 }
@@ -295,6 +304,18 @@ fn collect_rust_params(
             continue;
         }
 
+        // Capture the parameter type text for the call-site resolver.
+        // The type field on `parameter` nodes in tree-sitter-rust holds
+        // everything after the colon: `Foo`, `&mut Foo`,
+        // `Arc<Mutex<Foo>>`, etc.
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(type_node) = child.child_by_field_name("type") {
+            let ty = text(type_node, source);
+            if !ty.is_empty() {
+                metadata.insert("declared_type".to_string(), ty);
+            }
+        }
+
         symbols.push(ExtractedSymbol {
             name: pname.clone(),
             qualified_name: format!("{function_qname}::{pname}"),
@@ -306,7 +327,7 @@ fn collect_rust_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
 }

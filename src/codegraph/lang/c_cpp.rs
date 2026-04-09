@@ -1,4 +1,4 @@
-//! C and C++ language providers (Wave 5).
+//! C and C++ language providers.
 //!
 //! Both providers share `walk_c_node` / `walk_c_calls`; the C grammar
 //! simply never produces C++-only kinds like `class_specifier` or
@@ -293,7 +293,16 @@ fn walk_c_node(
             if let Some(declarator) = node.child_by_field_name("declarator")
                 && let Some(name) = extract_plain_name(declarator, source)
             {
-                symbols.push(sym(file_path, parent_name, &name, NodeLabel::Variable, &node));
+                let mut var_sym = sym(file_path, parent_name, &name, NodeLabel::Variable, &node);
+                // Capture the field type (e.g. `Foo`, `Foo*`,
+                // `std::shared_ptr<Bar>`) for the call-site resolver.
+                if let Some(type_node) = node.child_by_field_name("type") {
+                    let ty = text(type_node, source);
+                    if !ty.is_empty() {
+                        var_sym.metadata.insert("declared_type".to_string(), ty);
+                    }
+                }
+                symbols.push(var_sym);
             }
         }
         _ => {}
@@ -348,6 +357,15 @@ fn collect_c_params(
         if pname.is_empty() {
             continue;
         }
+        // Read the parameter's `type` field. `Foo*`, `const Foo&` etc.
+        // — the resolver will strip pointers/qualifiers later.
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(type_node) = child.child_by_field_name("type") {
+            let ty = text(type_node, source);
+            if !ty.is_empty() {
+                metadata.insert("declared_type".to_string(), ty);
+            }
+        }
         symbols.push(ExtractedSymbol {
             name: pname.clone(),
             qualified_name: format!("{fn_qname}::{pname}"),
@@ -359,7 +377,7 @@ fn collect_c_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
 }

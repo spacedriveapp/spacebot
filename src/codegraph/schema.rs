@@ -9,7 +9,13 @@
 //! Cypher queries to use `:CodeRelation {type: 'CALLS', ...}`.
 
 /// Current schema version. Bump this when making breaking changes.
-pub const SCHEMA_VERSION: u32 = 2;
+///
+/// v3 adds the `declared_type` STRING column to every symbol node table.
+/// LadybugDB's `CREATE NODE TABLE IF NOT EXISTS` is a no-op on existing
+/// tables, so users on v2 must wipe + re-index to pick up the new column.
+/// The call-site resolver reads this property to build the cross-file
+/// type environment.
+pub const SCHEMA_VERSION: u32 = 3;
 
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
 pub const ALL_NODE_LABELS: &[&str] = &[
@@ -59,6 +65,12 @@ pub fn schema_ddl() -> Vec<String> {
                 ("written_by", "STRING"),
                 ("extends_type", "STRING"),
                 ("import_source", "STRING"),
+                // Declared type text for Parameters and Variables
+                // (e.g. "Foo", "Arc<Mutex<T>>", "map[string]int"). Empty
+                // string for nodes whose kind doesn't carry a type. The
+                // resolver in pipeline/calls.rs reads this to bind
+                // receivers to their class qnames for method lookup.
+                ("declared_type", "STRING"),
             ],
         ));
     }

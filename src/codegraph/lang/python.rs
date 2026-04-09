@@ -112,10 +112,18 @@ fn walk_py_node(
                 if let Some(body) = node.child_by_field_name("body") {
                     // Collect class field names (class-level assignments and
                     // self.X = ... assignments inside methods), deduped.
-                    let mut fields: std::collections::HashMap<String, (u32, u32)> =
+                    let mut fields: std::collections::HashMap<String, (u32, u32, Option<String>)> =
                         std::collections::HashMap::new();
                     collect_py_class_fields(body, source, &mut fields);
-                    for (fname, (line_start, line_end)) in &fields {
+                    for (fname, (line_start, line_end, declared_type)) in &fields {
+                        let mut metadata = std::collections::HashMap::new();
+                        if let Some(ty) = declared_type
+                            && !ty.is_empty()
+                        {
+                            // Capture the annotation type for
+                            // `x: Foo = ...` style class fields.
+                            metadata.insert("declared_type".to_string(), ty.clone());
+                        }
                         symbols.push(ExtractedSymbol {
                             name: fname.clone(),
                             qualified_name: format!("{qname}::{fname}"),
@@ -127,7 +135,7 @@ fn walk_py_node(
                             extends: None,
                             implements: Vec::new(),
                             decorates: None,
-                            metadata: std::collections::HashMap::new(),
+                            metadata,
                         });
                     }
 
@@ -246,13 +254,13 @@ fn collect_py_params(
 ) {
     let cursor = &mut params_node.walk();
     for child in params_node.children(cursor) {
-        let pname = match child.kind() {
-            "identifier" => Some(text_str(child, source)),
-            "typed_parameter" | "default_parameter" | "typed_default_parameter" => {
+        let (pname, declared_type) = match child.kind() {
+            "identifier" => (Some(text_str(child, source)), None),
+            "typed_parameter" | "typed_default_parameter" => {
                 // Name lives on the first identifier child or in the
                 // `name` field depending on grammar version. Try field
                 // first, fall back to scanning children.
-                child
+                let name = child
                     .child_by_field_name("name")
                     .map(|n| text_str(n, source))
                     .or_else(|| {
@@ -263,7 +271,29 @@ fn collect_py_params(
                             }
                         }
                         None
-                    })
+                    });
+                // Capture annotation type for `x: Foo` parameters.
+                // `typed_parameter` is `identifier : type`; the `type`
+                // field carries the annotation.
+                let ty = child
+                    .child_by_field_name("type")
+                    .map(|n| text_str(n, source));
+                (name, ty)
+            }
+            "default_parameter" => {
+                let name = child
+                    .child_by_field_name("name")
+                    .map(|n| text_str(n, source))
+                    .or_else(|| {
+                        let cur = &mut child.walk();
+                        for c in child.children(cur) {
+                            if c.kind() == "identifier" {
+                                return Some(text_str(c, source));
+                            }
+                        }
+                        None
+                    });
+                (name, None)
             }
             "list_splat_pattern" | "dictionary_splat_pattern" => {
                 // *args / **kwargs — strip the splat marker.
@@ -275,14 +305,21 @@ fn collect_py_params(
                         break;
                     }
                 }
-                found
+                (found, None)
             }
-            _ => None,
+            _ => (None, None),
         };
 
         let Some(pname) = pname else { continue };
         if pname.is_empty() || pname == "self" || pname == "cls" {
             continue;
+        }
+
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(ty) = declared_type
+            && !ty.is_empty()
+        {
+            metadata.insert("declared_type".to_string(), ty);
         }
 
         symbols.push(ExtractedSymbol {
@@ -296,7 +333,7 @@ fn collect_py_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
 }
@@ -310,14 +347,15 @@ fn text_str(node: tree_sitter::Node, source: &str) -> String {
 /// - class-level assignments: `x = 0` or `x: int = 0`
 /// - instance assignments inside methods: `self.x = ...`
 ///
-/// Returned map keys are field names; values are (start_line, end_line)
-/// of the first occurrence. Nested classes are not descended into so
-/// their fields don't bleed into the parent.
+/// Returned map keys are field names; values are
+/// `(start_line, end_line, declared_type)` of the first occurrence.
+/// Nested classes are not descended into so their fields don't bleed
+/// into the parent.
 #[cfg(feature = "codegraph")]
 fn collect_py_class_fields(
     node: tree_sitter::Node,
     source: &str,
-    fields: &mut std::collections::HashMap<String, (u32, u32)>,
+    fields: &mut std::collections::HashMap<String, (u32, u32, Option<String>)>,
 ) {
     let kind = node.kind();
 
@@ -330,6 +368,12 @@ fn collect_py_class_fields(
     if kind == "assignment"
         && let Some(left) = node.child_by_field_name("left")
     {
+        // Annotated assignments (`x: Foo = ...`) carry a `type`
+        // field on the assignment node itself.
+        let declared_type = node
+            .child_by_field_name("type")
+            .map(|n| text_str(n, source));
+
         match left.kind() {
             // `x = 0`  or  `x: int = 0`  at class level
             "identifier" => {
@@ -341,6 +385,7 @@ fn collect_py_class_fields(
                     fields.entry(fname).or_insert((
                         node.start_position().row as u32 + 1,
                         node.end_position().row as u32 + 1,
+                        declared_type,
                     ));
                 }
             }
@@ -358,6 +403,7 @@ fn collect_py_class_fields(
                         fields.entry(fname).or_insert((
                             node.start_position().row as u32 + 1,
                             node.end_position().row as u32 + 1,
+                            declared_type,
                         ));
                     }
                 }

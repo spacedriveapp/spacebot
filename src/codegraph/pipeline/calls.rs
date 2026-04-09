@@ -1,4 +1,4 @@
-//! Phase 5: AST-aware call resolution with tiered confidence scoring.
+//! AST-aware call resolution with tiered confidence scoring.
 //!
 //! Resolution tiers:
 //! - Receiver-resolved method call: 0.92
@@ -124,16 +124,22 @@ pub async fn resolve_calls(
 
     // Build a lookup for class fields by (class_qname, field_name) → Variable qname.
     // Used by access resolution to turn `self.x` references into ACCESSES edges.
+    // Also builds the field-type environment: for each class field with a
+    // non-empty declared_type, record (class_qname, field_name) → type.
     let mut variables_by_class: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut field_types: HashMap<(String, String), String> = HashMap::new();
     let var_rows = db
         .query(&format!(
             "MATCH (n:Variable) WHERE n.project_id = '{pid}' \
-             RETURN n.qualified_name, n.name"
+             RETURN n.qualified_name, n.name, n.declared_type"
         ))
         .await?;
     for row in &var_rows {
-        if let (Some(lbug::Value::String(qname)), Some(lbug::Value::String(name))) =
-            (row.first(), row.get(1))
+        if let (
+            Some(lbug::Value::String(qname)),
+            Some(lbug::Value::String(name)),
+            declared_type_val,
+        ) = (row.first(), row.get(1), row.get(2))
             && let Some((parent, _)) = qname.rsplit_once("::")
             && classes_by_qname.contains(parent)
         {
@@ -141,6 +147,37 @@ pub async fn resolve_calls(
                 .entry(parent.to_string())
                 .or_default()
                 .insert(name.clone());
+            if let Some(lbug::Value::String(ty)) = declared_type_val
+                && !ty.is_empty()
+            {
+                field_types.insert((parent.to_string(), name.clone()), ty.clone());
+            }
+        }
+    }
+
+    // Build the parameter-type environment.
+    // For each Parameter node with a non-empty declared_type, record
+    // (enclosing_function_qname, param_name) → type_text. Parameter qnames
+    // are "function_qname::param_name", so the enclosing function is the
+    // rsplit prefix. This lets the resolver bind `param.method()` calls
+    // where the receiver type is known from its annotation.
+    let mut param_types: HashMap<(String, String), String> = HashMap::new();
+    let param_rows = db
+        .query(&format!(
+            "MATCH (p:Parameter) WHERE p.project_id = '{pid}' \
+             RETURN p.qualified_name, p.name, p.declared_type"
+        ))
+        .await?;
+    for row in &param_rows {
+        if let (
+            Some(lbug::Value::String(qname)),
+            Some(lbug::Value::String(name)),
+            Some(lbug::Value::String(ty)),
+        ) = (row.first(), row.get(1), row.get(2))
+            && !ty.is_empty()
+            && let Some((parent_fn, _)) = qname.rsplit_once("::")
+        {
+            param_types.insert((parent_fn.to_string(), name.clone()), ty.clone());
         }
     }
 
@@ -245,6 +282,50 @@ pub async fn resolve_calls(
                                 &pid,
                                 0.92,
                                 "receiver-resolved",
+                            );
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            // --- Typed-receiver method call (0.88) ---
+            // For calls like `param.method()`, `self.field.method()`, or
+            // `this.field.method()`, look up the receiver's declared type
+            // and resolve the method on that class. This handles the bulk
+            // of cross-file method calls that the receiver-resolved tier
+            // above can't reach because the receiver isn't a class name.
+            if site.is_method_call
+                && let Some(recv) = &site.receiver
+                && let Some(type_text) = resolve_receiver_type(
+                    recv,
+                    &site.caller_qualified_name,
+                    &classes_by_qname,
+                    &param_types,
+                    &field_types,
+                )
+                && let Some(base) = base_type_name(&type_text)
+                && let Some(class_entries) = classes_by_name.get(&base)
+            {
+                let class_qn = class_entries
+                    .iter()
+                    .find(|(_, sf)| *sf == relative)
+                    .or_else(|| class_entries.first())
+                    .map(|(qn, _)| qn.as_str());
+                if let Some(class_qn) = class_qn {
+                    let method_key = format!("{class_qn}::{}", site.callee_name);
+                    if let Some(target) = methods_by_class.get(&method_key) {
+                        let edge_key =
+                            format!("{}->{}", site.caller_qualified_name, target.qualified_name);
+                        if seen_edges.insert(edge_key) {
+                            push_edge(
+                                &mut edge_stmts,
+                                &site.caller_qualified_name,
+                                &target.qualified_name,
+                                &target.label,
+                                &pid,
+                                0.88,
+                                "typed-receiver",
                             );
                         }
                         continue;
@@ -379,6 +460,201 @@ fn find_enclosing_class<'a>(
         qn = parent;
     }
     None
+}
+
+/// Resolve a receiver expression to its declared type text.
+///
+/// Handles three receiver shapes:
+/// 1. `self.field` / `this.field` — look up `field` in the enclosing class's
+///    field_types map.
+/// 2. Plain identifier (e.g. `param`, `local`) — look up first in the
+///    current function's param_types, then fall back to the enclosing
+///    class's field_types (covers Go-style receiver-field accesses without
+///    the `self.` prefix, and Java/C# `field` without `this.`).
+///
+/// Returns `None` for more complex receivers (method-call chains,
+/// expressions with parens, etc.) — those fall through to the name-based
+/// tiers unchanged.
+fn resolve_receiver_type(
+    receiver: &str,
+    caller_qn: &str,
+    classes_by_qname: &HashSet<String>,
+    param_types: &HashMap<(String, String), String>,
+    field_types: &HashMap<(String, String), String>,
+) -> Option<String> {
+    // Case 1: self.field / this.field → single-level field access.
+    if let Some(field) = receiver
+        .strip_prefix("self.")
+        .or_else(|| receiver.strip_prefix("this."))
+    {
+        // Reject nested (`self.a.b`) — we'd need transitive resolution.
+        if field.contains('.') || field.contains('(') || field.contains('[') {
+            return None;
+        }
+        let class_qn = find_enclosing_class(caller_qn, classes_by_qname)?;
+        return field_types
+            .get(&(class_qn.to_string(), field.to_string()))
+            .cloned();
+    }
+
+    // Case 2: plain identifier.
+    if !receiver.is_empty()
+        && !receiver.contains('.')
+        && !receiver.contains('(')
+        && !receiver.contains('[')
+        && receiver != "self"
+        && receiver != "this"
+        && receiver
+            .chars()
+            .next()
+            .map(|c| c.is_alphabetic() || c == '_')
+            .unwrap_or(false)
+    {
+        // Walk up the enclosing-function chain so that params of a nested
+        // closure/lambda still resolve against the outer function's params.
+        // The caller qname is `file::...::fn::closure_x` etc. — strip
+        // segments until we find a function that owns a matching param.
+        let mut scope = caller_qn;
+        loop {
+            if let Some(ty) =
+                param_types.get(&(scope.to_string(), receiver.to_string()))
+            {
+                return Some(ty.clone());
+            }
+            match scope.rsplit_once("::") {
+                Some((parent, _)) => scope = parent,
+                None => break,
+            }
+        }
+        // Fall back to class field lookup (covers Go-style naked receiver
+        // `s.field` inside a method on S, and Java/C# `field` without
+        // `this.`).
+        if let Some(class_qn) = find_enclosing_class(caller_qn, classes_by_qname)
+            && let Some(ty) =
+                field_types.get(&(class_qn.to_string(), receiver.to_string()))
+        {
+            return Some(ty.clone());
+        }
+    }
+
+    None
+}
+
+/// Normalize a source-level type expression to a bare class name
+/// suitable for lookup in `classes_by_name`.
+///
+/// Handles:
+/// - Leading references/pointers/qualifiers: `&`, `&mut`, `*`, `*mut`,
+///   `*const`, `mut `, `const `
+/// - Trailing nullable markers: `?`, `*`, `&`, `...`, `[]`
+/// - Generic wrappers: `Arc<Foo>`, `Box<Foo>`, `Mutex<Foo>`, `Rc<Foo>`,
+///   `Option<Foo>`, `Vec<Foo>`, `RefCell<Foo>`, `Pin<Box<Foo>>`, etc.
+///   (recurses into the first type arg of known wrappers)
+/// - Path scoping: `foo::Bar`, `foo.Bar`, `java.lang.String` → leaf name
+///
+/// Returns `None` if the result is empty or contains no class-like token.
+fn base_type_name(type_text: &str) -> Option<String> {
+    // Wrappers whose inner type is the "real" class we care about. When
+    // the outer of a generic is one of these, recurse into the first arg.
+    const WRAPPERS: &[&str] = &[
+        "Arc", "Rc", "Box", "Option", "Result", "Vec", "Mutex", "RwLock",
+        "RefCell", "Cell", "Pin", "Weak", "MaybeUninit", "NonNull",
+        "UnsafeCell", "Cow", "Lazy", "OnceCell", "OnceLock", "Reverse",
+        // Java/Kotlin/C# common wrappers
+        "List", "ArrayList", "LinkedList", "Set", "HashSet", "Map",
+        "HashMap", "Optional", "Iterable", "Iterator", "Stream", "Flux",
+        "Mono", "Future", "CompletableFuture", "Nullable", "NonNull",
+        "IEnumerable", "ICollection", "IList", "IReadOnlyList", "Task",
+        "ValueTask", "Nullable",
+    ];
+
+    let mut s = type_text.trim();
+
+    // Strip leading `&`, `&mut`, `*`, `*mut`, `*const`, `mut `, `const `.
+    loop {
+        let start = s;
+        s = s.trim_start_matches('&').trim_start();
+        s = s.trim_start_matches('*').trim_start();
+        if let Some(rest) = s.strip_prefix("mut ") {
+            s = rest.trim_start();
+        }
+        if let Some(rest) = s.strip_prefix("const ") {
+            s = rest.trim_start();
+        }
+        if s == start {
+            break;
+        }
+    }
+
+    // Strip trailing `?`, `*`, `&`, `...`, `[]`.
+    loop {
+        let start = s;
+        s = s
+            .trim_end_matches('?')
+            .trim_end_matches('*')
+            .trim_end_matches('&')
+            .trim_end_matches("...")
+            .trim_end_matches("[]")
+            .trim_end();
+        if s == start {
+            break;
+        }
+    }
+
+    if s.is_empty() {
+        return None;
+    }
+
+    // If the type has a generic clause, consider unwrapping.
+    if let Some(lt_pos) = s.find('<') {
+        let outer = s[..lt_pos].trim();
+        let outer_leaf = leaf_name(outer);
+        if WRAPPERS.contains(&outer_leaf)
+            && let Some(gt_pos) = s.rfind('>')
+            && gt_pos > lt_pos
+        {
+            let inner = &s[lt_pos + 1..gt_pos];
+            let first_arg = split_first_type_arg(inner);
+            return base_type_name(first_arg);
+        }
+        // Not a known wrapper — use the outer as the base.
+        let leaf = leaf_name(outer);
+        return if leaf.is_empty() {
+            None
+        } else {
+            Some(leaf.to_string())
+        };
+    }
+
+    // No generics — take the leaf of the path-scoped name.
+    let leaf = leaf_name(s);
+    if leaf.is_empty() {
+        None
+    } else {
+        Some(leaf.to_string())
+    }
+}
+
+/// Strip path scoping (`a::b::Foo`, `a.b.Foo`) to the leaf identifier.
+fn leaf_name(s: &str) -> &str {
+    let s = s.trim();
+    let after_colons = s.rsplit("::").next().unwrap_or(s);
+    after_colons.rsplit('.').next().unwrap_or(after_colons).trim()
+}
+
+/// Split a generic argument list at the first top-level comma,
+/// returning the first argument.
+fn split_first_type_arg(inner: &str) -> &str {
+    let mut depth = 0i32;
+    for (i, c) in inner.char_indices() {
+        match c {
+            '<' | '(' | '[' => depth += 1,
+            '>' | ')' | ']' => depth -= 1,
+            ',' if depth == 0 => return inner[..i].trim(),
+            _ => {}
+        }
+    }
+    inner.trim()
 }
 
 /// Build and push a CALLS edge Cypher statement.

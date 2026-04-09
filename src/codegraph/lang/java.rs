@@ -1,4 +1,4 @@
-//! Java language provider (Wave 5).
+//! Java language provider.
 //!
 //! Extracts:
 //! - `class_declaration`       → Class (with `extends` and `implements` lists)
@@ -232,7 +232,14 @@ fn walk_java_node(
             }
         }
         "field_declaration" => {
-            // `field_declaration → variable_declarator → name`
+            // `field_declaration → variable_declarator → name`.
+            // The type lives on the enclosing field_declaration's `type`
+            // field and applies to every declarator in the same statement
+            // (`private Foo a, b;` → both `a` and `b` have type `Foo`).
+            let declared_type = node
+                .child_by_field_name("type")
+                .map(|n| text(n, source))
+                .unwrap_or_default();
             let cursor = &mut node.walk();
             for child in node.children(cursor) {
                 if child.kind() == "variable_declarator"
@@ -240,13 +247,21 @@ fn walk_java_node(
                 {
                     let name = text(name_node, source);
                     if !name.is_empty() {
-                        symbols.push(sym(
+                        let mut field_sym = sym(
                             file_path,
                             parent_name,
                             &name,
                             NodeLabel::Variable,
                             &child,
-                        ));
+                        );
+                        if !declared_type.is_empty() {
+                            // Stash the type for the call-site resolver
+                            // so `this.field.method()` can bind.
+                            field_sym
+                                .metadata
+                                .insert("declared_type".to_string(), declared_type.clone());
+                        }
+                        symbols.push(field_sym);
                     }
                 }
             }
@@ -318,6 +333,16 @@ fn collect_java_params(
             continue;
         }
 
+        // Capture parameter type (e.g. `Foo`, `List<Bar>`, `String...`
+        // for varargs) for the call-site resolver.
+        let mut metadata = std::collections::HashMap::new();
+        if let Some(type_node) = child.child_by_field_name("type") {
+            let ty = text(type_node, source);
+            if !ty.is_empty() {
+                metadata.insert("declared_type".to_string(), ty);
+            }
+        }
+
         symbols.push(ExtractedSymbol {
             name: pname.clone(),
             qualified_name: format!("{function_qname}::{pname}"),
@@ -329,7 +354,7 @@ fn collect_java_params(
             extends: None,
             implements: Vec::new(),
             decorates: None,
-            metadata: std::collections::HashMap::new(),
+            metadata,
         });
     }
 }
