@@ -58,6 +58,18 @@ impl LanguageProvider for RustProvider {
         }
     }
 
+    fn extract_tests(&self, file_path: &str, content: &str) -> Vec<String> {
+        #[cfg(feature = "codegraph")]
+        {
+            extract_tests_tree_sitter(file_path, content)
+        }
+        #[cfg(not(feature = "codegraph"))]
+        {
+            let _ = (file_path, content);
+            Vec::new()
+        }
+    }
+
     fn supported_labels(&self) -> &[NodeLabel] {
         &[
             NodeLabel::Struct,
@@ -907,6 +919,131 @@ fn walk_rust_locals(
     for child in node.children(cursor) {
         walk_rust_locals(child, file_path, source, locals, enclosing);
     }
+}
+
+#[cfg(feature = "codegraph")]
+fn extract_tests_tree_sitter(file_path: &str, content: &str) -> Vec<String> {
+    use tree_sitter::Parser;
+
+    let language: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut tests = Vec::new();
+    walk_rust_tests(
+        tree.root_node(),
+        file_path,
+        content,
+        &mut tests,
+        &mut Vec::new(),
+    );
+    tests
+}
+
+#[cfg(feature = "codegraph")]
+fn walk_rust_tests(
+    node: tree_sitter::Node,
+    file_path: &str,
+    source: &str,
+    tests: &mut Vec<String>,
+    enclosing: &mut Vec<String>,
+) {
+    match node.kind() {
+        "mod_item" | "impl_item" | "trait_item" => {
+            let name = match node.kind() {
+                "impl_item" => node
+                    .child_by_field_name("type")
+                    .map(|n| text(n, source))
+                    .unwrap_or_else(|| "impl".to_string()),
+                _ => node
+                    .child_by_field_name("name")
+                    .map(|n| text(n, source))
+                    .unwrap_or_default(),
+            };
+            if !name.is_empty() {
+                let outer = match enclosing.last() {
+                    Some(p) => format!("{p}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                enclosing.push(outer);
+                if let Some(body) = node.child_by_field_name("body") {
+                    let cursor = &mut body.walk();
+                    for child in body.children(cursor) {
+                        walk_rust_tests(child, file_path, source, tests, enclosing);
+                    }
+                }
+                enclosing.pop();
+                return;
+            }
+        }
+        "function_item" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let fq = match enclosing.last() {
+                    Some(p) => format!("{p}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                // Recurse into the body first so nested functions still
+                // get visited even when this one isn't a test itself.
+                enclosing.push(fq.clone());
+                let cursor = &mut node.walk();
+                for child in node.children(cursor) {
+                    walk_rust_tests(child, file_path, source, tests, enclosing);
+                }
+                enclosing.pop();
+                if rust_has_test_attribute(node, source) {
+                    tests.push(fq);
+                }
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        walk_rust_tests(child, file_path, source, tests, enclosing);
+    }
+}
+
+/// Return true if the given `function_item` has a preceding `#[test]`
+/// or `#[tokio::test]` (or any attribute whose path leaf is `test`)
+/// attribute_item sibling. Tree-sitter-rust attaches attributes as
+/// sibling nodes in the parent declaration list, not as children of
+/// the function itself, so we walk backwards from the function.
+#[cfg(feature = "codegraph")]
+fn rust_has_test_attribute(function_item: tree_sitter::Node, source: &str) -> bool {
+    let mut cursor = function_item;
+    while let Some(prev) = cursor.prev_named_sibling() {
+        match prev.kind() {
+            "attribute_item" | "inner_attribute_item" => {
+                let text_src = text(prev, source);
+                // The attribute text is `#[test]`, `#[tokio::test]`,
+                // `#[test(foo = "bar")]`, etc. A leaf-name match is
+                // enough — no need to parse the meta_item tree.
+                let inner = text_src
+                    .trim_start_matches("#!")
+                    .trim_start_matches('#')
+                    .trim_start_matches('[')
+                    .trim_end_matches(']');
+                let path = inner.split(['(', '=']).next().unwrap_or(inner).trim();
+                let leaf = path.rsplit("::").next().unwrap_or(path).trim();
+                if leaf == "test" {
+                    return true;
+                }
+                cursor = prev;
+            }
+            _ => return false,
+        }
+    }
+    false
 }
 
 fn extract_fallback(file_path: &str, content: &str) -> Vec<ExtractedSymbol> {

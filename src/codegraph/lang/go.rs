@@ -59,6 +59,18 @@ impl LanguageProvider for GoProvider {
         }
     }
 
+    fn extract_tests(&self, file_path: &str, content: &str) -> Vec<String> {
+        #[cfg(feature = "codegraph")]
+        {
+            extract_tests_tree_sitter(file_path, content)
+        }
+        #[cfg(not(feature = "codegraph"))]
+        {
+            let _ = (file_path, content);
+            Vec::new()
+        }
+    }
+
     fn file_extensions(&self) -> &[&str] {
         &["go"]
     }
@@ -734,6 +746,77 @@ fn walk_go_accesses(
             receiver_names,
         );
     }
+}
+
+#[cfg(feature = "codegraph")]
+fn extract_tests_tree_sitter(file_path: &str, content: &str) -> Vec<String> {
+    use tree_sitter::Parser;
+
+    let language: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut tests = Vec::new();
+    walk_go_tests(tree.root_node(), file_path, content, &mut tests);
+    tests
+}
+
+#[cfg(feature = "codegraph")]
+fn walk_go_tests(
+    node: tree_sitter::Node,
+    file_path: &str,
+    source: &str,
+    tests: &mut Vec<String>,
+) {
+    if node.kind() == "function_declaration"
+        && let Some(name_node) = node.child_by_field_name("name")
+    {
+        let name = text(name_node, source);
+        // Go's test runner recognizes top-level functions named Test*,
+        // Benchmark*, Example*, and Fuzz* with the appropriate
+        // testing.T / testing.B / testing.F receiver. Signature check
+        // keeps `TestHelper`-style utility names from leaking in.
+        let is_test_prefix = name.starts_with("Test")
+            || name.starts_with("Benchmark")
+            || name.starts_with("Example")
+            || name.starts_with("Fuzz");
+        if is_test_prefix && go_first_param_is_testing(node, source) {
+            tests.push(format!("{file_path}::{name}"));
+        }
+    }
+
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        walk_go_tests(child, file_path, source, tests);
+    }
+}
+
+#[cfg(feature = "codegraph")]
+fn go_first_param_is_testing(function: tree_sitter::Node, source: &str) -> bool {
+    let Some(params) = function.child_by_field_name("parameters") else {
+        return false;
+    };
+    let cursor = &mut params.walk();
+    for child in params.children(cursor) {
+        if child.kind() != "parameter_declaration" {
+            continue;
+        }
+        let Some(type_node) = child.child_by_field_name("type") else {
+            return false;
+        };
+        let type_text = text(type_node, source);
+        return type_text.contains("testing.T")
+            || type_text.contains("testing.B")
+            || type_text.contains("testing.F");
+    }
+    false
 }
 
 fn extract_fallback(file_path: &str, content: &str) -> Vec<ExtractedSymbol> {

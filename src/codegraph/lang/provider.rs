@@ -131,6 +131,17 @@ pub trait LanguageProvider: Send + Sync {
         Vec::new()
     }
 
+    /// Identify test functions in this file by qualified name.
+    ///
+    /// Providers use language-specific heuristics (attributes like
+    /// `#[test]` / `@Test`, naming conventions like `Test*` / `test_*`,
+    /// or receiver-type signatures) to classify functions as tests.
+    /// The resolver emits TESTED_BY edges from a call site's callee
+    /// back to any caller that appears in this set.
+    fn extract_tests(&self, _file_path: &str, _content: &str) -> Vec<String> {
+        Vec::new()
+    }
+
     /// File extensions (without the leading dot) that this provider
     /// handles. Kept on the trait so extension→provider routing can
     /// eventually live on each provider instead of the central

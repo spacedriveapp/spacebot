@@ -46,6 +46,18 @@ impl LanguageProvider for PythonProvider {
         }
     }
 
+    fn extract_tests(&self, file_path: &str, content: &str) -> Vec<String> {
+        #[cfg(feature = "codegraph")]
+        {
+            extract_tests_tree_sitter(file_path, content)
+        }
+        #[cfg(not(feature = "codegraph"))]
+        {
+            let _ = (file_path, content);
+            Vec::new()
+        }
+    }
+
     fn supported_labels(&self) -> &[NodeLabel] {
         &[
             NodeLabel::Class,
@@ -781,6 +793,83 @@ fn walk_py_accesses(
     let cursor = &mut node.walk();
     for child in node.children(cursor) {
         walk_py_accesses(child, file_path, source, accesses, enclosing);
+    }
+}
+
+#[cfg(feature = "codegraph")]
+fn extract_tests_tree_sitter(file_path: &str, content: &str) -> Vec<String> {
+    use tree_sitter::Parser;
+
+    let language: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut tests = Vec::new();
+    walk_py_tests(
+        tree.root_node(),
+        file_path,
+        content,
+        &mut tests,
+        &mut Vec::new(),
+    );
+    tests
+}
+
+#[cfg(feature = "codegraph")]
+fn walk_py_tests(
+    node: tree_sitter::Node,
+    file_path: &str,
+    source: &str,
+    tests: &mut Vec<String>,
+    enclosing: &mut Vec<String>,
+) {
+    match node.kind() {
+        "class_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text_str(name_node, source);
+                let outer = match enclosing.last() {
+                    Some(p) => format!("{p}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                enclosing.push(outer);
+                if let Some(body) = node.child_by_field_name("body") {
+                    let cursor = &mut body.walk();
+                    for child in body.children(cursor) {
+                        walk_py_tests(child, file_path, source, tests, enclosing);
+                    }
+                }
+                enclosing.pop();
+                return;
+            }
+        }
+        "function_definition" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text_str(name_node, source);
+                // Pytest and unittest both look for `test_`-prefixed
+                // methods; matching on name alone skips fixtures and
+                // helpers without false positives.
+                if name.starts_with("test_") || name == "test" {
+                    let fq = match enclosing.last() {
+                        Some(p) => format!("{p}::{name}"),
+                        None => format!("{file_path}::{name}"),
+                    };
+                    tests.push(fq);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        walk_py_tests(child, file_path, source, tests, enclosing);
     }
 }
 

@@ -73,6 +73,18 @@ impl LanguageProvider for JavaProvider {
         }
     }
 
+    fn extract_tests(&self, file_path: &str, content: &str) -> Vec<String> {
+        #[cfg(feature = "codegraph")]
+        {
+            extract_tests_tree_sitter(file_path, content)
+        }
+        #[cfg(not(feature = "codegraph"))]
+        {
+            let _ = (file_path, content);
+            Vec::new()
+        }
+    }
+
     fn file_extensions(&self) -> &[&str] {
         &["java"]
     }
@@ -683,6 +695,109 @@ fn walk_java_locals(
     for child in node.children(cursor) {
         walk_java_locals(child, file_path, source, locals, enclosing);
     }
+}
+
+#[cfg(feature = "codegraph")]
+fn extract_tests_tree_sitter(file_path: &str, content: &str) -> Vec<String> {
+    use tree_sitter::Parser;
+
+    let language: tree_sitter::Language = tree_sitter_java::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut tests = Vec::new();
+    walk_java_tests(
+        tree.root_node(),
+        file_path,
+        content,
+        &mut tests,
+        &mut Vec::new(),
+    );
+    tests
+}
+
+#[cfg(feature = "codegraph")]
+fn walk_java_tests(
+    node: tree_sitter::Node,
+    file_path: &str,
+    source: &str,
+    tests: &mut Vec<String>,
+    enclosing: &mut Vec<String>,
+) {
+    match node.kind() {
+        "class_declaration" | "interface_declaration" | "enum_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let outer = match enclosing.last() {
+                    Some(p) => format!("{p}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                enclosing.push(outer);
+                let cursor = &mut node.walk();
+                for child in node.children(cursor) {
+                    walk_java_tests(child, file_path, source, tests, enclosing);
+                }
+                enclosing.pop();
+                return;
+            }
+        }
+        "method_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                if !name.is_empty() && java_method_is_test(node, source) {
+                    let fq = match enclosing.last() {
+                        Some(p) => format!("{p}::{name}"),
+                        None => format!("{file_path}::{name}"),
+                    };
+                    tests.push(fq);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        walk_java_tests(child, file_path, source, tests, enclosing);
+    }
+}
+
+/// Look for `@Test`, `@ParameterizedTest`, `@RepeatedTest`, or similar
+/// JUnit/TestNG annotations on a `method_declaration`. Annotations live
+/// as children of the method's `modifiers` child, not the method itself.
+#[cfg(feature = "codegraph")]
+fn java_method_is_test(method: tree_sitter::Node, source: &str) -> bool {
+    let cursor = &mut method.walk();
+    for child in method.children(cursor) {
+        if child.kind() != "modifiers" {
+            continue;
+        }
+        let mods_cursor = &mut child.walk();
+        for m in child.children(mods_cursor) {
+            if !matches!(m.kind(), "annotation" | "marker_annotation") {
+                continue;
+            }
+            let name = m
+                .child_by_field_name("name")
+                .map(|n| text(n, source))
+                .unwrap_or_default();
+            let leaf = name.rsplit('.').next().unwrap_or(&name);
+            if matches!(
+                leaf,
+                "Test" | "ParameterizedTest" | "RepeatedTest" | "TestFactory" | "TestTemplate"
+            ) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn extract_fallback(file_path: &str, content: &str) -> Vec<ExtractedSymbol> {

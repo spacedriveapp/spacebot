@@ -251,6 +251,10 @@ pub async fn resolve_calls(
     // local binding shadows an outer param or class field of the same
     // name just like it would during real scope resolution.
     let mut local_types: HashMap<(String, String), String> = HashMap::new();
+    // Qnames of functions classified as tests by their language
+    // provider. Every call whose caller is in this set also gets a
+    // TESTED_BY edge from the resolved callee back to the test.
+    let mut test_fns: HashSet<String> = HashSet::new();
     let total_files = files.len();
     let report_interval = (total_files / 20).max(1);
 
@@ -292,6 +296,10 @@ pub async fn resolve_calls(
                 (binding.function_qualified_name, binding.name),
                 binding.declared_type,
             );
+        }
+
+        for test_qn in provider.extract_tests(&relative, &content) {
+            test_fns.insert(test_qn);
         }
 
         // --- Resolve self/this field accesses → ACCESSES edges ---
@@ -360,6 +368,15 @@ pub async fn resolve_calls(
                                 0.92,
                                 "receiver-resolved",
                             );
+                            maybe_emit_tested_by(
+                                &mut edge_stmts,
+                                &mut seen_edges,
+                                &test_fns,
+                                &site.caller_qualified_name,
+                                &target.qualified_name,
+                                &target.label,
+                                &pid,
+                            );
                         }
                         continue;
                     }
@@ -405,6 +422,15 @@ pub async fn resolve_calls(
                                 0.88,
                                 "typed-receiver",
                             );
+                            maybe_emit_tested_by(
+                                &mut edge_stmts,
+                                &mut seen_edges,
+                                &test_fns,
+                                &site.caller_qualified_name,
+                                &target.qualified_name,
+                                &target.label,
+                                &pid,
+                            );
                         }
                         continue;
                     }
@@ -430,6 +456,15 @@ pub async fn resolve_calls(
                         0.95,
                         "same-file",
                     );
+                    maybe_emit_tested_by(
+                        &mut edge_stmts,
+                        &mut seen_edges,
+                        &test_fns,
+                        &site.caller_qualified_name,
+                        &target.qualified_name,
+                        &target.label,
+                        &pid,
+                    );
                 }
                 continue;
             }
@@ -454,6 +489,15 @@ pub async fn resolve_calls(
                         0.93,
                         "imported-symbol",
                     );
+                    maybe_emit_tested_by(
+                        &mut edge_stmts,
+                        &mut seen_edges,
+                        &test_fns,
+                        &site.caller_qualified_name,
+                        &target.qualified_name,
+                        &target.label,
+                        &pid,
+                    );
                 }
                 continue;
             }
@@ -473,6 +517,15 @@ pub async fn resolve_calls(
                         0.90,
                         "import-scoped",
                     );
+                    maybe_emit_tested_by(
+                        &mut edge_stmts,
+                        &mut seen_edges,
+                        &test_fns,
+                        &site.caller_qualified_name,
+                        &target.qualified_name,
+                        &target.label,
+                        &pid,
+                    );
                 }
                 continue;
             }
@@ -491,6 +544,15 @@ pub async fn resolve_calls(
                         0.70,
                         "project-unique",
                     );
+                    maybe_emit_tested_by(
+                        &mut edge_stmts,
+                        &mut seen_edges,
+                        &test_fns,
+                        &site.caller_qualified_name,
+                        &target.qualified_name,
+                        &target.label,
+                        &pid,
+                    );
                 }
                 continue;
             }
@@ -507,6 +569,15 @@ pub async fn resolve_calls(
                         &pid,
                         0.40,
                         "project-multi",
+                    );
+                    maybe_emit_tested_by(
+                        &mut edge_stmts,
+                        &mut seen_edges,
+                        &test_fns,
+                        &site.caller_qualified_name,
+                        &target.qualified_name,
+                        &target.label,
+                        &pid,
                     );
                 }
             }
@@ -890,6 +961,38 @@ fn push_edge(
              WHERE a.qualified_name = '{src_escaped}' AND a.project_id = '{pid}' \
              AND b.qualified_name = '{tgt_escaped}' AND b.project_id = '{pid}' \
              CREATE (a)-[:CodeRelation {{type: 'CALLS', confidence: {confidence}, reason: '{reason}', step: 0}}]->(b)",
+        ));
+    }
+}
+
+/// Emit a `TESTED_BY` edge from a resolved callee back to the test
+/// function that called it, deduped separately from the `CALLS` edge
+/// set so both edges land even when the same test → target pair
+/// resolves through multiple confidence tiers in different call sites.
+fn maybe_emit_tested_by(
+    stmts: &mut Vec<String>,
+    seen: &mut HashSet<String>,
+    test_fns: &HashSet<String>,
+    caller_qn: &str,
+    target_qn: &str,
+    target_label: &str,
+    pid: &str,
+) {
+    if !test_fns.contains(caller_qn) {
+        return;
+    }
+    let key = format!("TB:{target_qn}->{caller_qn}");
+    if !seen.insert(key) {
+        return;
+    }
+    let src_escaped = cypher_escape(target_qn);
+    let tgt_escaped = cypher_escape(caller_qn);
+    for src_label in &["Function", "Method"] {
+        stmts.push(format!(
+            "MATCH (a:{target_label}), (b:{src_label}) \
+             WHERE a.qualified_name = '{src_escaped}' AND a.project_id = '{pid}' \
+             AND b.qualified_name = '{tgt_escaped}' AND b.project_id = '{pid}' \
+             CREATE (a)-[:CodeRelation {{type: 'TESTED_BY', confidence: 1.0, reason: 'test-caller', step: 0}}]->(b)",
         ));
     }
 }

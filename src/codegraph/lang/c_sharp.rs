@@ -76,6 +76,18 @@ impl LanguageProvider for CSharpProvider {
         }
     }
 
+    fn extract_tests(&self, file_path: &str, content: &str) -> Vec<String> {
+        #[cfg(feature = "codegraph")]
+        {
+            extract_tests_tree_sitter(file_path, content)
+        }
+        #[cfg(not(feature = "codegraph"))]
+        {
+            let _ = (file_path, content);
+            Vec::new()
+        }
+    }
+
     fn file_extensions(&self) -> &[&str] {
         &["cs"]
     }
@@ -771,6 +783,111 @@ fn walk_csharp_locals(
     for child in node.children(cursor) {
         walk_csharp_locals(child, file_path, source, locals, enclosing);
     }
+}
+
+#[cfg(feature = "codegraph")]
+fn extract_tests_tree_sitter(file_path: &str, content: &str) -> Vec<String> {
+    use tree_sitter::Parser;
+
+    let language: tree_sitter::Language = tree_sitter_c_sharp::LANGUAGE.into();
+    let mut parser = Parser::new();
+    if parser.set_language(&language).is_err() {
+        return Vec::new();
+    }
+
+    let tree = match parser.parse(content, None) {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let mut tests = Vec::new();
+    walk_csharp_tests(
+        tree.root_node(),
+        file_path,
+        content,
+        &mut tests,
+        &mut Vec::new(),
+    );
+    tests
+}
+
+#[cfg(feature = "codegraph")]
+fn walk_csharp_tests(
+    node: tree_sitter::Node,
+    file_path: &str,
+    source: &str,
+    tests: &mut Vec<String>,
+    enclosing: &mut Vec<String>,
+) {
+    match node.kind() {
+        "namespace_declaration"
+        | "file_scoped_namespace_declaration"
+        | "class_declaration"
+        | "struct_declaration"
+        | "record_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                let outer = match enclosing.last() {
+                    Some(p) => format!("{p}::{name}"),
+                    None => format!("{file_path}::{name}"),
+                };
+                enclosing.push(outer);
+                let cursor = &mut node.walk();
+                for child in node.children(cursor) {
+                    walk_csharp_tests(child, file_path, source, tests, enclosing);
+                }
+                enclosing.pop();
+                return;
+            }
+        }
+        "method_declaration" => {
+            if let Some(name_node) = node.child_by_field_name("name") {
+                let name = text(name_node, source);
+                if !name.is_empty() && csharp_method_is_test(node, source) {
+                    let fq = match enclosing.last() {
+                        Some(p) => format!("{p}::{name}"),
+                        None => format!("{file_path}::{name}"),
+                    };
+                    tests.push(fq);
+                }
+            }
+        }
+        _ => {}
+    }
+
+    let cursor = &mut node.walk();
+    for child in node.children(cursor) {
+        walk_csharp_tests(child, file_path, source, tests, enclosing);
+    }
+}
+
+/// Detect `[Test]` (NUnit), `[Fact]`/`[Theory]` (xUnit), and
+/// `[TestMethod]` (MSTest) attributes on a `method_declaration`. C#
+/// attributes show up as `attribute_list` children containing
+/// `attribute` nodes with a `name` field.
+#[cfg(feature = "codegraph")]
+fn csharp_method_is_test(method: tree_sitter::Node, source: &str) -> bool {
+    let cursor = &mut method.walk();
+    for child in method.children(cursor) {
+        if child.kind() != "attribute_list" {
+            continue;
+        }
+        let attr_cursor = &mut child.walk();
+        for attr in child.children(attr_cursor) {
+            if attr.kind() != "attribute" {
+                continue;
+            }
+            let name = attr
+                .child_by_field_name("name")
+                .map(|n| text(n, source))
+                .unwrap_or_default();
+            let leaf = name.rsplit('.').next().unwrap_or(&name);
+            if matches!(leaf, "Test" | "Fact" | "Theory" | "TestMethod" | "TestCase") {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 #[cfg(feature = "codegraph")]
