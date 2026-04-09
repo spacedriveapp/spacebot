@@ -182,10 +182,9 @@ function CortexChatInput({
 	}, []);
 
 	useEffect(() => {
-		const textarea = textareaRef.current;
-		if (!textarea) return;
-
 		const adjustHeight = () => {
+			const textarea = textareaRef.current;
+			if (!textarea) return;
 			textarea.style.height = "auto";
 			const scrollHeight = textarea.scrollHeight;
 			const maxHeight = 160;
@@ -194,9 +193,11 @@ function CortexChatInput({
 		};
 
 		adjustHeight();
+		const textarea = textareaRef.current;
+		if (!textarea) return;
 		textarea.addEventListener("input", adjustHeight);
 		return () => textarea.removeEventListener("input", adjustHeight);
-	}, [value]);
+	}, []);
 
 	const handleKeyDown = (event: React.KeyboardEvent<HTMLTextAreaElement>) => {
 		if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
