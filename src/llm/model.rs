@@ -2348,24 +2348,38 @@ fn parse_streamed_tool_arguments(
         return Ok(serde_json::json!({}));
     }
 
-    let direct_parse_error = match serde_json::from_str::<serde_json::Value>(raw_arguments) {
-        Ok(arguments) => return Ok(arguments),
-        Err(error) => error,
+    let mut iter =
+        serde_json::Deserializer::from_str(raw_arguments).into_iter::<serde_json::Value>();
+    let direct_parse_error = match iter.next() {
+        Some(Ok(arguments)) => return Ok(arguments),
+        Some(Err(error)) => error,
+        None => {
+            return Err(CompletionError::ProviderError(format!(
+                "invalid streamed tool arguments for '{tool_name}': empty JSON stream"
+            )));
+        }
     };
 
     let sanitized_arguments = escape_control_characters_in_json_strings(raw_arguments);
     if sanitized_arguments != raw_arguments {
-        match serde_json::from_str::<serde_json::Value>(&sanitized_arguments) {
-            Ok(arguments) => {
+        let mut sanitized_iter = serde_json::Deserializer::from_str(&sanitized_arguments)
+            .into_iter::<serde_json::Value>();
+        match sanitized_iter.next() {
+            Some(Ok(arguments)) => {
                 tracing::warn!(
                     tool_name,
                     "normalized control characters in streamed tool arguments"
                 );
                 return Ok(arguments);
             }
-            Err(sanitized_parse_error) => {
+            Some(Err(sanitized_parse_error)) => {
                 return Err(CompletionError::ProviderError(format!(
                     "invalid streamed tool arguments for '{tool_name}': {direct_parse_error}; after sanitization: {sanitized_parse_error}"
+                )));
+            }
+            None => {
+                return Err(CompletionError::ProviderError(format!(
+                    "invalid streamed tool arguments for '{tool_name}': {direct_parse_error}; after sanitization: empty JSON stream"
                 )));
             }
         }
@@ -3643,14 +3657,16 @@ fn provider_display_name(provider_id: &str) -> String {
 }
 
 fn remap_model_name_for_api(provider: &str, model_name: &str) -> String {
+    let stripped = model_name.strip_prefix("litellm/").unwrap_or(model_name);
+
     if provider == "zai-coding-plan" {
         // Coding Plan endpoint expects plain model ids (e.g. "glm-5").
-        model_name
+        stripped
             .strip_prefix("zai/")
-            .unwrap_or(model_name)
+            .unwrap_or(stripped)
             .to_string()
     } else {
-        model_name.to_string()
+        stripped.to_string()
     }
 }
 

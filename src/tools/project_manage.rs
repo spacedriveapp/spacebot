@@ -640,9 +640,8 @@ impl ProjectManageTool {
         let repo_abs_path = root.join(&repo.path);
         let is_single_repo = repo.path == ".";
 
-        // For single-repo projects, place worktrees in the parent directory
-        // (as siblings of the repo). For multi-repo projects, place them
-        // inside the project root.
+        // For multi-repo projects, place them inside the project root,
+        // prefixed with `.worktrees/repo_name-worktree_name` to avoid conflicts.
         let (worktree_abs_path, worktree_db_path) = if is_single_repo {
             let parent = root.parent().ok_or_else(|| {
                 ProjectManageError("single-repo project root has no parent directory".into())
@@ -652,7 +651,10 @@ impl ProjectManageTool {
                 format!("../{worktree_dir_name}"),
             )
         } else {
-            (root.join(&worktree_dir_name), worktree_dir_name.clone())
+            // Include repo name in the worktree directory name to avoid conflicts
+            // with other repos or their worktrees in a multi-repo project.
+            let dir_name = format!("{}-{}", repo.name, worktree_dir_name);
+            (root.join(&dir_name), dir_name)
         };
 
         // Create the git worktree (branch from HEAD of the repo)

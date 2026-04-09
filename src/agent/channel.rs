@@ -944,9 +944,11 @@ impl Channel {
             "/quiet" | "/observe" => {
                 self.set_response_mode(ResponseMode::Observe).await;
                 self.send_builtin_text(
-                    "observe mode enabled. i'll learn from this conversation but won't respond.".to_string(),
+                    "observe mode enabled. i'll learn from this conversation but won't respond."
+                        .to_string(),
                     "observe",
-                ).await;
+                )
+                .await;
                 return Ok(true);
             }
             "/active" => {
@@ -976,7 +978,8 @@ impl Channel {
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /observe: learn from conversation, never respond".to_string(),
-                    "- /mention-only: only respond when @mentioned, replied to, or given a command".to_string(),
+                    "- /mention-only: only respond when @mentioned, replied to, or given a command"
+                        .to_string(),
                     "- /active: normal reply mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
@@ -3004,7 +3007,8 @@ impl Channel {
 
                     // Truncate for working memory — full conclusion lives in branch_runs.
                     let summary = if conclusion.len() > 200 {
-                        format!("{}...", &conclusion[..200])
+                        let end = conclusion.floor_char_boundary(200);
+                        format!("{}...", &conclusion[..end])
                     } else {
                         conclusion.clone()
                     };
@@ -3077,7 +3081,8 @@ impl Channel {
 
                 // Record worker completion in working memory.
                 let worker_summary = if result.len() > 200 {
-                    format!("{}...", &result[..200])
+                    let end = result.floor_char_boundary(200);
+                    format!("{}...", &result[..end])
                 } else {
                     result.clone()
                 };

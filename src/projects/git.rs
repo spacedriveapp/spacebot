@@ -257,7 +257,7 @@ pub async fn remove_worktree(repo_path: &Path, worktree_path: &Path) -> anyhow::
         .context("worktree path is not valid UTF-8")?;
 
     let output = Command::new("git")
-        .args(["worktree", "remove", worktree_str])
+        .args(["worktree", "remove", "--force", worktree_str])
         .current_dir(repo_path)
         .output()
         .await

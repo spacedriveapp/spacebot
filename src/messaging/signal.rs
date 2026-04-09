@@ -897,7 +897,8 @@ impl Messaging for SignalAdapter {
                                     // Log response body at debug level only (may contain sensitive data)
                                     if let Ok(body_text) = response.text().await {
                                         let truncated = if body_text.len() > 200 {
-                                            format!("{}...<truncated>", &body_text[..200])
+                                            let end = body_text.floor_char_boundary(200);
+                                            format!("{}...<truncated>", &body_text[..end])
                                         } else {
                                             body_text
                                         };
