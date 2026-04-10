@@ -190,7 +190,7 @@ The `hierarchical` link kind establishes the chain of command. The `preset` fiel
 Boss receives user request
     → send_agent_message → Planning-lead task store
         → Cortex detects delegated_by metadata
-        → Injects identity (SOUL.md, IDENTITY.md, ROLE.md) + org_context
+        → Injects identity (SOUL.md, IDENTITY.md, ROLE.md) + org_context + hierarchical_rules
         → Planning-lead spawns Engineering Assistant (with DelegationConfig)
             → task_list → sees assigned tasks
             → send_agent_message → Builder workers
@@ -204,15 +204,28 @@ Boss receives user request
     → Boss relays synthesized result to user
 ```
 
-1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store. This appears as a message in the planning-lead's link channel (`link:planning-lead:boss`).
+1. **Boss delegates** — The boss agent uses `send_agent_message` to create a task in the planning-lead's task store. This appears as a message in the planning-lead's link channel (`link:planning-lead:boss`). **Do NOT use `spawn_worker` for delegation** — `spawn_worker` creates a worker directly without task board tracking, bypasses the delegation chain, and breaks completion notifications.
 2. **Cortex detects delegation** — The planning-lead's cortex picks up `Ready` tasks with `delegated_by` metadata. It detects this is a delegated task and enhances the worker setup:
    - **Identity injection** — SOUL.md, IDENTITY.md, and ROLE.md are appended AFTER the worker template
    - **Org context** — The worker sees its position in the hierarchy (reports to, direct reports, peers)
+   - **Hierarchical rules** — Behavioral rules for delegation, anti-bounce, and synthesis are automatically injected based on link structure
    - **Delegation tools** — Four additional tools are added to the ToolServer
 3. **Planning-lead orchestrates** — Spawns an engineering assistant with `DelegationConfig`, giving it `send_agent_message`, `task_list`, `task_get`, and `task_update` tools.
 4. **Engineering Assistant delegates** — Polls `task_list` for assigned tasks, delegates implementation to builder workers via `send_agent_message`, and waits for completion.
 5. **Builders execute** — Workers run autonomously with shell, file, and browser tools. They signal completion via `set_status(kind: "outcome")`.
-6. **Synthesis and report** — The engineering assistant reads results with `task_get`, synthesizes findings, updates the task, and reports back. The planning-lead synthesizes and reports to the boss.
+6. **Synthesis and report** — The engineering assistant reads results with `task_get`, synthesizes findings, updates the task, and reports back. The planning-lead synthesizes and reports to the boss. The boss relays the synthesized result to the user.
+
+### Hierarchical Behavior Injection
+
+When an agent has hierarchical links, behavioral rules are automatically injected into its prompt — no ROLE.md changes needed. These rules are agent-agnostic and work for any hierarchy configuration:
+
+- **Agents with superiors** get rules for receiving delegated work, synthesizing reports, and reporting up
+- **Agents with subordinates** get rules for delegating via `send_agent_message`, waiting for completion notifications, and avoiding status-check tasks
+- **All hierarchical agents** get rules about escalation chains, delegation as progress (not a blocker), and trusting the notification system
+
+The rules use dynamic agent names from the link structure (e.g., "When you delegate work to planning-lead...") so they work for any agent configuration without hardcoded names.
+
+Additionally, the `spawn_worker` tool description includes a warning for hierarchical agents: if you have subordinates, use `send_agent_message` instead of `spawn_worker` for delegation.
 
 ### Delegation Tools
 

@@ -16,7 +16,10 @@ You operate within a hierarchy. These rules govern how you delegate, receive wor
 {% if hierarchical_rules.has_subordinates -%}
 ### Delegating Work
 
+- To delegate work, use `send_agent_message` — NOT `spawn_worker`. `send_agent_message` creates a task in your subordinate's store and tracks the full delegation chain. `spawn_worker` bypasses the hierarchy and breaks completion notifications.
 - When you delegate work to {{ hierarchical_rules.subordinates | map(attribute='name') | join(', ') }}, delegate ONCE and wait for the completion notification.
+- After delegating, wait for the system notification ("[System] Delegated task #N completed...") before responding to the user. Do NOT report blockers or conclusions until you receive the subordinate's actual result.
+- When relaying results to the user, synthesize the subordinate's report — do NOT forward raw output or make up your own conclusions.
 - Do NOT create status-check tasks (e.g., "Check on task #X", "Any ETA?", "Any blockers?").
 - Do NOT poll `task_list` excessively — call it ONCE with broad filters, then wait.
 - When a subordinate completes work, synthesize their results before reporting to your superior.
