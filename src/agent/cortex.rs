@@ -354,6 +354,9 @@ struct BranchTracker {
     branch_id: BranchId,
     channel_id: ChannelId,
     started_at: Instant,
+    /// Currently set at branch spawn only. To make this truly activity-based,
+    /// send a ProcessEvent variant from the hook on tool completions and text
+    /// deltas, then update this field in the cortex event loop.
     last_activity_at: Instant,
 }
 
@@ -510,7 +513,7 @@ fn parse_structured_success_flag(result: &str) -> Option<bool> {
 fn kill_target_last_activity(target: &KillTarget) -> Instant {
     match target {
         KillTarget::Worker(tracker) => tracker.last_activity_at,
-        KillTarget::Branch(tracker) => tracker.started_at,
+        KillTarget::Branch(tracker) => tracker.last_activity_at,
     }
 }
 
