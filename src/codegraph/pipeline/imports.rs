@@ -49,10 +49,12 @@ pub async fn resolve_imports_scoped(
         "resolving imports"
     );
 
-    // 1. Query all Import nodes with their source file, import_source, and name.
+    // 1. Query all Import nodes with source file, import_source, name,
+    //    and extends_type (which carries the original name for aliased
+    //    imports like `import { Foo as Bar }`).
     let imports = db.query(&format!(
         "MATCH (i:Import) WHERE i.project_id = '{pid}' \
-         RETURN i.source_file, i.import_source, i.name"
+         RETURN i.source_file, i.import_source, i.name, i.extends_type"
     )).await?;
 
     // 2. Query all File nodes to build a lookup map.
@@ -111,17 +113,19 @@ pub async fn resolve_imports_scoped(
     let mut edge_stmts: Vec<String> = Vec::new();
 
     for row in &imports {
-        let (source_file, import_source, name) = match (row.first(), row.get(1), row.get(2)) {
+        let (source_file, import_source, name, original_name) = match (row.first(), row.get(1), row.get(2), row.get(3)) {
             (
                 Some(lbug::Value::String(sf)),
                 Some(lbug::Value::String(is)),
                 Some(lbug::Value::String(n)),
-            ) => (sf, is, n.as_str()),
-            (
-                Some(lbug::Value::String(sf)),
-                Some(lbug::Value::String(is)),
-                _,
-            ) => (sf, is, ""),
+                orig,
+            ) => {
+                let orig_str = match orig {
+                    Some(lbug::Value::String(o)) if !o.is_empty() => o.as_str(),
+                    _ => "",
+                };
+                (sf, is, n.as_str(), orig_str)
+            }
             _ => continue,
         };
 
@@ -190,9 +194,22 @@ pub async fn resolve_imports_scoped(
                 ));
 
                 if !name.is_empty() && name != "*" {
-                    // Named import — resolve the specific symbol.
-                    if let Some((sym_qname, sym_label)) =
+                    // Named import — try the local name first, then the
+                    // original name for aliased imports. `Bar` from
+                    // `import { Foo as Bar }` won't match any symbol
+                    // in the target file, but `Foo` will.
+                    let lookup_name = if let Some((sq, sl)) =
                         symbols_by_file_name.get(&(normalized.clone(), name.to_string()))
+                    {
+                        Some((sq.clone(), sl.clone()))
+                    } else if !original_name.is_empty() {
+                        symbols_by_file_name
+                            .get(&(normalized.clone(), original_name.to_string()))
+                            .map(|(sq, sl)| (sq.clone(), sl.clone()))
+                    } else {
+                        None
+                    };
+                    if let Some((sym_qname, sym_label)) = lookup_name.as_ref()
                     {
                         let sym_escaped = cypher_escape(sym_qname);
                         edge_stmts.push(format!(

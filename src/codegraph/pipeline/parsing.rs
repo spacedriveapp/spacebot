@@ -191,7 +191,20 @@ pub async fn parse_files(
                     heritage_parts.push(imp);
                 }
             }
-            let extends_val = cypher_escape(&heritage_parts.join(", "));
+            // For Import nodes, extends_type carries the original name
+            // when the import is aliased (`import { Foo as Bar }` →
+            // name="Bar", extends_type="Foo") so the import resolver
+            // can look up the correct symbol in the target file.
+            let extends_val = if sym.label == crate::codegraph::types::NodeLabel::Import {
+                cypher_escape(
+                    sym.metadata
+                        .get("original_name")
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                )
+            } else {
+                cypher_escape(&heritage_parts.join(", "))
+            };
             let import_src = cypher_escape(sym.import_source.as_deref().unwrap_or(""));
             // Type text stashed in metadata by the language provider
             // (typed params / typed fields). Empty string when the

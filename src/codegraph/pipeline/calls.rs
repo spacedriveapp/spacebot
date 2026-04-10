@@ -204,29 +204,37 @@ pub async fn resolve_calls(
     let import_rows = db
         .query(&format!(
             "MATCH (i:Import) WHERE i.project_id = '{pid}' \
-             RETURN i.source_file, i.name, i.import_source"
+             RETURN i.source_file, i.name, i.extends_type"
         ))
         .await?;
     for row in &import_rows {
         if let (
             Some(lbug::Value::String(src_file)),
             Some(lbug::Value::String(local_name)),
-            Some(lbug::Value::String(_module)),
+            orig_val,
         ) = (row.first(), row.get(1), row.get(2))
             && !local_name.is_empty()
             && local_name != "*"
-            && let Some(entries) = symbols_by_name.get(local_name.as_str())
         {
-            // Prefer the Function/Method whose qname leaf matches the
-            // imported name exactly so that collisions across unrelated
-            // files don't map all of them to the same import binding.
-            if let Some(entry) = entries.iter().find(|e| {
-                e.qualified_name
-                    .rsplit("::")
-                    .next()
-                    .map(|leaf| leaf == local_name.as_str())
-                    .unwrap_or(false)
-            }) {
+            // For aliased imports, extends_type carries the original name
+            // (e.g. "Foo" when the import is `import { Foo as Bar }`).
+            // Try the original first since it matches the symbol's name
+            // in the defining file; fall back to the local alias.
+            let original_name = match orig_val {
+                Some(lbug::Value::String(o)) if !o.is_empty() => Some(o.as_str()),
+                _ => None,
+            };
+            let lookup_name = original_name.unwrap_or(local_name.as_str());
+
+            if let Some(entries) = symbols_by_name.get(lookup_name)
+                && let Some(entry) = entries.iter().find(|e| {
+                    e.qualified_name
+                        .rsplit("::")
+                        .next()
+                        .map(|leaf| leaf == lookup_name)
+                        .unwrap_or(false)
+                })
+            {
                 imported_symbols_by_file
                     .entry(src_file.clone())
                     .or_default()
