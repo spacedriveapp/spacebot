@@ -3,5 +3,3 @@ Spawn an independent worker process. By default uses a built-in agent with {tool
 If OpenCode is enabled and the task is coding-heavy (multi-file edits, debugging, refactors), set `worker_type` to `"opencode"` and include a `directory`.
 
 IMPORTANT: If you have subordinates in your hierarchy, use `send_agent_message` to delegate work to them instead of `spawn_worker`. `spawn_worker` bypasses the delegation chain and breaks completion notifications.
-
-IMPORTANT: If you have subordinates in your hierarchy, use `send_agent_message` to delegate work to them instead of `spawn_worker`. `spawn_worker` bypasses the delegation chain and breaks completion notifications.
