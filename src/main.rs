@@ -2978,7 +2978,6 @@ async fn initialize_agents(
             links: agent_links.clone(),
             agent_names: agent_name_map.clone(),
             agent_roles: agent_role_map.clone(),
-            agent_roles: agent_role_map.clone(),
             humans: agent_humans.clone(),
             process_control_registry: Arc::new(
                 spacebot::agent::process_control::ProcessControlRegistry::new(),
