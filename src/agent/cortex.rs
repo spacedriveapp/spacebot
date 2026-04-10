@@ -3343,27 +3343,12 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
     // hierarchical links — not just delegated workers. This ensures workers
     // from hierarchical agents see delegation rules even when the agent
     // spawns them directly instead of delegating.
-    let system_prompt = if agent_has_hierarchical_links(&deps, &deps.agent_id) {
-        let mut enhanced = system_prompt;
-        if let Some(rules) = prompt_engine.build_hierarchical_rules_for_agent(
-            &deps.agent_id,
-            &deps.links.load(),
-            &deps.humans.load(),
-            &deps.agent_names,
-        ) {
-            enhanced.push_str("\n\n");
-            enhanced.push_str(&rules);
-        }
-        enhanced
-    } else {
-        system_prompt
-    };
+    let has_hierarchical_links = crate::links::links_for_agent(
+        &deps.links.load(),
+        &deps.agent_id,
+    ).iter().any(|l| l.kind == crate::links::LinkKind::Hierarchical);
 
-    // Inject hierarchical rules for ANY worker spawned by an agent with
-    // hierarchical links — not just delegated workers. This ensures workers
-    // from hierarchical agents see delegation rules even when the agent
-    // spawns them directly instead of delegating.
-    let system_prompt = if agent_has_hierarchical_links(&deps, &deps.agent_id) {
+    let system_prompt = if has_hierarchical_links {
         let mut enhanced = system_prompt;
         if let Some(rules) = prompt_engine.build_hierarchical_rules_for_agent(
             &deps.agent_id,
