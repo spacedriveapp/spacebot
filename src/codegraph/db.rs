@@ -81,12 +81,50 @@ impl CodeGraphDb {
     }
 
     /// Initialize the graph schema if not already done.
+    ///
+    /// Checks a `_SchemaVersion` sentinel table in the DB. If the
+    /// stored version doesn't match `SCHEMA_VERSION` in the code,
+    /// all tables are dropped and recreated so new columns are
+    /// available. This forces a re-index but avoids silent node
+    /// creation failures from column mismatches.
     pub async fn ensure_schema(&self) -> Result<()> {
         if self
             .schema_initialized
             .load(std::sync::atomic::Ordering::Acquire)
         {
             return Ok(());
+        }
+
+        let needs_rebuild = self.check_schema_version().await;
+
+        if needs_rebuild {
+            tracing::info!(
+                project_id = %self.project_id,
+                expected = schema::SCHEMA_VERSION,
+                "schema version mismatch — dropping and recreating all tables"
+            );
+            let drop_stmts = schema::schema_drop_ddl();
+            let db = self.database.clone();
+            tokio::task::spawn_blocking(move || -> Result<()> {
+                let conn =
+                    lbug::Connection::new(&db).context("creating connection for schema drop")?;
+                for stmt in &drop_stmts {
+                    if let Err(e) = conn.query(stmt) {
+                        // "does not exist" is fine — the table may not
+                        // have been created in a partially-initialized DB.
+                        let msg = e.to_string();
+                        if !msg.contains("does not exist")
+                            && !msg.contains("not found")
+                            && !msg.contains("not exist")
+                        {
+                            tracing::warn!(ddl = %stmt, err = %msg, "drop statement failed");
+                        }
+                    }
+                }
+                Ok(())
+            })
+            .await
+            .context("schema drop task panicked")??;
         }
 
         tracing::info!(
@@ -110,7 +148,6 @@ impl CodeGraphDb {
                     Ok(_) => success += 1,
                     Err(e) => {
                         let msg = e.to_string();
-                        // "already exists" is expected with IF NOT EXISTS on re-open.
                         if msg.contains("already exists") {
                             skipped += 1;
                         } else {
@@ -136,6 +173,47 @@ impl CodeGraphDb {
             .store(true, std::sync::atomic::Ordering::Release);
 
         Ok(())
+    }
+
+    /// Read the `_SchemaVersion` sentinel. Returns `true` when the DB
+    /// needs a full rebuild (version missing or doesn't match code).
+    async fn check_schema_version(&self) -> bool {
+        let db = self.database.clone();
+        let result = tokio::task::spawn_blocking(move || -> Option<u32> {
+            let conn = lbug::Connection::new(&db).ok()?;
+            let mut result = conn
+                .query("MATCH (sv:_SchemaVersion) RETURN sv.version")
+                .ok()?;
+            let row: Option<Vec<lbug::Value>> = result.by_ref().next();
+            match row?.first()? {
+                lbug::Value::Int32(v) => Some(*v as u32),
+                lbug::Value::Int64(v) => Some(*v as u32),
+                _ => None,
+            }
+        })
+        .await
+        .ok()
+        .flatten();
+
+        match result {
+            Some(v) if v == schema::SCHEMA_VERSION => false,
+            Some(v) => {
+                tracing::info!(
+                    project_id = %self.project_id,
+                    stored = v,
+                    expected = schema::SCHEMA_VERSION,
+                    "schema version stale"
+                );
+                true
+            }
+            None => {
+                tracing::info!(
+                    project_id = %self.project_id,
+                    "no schema version sentinel found — assuming fresh DB"
+                );
+                false
+            }
+        }
     }
 
     /// Execute a single Cypher statement (DDL or DML), ignoring results.

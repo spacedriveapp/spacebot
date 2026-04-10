@@ -8,13 +8,10 @@
 //! init fast (~30 DDL statements instead of ~1000) and simplifies all
 //! Cypher queries to use `:CodeRelation {type: 'CALLS', ...}`.
 
-/// Current schema version. Bump this when making breaking changes.
-///
-/// v3 adds the `declared_type` STRING column to every symbol node table.
-/// LadybugDB's `CREATE NODE TABLE IF NOT EXISTS` is a no-op on existing
-/// tables, so users on v2 must wipe + re-index to pick up the new column.
-/// The call-site resolver reads this property to build the cross-file
-/// type environment.
+/// Current schema version. Bump this when node or relationship table
+/// columns change. `ensure_schema` compares against the version stored
+/// in the DB; on mismatch it drops every table and recreates so the
+/// new columns are available.
 pub const SCHEMA_VERSION: u32 = 3;
 
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
@@ -25,11 +22,41 @@ pub const ALL_NODE_LABELS: &[&str] = &[
     "Record", "Template", "Test", "Community", "Process", "Section",
 ];
 
+/// Generate DROP statements for all tables so the schema can be rebuilt
+/// from scratch when the version changes. Rel table must be dropped
+/// before node tables because LadybugDB rejects dropping a node table
+/// that has active relationships.
+pub fn schema_drop_ddl() -> Vec<String> {
+    let mut ddl = Vec::new();
+
+    ddl.push("DROP REL TABLE IF EXISTS CodeRelation".to_string());
+
+    for label in ALL_NODE_LABELS {
+        ddl.push(format!("DROP NODE TABLE IF EXISTS {label}"));
+    }
+    // The version sentinel table itself is dropped last so the version
+    // check that triggered the drop doesn't trip again on a retry.
+    ddl.push("DROP NODE TABLE IF EXISTS _SchemaVersion".to_string());
+
+    ddl
+}
+
 /// Generate all DDL statements for the code graph schema.
 ///
 /// Returns a vector of Cypher DDL strings that should be executed in order.
 pub fn schema_ddl() -> Vec<String> {
     let mut ddl = Vec::new();
+
+    // Sentinel table that stores the schema version. ensure_schema reads
+    // this on startup and drops+recreates when it doesn't match the code.
+    ddl.push(
+        "CREATE NODE TABLE IF NOT EXISTS _SchemaVersion (\
+         id SERIAL, version INT32, PRIMARY KEY(id))"
+            .to_string(),
+    );
+    ddl.push(format!(
+        "CREATE (n:_SchemaVersion {{version: {SCHEMA_VERSION}}})"
+    ));
 
     // -----------------------------------------------------------------------
     // Node tables
