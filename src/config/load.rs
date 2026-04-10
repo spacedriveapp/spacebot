@@ -17,9 +17,9 @@ use super::{
     LinkDef, LlmConfig, MattermostConfig, MattermostInstanceConfig, McpServerConfig, McpTransport,
     MemoryPersistenceConfig, MessagingConfig, MetricsConfig, OpenCodeConfig, ProjectsConfig,
     ProviderConfig, SignalConfig, SignalInstanceConfig, SlackCommandConfig, SlackConfig,
-    SlackInstanceConfig, TelegramConfig, TelegramInstanceConfig, TelemetryConfig, TwitchConfig,
-    TwitchInstanceConfig, WarmupConfig, WebhookConfig, normalize_adapter,
-    validate_named_messaging_adapters,
+    SlackInstanceConfig, SpacedriveIntegrationConfig, TelegramConfig, TelegramInstanceConfig,
+    TelemetryConfig, TwitchConfig, TwitchInstanceConfig, WarmupConfig, WebhookConfig,
+    normalize_adapter, validate_named_messaging_adapters,
 };
 use crate::error::{ConfigError, Result};
 
@@ -977,6 +977,7 @@ impl Config {
                     .unwrap_or_else(|_| "spacebot".into()),
                 sample_rate: 1.0,
             },
+            spacedrive: SpacedriveIntegrationConfig::default(),
         })
     }
 
@@ -2598,6 +2599,15 @@ impl Config {
             }
         }
 
+        let spacedrive = SpacedriveIntegrationConfig {
+            enabled: toml.spacedrive.enabled,
+            api_url: toml.spacedrive.api_url,
+            api_key: toml.spacedrive.api_key,
+            web_url: toml.spacedrive.web_url,
+            library_id: toml.spacedrive.library_id,
+            device_id: toml.spacedrive.device_id,
+        };
+
         Ok(Config {
             instance_dir,
             llm,
@@ -2611,6 +2621,7 @@ impl Config {
             api,
             metrics,
             telemetry,
+            spacedrive,
         })
     }
 }

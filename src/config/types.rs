@@ -32,6 +32,44 @@ pub struct TelemetryConfig {
     pub sample_rate: f64,
 }
 
+/// Spacedrive integration configuration.
+///
+/// When `enabled = false` (the default), Spacebot operates standalone with
+/// no Spacedrive awareness anywhere. When enabled, the interface exposes a
+/// Files surface that embeds Spacedrive's web Explorer at `web_url`, and
+/// future runtime integrations (device graph, remote execution, file system
+/// intelligence) become possible against `api_url`.
+///
+/// `api_url` is consumed by the Spacebot process. `web_url` is consumed by
+/// the user's browser via an iframe — they may differ when Spacedrive sits
+/// behind a public proxy. When `web_url` is unset, it falls back to `api_url`.
+#[derive(Debug, Clone, Default)]
+pub struct SpacedriveIntegrationConfig {
+    /// Master switch. When false, no Spacedrive awareness anywhere.
+    pub enabled: bool,
+    /// HTTP base URL of the paired Spacedrive node's API. Used by the
+    /// Spacebot runtime for any future direct calls.
+    pub api_url: Option<String>,
+    /// Auth token for the Spacedrive API, if the node requires one.
+    pub api_key: Option<String>,
+    /// URL the Spacebot interface iframes when the user opens the Files
+    /// surface. Must be reachable from the user's browser. Falls back to
+    /// `api_url` when unset.
+    pub web_url: Option<String>,
+    /// Library ID this Spacebot instance is paired with. Set during pairing.
+    pub library_id: Option<String>,
+    /// Device UUID of the paired Spacedrive node — the device this Spacebot
+    /// "lives on" in the library graph.
+    pub device_id: Option<String>,
+}
+
+impl SpacedriveIntegrationConfig {
+    /// URL the interface should iframe. Returns `web_url` if set, else `api_url`.
+    pub fn resolved_web_url(&self) -> Option<String> {
+        self.web_url.clone().or_else(|| self.api_url.clone())
+    }
+}
+
 /// Top-level Spacebot configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -59,6 +97,8 @@ pub struct Config {
     pub metrics: MetricsConfig,
     /// OpenTelemetry export configuration.
     pub telemetry: TelemetryConfig,
+    /// Spacedrive integration (paired node + embedded web Explorer).
+    pub spacedrive: SpacedriveIntegrationConfig,
 }
 
 impl Config {

@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Instance-wide activity aggregation across all agents. */
+        get: operations["get_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/agents": {
         parameters: {
             query?: never;
@@ -340,11 +357,28 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** GET /agents/projects — list projects for an agent. */
+        /** GET /agents/projects — list projects. */
         get: operations["list_projects"];
         put?: never;
         /** POST /agents/projects — create a new project. */
         post: operations["create_project"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/projects/reorder": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /** PUT /agents/projects/reorder — update the sort order of all projects. */
+        put: operations["reorder_projects"];
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -379,6 +413,23 @@ export interface paths {
         };
         /** GET /agents/projects/{id}/disk-usage — calculate disk usage for a project. */
         get: operations["disk_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/projects/{id}/logo": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /agents/projects/{id}/logo — serve the detected project logo. */
+        get: operations["serve_logo"];
         put?: never;
         post?: never;
         delete?: never;
@@ -625,6 +676,66 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/agents/{agent_id}/attachments/{attachment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Serve a saved attachment file.
+         * @description Streams the file from disk with the correct Content-Type.
+         *     Use `?download=true` to force a download prompt.
+         *     Use `?thumbnail=true` to request a thumbnail (currently serves full file).
+         */
+        get: operations["serve_attachment"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{agent_id}/channels/{channel_id}/attachments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** List saved attachments for a channel. */
+        get: operations["list_attachments"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/agents/{agent_id}/channels/{channel_id}/attachments/upload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Upload a file attachment for a portal conversation.
+         * @description The file is persisted to `workspace/saved/` and tracked in `saved_attachments`.
+         *     Returns an attachment ID to include in the subsequent message send request.
+         */
+        post: operations["upload_attachment"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/bindings": {
         parameters: {
             query?: never;
@@ -816,6 +927,42 @@ export interface paths {
         };
         /** Get live status (active workers, branches, completed items) for all channels. */
         get: operations["channel_status"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/channels/{channel_id}/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_channel_settings"];
+        put: operations["update_channel_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/conversation-defaults": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get conversation defaults for an agent.
+         *     Returns the resolved default settings and available options for new conversations.
+         */
+        get: operations["conversation_defaults"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1322,6 +1469,176 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/notifications": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /notifications` — list notifications with optional filters. */
+        get: operations["list_notifications"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/dismiss_read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /notifications/dismiss_read` — dismiss all already-read notifications. */
+        post: operations["dismiss_read"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/read_all": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /notifications/read_all` — mark all undismissed notifications as read. */
+        post: operations["mark_all_read"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/unread_count": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** `GET /notifications/unread_count` — count unread, undismissed notifications. */
+        get: operations["unread_count"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/{id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /notifications/{id}/dismiss` — dismiss a single notification. */
+        post: operations["dismiss_notification"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/notifications/{id}/read": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** `POST /notifications/{id}/read` — mark a single notification as read. */
+        post: operations["mark_read"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portal/conversations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["list_portal_conversations"];
+        put?: never;
+        post: operations["create_portal_conversation"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portal/conversations/{session_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put: operations["update_portal_conversation"];
+        post?: never;
+        delete: operations["delete_portal_conversation"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portal/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["portal_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/portal/send": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Fire-and-forget message injection. The response arrives via the global SSE
+         *     event bus (`/api/events`), same as every other channel.
+         */
+        post: operations["portal_send"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/providers": {
         parameters: {
             query?: never;
@@ -1397,6 +1714,22 @@ export interface paths {
         put?: never;
         post?: never;
         delete: operations["delete_provider"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/providers/{provider}/config": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get: operations["get_provider_config"];
+        put?: never;
+        post?: never;
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1937,46 +2270,15 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/webchat/conversations": {
+    "/usage": {
         parameters: {
             query?: never;
             header?: never;
             path?: never;
             cookie?: never;
         };
-        get: operations["list_webchat_conversations"];
-        put?: never;
-        post: operations["create_webchat_conversation"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/webchat/conversations/{session_id}": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put: operations["update_webchat_conversation"];
-        post?: never;
-        delete: operations["delete_webchat_conversation"];
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/webchat/history": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get: operations["webchat_history"];
+        /** Aggregated token usage for the instance. */
+        get: operations["get_usage"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1985,7 +2287,77 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/webchat/send": {
+    "/usage/conversation/{conversation_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Aggregated token usage for a single conversation. */
+        get: operations["get_conversation_usage"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /wiki — list all wiki pages */
+        get: operations["list_pages"];
+        put?: never;
+        /** POST /wiki — create a new wiki page */
+        post: operations["create_page"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /wiki/search — search wiki pages */
+        get: operations["search_pages"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki/{slug}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /wiki/:slug — read a wiki page */
+        get: operations["get_page"];
+        put?: never;
+        post?: never;
+        /** DELETE /wiki/:slug — archive a page */
+        delete: operations["archive_page"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki/{slug}/edit": {
         parameters: {
             query?: never;
             header?: never;
@@ -1994,11 +2366,42 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Fire-and-forget message injection. The response arrives via the global SSE
-         *     event bus (`/api/events`), same as every other channel.
-         */
-        post: operations["webchat_send"];
+        /** POST /wiki/:slug/edit — apply a partial edit */
+        post: operations["edit_page"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki/{slug}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** GET /wiki/:slug/history — list version history */
+        get: operations["get_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/wiki/{slug}/restore": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** POST /wiki/:slug/restore — restore to a historical version */
+        post: operations["restore_version"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2025,10 +2428,45 @@ export interface components {
             message: string;
             success: boolean;
         };
+        ActivityDay: {
+            /** Format: int64 */
+            active_channels: number;
+            /** Format: int64 */
+            branches: number;
+            /** Format: int64 */
+            cortex: number;
+            /** Format: int64 */
+            cron: number;
+            date: string;
+            /** Format: int64 */
+            messages: number;
+            tokens: components["schemas"]["TokenSummary"];
+            /** Format: int64 */
+            workers: number;
+        };
         ActivityDayCount: {
             /** Format: int64 */
             branches: number;
             date: string;
+            /** Format: int64 */
+            workers: number;
+        };
+        ActivityResponse: {
+            daily: components["schemas"]["ActivityDay"][];
+            totals: components["schemas"]["ActivityTotals"];
+        };
+        ActivityTotals: {
+            /** Format: int64 */
+            active_channels: number;
+            /** Format: int64 */
+            branches: number;
+            /** Format: int64 */
+            cortex: number;
+            /** Format: int64 */
+            cron: number;
+            /** Format: int64 */
+            messages: number;
+            tokens: components["schemas"]["TokenSummary"];
             /** Format: int64 */
             workers: number;
         };
@@ -2145,6 +2583,24 @@ export interface components {
             /** Format: float */
             weight: number;
         };
+        AttachmentInfo: {
+            created_at: string;
+            id: string;
+            mime_type: string;
+            original_filename: string;
+            /** Format: int64 */
+            size_bytes: number;
+        };
+        AttachmentListResponse: {
+            attachments: components["schemas"]["AttachmentInfo"][];
+        };
+        AttachmentUploadResponse: {
+            id: string;
+            mime_type: string;
+            original_filename: string;
+            /** Format: int64 */
+            size_bytes: number;
+        };
         AuthorizedKeyRequest: {
             public_key: string;
         };
@@ -2203,10 +2659,16 @@ export interface components {
             id: string;
             is_active: boolean;
             last_activity_at: string;
+            model?: string | null;
             platform: string;
+            response_mode?: string | null;
         };
         ChannelSection: {
             listen_only_mode: boolean;
+        };
+        ChannelSettingsResponse: {
+            conversation_id: string;
+            settings: components["schemas"]["ConversationSettings"];
         };
         ChannelUpdate: {
             listen_only_mode?: boolean | null;
@@ -2252,6 +2714,47 @@ export interface components {
             background_threshold?: number | null;
             /** Format: float */
             emergency_threshold?: number | null;
+        };
+        /** @description Response payload for conversation defaults endpoint. */
+        ConversationDefaultsResponse: {
+            /** @description All available models. */
+            available_models: components["schemas"]["ModelOption"][];
+            /** @description Current default delegation mode. */
+            delegation: components["schemas"]["DelegationMode"];
+            /** @description Available delegation modes. */
+            delegation_modes: string[];
+            /** @description Current default memory mode. */
+            memory: components["schemas"]["MemoryMode"];
+            /** @description Available memory modes. */
+            memory_modes: string[];
+            /** @description Current default model name (from agent config). */
+            model: string;
+            /** @description Current default worker context settings. */
+            worker_context: components["schemas"]["WorkerContextMode"];
+            /** @description Available worker history modes. */
+            worker_history_modes: string[];
+            /** @description Available worker memory modes. */
+            worker_memory_modes: string[];
+        };
+        /** @description Per-conversation settings that control behavior. */
+        ConversationSettings: {
+            /** @description How tools work in this conversation. */
+            delegation?: components["schemas"]["DelegationMode"];
+            /** @description How memory is used in this conversation. */
+            memory?: components["schemas"]["MemoryMode"];
+            /**
+             * @description Blanket model override — applies to all processes unless a per-process
+             *     override is set in `model_overrides`.
+             */
+            model?: string | null;
+            /** @description Per-process model overrides. Takes priority over `model`. */
+            model_overrides?: components["schemas"]["ModelOverrides"];
+            /** @description How the channel handles incoming messages. */
+            response_mode?: components["schemas"]["ResponseMode"];
+            /** @description Whether file attachments are saved to workspace. */
+            save_attachments?: boolean | null;
+            /** @description What context workers spawned from this conversation receive. */
+            worker_context?: components["schemas"]["WorkerContextMode"];
         };
         CortexChatDeleteThreadRequest: {
             agent_id: string;
@@ -2448,8 +2951,22 @@ export interface components {
             name?: string | null;
             platform: string;
         };
-        CreateProjectRequest: {
+        CreatePageRequest: {
+            /** @description Who is creating this page: agent_id or user identifier. */
+            author_id?: string;
+            author_type?: string;
+            content?: string;
+            edit_summary?: string | null;
+            page_type: string;
+            related?: string[];
+            title: string;
+        };
+        CreatePortalConversationRequest: {
             agent_id: string;
+            settings?: null | components["schemas"]["ConversationSettings"];
+            title?: string | null;
+        };
+        CreateProjectRequest: {
             /** @description When true, scan root_path for git repos and register them automatically. */
             auto_discover?: boolean;
             description?: string | null;
@@ -2460,7 +2977,6 @@ export interface components {
             tags?: string[];
         };
         CreateRepoRequest: {
-            agent_id: string;
             default_branch?: string | null;
             description?: string | null;
             name: string;
@@ -2477,16 +2993,10 @@ export interface components {
             owner_agent_id: string;
             priority?: string | null;
             source_memory_id?: string | null;
-            status?: string | null;
             subtasks?: components["schemas"]["TaskSubtask"][];
             title: string;
         };
-        CreateWebChatConversationRequest: {
-            agent_id: string;
-            title?: string | null;
-        };
         CreateWorktreeRequest: {
-            agent_id: string;
             branch: string;
             repo_id: string;
             start_point?: string | null;
@@ -2534,13 +3044,13 @@ export interface components {
                 number
             ] | null;
             cron_expr?: string | null;
-            delivery_target: string;
             /** Format: int64 */
             delivery_failure_count: number;
             /** Format: int64 */
             delivery_skipped_count: number;
             /** Format: int64 */
             delivery_success_count: number;
+            delivery_target: string;
             enabled: boolean;
             /** Format: int64 */
             execution_failure_count: number;
@@ -2564,6 +3074,11 @@ export interface components {
             count: number;
             date: string;
         };
+        /**
+         * @description Delegation mode controls how the conversation handles tools.
+         * @enum {string}
+         */
+        DelegationMode: "standard" | "direct";
         DeleteBindingRequest: {
             adapter?: string | null;
             agent_id: string;
@@ -2612,6 +3127,14 @@ export interface components {
             /** Format: int64 */
             total_bytes: number;
         };
+        EditPageRequest: {
+            author_id?: string;
+            author_type?: string;
+            edit_summary?: string | null;
+            new_string: string;
+            old_string: string;
+            replace_all?: boolean;
+        };
         EncryptResponse: {
             master_key: string;
             message: string;
@@ -2649,6 +3172,7 @@ export interface components {
             brave_search_key?: string | null;
             company_name: string;
             opencode: components["schemas"]["OpenCodeSettingsResponse"];
+            spacedrive: components["schemas"]["SpacedriveStatusResponse"];
             ssh_enabled: boolean;
             worker_log_mode: string;
         };
@@ -2826,6 +3350,11 @@ export interface components {
             nodes: components["schemas"]["Memory"][];
             total: number;
         };
+        /**
+         * @description Memory mode controls how memory is used in a conversation.
+         * @enum {string}
+         */
+        MemoryMode: "full" | "ambient" | "off";
         MemoryPersistenceSection: {
             enabled: boolean;
             message_interval: number;
@@ -2894,12 +3423,56 @@ export interface components {
             /** @description Whether this model supports tool/function calling */
             tool_call: boolean;
         };
+        /** @description Model option for the defaults response. */
+        ModelOption: {
+            /** @description Context window size. */
+            context_window: number;
+            /** @description Model ID (e.g. "anthropic/claude-sonnet-4"). */
+            id: string;
+            /** @description Display name (e.g. "Claude Sonnet 4"). */
+            name: string;
+            /** @description Provider name (e.g. "anthropic"). */
+            provider: string;
+            /** @description Whether the model supports thinking/claude-style extended thinking. */
+            supports_thinking: boolean;
+            /** @description Whether the model supports tools. */
+            supports_tools: boolean;
+        };
+        /**
+         * @description Per-process model overrides. Each field, when set, overrides the
+         *     routing config for that specific process type within this conversation.
+         */
+        ModelOverrides: {
+            branch?: string | null;
+            channel?: string | null;
+            compactor?: string | null;
+            worker?: string | null;
+        };
         ModelsResponse: {
             models: components["schemas"]["ModelInfo"][];
         };
         MutationResponse: {
             message: string;
             success: boolean;
+        };
+        /** @description A persisted notification row. */
+        Notification: {
+            action_url?: string | null;
+            agent_id?: string | null;
+            body?: string | null;
+            created_at: string;
+            dismissed_at?: string | null;
+            id: string;
+            kind: string;
+            metadata?: string | null;
+            read_at?: string | null;
+            related_entity_id?: string | null;
+            related_entity_type?: string | null;
+            severity: string;
+            title: string;
+        };
+        NotificationsResponse: {
+            notifications: components["schemas"]["Notification"][];
         };
         OpenAiOAuthBrowserStartRequest: {
             model: string;
@@ -2974,6 +3547,58 @@ export interface components {
             configured: boolean;
             enabled: boolean;
         };
+        PortalConversation: {
+            agent_id: string;
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            settings?: null | components["schemas"]["ConversationSettings"];
+            title: string;
+            title_source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PortalConversationResponse: {
+            conversation: components["schemas"]["PortalConversation"];
+        };
+        PortalConversationSummary: {
+            agent_id: string;
+            archived: boolean;
+            /** Format: date-time */
+            created_at: string;
+            id: string;
+            /** Format: date-time */
+            last_message_at?: string | null;
+            last_message_preview?: string | null;
+            last_message_role?: string | null;
+            /** Format: int64 */
+            message_count: number;
+            settings?: null | components["schemas"]["ConversationSettings"];
+            title: string;
+            title_source: string;
+            /** Format: date-time */
+            updated_at: string;
+        };
+        PortalConversationsResponse: {
+            conversations: components["schemas"]["PortalConversationSummary"][];
+        };
+        PortalHistoryMessage: {
+            content: string;
+            id: string;
+            role: string;
+        };
+        PortalSendRequest: {
+            agent_id: string;
+            /** @description IDs of pre-uploaded attachments to include with this message. */
+            attachment_ids?: string[];
+            message: string;
+            sender_name?: string;
+            session_id: string;
+        };
+        PortalSendResponse: {
+            ok: boolean;
+        };
         /** @description A fully loaded preset with all identity file content. */
         Preset: {
             identity: string;
@@ -3003,15 +3628,29 @@ export interface components {
             name: string;
             tags?: string[];
         };
+        ProcessTokens: {
+            /** Format: int64 */
+            cache_read: number;
+            /** Format: double */
+            cost_usd: number;
+            /** Format: int64 */
+            input: number;
+            /** Format: int64 */
+            output: number;
+            /** Format: int64 */
+            reasoning: number;
+        };
         Project: {
-            agent_id: string;
             created_at: string;
             description: string;
             icon: string;
             id: string;
+            logo_path?: string | null;
             name: string;
             root_path: string;
             settings: unknown;
+            /** Format: int64 */
+            sort_order: number;
             status: components["schemas"]["ProjectStatus"];
             tags: string[];
             updated_at: string;
@@ -3081,8 +3720,18 @@ export interface components {
             channel_id: string;
             enabled: boolean;
         };
+        ProviderConfigResponse: {
+            api_version?: string | null;
+            base_url?: string | null;
+            deployment?: string | null;
+            message: string;
+            success: boolean;
+        };
         ProviderModelTestRequest: {
             api_key: string;
+            api_version?: string | null;
+            base_url?: string | null;
+            deployment?: string | null;
             model: string;
             provider: string;
         };
@@ -3095,6 +3744,7 @@ export interface components {
         };
         ProviderStatus: {
             anthropic: boolean;
+            azure: boolean;
             deepseek: boolean;
             fireworks: boolean;
             gemini: boolean;
@@ -3119,6 +3769,9 @@ export interface components {
         };
         ProviderUpdateRequest: {
             api_key: string;
+            api_version?: string | null;
+            base_url?: string | null;
+            deployment?: string | null;
             model: string;
             provider: string;
         };
@@ -3192,8 +3845,23 @@ export interface components {
             path?: string | null;
             success: boolean;
         };
+        ReorderProjectsRequest: {
+            /** @description Project IDs in the desired display order (first = sort_order 0). */
+            ids: string[];
+        };
         RepoResponse: {
             repo: components["schemas"]["ProjectRepo"];
+        };
+        /**
+         * @description Response mode controls how the channel handles incoming messages.
+         * @enum {string}
+         */
+        ResponseMode: "active" | "observe" | "mention_only";
+        RestoreVersionRequest: {
+            author_id?: string;
+            author_type?: string;
+            /** Format: int64 */
+            version: number;
         };
         RoutingSection: {
             branch: string;
@@ -3224,6 +3892,15 @@ export interface components {
             mode?: string | null;
             passthrough_env?: string[] | null;
             writable_paths?: string[] | null;
+        };
+        /** @description Metadata for a saved attachment, returned after persisting to disk and DB. */
+        SavedAttachmentMeta: {
+            filename: string;
+            id: string;
+            mime_type: string;
+            saved_filename: string;
+            /** Format: int64 */
+            size_bytes: number;
         };
         /**
          * @description Secret category determines subprocess exposure.
@@ -3277,6 +3954,15 @@ export interface components {
         };
         SkillsListResponse: {
             skills: components["schemas"]["SkillInfo"][];
+        };
+        /**
+         * @description Spacedrive integration status exposed to the interface. The interface
+         *     uses `enabled` to decide whether to render the Files surface, and
+         *     `web_url` as the iframe target.
+         */
+        SpacedriveStatusResponse: {
+            enabled: boolean;
+            web_url?: string | null;
         };
         SshStatusResponse: {
             enabled: boolean;
@@ -3341,6 +4027,7 @@ export interface components {
         };
         /** @description A unified timeline item combining messages, branch runs, and worker runs. */
         TimelineItem: {
+            attachments?: components["schemas"]["SavedAttachmentMeta"][];
             content: string;
             created_at: string;
             id: string;
@@ -3349,13 +4036,6 @@ export interface components {
             sender_name?: string | null;
             /** @enum {string} */
             type: "message";
-            attachments?: Array<{
-                id: string;
-                filename: string;
-                saved_filename: string;
-                mime_type: string;
-                size_bytes: number;
-            }>;
         } | {
             completed_at?: string | null;
             conclusion?: string | null;
@@ -3393,6 +4073,21 @@ export interface components {
             adapter?: string | null;
             enabled: boolean;
             platform: string;
+        };
+        TokenSummary: {
+            by_process: {
+                [key: string]: components["schemas"]["ProcessTokens"];
+            };
+            /** Format: int64 */
+            cache_read: number;
+            /** Format: double */
+            cost_usd: number;
+            /** Format: int64 */
+            input: number;
+            /** Format: int64 */
+            output: number;
+            /** Format: int64 */
+            reasoning: number;
         };
         ToolsResponse: {
             binaries: components["schemas"]["BinaryEntry"][];
@@ -3476,6 +4171,10 @@ export interface components {
         UnlockBody: {
             master_key: string;
         };
+        UnreadCountResponse: {
+            /** Format: int64 */
+            count: number;
+        };
         UpdateAgentRequest: {
             agent_id: string;
             display_name?: string | null;
@@ -3506,6 +4205,10 @@ export interface components {
             message: string;
             success: boolean;
         };
+        UpdateChannelSettingsRequest: {
+            agent_id: string;
+            settings: components["schemas"]["ConversationSettings"];
+        };
         UpdateGroupRequest: {
             agent_ids?: string[] | null;
             color?: string | null;
@@ -3525,10 +4228,16 @@ export interface components {
             direction?: string | null;
             kind?: string | null;
         };
-        UpdateProjectRequest: {
+        UpdatePortalConversationRequest: {
             agent_id: string;
+            archived?: boolean | null;
+            settings?: null | components["schemas"]["ConversationSettings"];
+            title?: string | null;
+        };
+        UpdateProjectRequest: {
             description?: string | null;
             icon?: string | null;
+            logo_path?: string | null;
             name?: string | null;
             settings?: unknown;
             status?: string | null;
@@ -3564,13 +4273,82 @@ export interface components {
             title?: string | null;
             worker_id?: string | null;
         };
-        UpdateWebChatConversationRequest: {
-            agent_id: string;
-            archived?: boolean | null;
-            title?: string | null;
-        };
         UploadSkillResponse: {
             installed: string[];
+        };
+        UsageByAgent: {
+            agent_id: string;
+            /** Format: int64 */
+            cache_read_tokens: number;
+            /** Format: int64 */
+            cache_write_tokens: number;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: int64 */
+            reasoning_tokens: number;
+            /** Format: int64 */
+            request_count: number;
+        };
+        UsageByDay: {
+            /** Format: int64 */
+            cache_read_tokens: number;
+            /** Format: int64 */
+            cache_write_tokens: number;
+            date: string;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: int64 */
+            reasoning_tokens: number;
+            /** Format: int64 */
+            request_count: number;
+        };
+        UsageByModel: {
+            /** Format: int64 */
+            cache_read_tokens: number;
+            /** Format: int64 */
+            cache_write_tokens: number;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            input_tokens: number;
+            model: string;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: int64 */
+            reasoning_tokens: number;
+            /** Format: int64 */
+            request_count: number;
+        };
+        UsageResponse: {
+            by_agent?: components["schemas"]["UsageByAgent"][];
+            by_day?: components["schemas"]["UsageByDay"][];
+            by_model?: components["schemas"]["UsageByModel"][];
+            total: components["schemas"]["UsageTotals"];
+        };
+        UsageTotals: {
+            /** Format: int64 */
+            cache_read_tokens: number;
+            /** Format: int64 */
+            cache_write_tokens: number;
+            cost_status: string;
+            /** Format: double */
+            estimated_cost_usd?: number | null;
+            /** Format: int64 */
+            input_tokens: number;
+            /** Format: int64 */
+            output_tokens: number;
+            /** Format: int64 */
+            reasoning_tokens: number;
+            /** Format: int64 */
+            request_count: number;
         };
         WarmupSection: {
             eager_embedding_load: boolean;
@@ -3619,53 +4397,67 @@ export interface components {
             /** Format: int64 */
             startup_delay_secs?: number | null;
         };
-        WebChatConversation: {
-            agent_id: string;
-            archived: boolean;
-            /** Format: date-time */
-            created_at: string;
-            id: string;
-            title: string;
-            title_source: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        WebChatConversationResponse: {
-            conversation: components["schemas"]["WebChatConversation"];
-        };
-        WebChatConversationSummary: {
-            agent_id: string;
-            archived: boolean;
-            /** Format: date-time */
-            created_at: string;
-            id: string;
-            /** Format: date-time */
-            last_message_at?: string | null;
-            last_message_preview?: string | null;
-            last_message_role?: string | null;
-            /** Format: int64 */
-            message_count: number;
-            title: string;
-            title_source: string;
-            /** Format: date-time */
-            updated_at: string;
-        };
-        WebChatConversationsResponse: {
-            conversations: components["schemas"]["WebChatConversationSummary"][];
-        };
-        WebChatHistoryMessage: {
-            content: string;
-            id: string;
-            role: string;
-        };
-        WebChatSendRequest: {
-            agent_id: string;
+        WikiActionResponse: {
             message: string;
-            sender_name?: string;
-            session_id: string;
+            success: boolean;
         };
-        WebChatSendResponse: {
-            ok: boolean;
+        WikiHistoryResponse: {
+            versions: components["schemas"]["WikiPageVersion"][];
+        };
+        WikiListResponse: {
+            pages: components["schemas"]["WikiPageSummary"][];
+            total: number;
+        };
+        WikiPage: {
+            archived: boolean;
+            content: string;
+            created_at: string;
+            created_by: string;
+            id: string;
+            page_type: string;
+            related: string[];
+            slug: string;
+            title: string;
+            updated_at: string;
+            updated_by: string;
+            /** Format: int64 */
+            version: number;
+        };
+        WikiPageResponse: {
+            page: components["schemas"]["WikiPage"];
+        };
+        WikiPageSummary: {
+            id: string;
+            page_type: string;
+            slug: string;
+            title: string;
+            updated_at: string;
+            updated_by: string;
+            /** Format: int64 */
+            version: number;
+        };
+        WikiPageVersion: {
+            author_id: string;
+            author_type: string;
+            content: string;
+            created_at: string;
+            edit_summary?: string | null;
+            id: string;
+            page_id: string;
+            /** Format: int64 */
+            version: number;
+        };
+        /** @description Worker context settings control what context workers receive when spawned. */
+        WorkerContextMode: {
+            /** @description What conversation context the worker sees. */
+            history: components["schemas"]["WorkerHistoryMode"];
+            /** @description What memory context the worker gets. */
+            memory: components["schemas"]["WorkerMemoryMode"];
+            /**
+             * @description Whether the worker gets wiki tools (wiki_create, wiki_edit, wiki_read, wiki_list,
+             *     wiki_search, wiki_history). Defaults to true so all workers can access the wiki.
+             */
+            wiki_write?: boolean;
         };
         WorkerDetailResponse: {
             channel_id?: string | null;
@@ -3692,6 +4484,14 @@ export interface components {
             transcript?: components["schemas"]["TranscriptStep"][] | null;
             worker_type: string;
         };
+        /** @description How much conversation history a worker receives. */
+        WorkerHistoryMode: "none" | "summary" | {
+            /**
+             * Format: int32
+             * @description Last N messages from the parent conversation.
+             */
+            recent: number;
+        } | "full";
         WorkerListItem: {
             channel_id?: string | null;
             channel_name?: string | null;
@@ -3730,6 +4530,11 @@ export interface components {
             total: number;
             workers: components["schemas"]["WorkerListItem"][];
         };
+        /**
+         * @description How much memory context a worker receives.
+         * @enum {string}
+         */
+        WorkerMemoryMode: "none" | "ambient" | "tools" | "full";
         WorktreeResponse: {
             worktree: components["schemas"]["ProjectWorktree"];
         };
@@ -3742,6 +4547,37 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    get_activity: {
+        parameters: {
+            query?: {
+                /** @description ISO 8601 lower bound (default: 30 days ago). */
+                since?: string | null;
+                /** @description ISO 8601 upper bound. */
+                until?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ActivityResponse"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     list_agents: {
         parameters: {
             query?: never;
@@ -4798,8 +5634,7 @@ export interface operations {
     };
     list_projects: {
         parameters: {
-            query: {
-                agent_id: string;
+            query?: {
                 status?: string | null;
             };
             header?: never;
@@ -4816,7 +5651,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectListResponse"];
                 };
             };
-            /** @description Agent not found */
+            /** @description No project store available */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4846,7 +5681,36 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectResponse"];
                 };
             };
-            /** @description Agent not found */
+            /** @description No project store available */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    reorder_projects: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReorderProjectsRequest"];
+            };
+        };
+        responses: {
+            /** @description Sort order updated */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No project store available */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4857,9 +5721,7 @@ export interface operations {
     };
     get_project: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -4877,7 +5739,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4910,7 +5772,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4921,9 +5783,7 @@ export interface operations {
     };
     delete_project: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -4941,7 +5801,7 @@ export interface operations {
                     "application/json": components["schemas"]["ActionResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -4952,9 +5812,7 @@ export interface operations {
     };
     disk_usage: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -4972,7 +5830,35 @@ export interface operations {
                     "application/json": components["schemas"]["DiskUsageResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    serve_logo: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Project ID */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Logo image */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description No logo found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5005,7 +5891,7 @@ export interface operations {
                     "application/json": components["schemas"]["RepoResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5016,9 +5902,7 @@ export interface operations {
     };
     scan_project: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -5036,7 +5920,7 @@ export interface operations {
                     "application/json": components["schemas"]["ProjectResponse"];
                 };
             };
-            /** @description Agent or project not found */
+            /** @description Project not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5069,7 +5953,7 @@ export interface operations {
                     "application/json": components["schemas"]["WorktreeResponse"];
                 };
             };
-            /** @description Agent, project, or repo not found */
+            /** @description Project or repo not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5080,9 +5964,7 @@ export interface operations {
     };
     delete_repo: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -5102,7 +5984,7 @@ export interface operations {
                     "application/json": components["schemas"]["ActionResponse"];
                 };
             };
-            /** @description Agent, project, or repo not found */
+            /** @description Project or repo not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5113,9 +5995,7 @@ export interface operations {
     };
     delete_worktree: {
         parameters: {
-            query: {
-                agent_id: string;
-            };
+            query?: never;
             header?: never;
             path: {
                 /** @description Project ID */
@@ -5135,7 +6015,7 @@ export interface operations {
                     "application/json": components["schemas"]["ActionResponse"];
                 };
             };
-            /** @description Agent, project, or worktree not found */
+            /** @description Project or worktree not found */
             404: {
                 headers: {
                     [name: string]: unknown;
@@ -5460,6 +6340,145 @@ export interface operations {
             };
             /** @description Agent or worker not found */
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    serve_attachment: {
+        parameters: {
+            query?: {
+                /** @description When true, force Content-Disposition: attachment (download). */
+                download?: boolean;
+                /**
+                 * @description When true, serve a thumbnail-sized version (for display in the UI).
+                 *     Currently serves the full file — thumbnail generation is a future enhancement.
+                 */
+                thumbnail?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Attachment ID */
+                attachment_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description File content */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Attachment not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_attachments: {
+        parameters: {
+            query?: {
+                /** @description Filter to attachments from a specific message. */
+                message_id?: string | null;
+                limit?: number | null;
+            };
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Channel ID */
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentListResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    upload_attachment: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Channel / conversation ID */
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AttachmentUploadResponse"];
+                };
+            };
+            /** @description Invalid or empty file */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description File too large (max 50 MB) */
+            413: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -5983,6 +7002,106 @@ export interface operations {
                 content: {
                     "application/json": unknown;
                 };
+            };
+        };
+    };
+    get_channel_settings: {
+        parameters: {
+            query: {
+                agent_id: string;
+            };
+            header?: never;
+            path: {
+                /** @description Channel conversation ID */
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelSettingsResponse"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_channel_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel conversation ID */
+                channel_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdateChannelSettingsRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelSettingsResponse"];
+                };
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    conversation_defaults: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ConversationDefaultsResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
             };
         };
     };
@@ -7057,6 +8176,427 @@ export interface operations {
             };
         };
     };
+    list_notifications: {
+        parameters: {
+            query?: {
+                /** @description "unread" returns only unread notifications; anything else returns all. */
+                filter?: string | null;
+                /** @description Filter by agent id. */
+                agent_id?: string | null;
+                /** @description Filter by kind: "task_approval", "worker_failed", "cortex_observation". */
+                kind?: string | null;
+                limit?: number;
+                offset?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NotificationsResponse"];
+                };
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    dismiss_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Read notifications dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mark_all_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description All marked as read */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    unread_count: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UnreadCountResponse"];
+                };
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    dismiss_notification: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Notification id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Dismissed */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found or already dismissed */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    mark_read: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Notification id */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Marked as read */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Not found or already read */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Notification store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    list_portal_conversations: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Include archived conversations */
+                include_archived: boolean;
+                /** @description Maximum number of conversations to return (default: 100, max: 500) */
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalConversationsResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    create_portal_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["CreatePortalConversationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalConversationResponse"];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    update_portal_conversation: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Conversation session ID */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UpdatePortalConversationRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalConversationResponse"];
+                };
+            };
+            /** @description Conversation not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    delete_portal_conversation: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+            };
+            header?: never;
+            path: {
+                /** @description Conversation session ID */
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalSendResponse"];
+                };
+            };
+            /** @description Conversation not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    portal_history: {
+        parameters: {
+            query: {
+                /** @description Agent ID */
+                agent_id: string;
+                /** @description Session ID */
+                session_id: string;
+                /** @description Maximum number of messages to return (default: 100, max: 200) */
+                limit: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalHistoryMessage"][];
+                };
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Internal server error */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    portal_send: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PortalSendRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortalSendResponse"];
+                };
+            };
+            /** @description Invalid request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Agent not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Messaging manager not available */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
     get_providers: {
         parameters: {
             query?: never;
@@ -7228,6 +8768,35 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Provider not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_provider_config: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Provider ID */
+                provider: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ProviderConfigResponse"];
+                };
             };
             /** @description Provider not found */
             404: {
@@ -8474,15 +10043,17 @@ export interface operations {
             };
         };
     };
-    list_webchat_conversations: {
+    get_usage: {
         parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Include archived conversations */
-                include_archived: boolean;
-                /** @description Maximum number of conversations to return (default: 100, max: 500) */
-                limit: number;
+            query?: {
+                /** @description Filter to one agent. */
+                agent_id?: string | null;
+                /** @description ISO 8601 lower bound (default: 30 days ago). */
+                since?: string | null;
+                /** @description ISO 8601 upper bound. */
+                until?: string | null;
+                /** @description Group by: day, agent, model (comma-separated for multiple). */
+                group_by?: string | null;
             };
             header?: never;
             path?: never;
@@ -8495,15 +10066,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebChatConversationsResponse"];
+                    "application/json": components["schemas"]["UsageResponse"];
                 };
-            };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Internal server error */
             500: {
@@ -8514,93 +10078,16 @@ export interface operations {
             };
         };
     };
-    create_webchat_conversation: {
+    get_conversation_usage: {
         parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["CreateWebChatConversationRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebChatConversationResponse"];
-                };
-            };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    update_webchat_conversation: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                /** @description Conversation session ID */
-                session_id: string;
-            };
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["UpdateWebChatConversationRequest"];
-            };
-        };
-        responses: {
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["WebChatConversationResponse"];
-                };
-            };
-            /** @description Conversation not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-        };
-    };
-    delete_webchat_conversation: {
-        parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
+            query?: {
+                /** @description Filter to one agent. */
+                agent_id?: string | null;
             };
             header?: never;
             path: {
-                /** @description Conversation session ID */
-                session_id: string;
+                /** @description Conversation ID */
+                conversation_id: string;
             };
             cookie?: never;
         };
@@ -8611,15 +10098,8 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebChatSendResponse"];
+                    "application/json": components["schemas"]["UsageTotals"];
                 };
-            };
-            /** @description Conversation not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Internal server error */
             500: {
@@ -8630,15 +10110,10 @@ export interface operations {
             };
         };
     };
-    webchat_history: {
+    list_pages: {
         parameters: {
-            query: {
-                /** @description Agent ID */
-                agent_id: string;
-                /** @description Session ID */
-                session_id: string;
-                /** @description Maximum number of messages to return (default: 100, max: 200) */
-                limit: number;
+            query?: {
+                page_type?: string | null;
             };
             header?: never;
             path?: never;
@@ -8651,18 +10126,11 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebChatHistoryMessage"][];
+                    "application/json": components["schemas"]["WikiListResponse"];
                 };
             };
-            /** @description Agent not found */
-            404: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
-            };
-            /** @description Internal server error */
-            500: {
+            /** @description Wiki store not initialized */
+            503: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -8670,7 +10138,7 @@ export interface operations {
             };
         };
     };
-    webchat_send: {
+    create_page: {
         parameters: {
             query?: never;
             header?: never;
@@ -8679,7 +10147,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["WebChatSendRequest"];
+                "application/json": components["schemas"]["CreatePageRequest"];
             };
         };
         responses: {
@@ -8688,24 +10156,231 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["WebChatSendResponse"];
+                    "application/json": components["schemas"]["WikiPageResponse"];
                 };
             };
-            /** @description Invalid request */
+            /** @description Invalid page_type */
             400: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Agent not found */
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    search_pages: {
+        parameters: {
+            query: {
+                query: string;
+                page_type?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiListResponse"];
+                };
+            };
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_page: {
+        parameters: {
+            query?: {
+                version?: number | null;
+            };
+            header?: never;
+            path: {
+                /** @description Page slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiPageResponse"];
+                };
+            };
+            /** @description Page not found */
             404: {
                 headers: {
                     [name: string]: unknown;
                 };
                 content?: never;
             };
-            /** @description Messaging manager not available */
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    archive_page: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Page slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiActionResponse"];
+                };
+            };
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    edit_page: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Page slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditPageRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiPageResponse"];
+                };
+            };
+            /** @description Edit match failed */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Page not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    get_history: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                /** @description Page slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiHistoryResponse"];
+                };
+            };
+            /** @description Wiki store not initialized */
+            503: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+        };
+    };
+    restore_version: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Page slug */
+                slug: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreVersionRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["WikiPageResponse"];
+                };
+            };
+            /** @description Page or version not found */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Wiki store not initialized */
             503: {
                 headers: {
                     [name: string]: unknown;

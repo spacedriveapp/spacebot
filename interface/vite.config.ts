@@ -73,6 +73,10 @@ export default defineConfig({
 				find: "@spacedrive/explorer",
 				replacement: `${spaceui}/explorer/src/index.ts`,
 			},
+			{
+				find: "@spacedrive/icons",
+				replacement: `${spaceui}/icons`,
+			},
 
 			// Project alias
 			{ find: "@", replacement: path.resolve(__dirname, "src") },

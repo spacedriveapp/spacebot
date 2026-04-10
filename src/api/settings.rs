@@ -16,6 +16,16 @@ pub(super) struct GlobalSettingsResponse {
     worker_log_mode: String,
     opencode: OpenCodeSettingsResponse,
     ssh_enabled: bool,
+    spacedrive: SpacedriveStatusResponse,
+}
+
+/// Spacedrive integration status exposed to the interface. The interface
+/// uses `enabled` to decide whether to render the Files surface, and
+/// `web_url` as the iframe target.
+#[derive(Serialize, utoipa::ToSchema, Default)]
+pub(super) struct SpacedriveStatusResponse {
+    enabled: bool,
+    web_url: Option<String>,
 }
 
 #[derive(Serialize, utoipa::ToSchema)]
@@ -110,6 +120,7 @@ pub(super) async fn get_global_settings(
         worker_log_mode,
         opencode,
         ssh_enabled,
+        spacedrive,
     ) = if config_path.exists() {
         let content = tokio::fs::read_to_string(&config_path)
             .await
@@ -216,6 +227,24 @@ pub(super) async fn get_global_settings(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+        let spacedrive_table = doc.get("spacedrive");
+        let spacedrive = SpacedriveStatusResponse {
+            enabled: spacedrive_table
+                .and_then(|s| s.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+            web_url: spacedrive_table
+                .and_then(|s| s.get("web_url"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| {
+                    spacedrive_table
+                        .and_then(|s| s.get("api_url"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                }),
+        };
+
         (
             company_name,
             brave_search,
@@ -225,6 +254,7 @@ pub(super) async fn get_global_settings(
             worker_log_mode,
             opencode,
             ssh_enabled,
+            spacedrive,
         )
     } else {
         (
@@ -247,6 +277,7 @@ pub(super) async fn get_global_settings(
                 },
             },
             false,
+            SpacedriveStatusResponse::default(),
         )
     };
 
@@ -259,6 +290,7 @@ pub(super) async fn get_global_settings(
         worker_log_mode,
         opencode,
         ssh_enabled,
+        spacedrive,
     }))
 }
 

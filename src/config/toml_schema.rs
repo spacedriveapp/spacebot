@@ -29,6 +29,19 @@ pub(super) struct TomlConfig {
     pub(super) metrics: TomlMetricsConfig,
     #[serde(default)]
     pub(super) telemetry: TomlTelemetryConfig,
+    #[serde(default)]
+    pub(super) spacedrive: TomlSpacedriveConfig,
+}
+
+#[derive(Deserialize, Default)]
+pub(super) struct TomlSpacedriveConfig {
+    #[serde(default)]
+    pub(super) enabled: bool,
+    pub(super) api_url: Option<String>,
+    pub(super) api_key: Option<String>,
+    pub(super) web_url: Option<String>,
+    pub(super) library_id: Option<String>,
+    pub(super) device_id: Option<String>,
 }
 
 #[derive(Deserialize)]

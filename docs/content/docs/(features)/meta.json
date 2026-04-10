@@ -1,4 +1,4 @@
 {
   "title": "Features",
-  "pages": ["workers", "tasks", "opencode", "tools", "browser", "cron", "skills", "ingestion", "wiki", "notifications", "portal", "projects"]
+  "pages": ["workers", "tasks", "opencode", "tools", "browser", "cron", "skills", "ingestion", "wiki", "notifications", "portal", "projects", "spacedrive"]
 }

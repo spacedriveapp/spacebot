@@ -27,6 +27,7 @@ import {Wiki} from "@/routes/Wiki";
 import {AgentChat} from "@/routes/AgentChat";
 import {Settings} from "@/routes/Settings";
 import {Workbench} from "@/routes/Workbench";
+import {SpacedriveExplorer} from "@/routes/SpacedriveExplorer";
 import {useLiveContext} from "@/hooks/useLiveContext";
 
 // ── Root layout ──────────────────────────────────────────────────────────
@@ -34,7 +35,10 @@ import {useLiveContext} from "@/hooks/useLiveContext";
 function RootLayout() {
 	const {liveStates, connectionState, hasData} = useLiveContext();
 	const location = useLocation();
-	const bare = location.pathname.startsWith("/workbench") || location.pathname.startsWith("/dashboard");
+	const bare =
+		location.pathname.startsWith("/workbench") ||
+		location.pathname.startsWith("/dashboard") ||
+		location.pathname.startsWith("/spacedrive");
 
 	return (
 		<div className="flex h-screen flex-col overflow-hidden bg-sidebar">
@@ -123,6 +127,12 @@ const wikiRoute = createRoute({
 	component: function WikiPage() {
 		return <Wiki />;
 	},
+});
+
+const spacedriveRoute = createRoute({
+	getParentRoute: () => rootRoute,
+	path: "/spacedrive",
+	component: SpacedriveExplorer,
 });
 
 const agentRoute = createRoute({
@@ -265,6 +275,7 @@ const routeTree = rootRoute.addChildren([
 	workbenchRoute,
 	tasksRoute,
 	wikiRoute,
+	spacedriveRoute,
 	agentRoute,
 	agentChatRoute,
 	agentChannelsRoute,

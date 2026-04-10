@@ -3155,6 +3155,21 @@ async fn initialize_agents(
         }
     }
 
+    if config.spacedrive.enabled {
+        let web_url = config.spacedrive.resolved_web_url();
+        tracing::info!(
+            api_url = ?config.spacedrive.api_url,
+            web_url = ?web_url,
+            library_id = ?config.spacedrive.library_id,
+            "spacedrive integration enabled"
+        );
+        if web_url.is_none() {
+            tracing::warn!(
+                "spacedrive integration is enabled but neither web_url nor api_url is set; the Files surface will be hidden"
+            );
+        }
+    }
+
     // Initialize messaging adapters
     let new_messaging_manager = spacebot::messaging::MessagingManager::new();
 

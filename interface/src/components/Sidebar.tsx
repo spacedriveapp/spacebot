@@ -26,6 +26,13 @@ import {CSS} from "@dnd-kit/utilities";
 import {api, getApiBase} from "@/api/client";
 import type {ChannelLiveState} from "@/hooks/useChannelLiveState";
 import {useAgentOrder} from "@/hooks/useAgentOrder";
+import FolderPng from "@spacedrive/icons/icons/Folder.png";
+
+/** Wraps the Spacedrive brand folder PNG so it can be passed as `icon` to
+ * CircleButton (which expects a React component, not an image source). */
+function FilesIcon({className}: {className?: string}) {
+	return <img src={FolderPng} alt="" className={className} />;
+}
 import {
 	House,
 	TreeStructure,
@@ -460,7 +467,22 @@ export function Sidebar({liveStates: _liveStates}: SidebarProps) {
 
 			{/* Footer */}
 			<div className="flex shrink-0 items-center justify-between border-t border-app-line/30 px-3 py-2">
-				<WorkersPanelButton />
+				<div className="flex items-center gap-2">
+					<WorkersPanelButton />
+					{globalSettings?.spacedrive?.enabled && (
+						<Link to="/spacedrive">
+							<CircleButton
+								icon={FilesIcon}
+								title="Files"
+								variant={
+									!!matchRoute({to: "/spacedrive", fuzzy: true})
+										? "active"
+										: "default"
+								}
+							/>
+						</Link>
+					)}
+				</div>
 				<Link to="/settings">
 					<CircleButton
 						icon={GearSix}

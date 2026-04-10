@@ -1,0 +1,121 @@
+---
+title: Spacedrive
+description: Embed Spacedrive's file Explorer inside Spacebot as the Files surface, paired through a `[spacedrive]` config flag.
+---
+
+# Spacedrive
+
+When you enable the Spacedrive integration, Spacebot grows a Files surface — a folder button in the sidebar footer that opens a route containing the live Spacedrive Explorer. Browse the filesystem your Spacebot is running on top of from a web browser, with the actual Spacedrive UI, no parallel file manager.
+
+This is a UI and deployment integration. Spacebot doesn't take on Spacedrive's responsibilities (device graph, content addressing, P2P sync) and Spacedrive doesn't take on Spacebot's (LLM processes, agents, workers). They run as two independent processes that talk over HTTP. The Files surface inside Spacebot is an `<iframe>` pointing at Spacedrive's web UI.
+
+## What it gives you
+
+- **A Files button in the sidebar footer**, next to the workers panel button. Only renders when the integration is enabled.
+- **A `/spacedrive` route** in the Spacebot interface that loads the Spacedrive Explorer in an iframe.
+- **The actual Spacedrive UI** — file kinds, locations, devices, volumes, tags, the nine view modes, QuickPreview. Not a reimplementation.
+- **Brand continuity** — the sidebar button uses Spacedrive's 3D folder icon so the affordance commits to what it's about to open.
+
+The integration is **off by default**. Turn it on per-instance with the config flag below.
+
+## Enabling
+
+Add a `[spacedrive]` section to `config.toml`:
+
+```toml
+[spacedrive]
+enabled = true
+api_url = "http://127.0.0.1:8080"
+web_url = "http://localhost:8080"
+```
+
+| Field | Required | What it does |
+|---|---|---|
+| `enabled` | yes | Master switch. When `false` (default), Spacebot operates standalone with no Spacedrive awareness anywhere. |
+| `api_url` | no | Base URL of the paired Spacedrive node's API. Used by the Spacebot runtime for any future direct calls (device graph, remote execution). |
+| `api_key` | no | Bearer token for the Spacedrive API, if the node requires one. |
+| `web_url` | no | URL the interface iframes when the user opens the Files surface. Falls back to `api_url` when unset. |
+| `library_id` | no | Library ID this Spacebot instance is paired with. Set during pairing. |
+| `device_id` | no | Device UUID of the paired Spacedrive node. |
+
+`api_url` and `web_url` are allowed to differ. `api_url` is consumed by the Spacebot process running inside your container or on your machine. `web_url` is loaded by the user's browser via an iframe — so when Spacedrive sits behind a public proxy, point `web_url` at the public hostname while `api_url` stays on `127.0.0.1`. When `web_url` is unset, the integration falls back to `api_url`.
+
+When the flag flips on, Spacebot logs an info line at startup confirming the integration is enabled and warns if no URL resolves. The runtime keeps running normally if Spacedrive is unreachable — the iframe will surface its own connection error when the user opens the Files route.
+
+## How it works
+
+The Spacebot interface fetches `/api/settings` on every page load. When the response includes `spacedrive: { enabled: true, web_url: "..." }`, the sidebar shows the Files button. Clicking it navigates to `/spacedrive`, which renders an `<iframe src={web_url} />` filling the route container.
+
+That's the entire mechanism. There's no typed client between Spacebot and Spacedrive. There's no shared state. The iframe is a process boundary expressed as a UI shape — Spacedrive's web app loads inside it and operates exactly as it does standalone, talking to its own `/rpc` endpoint within its own origin.
+
+This means:
+
+- Updates to Spacedrive's Explorer flow into Spacebot automatically. Ship Spacedrive, the iframe content updates next time the user opens the Files route.
+- Spacebot can't deep-link into a Spacedrive path. Cross-frame messaging is possible later if there's a real reason; today the iframe is a self-contained surface.
+- Cookies, storage, and auth don't share between Spacebot and Spacedrive — they live in separate origins (different ports, by default).
+- Both products keep working alone. Disable the flag and Spacebot is exactly what it was before.
+
+## Running locally
+
+You don't need Docker for local development. The setup is two processes pointing at each other.
+
+The catch: **the Tauri Spacedrive desktop app can't be the iframe target.** Tauri serves its UI through the webview, not over HTTP, so there's no port to hit. For local development of this feature, run `sd-server` (the headless Spacedrive daemon) in place of the desktop app. Both can coexist if you point them at separate data directories — `sd-server` and the Tauri app share SQLite locks if they touch the same library.
+
+Two processes, two terminals:
+
+```bash
+# Terminal 1 — Spacedrive server with embedded web UI
+cd spacedrive
+SD_AUTH=disabled SD_P2P=false cargo run -p sd-server \
+  --features sd-core/heif,sd-core/ffmpeg -- --port 8080
+```
+
+```bash
+# Terminal 2 — Spacebot
+cd spacebot
+cargo run
+```
+
+With `[spacedrive] enabled = true` and `web_url = "http://localhost:8080"` in your spacebot config, open the Spacebot interface, click the Files button in the sidebar footer, and the Spacedrive Explorer loads in the iframe.
+
+`SD_P2P=false` is recommended for local dev — Iroh's relay handshake can take a while when relays are unreachable, and the daemon's startup window is generous but not infinite. Skip P2P entirely while you're just testing the embed.
+
+### Vite dev mode for the Spacedrive UI
+
+If you want HMR while iterating on Spacedrive's UI itself, run the Vite dev server alongside `sd-server`:
+
+```bash
+# Terminal 3 — Spacedrive UI in Vite dev mode
+cd spacedrive/apps/web
+bun run dev
+```
+
+Vite serves the UI on its own port and proxies `/rpc` requests through to `sd-server` on `:8080`. Point Spacebot's `web_url` at the Vite port instead, and the iframe loads the dev server. Edits to `apps/web/src/` and `packages/interface/src/` hot-reload inside the iframe.
+
+## Running in Docker (hosted)
+
+For hosted deployments — the unified container that ships both binaries — Docker handles process supervision and port exposure. The image runs `sd-server` and `spacebot` side by side with a default `config.toml` that wires them together.
+
+The current shape is two-port: Spacebot exposes its API on its own port and Spacedrive exposes the embedded web UI on `:8080`. The iframe runs in the user's browser and reaches Spacedrive directly. For deployments behind a reverse proxy, set `SPACEDRIVE_PUBLIC_URL` so Spacebot's bundled config uses the publicly reachable hostname for `web_url`. A single-port mode that proxies Spacedrive through Spacebot's HTTP server is on the roadmap.
+
+## Realtime events
+
+The Spacedrive web client running inside the iframe uses an HTTP transport that POSTs to `/rpc` for queries and actions, and an `EventSource` to `/events` for the daemon's realtime event stream. `sd-server` opens a dedicated TCP connection to the daemon for each SSE client, sends a Subscribe request, and forwards every Event and LogMessage line as an SSE message. Job progress, library events, file changes — all of it streams into the browser exactly the way it would in the desktop app. When the browser closes the connection, `sd-server` drops the daemon socket and the bridge cleans up.
+
+There's no per-subscription filter wired through HTTP yet — the daemon's broadcast covers everything and the client filters on its end. That's enough for the current use cases; per-event-type filtering on the SSE endpoint can be added if it ever becomes a bottleneck.
+
+## Limitations
+
+- **Cross-origin in v1.** Spacebot and Spacedrive run on separate ports, so they're separate origins. Cookies, storage, and auth don't share. The reverse-proxy mode mentioned below will make them same-origin and remove this rough edge.
+- **No deep linking.** The Spacebot route can't tell the embedded Explorer to open a specific folder, jump to a Space, or run a search. Cross-frame messaging is possible later if there's a real reason; v1 ships with the iframe as a fully self-contained surface.
+- **Tauri desktop is not an iframe target.** The Spacedrive desktop app embeds its UI in a webview, not over HTTP. Use `sd-server` for the integration regardless of whether the desktop app is also running on the same machine.
+
+## What this isn't
+
+This integration is the UI half of a larger contract between Spacebot and Spacedrive. The other half — a typed Spacedrive client inside Spacebot, device graph awareness, remote execution where workers target specific machines, file system intelligence — lives in the integration contract and is independent of this feature. Embedding the Explorer is a UI concern and doesn't pull RPC plumbing along with it. The two halves can ship independently and compose when both land.
+
+## Future
+
+- **Single-port reverse proxy**: a `/spacedrive/{*path}` wildcard route in Spacebot's HTTP server that streams requests through to Spacedrive (including SSE pass-through). The iframe targets a same-origin relative URL, the Docker image collapses to a single exposed port, and `sd-server` only listens on `127.0.0.1`.
+- **Per-subscription filtering**: pass `event_types` and `filter` through the SSE endpoint as query parameters so clients can ask the daemon for only the events they care about, rather than filtering after the fact.
+- **Swap iframe for native components**: as `@spacedrive/explorer` matures and the Explorer's React surface decouples from Spacedrive's runtime, the iframe can be replaced with a native React surface mounted at the same `/spacedrive` route. Same button, same URL, different implementation underneath.
