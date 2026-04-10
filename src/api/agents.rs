@@ -496,6 +496,7 @@ pub(super) async fn trigger_warmup(
                 project_store,
                 links: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
                 agent_names: Arc::new(std::collections::HashMap::new()),
+                agent_roles: Arc::new(std::collections::HashMap::new()),
                 humans: Arc::new(arc_swap::ArcSwap::from_pointee(humans)),
                 process_control_registry: Arc::new(
                     crate::agent::process_control::ProcessControlRegistry::new(),
@@ -909,6 +910,17 @@ pub async fn create_agent_internal(
                     .unwrap_or_else(|| agent_id.clone())
             });
             Arc::new(names)
+        },
+        agent_roles: {
+            let configs = state.agent_configs.load();
+            let mut roles: std::collections::HashMap<String, String> = configs
+                .iter()
+                .filter_map(|c| c.role.as_ref().map(|r| (c.id.clone(), r.clone())))
+                .collect();
+            if let Some(role) = request.role.as_ref() {
+                roles.entry(agent_id.clone()).or_insert_with(|| role.clone());
+            }
+            Arc::new(roles)
         },
         humans: Arc::new(arc_swap::ArcSwap::from_pointee(
             (**state.agent_humans.load()).clone(),

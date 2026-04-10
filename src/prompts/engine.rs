@@ -662,6 +662,7 @@ impl PromptEngine {
         links: &[crate::links::AgentLink],
         humans: &[crate::config::HumanDef],
         agent_names: &std::collections::HashMap<String, String>,
+        agent_roles: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
         let agent_links = crate::links::links_for_agent(links, agent_id);
         if agent_links.is_empty() {
@@ -697,7 +698,8 @@ impl PromptEngine {
                     .get(other_id.as_str())
                     .cloned()
                     .unwrap_or_else(|| other_id.clone());
-                (name, None, None)
+                let role = agent_roles.get(other_id.as_str()).cloned();
+                (name, role, None)
             };
 
             let info = LinkedAgent {
@@ -739,6 +741,7 @@ impl PromptEngine {
         links: &[crate::links::AgentLink],
         humans: &[crate::config::HumanDef],
         agent_names: &std::collections::HashMap<String, String>,
+        agent_roles: &std::collections::HashMap<String, String>,
     ) -> Option<String> {
         let agent_links = crate::links::links_for_agent(links, agent_id);
         if agent_links.is_empty() {
@@ -759,21 +762,25 @@ impl PromptEngine {
                 &link.from_agent_id
             };
 
-            let name = if let Some(human) = humans_by_id.get(other_id.as_str()) {
-                human
+            let (name, role) = if let Some(human) = humans_by_id.get(other_id.as_str()) {
+                let name = human
                     .display_name
                     .clone()
-                    .unwrap_or_else(|| other_id.clone())
+                    .unwrap_or_else(|| other_id.clone());
+                (name, human.role.clone())
             } else {
-                agent_names
+                let name = agent_names
                     .get(other_id.as_str())
                     .cloned()
-                    .unwrap_or_else(|| other_id.clone())
+                    .unwrap_or_else(|| other_id.clone());
+                let role = agent_roles.get(other_id.as_str()).cloned();
+                (name, role)
             };
 
             let info = HierarchicalLinkedAgent {
                 name,
                 id: other_id.clone(),
+                role,
             };
 
             if link.kind == crate::links::LinkKind::Hierarchical {
@@ -887,11 +894,12 @@ pub struct LinkedAgent {
     pub description: Option<String>,
 }
 
-/// Simplified agent info for hierarchical rules — only name and id.
+/// Simplified agent info for hierarchical rules — name, id, and optional role.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct HierarchicalLinkedAgent {
     pub name: String,
     pub id: String,
+    pub role: Option<String>,
 }
 
 /// Hierarchical rules context for an agent — simplified view of the hierarchy.

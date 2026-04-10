@@ -2160,6 +2160,7 @@ impl Channel {
             &self.deps.links.load(),
             &self.deps.humans.load(),
             &self.deps.agent_names,
+            &self.deps.agent_roles,
         )
     }
 

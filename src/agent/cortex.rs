@@ -3323,6 +3323,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &deps.links.load(),
             &deps.humans.load(),
             &deps.agent_names,
+            &deps.agent_roles,
         );
 
         let mut enhanced = worker_system_prompt;
@@ -3355,6 +3356,7 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             &deps.links.load(),
             &deps.humans.load(),
             &deps.agent_names,
+            &deps.agent_roles,
         ) {
             enhanced.push_str("\n\n");
             enhanced.push_str(&rules);
