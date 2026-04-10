@@ -122,6 +122,7 @@ pub enum EdgeType {
     HandlesRoute,
     Fetches,
     Queries,
+    HandlesTool,
 }
 
 impl EdgeType {
@@ -149,6 +150,7 @@ impl EdgeType {
             Self::HandlesRoute => "HANDLES_ROUTE",
             Self::Fetches => "FETCHES",
             Self::Queries => "QUERIES",
+            Self::HandlesTool => "HANDLES_TOOL",
         }
     }
 }

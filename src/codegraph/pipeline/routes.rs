@@ -22,6 +22,14 @@ fn normalize_path(s: &str) -> String {
     s.replace('\\', "/")
 }
 
+/// A detected MCP tool definition.
+struct DetectedTool {
+    /// Tool name as registered with the MCP server.
+    name: String,
+    /// Qualified name of the handler function.
+    handler_qname: String,
+}
+
 /// A detected route endpoint.
 struct DetectedRoute {
     /// HTTP method (GET, POST, etc.) or "*" for catch-all.
@@ -45,6 +53,7 @@ pub async fn detect_routes(
     let pid = cypher_escape(project_id);
 
     let mut routes: Vec<DetectedRoute> = Vec::new();
+    let mut tools: Vec<DetectedTool> = Vec::new();
 
     for file_path in files {
         let ext = file_path
@@ -67,11 +76,9 @@ pub async fn detect_routes(
                 .to_string_lossy(),
         );
 
-        // File-path-based detection (Next.js, Expo)
         detect_nextjs_routes(&relative, &content, &mut routes);
-
-        // Decorator/call-based detection (Express, FastAPI, Flask, Django, etc.)
         detect_decorator_routes(&relative, &content, &mut routes);
+        detect_tool_definitions(&relative, &content, &mut tools);
     }
 
     if routes.is_empty() {
@@ -138,6 +145,25 @@ pub async fn detect_routes(
         }
     }
 
+    // HANDLES_TOOL edges: link handler functions to their tool names.
+    // Tool definitions don't get their own node type — the tool name
+    // is stored in the edge reason field, keeping the schema compact.
+    for tool in &tools {
+        if !known_symbols.contains(&tool.handler_qname) {
+            continue;
+        }
+        let handler_escaped = cypher_escape(&tool.handler_qname);
+        let tool_name_escaped = cypher_escape(&tool.name);
+        for label in &["Function", "Method"] {
+            edge_stmts.push(format!(
+                "MATCH (h:{label}) WHERE h.qualified_name = '{handler_escaped}' \
+                 AND h.project_id = '{pid}' \
+                 CREATE (h)-[:CodeRelation {{type: 'HANDLES_TOOL', confidence: 0.85, \
+                 reason: '{tool_name_escaped}', step: 0}}]->(h)"
+            ));
+        }
+    }
+
     if !node_stmts.is_empty() {
         let batch = db.execute_batch(node_stmts).await?;
         result.nodes_created += batch.success;
@@ -154,9 +180,10 @@ pub async fn detect_routes(
     tracing::info!(
         project_id = %project_id,
         routes = seen_routes.len(),
+        tools = tools.len(),
         nodes = result.nodes_created,
         edges = result.edges_created,
-        "route detection complete"
+        "route and tool detection complete"
     );
 
     Ok(result)
@@ -365,4 +392,62 @@ fn extract_fn_name(line: &str) -> Option<String> {
     } else {
         Some(name)
     }
+}
+
+/// Detect MCP tool definitions by scanning for common SDK patterns:
+/// - `server.tool("name", ...)` (TypeScript MCP SDK)
+/// - `@server.tool()` / `@mcp.tool()` decorators (Python)
+/// - `.tool("name", handler)` method calls
+/// - `Tool { name: "...", ... }` struct literals (Rust)
+fn detect_tool_definitions(relative: &str, content: &str, tools: &mut Vec<DetectedTool>) {
+    let tool_patterns: &[&str] = &[
+        "server.tool(",
+        ".tool(",
+        "Tool::new(",
+        "@server.tool",
+        "@mcp.tool",
+        "add_tool(",
+        "register_tool(",
+    ];
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        for pattern in tool_patterns {
+            if let Some(pos) = trimmed.find(pattern) {
+                let after = &trimmed[pos + pattern.len()..];
+                if let Some(name) = extract_string_arg(after)
+                    && !name.is_empty()
+                {
+                    tools.push(DetectedTool {
+                        name: name.clone(),
+                        handler_qname: format!("{relative}::__tool_pending_{line_idx}"),
+                    });
+                }
+                break;
+            }
+        }
+
+        // Resolve pending tool handlers to the next function definition
+        if (trimmed.starts_with("def ")
+            || trimmed.starts_with("async def ")
+            || trimmed.starts_with("fn ")
+            || trimmed.starts_with("pub fn ")
+            || trimmed.starts_with("pub async fn ")
+            || trimmed.starts_with("async fn ")
+            || trimmed.starts_with("function ")
+            || trimmed.starts_with("export function ")
+            || trimmed.starts_with("export async function "))
+            && let Some(name) = extract_fn_name(trimmed)
+        {
+            let fn_qname = format!("{relative}::{name}");
+            if let Some(last) = tools.last_mut()
+                && last.handler_qname.contains("__tool_pending_")
+            {
+                last.handler_qname = fn_qname;
+            }
+        }
+    }
+
+    // Drop any tools whose handler was never resolved
+    tools.retain(|t| !t.handler_qname.contains("__tool_pending_"));
 }
