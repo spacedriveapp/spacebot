@@ -282,7 +282,7 @@ pub async fn resolve_calls(
             .strip_prefix(root_path)
             .unwrap_or(file_path)
             .to_string_lossy()
-            .to_string();
+            .replace('\\', "/");
 
         let imported_files = import_map.get(&relative);
         let call_sites = provider.extract_calls(&relative, &content);
