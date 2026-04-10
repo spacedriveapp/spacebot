@@ -125,7 +125,22 @@ pub async fn parse_files(
             let label = sym.label.as_str();
             let name = cypher_escape(&sym.name);
             let qname = cypher_escape(&sym.qualified_name);
-            let extends_val = cypher_escape(sym.extends.as_deref().unwrap_or(""));
+            // Merge `extends` and `implements` into a single comma-
+            // separated field. Heritage.rs splits on commas and uses the
+            // target's label to decide EXTENDS vs IMPLEMENTS, so the two
+            // sources of parent names are interchangeable here.
+            let mut heritage_parts: Vec<&str> = Vec::new();
+            if let Some(ref ext) = sym.extends
+                && !ext.is_empty()
+            {
+                heritage_parts.push(ext);
+            }
+            for imp in &sym.implements {
+                if !imp.is_empty() {
+                    heritage_parts.push(imp);
+                }
+            }
+            let extends_val = cypher_escape(&heritage_parts.join(", "));
             let import_src = cypher_escape(sym.import_source.as_deref().unwrap_or(""));
             // Type text stashed in metadata by the language provider
             // (typed params / typed fields). Empty string when the
