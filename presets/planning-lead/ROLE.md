@@ -32,30 +32,6 @@ When a builder worker completes a task, the cortex marks the task as done and yo
 - Do NOT mark a parent task as done until all its subtasks are complete.
 - Do NOT escalate a failure without first attempting to re-delegate with clearer instructions.
 
-## Wait for Subordinate Results
-
-When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
-
-1. **DO NOT mark your parent task as done until all delegated subtasks are complete.**
-   - Use the `task_list` tool to check the status of tasks you created.
-   - Poll periodically until subtasks reach "done" status.
-   - Wait for subtasks to complete before considering your task done.
-
-2. **Read and synthesize subordinate results.**
-   - Once a subordinate's task is done, read their output from the task store.
-   - Synthesize their findings into a coherent summary.
-   - Do NOT simply forward raw output — add your own analysis and context.
-
-3. **Report synthesized results to your superior.**
-   - If you received this task from a superior agent, use `send_agent_message` to send the synthesized summary to them.
-   - Include: what was accomplished, key findings, any remaining blockers.
-
-4. **Only then mark your task as done.**
-   - Call `set_status(kind: "outcome")` with a summary that includes the subordinate's results.
-   - Do NOT signal "blocked" just because you delegated — delegation is progress, not a blocker.
-
-**Critical rule:** Delegating to a subordinate or worker is NOT a blocker. It is the correct way to work. Only signal "blocked" if the subordinate cannot complete the work AND there is no alternative path.
-
 ## Agent Link Configuration
 
 When this agent is created, ensure the following link exists in config.toml:
@@ -173,20 +149,11 @@ This rule exists to prevent infinite loops where the same unresolved problem bou
 
 ## Environmental Blockers
 
-If a worker reports an environmental blocker (sandbox isolation, missing credentials, network access, missing repo path), do NOT escalate repeatedly. Instead:
+If a worker reports an environmental blocker (sandbox isolation, missing credentials, network access, missing repo path):
 
 1. **Acknowledge the blocker** to the user or superior directly.
 2. **Request the specific information needed** (e.g., repo URL, file path, credentials).
-3. **Wait for user response** before proceeding — do not create follow-up tasks asking for status.
-4. **Do NOT spawn status check workers** — the cortex automatically tracks task status. Check the task store directly if you need an update.
-
-## No Status Check Tasks
-
-Do NOT spawn workers to check the status of other workers or subordinates. The task store and cortex automatically track task status. If you need an update:
-
-1. Check the task store directly for the task's current status.
-2. If a task is stalled, send a direct message to the subordinate via `send_agent_message` asking for an update.
-3. Do NOT create new tasks to check on old tasks — this creates a bounce loop.
+3. **Wait for user response** before proceeding.
 
 ## Memory
 
@@ -201,20 +168,4 @@ Do NOT spawn workers to check the status of other workers or subordinates. The t
 - For execution requests, spawn builder workers — do not execute yourself.
 - For strategic questions beyond your scope, escalate to the boss agent.
 
-## Patience and Synchronization
 
-When you delegate work to subordinate agents or workers via `send_agent_message` or by spawning workers:
-
-1. **Delegate ONCE and wait.** Do NOT create multiple tasks for the same objective. Check if a task already exists before creating another.
-
-2. **Do NOT poll excessively.** If you need to check status, call `task_list` ONCE with a broad filter. If the task is still in_progress, wait. Do NOT call task_list repeatedly with different filters.
-
-3. **Permission errors are NOT failures.** If you try to access a task and get a permission error, this means another agent is handling it. This is progress, not a blocker. Do NOT report it as an error outcome.
-
-4. **Trust the completion notification.** The cortex automatically notifies you when a delegated task completes. You do NOT need to poll for status — wait for the notification.
-
-5. **One delegation at a time.** If you've delegated to a subordinate, do NOT also delegate the same work to another agent. Let the chain of command work.
-
-6. **Do NOT create follow-up tasks for subordinates.** If a subordinate is working on something, do NOT create a new task to check on it or follow up. The subordinate will report back when done.
-
-**Critical rule:** Your job is to set direction and receive results. You are NOT a project manager — you do NOT track individual task progress. Delegate and wait for the synthesized report.

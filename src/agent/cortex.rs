@@ -3334,6 +3334,15 @@ async fn pickup_one_ready_task(deps: &AgentDeps, logger: &CortexLogger) -> anyho
             enhanced.push_str("\n\n");
             enhanced.push_str(&org);
         }
+        if let Some(rules) = prompt_engine.build_hierarchical_rules_for_agent(
+            &deps.agent_id,
+            &deps.links.load(),
+            &deps.humans.load(),
+            &deps.agent_names,
+        ) {
+            enhanced.push_str("\n\n");
+            enhanced.push_str(&rules);
+        }
         enhanced
     } else {
         worker_system_prompt
