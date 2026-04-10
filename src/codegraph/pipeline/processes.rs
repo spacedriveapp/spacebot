@@ -1,15 +1,12 @@
-//! Phase 8: Entry point scoring and call chain tracing.
+//! Entry point scoring and call chain tracing.
 //!
-//! Wave 4.3 improvements:
-//! - Entry points are ranked by a weighted score that now incorporates
+//! - Entry points are ranked by a weighted score that incorporates
 //!   transitive call-chain **reach** and the number of distinct
 //!   **communities** the chain spans. A function that fans out across
 //!   multiple modules is much more likely to be a meaningful entry point
 //!   than one with high out-degree but a single-community blast radius.
-//! - BFS tracing already tracks a `visited` set (cycles can't reappear
-//!   as steps).
-//! - The old `truncate(50)` hardcap is replaced by `config.max_processes`
-//!   from Wave 1.
+//! - BFS tracing tracks a `visited` set so cycles can't reappear as steps.
+//! - The number of processes emitted is bounded by `config.max_processes`.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -195,8 +192,7 @@ pub async fn trace_processes(
     // 2b. Query MEMBER_OF edges so we can measure the community span
     //     reachable from each candidate entry point. If community
     //     detection hasn't run (or produced nothing), this map stays
-    //     empty and community_span contributes 0 to the score —
-    //     equivalent to the pre-Wave-4 behaviour.
+    //     empty and community_span contributes 0 to the score.
     let mut community_of: HashMap<String, String> = HashMap::new();
     let member_rows = db
         .query(&format!(
@@ -289,6 +285,16 @@ pub async fn trace_processes(
              call_depth: {depth}, source: 'pipeline'}})",
             depth = trace.len(),
         ));
+
+        // ENTRY_POINT_OF: link the entry function to the Process.
+        let entry_escaped = cypher_escape(entry_qname);
+        for label in &["Function", "Method"] {
+            edge_stmts.push(format!(
+                "MATCH (n:{label}), (p:Process) WHERE n.qualified_name = '{entry_escaped}' \
+                 AND n.project_id = '{pid}' AND p.qualified_name = '{proc_qname_escaped}' \
+                 CREATE (n)-[:CodeRelation {{type: 'ENTRY_POINT_OF', confidence: 1.0, reason: '', step: 0}}]->(p)",
+            ));
+        }
 
         // STEP_IN_PROCESS edges — try Function first, then Method
         for (step, step_qname) in trace.iter().enumerate() {

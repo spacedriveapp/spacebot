@@ -46,6 +46,8 @@ pub enum NodeLabel {
     // Documentation & testing
     Section,
     Test,
+    // Web / API
+    Route,
 }
 
 impl NodeLabel {
@@ -80,6 +82,7 @@ impl NodeLabel {
             Self::Process => "Process",
             Self::Section => "Section",
             Self::Test => "Test",
+            Self::Route => "Route",
         }
     }
 }
@@ -115,6 +118,9 @@ pub enum EdgeType {
     MemberOf,
     StepInProcess,
     TestedBy,
+    EntryPointOf,
+    HandlesRoute,
+    Fetches,
 }
 
 impl EdgeType {
@@ -138,6 +144,9 @@ impl EdgeType {
             Self::MemberOf => "MEMBER_OF",
             Self::StepInProcess => "STEP_IN_PROCESS",
             Self::TestedBy => "TESTED_BY",
+            Self::EntryPointOf => "ENTRY_POINT_OF",
+            Self::HandlesRoute => "HANDLES_ROUTE",
+            Self::Fetches => "FETCHES",
         }
     }
 }
@@ -208,29 +217,29 @@ pub struct GraphEdge {
 // Pipeline types
 // ---------------------------------------------------------------------------
 
-/// Phases of the 10-phase indexing pipeline.
+/// Phases of the indexing pipeline.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum PipelinePhase {
-    /// Phase 1: Walk filesystem, respect .gitignore, skip binaries.
+    /// Walk filesystem, respect .gitignore, skip binaries.
     Extracting,
-    /// Phase 2: Create structural nodes (Folder, File, Package, Module, Project).
+    /// Create structural nodes (Folder, File, Package, Module, Project).
     Structure,
-    /// Phase 3: tree-sitter AST parse, extract symbol nodes.
+    /// tree-sitter AST parse, extract symbol nodes.
     Parsing,
-    /// Phase 4: Resolve import/require/use statements.
+    /// Resolve import/require/use statements.
     Imports,
-    /// Phase 5: Resolve call-sites with confidence scoring.
+    /// Resolve call-sites with confidence scoring.
     Calls,
-    /// Phase 6: Resolve extends/implements/inherits.
+    /// Resolve extends/implements/inherits and method overrides.
     Heritage,
-    /// Phase 7: Leiden community detection.
+    /// Leiden community detection.
     Communities,
-    /// Phase 8: Score entry-points, trace call chains.
+    /// Score entry-points, trace call chains.
     Processes,
-    /// Phase 9: Optional LLM labels (skipped if >50k nodes).
+    /// Optional LLM labels (skipped if >50k nodes).
     Enriching,
-    /// Phase 10: Write meta.json, fire events, start watcher.
+    /// Write meta.json, fire events, start watcher.
     Complete,
 }
 
@@ -462,7 +471,7 @@ pub struct CodeGraphConfig {
     /// Watcher debounce window in milliseconds.
     #[serde(default = "default_debounce_ms")]
     pub debounce_ms: u64,
-    /// Enable LLM enrichment labels in phase 9.
+    /// Enable LLM enrichment labels in the enriching phase.
     #[serde(default)]
     pub llm_enrichment: bool,
     /// If set, only parse files matching these languages.
@@ -504,7 +513,7 @@ pub struct CodeGraphConfig {
     /// Auto-skip semantic embeddings above this node count.
     #[serde(default = "default_node_embedding_skip_threshold")]
     pub node_embedding_skip_threshold: u64,
-    /// Auto-generate AGENTS.md on index complete.
+    /// Auto-generate AGENTS.md when indexing finishes.
     #[serde(default = "default_true")]
     pub generate_agents_md: bool,
 }

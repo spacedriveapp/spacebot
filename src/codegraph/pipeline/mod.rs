@@ -1,7 +1,7 @@
-//! 10-phase indexing pipeline orchestrator.
+//! Indexing pipeline orchestrator.
 //!
-//! 10-phase indexing pipeline. Each phase runs
-//! sequentially, reporting progress via a `watch::Sender<PipelineProgress>`.
+//! Each phase runs sequentially, reporting progress via a
+//! `watch::Sender<PipelineProgress>`.
 
 pub mod walker;
 pub mod structure;
@@ -15,6 +15,7 @@ pub mod processes;
 pub mod enriching;
 pub mod incremental;
 pub mod embeddings;
+pub mod routes;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,8 +62,8 @@ impl PipelineHandle {
 ///
 /// Returns a `PipelineHandle` for monitoring progress and cancellation.
 ///
-/// Wave 6 added two optional integrations:
-/// - `llm_manager` unlocks LLM-driven label generation in Phase 9.
+/// Two optional integrations:
+/// - `llm_manager` unlocks LLM-driven label generation in the enriching phase.
 /// - `embedding_model` unlocks semantic vector embeddings for
 ///   Function/Method/Class nodes.
 ///
@@ -108,7 +109,6 @@ pub fn start_full_pipeline(
     }
 }
 
-/// The main pipeline execution function.
 #[allow(clippy::too_many_arguments)]
 async fn run_pipeline(
     project_id: String,
@@ -125,13 +125,15 @@ async fn run_pipeline(
     let mut stats = PipelineStats::default();
     let mut phase_timings = std::collections::HashMap::new();
 
-    // Ensure the database schema is initialized.
     db.ensure_schema().await?;
 
     // Note: graph data purge for re-index scenarios happens in
     // manager.rs::remove_project() — not here — so indexing starts instantly.
 
-    // Helper macro to check cancellation between phases.
+    // Cancellation is checked between phases, never inside one. A
+    // long-running phase like parsing or community detection will run
+    // to completion even if cancel is signalled mid-phase — phases must
+    // not block on this channel themselves.
     macro_rules! check_cancel {
         () => {
             if *cancel_rx.borrow() {
@@ -141,7 +143,6 @@ async fn run_pipeline(
         };
     }
 
-    // Helper to update progress.
     let update_progress = |phase: PipelinePhase, progress: f32, msg: &str, stats: &PipelineStats| {
         let _ = progress_tx.send(PipelineProgress {
             phase,
@@ -149,7 +150,6 @@ async fn run_pipeline(
             message: msg.to_string(),
             stats: stats.clone(),
         });
-        // Also fire SSE event for live UI updates.
         let _ = event_tx.send(CodeGraphEvent::IndexProgress {
             project_id: project_id.clone(),
             phase,
@@ -158,12 +158,14 @@ async fn run_pipeline(
         });
     };
 
-    // ── Phase 1: Extracting ──────────────────────────────────────────────
+    // ── Extracting ───────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Extracting, 0.0, "Walking filesystem", &stats);
 
-    // Build a progress callback so the walker can emit incremental
-    // "Walking filesystem (N files found)" updates for huge repos.
+    // Walker callback fires every WALK_PROGRESS_INTERVAL files. Total
+    // file count is unknown until the walk finishes, so the walker
+    // reports phase_progress at a fixed midway value (~0.5) and the
+    // final 1.0 tick is sent below after walk_project returns.
     let walk_progress: ProgressFn = {
         let tx = Arc::clone(&progress_tx);
         let etx = event_tx.clone();
@@ -191,8 +193,7 @@ async fn run_pipeline(
     stats.files_found = files.len() as u64;
 
     // Surface ignore-rule state in the progress message so users can see
-    // whether their .spacebotignore / SPACEBOT_NO_GITIGNORE settings took
-    // effect without having to dig through debug logs.
+    // whether their .spacebotignore / SPACEBOT_NO_GITIGNORE took effect.
     let mut walk_suffix_parts: Vec<String> = Vec::new();
     if walk_outcome.spacebotignore_loaded.is_some() {
         walk_suffix_parts.push(".spacebotignore applied".to_string());
@@ -220,7 +221,7 @@ async fn run_pipeline(
     phase_timings.insert("extracting".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 2: Structure ───────────────────────────────────────────────
+    // ── Structure ────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Structure, 0.0, "Building structural nodes", &stats);
 
@@ -232,10 +233,14 @@ async fn run_pipeline(
     phase_timings.insert("structure".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 3: Parsing ─────────────────────────────────────────────────
+    // ── Parsing ──────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Parsing, 0.0, "Parsing source files", &stats);
 
+    // The parse callback is invoked many times during a single phase
+    // run. `base` snapshots the cumulative stats from prior phases so
+    // each intermediate update reports a coherent total instead of
+    // double-counting parser progress on top of itself.
     let parse_progress: ProgressFn = {
         let tx = Arc::clone(&progress_tx);
         let etx = event_tx.clone();
@@ -278,7 +283,7 @@ async fn run_pipeline(
     phase_timings.insert("parsing".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 4: Imports ─────────────────────────────────────────────────
+    // ── Imports ──────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Imports, 0.0, "Resolving imports", &stats);
 
@@ -291,7 +296,7 @@ async fn run_pipeline(
     phase_timings.insert("imports".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 5: Calls ───────────────────────────────────────────────────
+    // ── Calls ────────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Calls, 0.0, "Resolving call-sites", &stats);
 
@@ -326,7 +331,7 @@ async fn run_pipeline(
     phase_timings.insert("calls".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 6: Heritage (extends/implements + overrides) ──────────────
+    // ── Heritage (extends/implements + overrides) ───────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Heritage, 0.0, "Resolving inheritance", &stats);
 
@@ -347,7 +352,15 @@ async fn run_pipeline(
     phase_timings.insert("heritage".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 7: Communities ─────────────────────────────────────────────
+    // ── Routes ──────────────────────────────────────────────────────────
+    let phase_start = Instant::now();
+    let route_result = routes::detect_routes(&project_id, &root_path, &files, &db).await?;
+    stats.nodes_created += route_result.nodes_created;
+    stats.edges_created += route_result.edges_created;
+    phase_timings.insert("routes".to_string(), phase_start.elapsed().as_secs_f64());
+    check_cancel!();
+
+    // ── Communities ──────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Communities, 0.0, "Detecting communities", &stats);
 
@@ -365,7 +378,7 @@ async fn run_pipeline(
     phase_timings.insert("communities".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 8: Processes ───────────────────────────────────────────────
+    // ── Processes ────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Processes, 0.0, "Tracing processes", &stats);
 
@@ -383,12 +396,16 @@ async fn run_pipeline(
     phase_timings.insert("processes".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 9: Enriching ───────────────────────────────────────────────
-    // Phase 9 now covers two orthogonal Wave 6 tasks:
-    //   9a. LLM-driven label generation for Community nodes.
-    //   9b. Vector embeddings for Function/Method/Class nodes.
-    // Both are optional and controlled by service availability + config.
+    // ── Enriching ────────────────────────────────────────────────────────
+    // Two orthogonal optional passes: LLM labels for Community nodes and
+    // vector embeddings for Function/Method/Class nodes. Both gated on
+    // service availability and the node-count threshold.
     let phase_start = Instant::now();
+    // Both passes share the same node-count ceiling because their cost
+    // (token spend for the LLM, CPU + memory for embeddings) scales
+    // with graph size. Any project bigger than the threshold gets
+    // skipped on both fronts to keep enrichment from blowing up the
+    // budget on monorepos.
     let enrichment_eligible =
         config.llm_enrichment && stats.nodes_created <= config.node_embedding_skip_threshold;
 
@@ -419,8 +436,8 @@ async fn run_pipeline(
         update_progress(PipelinePhase::Enriching, 0.5, &reason, &stats);
     }
 
-    // 9b. Vector embeddings pass. Shares the node-count threshold with
-    //     the LLM pass — large projects skip both to avoid runaway cost.
+    // Vector embeddings — shares the node-count threshold with the LLM
+    // pass so large projects skip both and avoid runaway cost.
     if let Some(ref embedder) = embedding_model {
         if stats.nodes_created <= config.node_embedding_skip_threshold {
             update_progress(
@@ -455,7 +472,7 @@ async fn run_pipeline(
     phase_timings.insert("enriching".to_string(), phase_start.elapsed().as_secs_f64());
     check_cancel!();
 
-    // ── Phase 10: Complete ───────────────────────────────────────────────
+    // ── Finalize ─────────────────────────────────────────────────────────
     let phase_start = Instant::now();
     update_progress(PipelinePhase::Complete, 0.0, "Finalizing index", &stats);
 
@@ -471,7 +488,6 @@ async fn run_pipeline(
         "indexing pipeline complete"
     );
 
-    // Fire the graph_indexed event.
     let _ = event_tx.send(CodeGraphEvent::GraphIndexed {
         project_id: project_id.clone(),
         stats: stats.clone(),

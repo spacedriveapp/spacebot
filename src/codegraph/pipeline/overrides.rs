@@ -17,7 +17,7 @@
 //! - Cycle detection caps chain depth at 50 and tracks visited nodes
 //!   to avoid infinite loops on broken graphs.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use anyhow::Result;
 
@@ -104,7 +104,11 @@ pub async fn resolve_overrides(
     // A single qname may appear in multiple labels (e.g. Struct Foo and
     // Impl Foo for trait T) — both contribute their extends to the same
     // child. We dedupe at the parent level.
-    let mut immediate_parents: HashMap<String, HashSet<String>> = HashMap::new();
+    // Ordered Vec instead of HashSet so the declaration order of
+    // parents is preserved. This gives leftmost-base MRO behavior
+    // which is correct for Java/C#/C++ and a reasonable approximation
+    // of C3 for Python's non-diamond cases.
+    let mut immediate_parents: HashMap<String, Vec<String>> = HashMap::new();
     for r in &all_rows {
         if r.extends_type.is_empty() {
             continue;
@@ -116,7 +120,6 @@ pub async fn resolve_overrides(
             let resolved = if by_qname.contains(parent_name) {
                 Some(parent_name.to_string())
             } else if let Some(candidates) = by_name.get(parent_name) {
-                // Prefer same-file by string-prefix match if multiple.
                 candidates
                     .iter()
                     .find(|c| {
@@ -131,10 +134,12 @@ pub async fn resolve_overrides(
             };
 
             if let Some(parent_qname) = resolved {
-                immediate_parents
+                let parents = immediate_parents
                     .entry(r.qualified_name.clone())
-                    .or_default()
-                    .insert(parent_qname);
+                    .or_default();
+                if !parents.contains(&parent_qname) {
+                    parents.push(parent_qname);
+                }
             }
         }
     }
@@ -217,16 +222,14 @@ pub async fn resolve_overrides(
 fn find_nearest_override(
     start_class_qn: &str,
     method_name: &str,
-    parents: &HashMap<String, HashSet<String>>,
+    parents: &HashMap<String, Vec<String>>,
     class_methods: &HashMap<String, Vec<(String, String)>>,
 ) -> Option<String> {
-    use std::collections::VecDeque;
-
     let mut queue: VecDeque<(String, usize)> = VecDeque::new();
     let mut visited: HashSet<String> = HashSet::new();
 
-    // Seed with immediate parents — we don't want to match a method
-    // against itself in the same class.
+    // Seed with immediate parents in declaration order so the
+    // leftmost base class is checked first.
     if let Some(direct) = parents.get(start_class_qn) {
         for p in direct {
             if visited.insert(p.clone()) {

@@ -56,6 +56,28 @@ pub async fn parse_files(
             .and_then(|e| e.to_str())
             .unwrap_or("");
 
+        // Markdown files get Section node extraction directly —
+        // no tree-sitter provider needed.
+        if ext == "md" || ext == "mdx" {
+            let content = match tokio::fs::read_to_string(file_path).await {
+                Ok(c) => c,
+                Err(_) => continue,
+            };
+            let relative = normalize_path(
+                &file_path
+                    .strip_prefix(root_path)
+                    .unwrap_or(file_path)
+                    .to_string_lossy(),
+            );
+            let rel_escaped = cypher_escape(&relative);
+            let file_qname = format!("{pid}::{rel_escaped}");
+            extract_markdown_sections(
+                &content, &relative, &pid, &file_qname, &mut node_stmts, &mut edge_stmts,
+            );
+            result.files_parsed += 1;
+            continue;
+        }
+
         let provider = match lang::provider_for_extension(ext) {
             Some(p) => p,
             None => {
@@ -298,4 +320,70 @@ pub async fn parse_files(
     );
 
     Ok(result)
+}
+
+/// Extract `#`-prefixed headings from Markdown as Section nodes with
+/// hierarchical CONTAINS edges. Each heading becomes a Section node
+/// whose parent is the most recent heading at a shallower depth.
+fn extract_markdown_sections(
+    content: &str,
+    relative: &str,
+    pid: &str,
+    file_qname: &str,
+    node_stmts: &mut Vec<String>,
+    edge_stmts: &mut Vec<String>,
+) {
+    // Stack tracks (depth, qname) of the most recently seen heading at
+    // each depth level, so we can parent deeper headings under shallower
+    // ones.
+    let mut stack: Vec<(usize, String)> = Vec::new();
+    let rel_escaped = cypher_escape(relative);
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if !trimmed.starts_with('#') {
+            continue;
+        }
+        let depth = trimmed.chars().take_while(|c| *c == '#').count();
+        let title = trimmed[depth..].trim().trim_start_matches(' ');
+        if title.is_empty() || depth > 6 {
+            continue;
+        }
+        let line_num = line_idx as u32 + 1;
+        let name_escaped = cypher_escape(title);
+        let sec_qname = format!(
+            "{pid}::{rel_escaped}::section_{line_num}",
+        );
+        let sec_qname_escaped = cypher_escape(&sec_qname);
+
+        node_stmts.push(format!(
+            "CREATE (:Section {{qualified_name: '{sec_qname_escaped}', \
+             name: '{name_escaped}', project_id: '{pid}', \
+             source_file: '{rel_escaped}', line_start: {line_num}, line_end: {line_num}, \
+             source: 'pipeline', written_by: 'pipeline', \
+             extends_type: '', import_source: '', declared_type: ''}})"
+        ));
+
+        // Pop stack entries at the same or deeper depth
+        while stack.last().map(|(d, _)| *d >= depth).unwrap_or(false) {
+            stack.pop();
+        }
+
+        // Parent is either the most recent shallower heading or the file
+        let parent_qname = stack
+            .last()
+            .map(|(_, qn)| qn.as_str())
+            .unwrap_or(file_qname);
+        let parent_escaped = cypher_escape(parent_qname);
+        let parent_label = if stack.is_empty() { "File" } else { "Section" };
+
+        edge_stmts.push(format!(
+            "MATCH (p:{parent_label}), (s:Section) \
+             WHERE p.qualified_name = '{parent_escaped}' AND p.project_id = '{pid}' \
+             AND s.qualified_name = '{sec_qname_escaped}' AND s.project_id = '{pid}' \
+             CREATE (p)-[:CodeRelation {{type: 'CONTAINS', confidence: 1.0, reason: 'heading', step: 0}}]->(s)"
+        ));
+
+        stack.push((depth, sec_qname));
+    }
 }

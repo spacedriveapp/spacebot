@@ -12,14 +12,14 @@
 /// columns change. `ensure_schema` compares against the version stored
 /// in the DB; on mismatch it drops every table and recreates so the
 /// new columns are available.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
 pub const ALL_NODE_LABELS: &[&str] = &[
     "Project", "Package", "Module", "Folder", "File", "Class", "Function",
     "Method", "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
     "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
-    "Record", "Template", "Test", "Community", "Process", "Section",
+    "Record", "Template", "Test", "Community", "Process", "Section", "Route",
 ];
 
 /// Generate DROP statements for all tables so the schema can be rebuilt
@@ -77,7 +77,7 @@ pub fn schema_ddl() -> Vec<String> {
         "Package", "Module", "Folder", "File", "Class", "Function", "Method",
         "Variable", "Parameter", "Interface", "Enum", "Decorator", "Import", "Type",
         "Struct", "MacroDef", "Trait", "Impl", "Namespace", "TypeAlias", "Const",
-        "Record", "Template", "Test",
+        "Record", "Template", "Test", "Route",
     ] {
         ddl.push(node_table(
             label,

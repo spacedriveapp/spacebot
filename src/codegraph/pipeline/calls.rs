@@ -302,6 +302,42 @@ pub async fn resolve_calls(
             test_fns.insert(test_qn);
         }
 
+        // Detect HTTP client calls (fetch, axios, requests, etc.) and
+        // emit FETCHES edges from the caller to a synthetic URL target.
+        // The URL is stored in the reason field since it isn't a graph
+        // node — queries can filter on reason to find all fetch sites.
+        for site in &call_sites {
+            let is_fetch = match (site.callee_name.as_str(), site.receiver.as_deref()) {
+                ("fetch", None) => true,
+                ("get" | "post" | "put" | "delete" | "patch" | "head" | "request",
+                 Some("axios" | "requests" | "http" | "https" | "client" | "httpClient" | "HttpClient")) => true,
+                ("Get" | "Post" | "Put" | "Delete" | "Do",
+                 Some("http" | "client" | "resp")) => true,
+                ("send" | "execute",
+                 Some(r)) if r.contains("request") || r.contains("Request") || r.contains("client") || r.contains("Client") => true,
+                _ => false,
+            };
+            if is_fetch {
+                let fetch_key = format!("FETCH:{}::{}", site.caller_qualified_name, site.line);
+                if seen_edges.insert(fetch_key) {
+                    let caller_escaped = cypher_escape(&site.caller_qualified_name);
+                    // Emit a self-referencing FETCHES edge on the caller
+                    // with the call details in the reason field so
+                    // queries can discover which functions make HTTP calls.
+                    for src_label in &["Function", "Method"] {
+                        edge_stmts.push(format!(
+                            "MATCH (a:{src_label}) WHERE a.qualified_name = '{caller_escaped}' \
+                             AND a.project_id = '{pid}' \
+                             CREATE (a)-[:CodeRelation {{type: 'FETCHES', confidence: 0.80, \
+                             reason: '{callee}', step: {line}}}]->(a)",
+                            callee = cypher_escape(&format!("{}.{}", site.receiver.as_deref().unwrap_or(""), site.callee_name)),
+                            line = site.line,
+                        ));
+                    }
+                }
+            }
+        }
+
         // --- Resolve self/this field accesses → ACCESSES edges ---
         for site in &access_sites {
             if site.receiver != "self" && site.receiver != "this" {
