@@ -399,6 +399,15 @@ pub async fn resolve_calls(
                     &field_types,
                     &local_types,
                 )
+                .or_else(|| resolve_chained_receiver_type(
+                    recv,
+                    &site.caller_qualified_name,
+                    &classes_by_qname,
+                    &symbols_by_name,
+                    &methods_by_class,
+                    &function_return_types,
+                    &relative,
+                ))
                 && let Some(base) = base_type_name(&type_text)
                 && let Some(class_entries) = classes_by_name.get(&base)
             {
@@ -884,6 +893,61 @@ fn resolve_receiver_type(
         {
             return Some(ty.clone());
         }
+    }
+
+    None
+}
+
+/// Resolve a receiver that ends with a function call — `foo()`,
+/// `self.method()`, `this.method()` — by looking up the callee's
+/// return type. Handles one level of chaining so `foo().bar()` binds
+/// `bar` against the class that `foo` returns.
+fn resolve_chained_receiver_type(
+    receiver: &str,
+    caller_qn: &str,
+    classes_by_qname: &HashSet<String>,
+    symbols_by_name: &HashMap<String, Vec<SymbolEntry>>,
+    methods_by_class: &HashMap<String, SymbolEntry>,
+    function_return_types: &HashMap<String, (String, String)>,
+    relative: &str,
+) -> Option<String> {
+    // Strip the trailing argument list: `foo()` → `foo`,
+    // `foo(x, y)` → `foo`. Bail if no parens found.
+    let open = receiver.rfind('(')?;
+    if !receiver.ends_with(')') {
+        return None;
+    }
+    let inner = &receiver[..open];
+    if inner.is_empty() {
+        return None;
+    }
+
+    // `self.method(...)` / `this.method(...)` → look up the method's
+    // return type on the enclosing class.
+    if let Some(method_name) = inner
+        .strip_prefix("self.")
+        .or_else(|| inner.strip_prefix("this."))
+    {
+        if method_name.contains('.') || method_name.contains('(') {
+            return None;
+        }
+        let class_qn = find_enclosing_class(caller_qn, classes_by_qname)?;
+        let method_key = format!("{class_qn}::{method_name}");
+        let method_entry = methods_by_class.get(&method_key)?;
+        let (return_type, _) = function_return_types.get(&method_entry.qualified_name)?;
+        return Some(return_type.clone());
+    }
+
+    // `foo(...)` — bare function/method call. Resolve by name,
+    // preferring the same-file definition for disambiguation.
+    if !inner.contains('.') && !inner.contains('(') {
+        let entries = symbols_by_name.get(inner)?;
+        let best = entries
+            .iter()
+            .find(|e| e.source_file == relative)
+            .or_else(|| entries.first())?;
+        let (return_type, _) = function_return_types.get(&best.qualified_name)?;
+        return Some(return_type.clone());
     }
 
     None
