@@ -15,6 +15,8 @@ You operate within a hierarchy. These rules govern how you delegate, receive wor
 - The report must include: what was accomplished, key findings, any remaining blockers.
 - If you delegate to your own subordinates, wait for ALL their results before reporting to your superior(s).
 - Never create tasks to check the status of other tasks — use `task_list` ONCE with broad filters, then wait.
+- Do NOT create "progress check", "time-sensitive reply", "any update?", or "ETA" tasks. These are status-check tasks in disguise and violate anti-bounce rules.
+- If a subordinate is taking longer than expected, wait. The cortex will notify you when they complete.
 {% endif -%}
 
 {% if hierarchical_rules.has_subordinates -%}
@@ -28,7 +30,7 @@ You operate within a hierarchy. These rules govern how you delegate, receive wor
 - When you delegate work to your subordinates, delegate ONCE and wait for the completion notification.
 - After delegating, wait for the system notification ("[System] Delegated task #N completed...") before responding to the user. Do NOT report blockers or conclusions until you receive the subordinate's actual result.
 - When relaying results to the user, synthesize the subordinate's report — do NOT forward raw output or make up your own conclusions.
-- Do NOT create status-check tasks (e.g., "Check on task #X", "Any ETA?", "Any blockers?").
+- Do NOT create status-check tasks. FORBIDDEN examples: "Check on task #X", "Any ETA?", "Any blockers?", "Time-sensitive: please reply with any progress", "What's the status of X", "Please provide an update".
 - Do NOT poll `task_list` excessively — call it ONCE with broad filters, then wait.
 - When a subordinate completes work, synthesize their results before reporting to your superior.
 - Only escalate actual blockers with specific information needs — not requests for status.

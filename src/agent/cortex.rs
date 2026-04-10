@@ -4015,9 +4015,14 @@ async fn notify_delegation_completion(
     };
 
     // Truncate very long results for the notification message.
-    let truncated_result = if result_summary.len() > 500 {
-        let boundary = result_summary.floor_char_boundary(500);
-        format!("{}... [truncated]", &result_summary[..boundary])
+    // 3000 chars is enough for a meaningful summary while keeping the
+    // notification readable in the channel context window.
+    let truncated_result = if result_summary.len() > 3000 {
+        let boundary = result_summary.floor_char_boundary(3000);
+        format!(
+            "{}... [result truncated to 3000 chars. Use `task_get` on task #{} to read the full result.]",
+            &result_summary[..boundary], task.task_number
+        )
     } else {
         result_summary.to_string()
     };
