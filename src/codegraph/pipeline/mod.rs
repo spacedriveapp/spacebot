@@ -506,6 +506,28 @@ async fn run_pipeline(
         "indexing pipeline complete"
     );
 
+    // Write meta.json with the current git commit so staleness can be
+    // detected on next startup without re-parsing the repo.
+    let head_commit = read_git_head(&root_path).await;
+    let meta = super::types::ProjectMeta {
+        project_id: project_id.clone(),
+        schema_version: super::schema::SCHEMA_VERSION,
+        status: super::types::IndexStatus::Indexed,
+        last_commit: head_commit.clone(),
+        phase_timings: phase_timings.clone(),
+        stats: Some(stats.clone()),
+        last_indexed_at: Some(chrono::Utc::now()),
+        created_at: chrono::Utc::now(),
+        updated_at: chrono::Utc::now(),
+    };
+    let meta_dir = db.db_path.parent().unwrap_or(std::path::Path::new("."));
+    let meta_path = meta_dir.join("meta.json");
+    if let Ok(json) = serde_json::to_string_pretty(&meta)
+        && let Err(err) = tokio::fs::write(&meta_path, json).await
+    {
+        tracing::warn!(%err, path = %meta_path.display(), "failed to write meta.json");
+    }
+
     let _ = event_tx.send(CodeGraphEvent::GraphIndexed {
         project_id: project_id.clone(),
         stats: stats.clone(),
@@ -515,6 +537,44 @@ async fn run_pipeline(
     phase_timings.insert("complete".to_string(), phase_start.elapsed().as_secs_f64());
 
     Ok(stats)
+}
+
+/// Read the current HEAD commit hash from a git repository.
+async fn read_git_head(root_path: &std::path::Path) -> Option<String> {
+    let output = tokio::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(root_path)
+        .output()
+        .await
+        .ok()?;
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
+    }
+}
+
+/// Check whether a project's index is stale by comparing the stored
+/// commit hash in meta.json against the current HEAD.
+pub async fn check_staleness(
+    root_path: &std::path::Path,
+    meta_path: &std::path::Path,
+) -> (bool, Option<String>, Option<String>) {
+    let current_head = read_git_head(root_path).await;
+    let stored_commit = tokio::fs::read_to_string(meta_path)
+        .await
+        .ok()
+        .and_then(|json| {
+            serde_json::from_str::<super::types::ProjectMeta>(&json)
+                .ok()
+                .and_then(|m| m.last_commit)
+        });
+    let is_stale = match (&current_head, &stored_commit) {
+        (Some(head), Some(stored)) => head != stored,
+        (Some(_), None) => true,
+        _ => false,
+    };
+    (is_stale, current_head, stored_commit)
 }
 
 /// Result from a single pipeline phase.

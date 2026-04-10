@@ -36,7 +36,7 @@ struct Inner {
     registry: RwLock<HashMap<String, RegisteredProject>>,
     event_tx: broadcast::Sender<CodeGraphEvent>,
     config: RwLock<Arc<CodeGraphConfig>>,
-    /// Optional Wave 6 integrations — populated by `set_llm_manager` /
+    /// Optional LLM + embedding services — populated by `set_llm_manager` /
     /// `set_embedding_model` from `main.rs` once those services exist. The
     /// pipeline reads them lazily, so the code graph can still index
     /// projects before (or without) LLM/embedding services being available.
@@ -73,14 +73,14 @@ impl CodeGraphManager {
         }
     }
 
-    /// Wire in the shared LLM manager so Phase 9 enrichment can call out
+    /// Wire in the shared LLM manager so the enriching phase can call out
     /// to a model. Called once from `main.rs` after both managers exist.
     pub async fn set_llm_manager(&self, llm: Arc<LlmManager>) {
         *self.inner.llm_manager.write().await = Some(llm);
     }
 
-    /// Wire in the shared fastembed model so the Wave 6 embeddings phase
-    /// can generate vectors for code symbols. Called once from `main.rs`.
+    /// Wire in the shared fastembed model so the embeddings phase can
+    /// generate vectors for code symbols. Called once from `main.rs`.
     pub async fn set_embedding_model(&self, embedder: Arc<EmbeddingModel>) {
         *self.inner.embedding_model.write().await = Some(embedder);
     }
@@ -111,7 +111,25 @@ impl CodeGraphManager {
             serde_json::from_str(&data).with_context(|| "parsing registry.json")?;
 
         let mut registry = self.inner.registry.write().await;
-        for project in projects {
+        for mut project in projects {
+            // Check staleness by comparing meta.json's stored commit
+            // against the repo's current HEAD.
+            let meta_path = self
+                .inner
+                .base_path
+                .join("codegraph")
+                .join(&project.project_id)
+                .join("meta.json");
+            let (stale, current_head, _stored) =
+                super::pipeline::check_staleness(&project.root_path, &meta_path).await;
+            project.is_stale = stale;
+            if stale {
+                tracing::info!(
+                    project_id = %project.project_id,
+                    head = ?current_head,
+                    "project index is stale"
+                );
+            }
             registry.insert(project.project_id.clone(), project);
         }
 
@@ -201,6 +219,8 @@ impl CodeGraphManager {
             last_indexed_at: None,
             primary_language: None,
             schema_version: super::schema::SCHEMA_VERSION,
+            indexed_commit: None,
+            is_stale: false,
             created_at: now,
             updated_at: now,
         };
@@ -293,8 +313,8 @@ impl CodeGraphManager {
             tracing::debug!(project_id = %project_id, "purged stale graph data before indexing");
         }
 
-        // Snapshot the optional Wave 6 services once per run so the pipeline
-        // never has to take the RwLock again mid-phase.
+        // Snapshot the optional LLM + embedding services once per run so
+        // the pipeline never has to take the RwLock again mid-phase.
         let llm_manager = self.inner.llm_manager.read().await.clone();
         let embedding_model = self.inner.embedding_model.read().await.clone();
 
@@ -346,7 +366,7 @@ impl CodeGraphManager {
                     );
 
                     // Update registry — keep progress visible so the
-                    // frontend can display the "Complete" state before
+                    // frontend can display the finished state before
                     // transitioning to the overview.
                     {
                         let mut reg = inner.registry.write().await;
@@ -364,12 +384,13 @@ impl CodeGraphManager {
                             });
                             project.last_index_stats = Some(stats);
                             project.last_indexed_at = Some(chrono::Utc::now());
+                            project.is_stale = false;
                             project.updated_at = chrono::Utc::now();
                         }
                     }
 
                     // Clear the completion progress after 8 seconds so the
-                    // frontend has time to poll and show the complete state.
+                    // frontend has time to poll and show the finished state.
                     let clear_inner = inner.clone();
                     let clear_pid = project_id_owned.clone();
                     tokio::spawn(async move {
@@ -438,10 +459,17 @@ impl CodeGraphManager {
             }
         }
 
-        // 2. Purge all graph data for this project while the DB is still open.
+        // 2. Purge graph data only if the DB is already open. Lazy-opening here
+        //    would be wasted work — step 5 removes the entire project directory
+        //    anyway — and on Windows, opening a stale `lbug/` directory can hang
+        //    inside the native re-create when `remove_dir_all` leaves the path
+        //    in a "delete-pending" state.
         {
-            let db = self.ensure_db(project_id).await;
-            if let Ok(db) = db {
+            let db_opt = {
+                let databases = self.inner.databases.read().await;
+                databases.get(project_id).cloned()
+            };
+            if let Some(db) = db_opt {
                 let pid = project_id.replace('\\', "\\\\").replace('\'', "\\'");
                 for label in super::schema::ALL_NODE_LABELS {
                     db.execute(&format!(
@@ -778,8 +806,8 @@ async fn trigger_full_reindex(
         .ok();
     }
 
-    // Pull the Wave 6 services so the full-re-index fallback can still
-    // enrich + embed on its way through.
+    // Pull the LLM + embedding services so the full-re-index fallback
+    // can still enrich + embed on its way through.
     let llm_manager = inner.llm_manager.read().await.clone();
     let embedding_model = inner.embedding_model.read().await.clone();
 

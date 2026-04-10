@@ -374,6 +374,12 @@ pub struct RegisteredProject {
     pub primary_language: Option<String>,
     /// Schema version of the graph database.
     pub schema_version: u32,
+    /// Git commit hash at the time the index was built.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexed_commit: Option<String>,
+    /// True when HEAD differs from the indexed commit.
+    #[serde(default)]
+    pub is_stale: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -388,6 +394,10 @@ pub struct ProjectMeta {
     pub project_id: String,
     pub schema_version: u32,
     pub status: IndexStatus,
+    /// Git commit hash at the time of indexing. Compared against HEAD
+    /// on startup to detect stale indexes.
+    #[serde(default)]
+    pub last_commit: Option<String>,
     /// Phase-by-phase timing from last run.
     #[serde(default)]
     pub phase_timings: HashMap<String, f64>,
