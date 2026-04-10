@@ -207,11 +207,11 @@ impl CodeGraphDb {
                 true
             }
             None => {
-                tracing::info!(
-                    project_id = %self.project_id,
-                    "no schema version sentinel found — assuming fresh DB"
-                );
-                false
+                // No sentinel — either a truly fresh DB or a pre-sentinel
+                // database that predates the migration system. Drop is
+                // harmless on an empty DB (all DROP IF EXISTS) and
+                // necessary on a stale one.
+                true
             }
         }
     }

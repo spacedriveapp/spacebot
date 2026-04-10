@@ -12,7 +12,7 @@
 /// columns change. `ensure_schema` compares against the version stored
 /// in the DB; on mismatch it drops every table and recreates so the
 /// new columns are available.
-pub const SCHEMA_VERSION: u32 = 3;
+pub const SCHEMA_VERSION: u32 = 4;
 
 /// All node table labels. Used by the pipeline to purge stale data before re-indexing.
 pub const ALL_NODE_LABELS: &[&str] = &[
