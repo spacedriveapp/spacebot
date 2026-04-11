@@ -62,6 +62,7 @@ pub mod task_create;
 pub mod task_get;
 pub mod task_list;
 pub mod task_update;
+pub mod wait_for_task;
 pub mod web_search;
 pub mod worker_inspect;
 
@@ -143,6 +144,7 @@ pub use task_create::{TaskCreateArgs, TaskCreateError, TaskCreateOutput, TaskCre
 pub use task_get::{TaskGetArgs, TaskGetError, TaskGetOutput, TaskGetTool};
 pub use task_list::{TaskListArgs, TaskListError, TaskListOutput, TaskListTool};
 pub use task_update::{TaskUpdateArgs, TaskUpdateError, TaskUpdateOutput, TaskUpdateTool};
+pub use wait_for_task::{WaitForTaskArgs, WaitForTaskError, WaitForTaskOutput, WaitForTaskTool};
 pub use web_search::{SearchResult, WebSearchArgs, WebSearchError, WebSearchOutput, WebSearchTool};
 pub use worker_inspect::{
     WorkerInspectArgs, WorkerInspectError, WorkerInspectOutput, WorkerInspectTool,
@@ -744,6 +746,7 @@ pub fn create_worker_tool_server(
         server = server.tool(send_tool);
         server = server.tool(TaskListTool::new(task_store.clone(), agent_id_for_delegation.to_string()));
         server = server.tool(TaskGetTool::new(task_store.clone(), agent_id_for_delegation.clone()));
+        server = server.tool(WaitForTaskTool::new(task_store.clone(), agent_id_for_delegation.clone()));
         server = server.tool(TaskUpdateTool::for_worker(
             task_store.clone(),
             agent_id_for_delegation.clone(),
