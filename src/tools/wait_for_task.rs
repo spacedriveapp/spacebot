@@ -118,21 +118,23 @@ impl Tool for WaitForTaskTool {
                 task.status,
                 crate::tasks::TaskStatus::Done | crate::tasks::TaskStatus::Backlog
             ) {
+                let task_status = task.status.clone();
                 return Ok(WaitForTaskOutput {
                     success: true,
                     task: Some(task),
-                    message: format!("Task #{} completed with status: {}", task_number, task.status),
+                    message: format!("Task #{} completed with status: {}", task_number, task_status),
                 });
             }
 
             // Check timeout
             if elapsed >= timeout_secs {
+                let task_status = task.status.clone();
                 return Ok(WaitForTaskOutput {
                     success: false,
                     task: Some(task),
                     message: format!(
                         "Task #{} still {} after {}s. Call wait_for_task again to continue waiting, or check manually with task_get.",
-                        task_number, task.status, elapsed
+                        task_number, task_status, elapsed
                     ),
                 });
             }
