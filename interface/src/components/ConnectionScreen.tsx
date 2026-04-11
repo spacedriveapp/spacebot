@@ -57,7 +57,7 @@ export function ConnectionScreen() {
             if (!sawReady || data.code === null || data.code !== 0) {
               const stderr =
                 stderrLines.length > 0
-                  ? `\n\nstderr:\n${stderrLines.slice(-20).join("\n")}`
+                  ? `\n\nstderr:\n${stderrLines.join("\n")}`
                   : "";
               setSidecarState("error");
               setSidecarError(
@@ -82,6 +82,9 @@ export function ConnectionScreen() {
           onStderr: (line) => {
             console.log("[sidecar stderr]", line);
             stderrLines.push(line);
+            if (stderrLines.length > 20) {
+              stderrLines.splice(0, stderrLines.length - 20);
+            }
           },
         },
       );
@@ -204,7 +207,9 @@ export function ConnectionScreen() {
               )}
 
               {sidecarState === "error" && sidecarError && (
-                <p className="text-xs text-red-400">{sidecarError}</p>
+                <p className="whitespace-pre-wrap text-xs text-red-400">
+                  {sidecarError}
+                </p>
               )}
             </div>
           </>
