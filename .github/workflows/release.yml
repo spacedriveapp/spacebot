@@ -141,6 +141,31 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read spacedrive pin
+        id: pins
+        run: |
+          SD_REF=$(tr -d '[:space:]' < .spacedrive-version)
+          if [ -z "$SD_REF" ]; then
+            echo "::error::.spacedrive-version is empty"
+            exit 1
+          fi
+          echo "spacedrive_ref=$SD_REF" >> "$GITHUB_OUTPUT"
+          echo "Pinned spacedrive ref: $SD_REF"
+
+      - name: Checkout spacedrive into build context
+        uses: actions/checkout@v4
+        with:
+          repository: spacedriveapp/spacedrive
+          ref: ${{ steps.pins.outputs.spacedrive_ref }}
+          path: .build/spacedrive
+
+      - name: Checkout spaceui into build context
+        uses: actions/checkout@v4
+        with:
+          repository: spacedriveapp/spaceui
+          ref: main
+          path: .build/spaceui
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

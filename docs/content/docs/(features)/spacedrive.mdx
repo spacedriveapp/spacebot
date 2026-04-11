@@ -94,9 +94,59 @@ Vite serves the UI on its own port and proxies `/rpc` requests through to `sd-se
 
 ## Running in Docker (hosted)
 
-For hosted deployments — the unified container that ships both binaries — Docker handles process supervision and port exposure. The image runs `sd-server` and `spacebot` side by side with a default `config.toml` that wires them together.
+For hosted deployments — the unified container that ships both binaries — the existing spacebot Docker image now builds and embeds `sd-server` alongside the spacebot binary. One image, one supervised process tree, one volume, a bundled `config.toml` that wires the two sides together automatically.
 
-The current shape is two-port: Spacebot exposes its API on its own port and Spacedrive exposes the embedded web UI on `:8080`. The iframe runs in the user's browser and reaches Spacedrive directly. For deployments behind a reverse proxy, set `SPACEDRIVE_PUBLIC_URL` so Spacebot's bundled config uses the publicly reachable hostname for `web_url`. A single-port mode that proxies Spacedrive through Spacebot's HTTP server is on the roadmap.
+### Versioning
+
+The embedded Spacedrive revision is pinned in a single file at the repo root: **`.spacedrive-version`**. It contains one line — a full git SHA on the `spacedriveapp/spacedrive` repository. Bumping the pin and cutting a new spacebot release rebakes the image with that Spacedrive revision. CI reads the file in the `build-docker` job and does `actions/checkout` against `spacedriveapp/spacedrive` at that ref (plus `spacedriveapp/spaceui` at `main`) into `.build/` before running `docker build`. The pin file is the contract between the two products — everything else is derived from it.
+
+### Ports
+
+Two ports are exposed: **`19898`** for spacebot's API and interface, **`8080`** for sd-server's API and embedded web UI. The iframe runs in the user's browser and reaches Spacedrive on the second port directly. For deployments behind a reverse proxy, set `SPACEDRIVE_PUBLIC_URL` at container start so the bundled config's `web_url` points at the publicly reachable hostname. A single-port mode that proxies sd-server through spacebot's HTTP server is on the roadmap.
+
+### Process supervision
+
+`tini` runs as PID 1 and reaps zombies. The entrypoint script starts `sd-server` in the background with `DATA_DIR=/data/spacedrive`, `SD_AUTH=disabled`, and `SD_P2P=false` (all overridable via env), then polls `/health` for up to 120 seconds before starting spacebot in the foreground. Both processes share `/data` as their single persistent volume — spacebot's config and memory live at `/data`, sd-server's library and files at `/data/spacedrive`. A `SIGTERM` to the container propagates to both children cleanly via a trap in the entrypoint script.
+
+### Building the image locally
+
+A helper script lives at **`scripts/build-unified.sh`**. Default behavior fetches spacedrive at the pinned SHA and spaceui at `main` from GitHub into `.build/`, then runs `docker build` with the spacebot repo as the build context:
+
+```bash
+./scripts/build-unified.sh                  # fetch pinned refs, build
+./scripts/build-unified.sh --pull           # force re-fetch
+./scripts/build-unified.sh --tag spacebot:dev
+```
+
+For iterating on spacedrive or spaceui alongside spacebot without pushing, pass `--local`. The script `rsync`s from sibling worktrees at `../spacedrive` and `../spaceui` (excluding `target/`, `node_modules/`, `dist/`) so the next Docker build captures your uncommitted changes:
+
+```bash
+./scripts/build-unified.sh --local
+```
+
+Run the resulting image with both ports forwarded:
+
+```bash
+docker run --rm \
+    -p 19898:19898 \
+    -p 8080:8080 \
+    -v $(pwd)/.docker-data:/data \
+    -e ANTHROPIC_API_KEY=... \
+    spacebot-unified:local
+```
+
+Open `http://localhost:19898` and click the Files button in the sidebar footer.
+
+### Bumping the Spacedrive pin
+
+```bash
+# Edit .spacedrive-version to the new SHA
+echo "abc123def..." > .spacedrive-version
+# Rebuild
+./scripts/build-unified.sh --pull
+```
+
+When you're happy, commit the pin update and cut a new spacebot release — CI produces a fresh multi-arch image at `ghcr.io/spacedriveapp/spacebot:TAG`.
 
 ## Realtime events
 
