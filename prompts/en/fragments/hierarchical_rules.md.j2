@@ -43,4 +43,17 @@ You operate within a hierarchy. These rules govern how you delegate, receive wor
 - Delegation is progress, not a blocker. Only signal "blocked" if the subordinate cannot complete AND there is no alternative path.
 - Check `escalation_chain` before escalating — if your ID is already in the chain, resolve directly or mark as failed.
 - The cortex automatically notifies you when delegated tasks complete — trust the notification system.
+
+### CRITICAL: Report Findings to Task Metadata
+
+- **BEFORE** calling `set_status(kind: "outcome")`, you MUST call `task_update` to write your complete findings to the task's `metadata` field.
+- The `metadata` field is how your superior sees your work. If you don't write findings there, they will think you did no work.
+- Use `task_update(task_number=N, metadata={...})` to include:
+  - What you accomplished
+  - Key findings/results
+  - Any files created or modified
+  - Blockers or issues encountered
+- Example: `task_update(task_number=123, metadata={ "findings": "Scanned 5 files, found 3 features", "files": ["README.md", "src/lib.rs"], "blockers": null })`
+- **ONLY AFTER** updating the metadata should you call `set_status(kind: "outcome")`.
+- If you signal outcome without updating metadata, your superior will create a new task asking for the findings — this wastes time and creates noise.
 {%- endif %}
