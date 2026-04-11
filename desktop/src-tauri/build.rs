@@ -73,13 +73,26 @@ fn main() {
                 .unwrap_or_else(|_| "x86_64-pc-windows-msvc".to_string());
             let src =
                 std::path::Path::new(&manifest_dir).join(format!("binaries/spacebot-{triple}.exe"));
-            let needs_copy = src.exists()
-                && (!dest.exists()
-                    || src.metadata().and_then(|s| s.modified()).ok()
-                        > dest.metadata().and_then(|d| d.modified()).ok());
+            if !src.exists() {
+                panic!(
+                    "sidecar binary not found at {}. Build the server first \
+                     (`cargo build -p spacebot`) then copy it to binaries/.",
+                    src.display()
+                );
+            }
+
+            let needs_copy = !dest.exists()
+                || src.metadata().and_then(|s| s.modified()).ok()
+                    > dest.metadata().and_then(|d| d.modified()).ok();
             if needs_copy {
                 println!("cargo:warning=Copying sidecar to {}", dest.display());
-                let _ = std::fs::copy(&src, &dest);
+                std::fs::copy(&src, &dest).unwrap_or_else(|error| {
+                    panic!(
+                        "failed to copy sidecar from {} to {}: {error}",
+                        src.display(),
+                        dest.display()
+                    )
+                });
             }
             println!("cargo:rerun-if-changed={}", src.display());
         }
