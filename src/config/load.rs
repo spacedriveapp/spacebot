@@ -137,7 +137,9 @@ fn parse_response_mode(
     // Backwards compat: listen_only_mode maps to response_mode
     match listen_only_mode {
         Some(true) => {
-            tracing::warn!("listen_only_mode is deprecated, use response_mode = \"quiet\" instead");
+            tracing::warn!(
+                "listen_only_mode is deprecated, use response_mode = \"quiet\" instead"
+            );
             Some(ResponseMode::Quiet)
         }
         Some(false) => Some(ResponseMode::Active),

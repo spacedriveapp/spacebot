@@ -946,9 +946,11 @@ impl Channel {
             "/quiet" => {
                 self.set_response_mode(ResponseMode::Quiet).await;
                 self.send_builtin_text(
-                    "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message.".to_string(),
+                    "quiet mode enabled. i'll only reply to commands, @mentions, or replies to my message."
+                        .to_string(),
                     "quiet",
-                ).await;
+                )
+                .await;
                 return Ok(true);
             }
             "/active" => {
@@ -978,7 +980,8 @@ impl Channel {
                     "- /tasks: ready task list".to_string(),
                     "- /digest: one-shot day digest (00:00 -> now)".to_string(),
                     "- /quiet: only reply to commands, @mentions, or replies".to_string(),
-                    "- /mention-only: only respond when @mentioned or replied to".to_string(),
+                    "- /mention-only: only respond when @mentioned, replied to, or given a command"
+                        .to_string(),
                     "- /active: normal reply mode".to_string(),
                     "- /agent-id: runtime agent id".to_string(),
                 ];
